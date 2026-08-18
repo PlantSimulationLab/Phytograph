@@ -32,7 +32,7 @@ export const FEEDBACK_EMAIL = 'baileylabshared@gmail.com';
 // src/renderer/lib/pointCloudParsers.ts (plus Helios scan 'xml').
 export const IMPORTABLE_EXTENSIONS = [
   // point clouds
-  'las', 'laz', 'e57', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc',
+  'las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc',
   // meshes (ply already listed)
   'obj', 'stl',
   // skeletons

@@ -194,10 +194,12 @@ dropdowns in; you correct anything that's wrong before importing:
   but you can give any scan its own trajectory, and an explicit per-scan choice is
   never overwritten by the default.
 
-For `.ply`, `.pcd`, `.las`, and `.laz`, the column layout is defined inside
-the file, so X/Y/Z and color roles can't be reassigned — but you can still
+For `.ply`, `.pcd`, `.las`, `.laz` and `.ptx`, the column layout is defined
+inside the file, so X/Y/Z and color roles can't be reassigned — but you can still
 preview the fields, rename scalars, and switch any scalar between **Scalar**
-and **Label**.
+and **Label**. `.e57` is the one format with no sample rows: reading values out
+of it means decoding its binary point data, so the wizard shows the structure
+only.
 
 (A LAS/LAZ or ASCII cloud that already carries per-pulse beam-origin columns —
 `ox`/`oy`/`oz` — needs no trajectory: those ground-truth origins are used
@@ -332,7 +334,7 @@ for the columns and the requirements on a hand-edited file.
 
 ### Importing scans with sky/miss points
 
-`.e57` and structured `.ply` scans — and a re-imported Helios **scan XML
+`.e57`, `.ptx` and structured `.ply` scans — and a re-imported Helios **scan XML
 bundle**, which carries the scanner `<origin>` and an `is_miss` column — bring
 **sky/miss points** — pulses that hit the sky and returned nothing — which the
 [leaf-area-density inversion](../concepts/leaf-area-density.md) relies on.
@@ -340,17 +342,23 @@ Phytograph recovers and tags them on import. They're hidden by default (their
 true positions are ~20 km away); toggle the **Show misses** button on a scan row
 to draw them in a distinct colour, relocated onto the scan's bounding sphere, so
 you can confirm a scan actually carries miss information. The relocation needs a
-scanner origin — supplied by the E57/PLY pose or the XML bundle's `<origin>`; a
-bare ASCII cloud with no scanner geometry shows its misses at their true
-far-field position instead. See
+scanner origin — supplied by the E57/PTX/PLY pose or the XML bundle's
+`<origin>`; a bare ASCII cloud with no scanner geometry shows its misses at their
+true far-field position instead. See
 **[Sky/miss points](../reference/file-formats.md#skymiss-points)**.
 
 ### Scans that bring their own parameters
 
 When a point-cloud file records the scanner's geometry in its header, importing
 it on its own auto-fills the scan's **scan parameters** — no need to enter them
-by hand. `.e57` brings the scanner origin and orientation, plus the angular
-sweep and grid resolution when present; `.pcd` brings a sensor origin from its
+by hand. A file holding several scanner setups (a multi-block `.ptx`, a
+multi-scan `.e57`) imports as **one scan per setup**, each with its own pose and
+grid — see
+**[Files holding several scan positions](../reference/file-formats.md#files-holding-several-scan-positions)**.
+`.e57` brings the scanner origin and orientation, plus the angular
+sweep and grid resolution when present; `.ptx` brings the registered scanner
+position and the grid resolution from its header, and its angular sweep is
+measured back off the scan grid; `.pcd` brings a sensor origin from its
 `VIEWPOINT` field. Anything the file omits stays at its default. (Loading a
 Helios XML still takes precedence — its `<scan>` definitions win.) See
 **[Scan parameters recovered from the point-cloud file](../reference/file-formats.md#scan-parameters-recovered-from-the-point-cloud-file)**.
@@ -461,15 +469,27 @@ folder in the file dialog after setting the options.
   Helios triangulation) again. It is the round-trip-faithful path for synthetic
   and edited scans.
 - **Data only** — writes just the per-scan data files, no XML, and reveals a
-  **Format** chooser: `LAS`, `LAZ`, `PLY`, `XYZ`, `CSV`, `TXT`, `OBJ`, or
-  `E57`. Use this to round-trip a scan into any supported format for another
+  **Format** chooser: `LAS`, `LAZ`, `PLY`, `XYZ`, `CSV`, `TXT`, `OBJ`, `E57`, or
+  `PTX`. Use this to round-trip a scan into any supported format for another
   tool.
+
+!!! note "Exporting to PTX"
+    PTX is a *complete raster*: it writes one line per grid cell, so the file
+    always has `Ntheta x Nphi` data rows and a cell with no return is recorded as
+    an all-zero row. That completeness is what lets a PTX be re-imported with its
+    sky/miss points recovered. Two consequences: the scan needs a grid — either
+    real row/column indices (from an E57/PTX import) or a raster scan's
+    **Ntheta x Nphi** resolution — and a non-raster pattern (Risley/Livox) can't be
+    exported to PTX at all. **Include miss points** has no effect on a PTX,
+    because an excluded miss is written as the same empty cell. Points are written
+    in the scanner's local frame with the registered scanner position in the
+    header, so the file opens in the right place in Cyclone or CloudCompare.
 
 **Columns** — for the text formats (XYZ / CSV / TXT, and the XML bundle's
 `.xyz` data), a column picker lets you check which fields to write and **drag to
 reorder** them. `x`, `y`, `z` are required and locked on. Binary / structured
-formats (LAS / LAZ / PLY / OBJ / E57) use their own fixed schema, so the column
-picker is hidden for them.
+formats (LAS / LAZ / PLY / OBJ / E57 / PTX) use their own fixed schema, so the
+column picker is hidden for them.
 
 **Include miss points** — when on (default), the sky/miss points and the
 `is_miss` flag are written, so misses survive the round-trip. The `is_miss`

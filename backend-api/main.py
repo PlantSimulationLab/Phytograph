@@ -19,6 +19,8 @@ import atexit
 import subprocess
 import shutil
 import struct
+# Aliased: `warnings` is used as a local variable name in several converters.
+import warnings as warnings_module
 from pathlib import Path
 from pytexit import py2tex
 
@@ -9341,14 +9343,23 @@ _DATA_GEOMETRY_SLUGS = ('x', 'y', 'z')
 _DATA_COLOR_SLUGS = ('r', 'g', 'b')
 
 
-def _resolve_scan_for_format(scan_entry, include_misses: bool):
+def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tuple = ()):
     """Resolve a scan entry to the channels a per-format writer needs:
     {positions (N,3), colors (N,3 0-1)|None, intensity (N,)|None,
-     scalars: {slug: (N,)}, ordered: [slugs]}. Translation applied, edits honored,
-     miss rows optionally dropped (applied uniformly to every channel).
+     scalars: {slug: (N,)}, ordered: [slugs], world_shift: (3,)|None}.
+    Translation applied, edits honored, miss rows optionally dropped (applied
+    uniformly to every channel).
 
     `ordered` is the export column order (from the modal's `columns`, minus x/y/z),
     used by the ASCII writer; binary writers ignore it and use their fixed schema.
+
+    `force_slugs` names columns that must be resolved regardless of the modal's
+    column picker — PTX passes the raster indices, which it places every point by.
+
+    `world_shift` is the session's import-time global shift, or None for an inline
+    or file-backed entry. It is NOT applied to `positions` (every scan export
+    writes the session's display frame); it is surfaced so a format that declares
+    an absolute pose can put true world coordinates in its header.
     """
     import numpy as np
 
@@ -9454,6 +9465,12 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
     # _resolve_scan_export_arrays).
     if include_misses and _MISS_SLUG not in wanted:
         wanted = [_MISS_SLUG] + wanted
+    # Structured formats need their columns regardless of the picker, exactly as
+    # `is_miss` rides along above. PTX places every point by (row, column), and
+    # without these it falls back to angular binning.
+    for slug in force_slugs:
+        if slug not in wanted:
+            wanted = wanted + [slug]
     scalars: dict = {}
     ordered: list = []
     for slug in wanted:
@@ -9476,7 +9493,7 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
             ordered = [s for s in ordered if s != 'is_miss']
 
     return {"positions": xyz, "colors": colors, "intensity": intensity,
-            "scalars": scalars, "ordered": ordered}
+            "scalars": scalars, "ordered": ordered, "world_shift": world_shift}
 
 
 def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
@@ -9495,6 +9512,15 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
     ordered = resolved["ordered"]        # ordered scalar slugs
     n = xyz.shape[0]
     fmt = fmt.lower()
+
+    # ---- PTX (structured raster) ----
+    # Needs the scan's grid + pose, which this signature doesn't carry, so the
+    # export path calls `_emit_ptx_file` directly. Kept here so this function
+    # stays the single answer to "what does format X look like".
+    if fmt == "ptx":
+        raise ValueError(
+            "PTX is written by _emit_ptx_file, which also needs the scan entry "
+            "(origin, grid resolution and sweep) — not just the resolved channels.")
 
     # ---- ASCII text (xyz / txt / csv) — full column control ----
     if fmt in ("xyz", "txt", "csv"):
@@ -9723,6 +9749,270 @@ def _resolve_export_dest_dir(dest_dir: str) -> Path:
     return p
 
 
+# Cells formatted per write in the PTX writer. Bounds the transient text buffer
+# to ~20 MB regardless of grid size.
+_PTX_EXPORT_CHUNK_CELLS = 250_000
+# Refuse a raster beyond this (~4 GB of ASCII). The guard exists so a corrupt
+# row_index column can't ask for a terabyte-scale file.
+_PTX_MAX_CELLS = 60_000_000
+# Without a `dest_dir` the file must survive base64 + a JSON string, so a
+# full-resolution raster can't go that way (see ScanExportRequest.dest_dir).
+_PTX_MAX_INLINE_CELLS = 2_000_000
+
+
+def _ptx_export_cells(resolved: dict, scan_entry) -> "tuple[np.ndarray, int, int, str]":
+    """Assign each point to a PTX grid cell. Returns (cell, n_rows, n_cols, source).
+
+    `cell` is the column-major flat index `col * n_rows + row`, or -1 for a point
+    that has no place in the raster. That index IS the PTX write order, so the
+    writer becomes one ascending walk with no transpose and no full-raster
+    allocation.
+
+    Two sources, in order of authority:
+      * `row_index`/`column_index` — instrument ground truth, exact;
+      * angular binning against the scan's Ntheta/Nphi sweep — used when the
+        cloud carries no raster (a synthetic Helios scan, or an ASCII import).
+        Note this is not an approximation for a raster scan: every hit lies on a
+        known beam. And a mis-binned point still carries its own exact local xyz,
+        so a wrong bin reorders the raster without corrupting any geometry.
+    """
+    xyz = resolved["positions"]
+    scalars = resolved["scalars"]
+    n_rows = int(scan_entry.n_theta or 0)
+    n_cols = int(scan_entry.n_phi or 0)
+
+    row = scalars.get("row_index")
+    col = scalars.get("column_index")
+    if row is not None and col is not None and len(row) == xyz.shape[0]:
+        r = np.rint(np.asarray(row, np.float64)).astype(np.int64)
+        c = np.rint(np.asarray(col, np.float64)).astype(np.int64)
+        valid = (r >= 0) & (c >= 0)          # -1 sentinels (see _e57_to_las)
+        if r.size and valid.sum() >= 0.5 * r.size:
+            rmin, rmax = int(r[valid].min()), int(r[valid].max())
+            cmin, cmax = int(c[valid].min()), int(c[valid].max())
+            # Rebase ONLY when the raw indices overflow the declared grid (the
+            # E57 rowMinimum case). A cropped scan whose surviving rows start at
+            # 40 of 2000 still fits, and rebasing it would slide the whole cloud
+            # up the raster.
+            if n_rows and rmax >= n_rows and (rmax - rmin) < n_rows:
+                r = r - rmin
+                rmax -= rmin
+            if n_cols and cmax >= n_cols and (cmax - cmin) < n_cols:
+                c = c - cmin
+                cmax -= cmin
+            # Declared dims vs observed indices: the RASTER wins. Growing keeps
+            # every point; clamping would stack points into the edge cells.
+            n_rows, n_cols = max(n_rows, rmax + 1), max(n_cols, cmax + 1)
+            return np.where(valid, c * n_rows + r, -1), n_rows, n_cols, "index"
+
+    if n_rows <= 0 or n_cols <= 0:
+        raise ValueError(
+            "PTX needs a complete scan grid: this cloud carries no row/column "
+            "indices and its scan parameters have no Ntheta x Nphi resolution. "
+            "Set the scan resolution, or export from a structured source.")
+    pattern = getattr(scan_entry, "scan_pattern", None) or "raster"
+    if pattern != "raster":
+        raise ValueError(
+            f"PTX stores one sample per grid cell, so it can't represent a "
+            f"'{pattern}' scan. Export this scan as E57 or LAS instead.")
+
+    origin = np.asarray(scan_entry.origin, np.float64).reshape(3)
+    t = getattr(scan_entry, "translation", None)
+    if t is not None:
+        origin = origin + np.asarray(t, np.float64).reshape(3)
+    local = xyz - origin
+    rad = np.linalg.norm(local, axis=1)
+    ok = rad > 1e-9
+    rs = np.where(ok, rad, 1.0)
+    theta = np.degrees(np.arccos(np.clip(local[:, 2] / rs, -1.0, 1.0)))   # zenith from +Z
+    phi = np.degrees(np.arctan2(local[:, 0], local[:, 1]))                # CW from +Y
+    phi = (phi + float(getattr(scan_entry, "scan_azimuth_offset", 0.0) or 0.0)) % 360.0
+
+    t0 = float(scan_entry.theta_min if scan_entry.theta_min is not None else 0.0)
+    t1 = float(scan_entry.theta_max if scan_entry.theta_max is not None else 180.0)
+    p0 = float(scan_entry.phi_min if scan_entry.phi_min is not None else 0.0)
+    p1 = float(scan_entry.phi_max if scan_entry.phi_max is not None else 360.0)
+    tspan = t1 - t0
+    pspan = ((p1 - p0) % 360.0) or 360.0     # a 0..360 sweep reads as 0 under the mod
+
+    rr = np.floor((theta - t0) / (tspan if abs(tspan) > 1e-12 else 1e-12) * n_rows)
+    rr = np.where(rr == n_rows, n_rows - 1, rr).astype(np.int64)
+    cc = np.floor(((phi - p0) % 360.0) / pspan * n_cols)
+    cc = np.where(cc == n_cols, n_cols - 1, cc).astype(np.int64)
+    good = ok & (rr >= 0) & (rr < n_rows) & (cc >= 0) & (cc < n_cols)
+    return np.where(good, cc * n_rows + rr, -1), n_rows, n_cols, "angles"
+
+
+def _ptx_first_per_cell(cell: "np.ndarray", rank: "np.ndarray"):
+    """Pick one point per cell — lowest `rank` wins. Returns (point indices,
+    their cells, collapsed count).
+
+    PTX stores exactly one sample per cell, so a multi-return scan must collapse.
+    Doing it with an explicit sort rather than a duplicate-index scatter makes
+    the winner DETERMINISTIC (numpy leaves scatter order to the implementation)
+    and leaves the writer's targets unique by construction.
+    """
+    idx = np.flatnonzero(cell >= 0)
+    if idx.size == 0:
+        return idx, cell[idx], 0
+    order = idx[np.lexsort((rank[idx], cell[idx]))]
+    cs = cell[order]
+    first = np.empty(cs.size, bool)
+    first[:1] = True
+    first[1:] = cs[1:] != cs[:-1]
+    return order[first], cs[first], int(cs.size - int(first.sum()))
+
+
+def _ptx_write_stream(fh, resolved: dict, scan_entry,
+                      max_cells: int = _PTX_MAX_CELLS) -> dict:
+    """Format one scan as PTX into the binary stream `fh`. Returns grid stats.
+
+    Points are written SCANNER-LOCAL (`world - origin`) under an identity
+    rotation, with the scanner position as the transform's translation. Three
+    reasons, all load-bearing:
+
+      * ScanParameters carries no registration rotation — only azimuth offset and
+        tilt, which are beam-frame knobs. Synthesising a rotation from them would
+        mean rotating every point by its inverse just to keep world coordinates
+        unchanged, with a convention error silently yawing the whole cloud.
+      * The local frame is what makes the empty-cell literal unambiguous: `0 0 0`
+        in local coordinates IS the scanner, a physically impossible return. In
+        world coordinates it is a real place.
+      * `%.6f` on a ~10 m local coordinate is six real decimals; on a UTM
+        coordinate it is barely three significant decimals of range.
+
+    The round trip is exact in floating point — the reader computes `local @ I + o`
+    and the only operation is adding back the constant that was subtracted.
+    """
+    cell, n_rows, n_cols, source = _ptx_export_cells(resolved, scan_entry)
+    n_cells = n_rows * n_cols
+    if n_cells > max_cells:
+        raise ValueError(
+            f"PTX raster would be {n_rows} x {n_cols} = {n_cells:,} cells, past "
+            f"the {max_cells:,} limit for this export path."
+            + ("" if max_cells != _PTX_MAX_INLINE_CELLS else
+               " Choose a destination folder so the file can be streamed to disk."))
+
+    xyz = resolved["positions"]
+    colors = resolved["colors"]
+    intensity = resolved["intensity"]
+    has_color = colors is not None
+
+    origin = np.asarray(scan_entry.origin, np.float64).reshape(3)
+    t = getattr(scan_entry, "translation", None)
+    if t is not None:
+        # The viewer translation moves the points, so it must move the scanner
+        # with them — otherwise `local` is off by it and the origin is no longer
+        # at local zero. (The XML path leaves `origin` alone, which is harmless
+        # for a flat format and fatal here.)
+        origin = origin + np.asarray(t, np.float64).reshape(3)
+    local = xyz - origin
+    # The header translation is the scanner's REGISTERED WORLD position, so the
+    # import-time global shift is added back for it alone. The point block is
+    # shift-invariant — local = (world - shift) - (origin - shift) — so this
+    # changes lines 3 and 10 and not one data line. PTX is the only scan-export
+    # format that does this, because it is the only one that declares an
+    # absolute pose (cf. the DEM raster export, which re-adds it for the same
+    # georeferencing reason).
+    ws = resolved.get("world_shift")
+    origin_world = origin if ws is None else origin + np.asarray(ws, np.float64)
+
+    # Rank for the multi-return collapse: the first return is what a Leica writes.
+    ti = resolved["scalars"].get("target_index")
+    rank = (np.asarray(ti, np.float64) if ti is not None and len(ti) == xyz.shape[0]
+            else np.linalg.norm(local, axis=1))
+    pidx, pcell, collapsed = _ptx_first_per_cell(cell, rank)
+    unplaced = int((cell < 0).sum())
+
+    iv = None
+    if intensity is not None:
+        v = np.asarray(intensity, np.float64)
+        finite = np.isfinite(v)
+        if finite.any():
+            lo, hi = float(v[finite].min()), float(v[finite].max())
+            # PTX intensity is 0..1; sources range from 0..1 floats through
+            # 0..65535 LAS. Normalise by the observed range, matching how the
+            # importer reads it back.
+            iv = ((v - lo) / (hi - lo)) if hi > lo else np.clip(v, 0.0, 1.0)
+    rgb = (np.clip(np.rint(np.asarray(colors, np.float64) * 255.0), 0, 255)
+           if has_color else None)
+
+    ox, oy, oz = (float(v) for v in origin_world)
+    fh.write((
+        f"{n_cols}\n{n_rows}\n"
+        f"{ox:.6f} {oy:.6f} {oz:.6f}\n"
+        "1.000000 0.000000 0.000000\n"
+        "0.000000 1.000000 0.000000\n"
+        "0.000000 0.000000 1.000000\n"
+        "1.000000 0.000000 0.000000 0.000000\n"
+        "0.000000 1.000000 0.000000 0.000000\n"
+        "0.000000 0.000000 1.000000 0.000000\n"
+        f"{ox:.6f} {oy:.6f} {oz:.6f} 1.000000\n"
+    ).encode("ascii"))
+
+    ntok = 7 if has_color else 4
+    row_fmt = ("%.6f %.6f %.6f %.6f %d %d %d\n" if has_color
+               else "%.6f %.6f %.6f %.6f\n")
+    order = np.argsort(pcell, kind="stable")
+    pcell, pidx = pcell[order], pidx[order]
+    for c0 in range(0, n_cells, _PTX_EXPORT_CHUNK_CELLS):
+        c1 = min(c0 + _PTX_EXPORT_CHUNK_CELLS, n_cells)
+        m = c1 - c0
+        # Every cell starts EMPTY, so a cell with no return costs no branch —
+        # it is simply a buffer row that nothing overwrote.
+        buf = np.zeros((m, ntok), np.float64)
+        buf[:, 3] = _PTX_EMPTY_INTENSITY
+        blo = int(np.searchsorted(pcell, c0, "left"))
+        bhi = int(np.searchsorted(pcell, c1, "left"))
+        if bhi > blo:
+            sl = pidx[blo:bhi]
+            tgt = pcell[blo:bhi] - c0            # unique by construction
+            buf[tgt, 0:3] = local[sl]
+            if iv is not None:
+                buf[tgt, 3] = iv[sl]
+            if rgb is not None:
+                buf[tgt, 4:7] = rgb[sl]
+        fh.write((row_fmt * m % tuple(buf.ravel())).encode("ascii"))
+
+    return {"rows": n_rows, "cols": n_cols, "cells": n_cells,
+            "filled": int(pcell.size), "collapsed": collapsed,
+            "unplaced": unplaced, "source": source}
+
+
+def _emit_ptx_file(name: str, resolved: dict, scan_entry,
+                   dest: Optional[Path]) -> dict:
+    """One `files` entry for a PTX scan.
+
+    With `dest` the raster is formatted STRAIGHT INTO THE FILE and never
+    materialised as bytes — a 10 M-cell colour PTX is ~700 MB, which is exactly
+    the V8 string-cap failure `dest_dir` exists to avoid once base64 inflates it.
+    Without a destination the caller still gets base64, but capped.
+    """
+    if dest is not None:
+        target = dest / name
+        tmp = target.with_name(target.name + ".part")
+        try:
+            with open(tmp, "wb") as fh:
+                stats = _ptx_write_stream(fh, resolved, scan_entry)
+            os.replace(tmp, target)
+        except BaseException:
+            # Never leave a truncated .ptx behind — a partial raster is a valid-
+            # looking file with silently missing cells.
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return {"name": name, "data": None, "is_xml": False,
+                "bytes": target.stat().st_size, "written": True, "grid": stats}
+    buf = io.BytesIO()
+    stats = _ptx_write_stream(buf, resolved, scan_entry,
+                              max_cells=_PTX_MAX_INLINE_CELLS)
+    entry = _emit_scan_export_file(name, buf.getvalue(), False, None)
+    entry["grid"] = stats
+    return entry
+
+
 def _emit_scan_export_file(name: str, raw_bytes: bytes, is_xml: bool,
                            dest: Optional[Path]) -> dict:
     """Return one entry for the export response's `files` list.
@@ -9922,14 +10212,28 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
     instead of being base64'd back to the renderer.
     """
     fmt = (request.data_format or "xyz").lower()
-    if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj", "e57"):
+    if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj", "e57", "ptx"):
         return {"success": False, "error": f"Unsupported data format: {fmt}"}
+
+    is_ptx = fmt == "ptx"
+    # PTX writes EVERY cell, so an excluded miss simply becomes an empty cell —
+    # byte-identical output either way. Excluding is also the correct reading: a
+    # Helios/E57 miss is a real row parked 20 km out, which would otherwise
+    # occupy its cell with a bogus point where the format wants the empty
+    # sentinel. And on a sky-heavy scan it halves the rows before the sort.
+    want_misses = False if is_ptx else request.include_misses
+    force = _GRID_INDEX_SLUGS if is_ptx else ()
 
     files = []
     total_points = 0
     for i, scan_entry in enumerate(request.scans):
-        resolved = _resolve_scan_for_format(scan_entry, request.include_misses)
+        resolved = _resolve_scan_for_format(scan_entry, want_misses, force_slugs=force)
         total_points += int(resolved["positions"].shape[0])
+        if is_ptx:
+            # Bypasses _write_scan_to_bytes' (name, bytes) contract so a large
+            # raster can stream straight to disk — see _emit_ptx_file.
+            files.append(_emit_ptx_file(f"{base}_{i}.ptx", resolved, scan_entry, dest))
+            continue
         name, raw_bytes = _write_scan_to_bytes(resolved, fmt, f"{base}_{i}")
         files.append(_emit_scan_export_file(name, raw_bytes, False, dest))
         # Drop the reference before resolving the next scan: with dest set the
@@ -17708,6 +18012,49 @@ def _canonicalise_exclusive_role(role: str) -> Optional[str]:
 # its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
 _MISS_GAP_DISTANCE = 20000.0
 
+# ---------------------------------------------------------------------------
+# PTX (Leica/RiSCAN/FARO structured scan) tuning constants. See `_ptx_to_las`.
+# ---------------------------------------------------------------------------
+# Header lines preceding each block's data: cols, rows, position, 3 axis rows,
+# 4 transform rows.
+_PTX_HEADER_LINES = 10
+# Squared local range below which a cell is the "0 0 0" no-return sentinel.
+# Expressed as a range test rather than three == 0 comparisons so a writer
+# emitting -0.0 or 0.000000 is caught identically. A real return at exactly the
+# scanner's optical centre is physically impossible, so this cannot false-fire.
+_PTX_MISS_RANGE2 = 1e-18
+# A cell this close to +/-Z has an arbitrary azimuth, so it must not pollute its
+# column's azimuth statistic (it still feeds the zenith one).
+_PTX_POLE_SIN = 1e-3
+# Valid cells needed before a row/column's angle is taken as measured.
+_PTX_MIN_CELLS_PER_INDEX = 3
+# Separability residual above which the grid is not the raster we assumed —
+# either the reshape is wrong or the file isn't a single coherent scan.
+_PTX_MAX_ANGULAR_RESIDUAL = math.radians(0.5)
+# How far past the populated index range an angle LUT may be extrapolated before
+# the result stops being trusted, as a fraction of the axis length. Interior gaps
+# are always trusted (they're bracketed by measurements); only the ends guess.
+_PTX_MAX_EXTRAP_FRACTION = 0.10
+# Cells parsed per chunk. Rounded DOWN to a whole number of columns so every
+# chunk reshapes to (row, column) cleanly — see `_ptx_iter_chunks`.
+#
+# Sized from measurement, not intuition. On the 19.9 M-cell reference block the
+# decode's transient working memory scales almost linearly with this while the
+# wall clock does NOT move at all:
+#     2,000,000 -> 1.71 GB transient, 14.0 s
+#     1,000,000 -> 0.95 GB,           14.0 s
+#       500,000 -> 0.58 GB,           13.7 s
+#       250,000 -> 0.47 GB,           13.8 s
+# So a big chunk buys nothing but memory. 500 k sits just past the knee (halving
+# again saves only 0.11 GB) and still gives 150 whole columns per chunk on a
+# 3333-row grid, keeping the pandas read comfortably vectorised.
+_PTX_CHUNK_CELLS = 500_000
+# Cells sampled per block when scoring the columns-vs-rows header hypotheses.
+_PTX_HYPOTHESIS_SAMPLE_CELLS = 4_000_000
+# Intensity written into an empty cell on EXPORT. The spec's value; the importer
+# keys misses off zero xyz alone, so it also accepts the 0 that RiSCAN PRO writes.
+_PTX_EMPTY_INTENSITY = 0.5
+
 # Helios assigns this sentinel target_index to a sky/miss return (LiDAR.cpp:5609,
 # "Special value to exclude from triangulation"). A miss-recording synthetic scan
 # exported to bare ASCII (e.g. `x y z timestamp target_index target_count`) drops
@@ -20618,7 +20965,7 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     # PCD (no angular sweep / grid), so the rest of ScanParameters stays default.
     vp = _pcd_viewpoint_origin(source_path)
     if vp is not None:
-        _e57_scan_meta[str(out_las.resolve())] = {
+        _import_scan_meta[str(out_las.resolve())] = {
             "origin": vp,
             "scan_params": {"origin": vp},
             "has_misses": False,
@@ -20629,13 +20976,19 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     return n, []
 
 
-# Scanner origin recovered from the most recent E57 conversion, keyed by the
-# absolute output LAS path. `_e57_to_las` writes it; `create_cloud_session` pops
-# it right after conversion to surface the origin (and a hasMisses flag) to the
-# renderer so it can place the scan's `ScanParameters.origin` and relocate miss
-# points onto the bounding sphere for display. Threaded this way (rather than
-# widening `_source_to_las`'s tuple) so the many other callers stay untouched.
-_e57_scan_meta: Dict[str, dict] = {}
+# Scanner pose recovered from the most recent header-bearing conversion, keyed by
+# the absolute output LAS path. Written by `_pcd_to_las` (VIEWPOINT origin only),
+# `_e57_to_las` and `_ptx_to_las`; `create_cloud_session` pops it right after
+# conversion to surface the origin (and a hasMisses flag) to the renderer so it
+# can place the scan's `ScanParameters.origin` and relocate miss points onto the
+# bounding sphere for display. Threaded this way (rather than widening
+# `_source_to_las`'s tuple) so the many other callers stay untouched.
+#
+# Keys: origin, scan_origins, scan_params, has_misses, miss_count,
+# unplaceable_miss_count, and optionally `warnings` (a list of human-readable
+# notes the create endpoint splices into its own warning list — PTX uses it to
+# report a swapped header, a degenerate pose, or a truncated final block).
+_import_scan_meta: Dict[str, dict] = {}
 
 
 def _e57_scan_params(header, has_grid: bool) -> dict:
@@ -20715,7 +21068,8 @@ def _e57_scan_params(header, has_grid: bool) -> dict:
     return params
 
 
-def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
+def _e57_to_las(source_path: _Path, out_las: _Path,
+                scan_index: Optional[int] = None) -> tuple[int, List[dict]]:
     """Convert an E57 to LAS, recovering sky/miss points from the structured
     grid so the LAD inversion can account for beams that returned nothing.
 
@@ -20736,7 +21090,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
 
     Each scan is transformed by ITS OWN pose (rotation + translation); a
     multi-scan E57 merges into one cloud with every scan's misses placed relative
-    to its own origin. The first scan's origin is stashed in `_e57_scan_meta`
+    to its own origin. The first scan's origin is stashed in `_import_scan_meta`
     (plus per-scan origins + the unplaceable-miss count) for the create endpoint.
     Intensity is normalised per scan from its observed valid range (E57 intensity
     is often 0..1 float); RGB colour (colorRed/Green/Blue) is carried into the LAS
@@ -20751,6 +21105,18 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         n_scans = e.scan_count
         if n_scans == 0:
             raise HTTPException(status_code=400, detail="E57 file has no scans.")
+        # One E57 scan -> one scan position. When `scan_index` is given the caller
+        # is driving the fan-out (see `_do_create_multi_cloud_session`) and wants
+        # THIS scan's pose and grid to define the session, instead of every scan
+        # merging into one cloud that can only carry the first one's.
+        scan_range = range(n_scans)
+        if scan_index is not None:
+            if not 0 <= scan_index < n_scans:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"{source_path.name}: scan {scan_index} requested but the "
+                            f"file has {n_scans}."))
+            scan_range = range(scan_index, scan_index + 1)
 
         all_xyz: List[np.ndarray] = []
         all_miss: List[np.ndarray] = []
@@ -20765,7 +21131,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         scan_params_list: List[dict] = []
         unplaceable_misses = 0
 
-        for si in range(n_scans):
+        for si in scan_range:
             header = e.get_header(si)
             try:
                 rot = np.asarray(header.rotation_matrix, dtype=np.float64).reshape(3, 3)
@@ -20960,7 +21326,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         writer.write_points(record)
 
-    _e57_scan_meta[str(out_las.resolve())] = {
+    _import_scan_meta[str(out_las.resolve())] = {
         "origin": (scan_origins[0] if scan_origins else [0.0, 0.0, 0.0]),
         "scan_origins": scan_origins,
         # Full scan-pattern parameters of the first scan (origin + whatever
@@ -20973,6 +21339,891 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         "unplaceable_miss_count": unplaceable_misses,
     }
     return n, extra_dims
+
+
+# ===========================================================================
+# PTX — Leica Cyclone's structured-scan ASCII format (also written by RiSCAN
+# PRO and FARO SCENE). See `_ptx_to_las` for the format and the design.
+# ===========================================================================
+
+
+@dataclass
+class _PtxBlock:
+    """One scan block's header plus where its data starts.
+
+    A PTX file may hold SEVERAL blocks back to back — one per scan setup — and
+    both dimensions can differ between them (a real 3-block RiSCAN file measured
+    5964x3333, 5952x3333, 5959x3332), so nothing may be cached across blocks.
+    """
+    index: int
+    header_line: int         # 1-based, for error messages
+    n1: int                  # header line 1 (columns, under the spec ordering)
+    n2: int                  # header line 2 (rows, under the spec ordering)
+    position: "np.ndarray"   # (3,) line 3
+    axes: "np.ndarray"       # (3,3) lines 4-6, one scanner axis per ROW
+    matrix4: "np.ndarray"    # (4,4) lines 7-10, row-major, translation in row 3
+    n_tokens: int            # 4 (x y z i) or 7 (x y z i r g b)
+    data_byte: int           # byte offset of the first data line
+    n_cells: int             # n1 * n2
+    n_lines: int             # data lines actually present (< n_cells if truncated)
+    # Set once the columns/rows hypothesis is settled (see `_ptx_choose_shape`).
+    rows: int = 0
+    cols: int = 0
+    swapped: bool = False
+
+
+def _ptx_skip_lines(fh, start_byte: int, n_lines: int, size: int) -> "tuple[int, int]":
+    """Advance past `n_lines` newline-terminated lines from `start_byte`.
+
+    Returns (byte offset just past the last one consumed, lines actually found).
+    Counting is done with `bytes.count(b'\\n')` over 8 MB reads, which runs at
+    memchr speed — seconds on a multi-GB file. This is what lets every block be
+    handed to pandas by byte offset instead of an integer `skiprows`, which would
+    re-scan from the top for each block (O(blocks^2)) and, more importantly,
+    would leave the file handle in an unusable position because pandas' C parser
+    reads ahead of what it consumes.
+
+    A final line with no trailing newline still counts as a line.
+    """
+    CHUNK = 8 << 20
+    fh.seek(start_byte)
+    found = 0
+    pos = start_byte
+    while found < n_lines and pos < size:
+        buf = fh.read(CHUNK)
+        if not buf:
+            break
+        c = buf.count(b"\n")
+        if found + c < n_lines:
+            found += c
+            pos += len(buf)
+            continue
+        # The target newline is inside this buffer — walk to it exactly.
+        need = n_lines - found
+        off = -1
+        for _ in range(need):
+            off = buf.find(b"\n", off + 1)
+        return pos + off + 1, n_lines
+    # Ran out of file. A trailing unterminated line still counts.
+    if pos < size:
+        fh.seek(pos)
+        if fh.read(1):
+            found += 1
+    return size, found
+
+
+def _ptx_read_header(fh, start_byte: int, index: int, header_line: int,
+                     source_name: str) -> "tuple[_PtxBlock, int]":
+    """Parse one block header at `start_byte`. Returns (block, data_byte)."""
+    # 10 header lines are at most a few hundred bytes; 8 KB is generous.
+    fh.seek(start_byte)
+    buf = fh.read(8192)
+    raw = buf.split(b"\n")
+    if len(raw) < _PTX_HEADER_LINES + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{source_name}: PTX block {index} at line {header_line} is "
+                    f"truncated — expected {_PTX_HEADER_LINES} header lines."))
+    lines = [raw[i].decode("ascii", "replace").strip() for i in range(_PTX_HEADER_LINES)]
+    data_byte = start_byte + sum(len(raw[i]) + 1 for i in range(_PTX_HEADER_LINES))
+
+    def _bad(msg: str, line_no: int):
+        return HTTPException(
+            status_code=400,
+            detail=(f"{source_name}: PTX block {index}, line "
+                    f"{header_line + line_no}: {msg}"))
+
+    def _floats(line_no: int, want: int) -> "np.ndarray":
+        toks = lines[line_no].split()
+        if len(toks) != want:
+            raise _bad(f"expected {want} numbers, got {len(toks)}", line_no)
+        try:
+            v = np.asarray([float(t) for t in toks], dtype=np.float64)
+        except ValueError:
+            raise _bad(f"expected {want} numbers, got {lines[line_no]!r}", line_no)
+        if not np.all(np.isfinite(v)):
+            raise _bad("header numbers must be finite", line_no)
+        return v
+
+    try:
+        n1, n2 = int(lines[0]), int(lines[1])
+    except ValueError:
+        raise _bad("the first two lines must be the grid dimensions "
+                   f"(got {lines[0]!r}, {lines[1]!r})", 0)
+    if n1 <= 0 or n2 <= 0:
+        raise _bad(f"grid dimensions must be positive (got {n1} x {n2})", 0)
+
+    position = _floats(2, 3)
+    axes = np.vstack([_floats(3, 3), _floats(4, 3), _floats(5, 3)])
+    matrix4 = np.vstack([_floats(6, 4), _floats(7, 4), _floats(8, 4), _floats(9, 4)])
+
+    # Token count comes from the first data line — 4 (x y z intensity) or 7
+    # (+ r g b). Blocks in one file could in principle differ, so sniff per block.
+    fh.seek(data_byte)
+    first = fh.readline().decode("ascii", "replace")
+    n_tokens = len(first.split())
+    if n_tokens not in (4, 7):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{source_name}: PTX block {index} data starts with "
+                    f"{n_tokens} columns ({first.strip()!r}); expected 4 "
+                    f"(x y z intensity) or 7 (+ r g b)."))
+
+    return _PtxBlock(
+        index=index, header_line=header_line, n1=n1, n2=n2,
+        position=position, axes=axes, matrix4=matrix4, n_tokens=n_tokens,
+        data_byte=data_byte, n_cells=n1 * n2, n_lines=0,
+    ), data_byte
+
+
+# Block index cache keyed by (path, size, mtime_ns). Splitting a multi-block PTX
+# into one session per block converts each block separately, and each conversion
+# would otherwise re-walk the whole file to find the boundaries — 3 extra passes
+# over 1.67 GB for the reference dataset. Invalidated by any size/mtime change.
+_ptx_block_index_cache: "Dict[tuple, tuple]" = {}
+
+
+def _ptx_index_blocks_cached(source_path: _Path) -> "tuple[List[_PtxBlock], List[str]]":
+    st = source_path.stat()
+    key = (str(source_path.resolve()), st.st_size, st.st_mtime_ns)
+    hit = _ptx_block_index_cache.get(key)
+    if hit is None:
+        hit = _ptx_index_blocks(source_path)
+        # Bound it: one entry is all the import flow needs, and the blocks hold
+        # only headers (a few hundred bytes each), but don't grow unbounded.
+        if len(_ptx_block_index_cache) > 4:
+            _ptx_block_index_cache.clear()
+        _ptx_block_index_cache[key] = hit
+    return hit
+
+
+def _ptx_index_blocks(source_path: _Path) -> "tuple[List[_PtxBlock], List[str]]":
+    """Walk a PTX end to end, returning every block's header + data byte offset.
+
+    PTX has no block directory: block b+1 begins exactly `n1*n2` data lines after
+    block b's header, and only a newline count turns that into a byte offset.
+    Returns (blocks, warnings).
+
+    Two distinct failure shapes, reported differently on purpose. Running out of
+    file mid-block is a TRUNCATED COPY: the cells present are imported and a
+    warning is raised, because that data is usually still wanted. A desync in the
+    middle of a file that continues — lines lost or added inside a block — instead
+    surfaces as the NEXT block's header failing to parse, which raises a 400
+    naming the exact line. That distinction is why there's no interior
+    short-count branch here: with a fixed cell count per block, a short count can
+    only mean EOF.
+    """
+    warnings: List[str] = []
+    blocks: List[_PtxBlock] = []
+    size = source_path.stat().st_size
+    name = source_path.name
+    with open(source_path, "rb") as fh:
+        pos = 0
+        line_no = 1
+        while pos < size:
+            # A trailing newline / whitespace tail is the end, not a new block.
+            fh.seek(pos)
+            if not fh.read(64).strip():
+                break
+            block, data_byte = _ptx_read_header(fh, pos, len(blocks), line_no, name)
+            end, found = _ptx_skip_lines(fh, data_byte, block.n_cells, size)
+            block.n_lines = found
+            blocks.append(block)
+            if found < block.n_cells:
+                warnings.append(
+                    f"PTX block {block.index} declares {block.n1} x {block.n2} "
+                    f"= {block.n_cells} points but only {found} data lines follow "
+                    f"(from line {line_no + _PTX_HEADER_LINES}). The file looks "
+                    "truncated; importing the cells present and treating the rest "
+                    "as absent.")
+            pos = end
+            line_no += _PTX_HEADER_LINES + found
+    if not blocks:
+        raise HTTPException(
+            status_code=400, detail=f"{name}: no PTX scan blocks found.")
+    return blocks, warnings
+
+
+def _ptx_iter_chunks(source_path: _Path, block: _PtxBlock, usecols, rows: int,
+                     max_cells: Optional[int] = None):
+    """Yield (n_tokens_used, rows, chunk_cols) float64 grids for one block.
+
+    Chunks are WHOLE COLUMNS. PTX is column-major (`k = col*rows + row`), so a
+    chunk of complete columns reshapes to [token, row, column] with no copy games
+    — which is what makes every per-column reduction an `axis=0` and every
+    per-row one an `axis=1`, and is the load-bearing invariant behind the whole
+    angular fit.
+
+    Yields (grid, col0) where `col0` is the chunk's first column index.
+    """
+    chunk_cols = max(1, _PTX_CHUNK_CELLS // max(1, rows))
+    total = block.n_lines if max_cells is None else min(block.n_lines, max_cells)
+    # Only whole columns; a truncated tail column is dropped rather than
+    # mis-shaped (its cells would be attributed to the wrong rows).
+    total_cols = total // rows
+    if total_cols == 0:
+        return
+    ncols_tok = len(usecols)
+    with open(source_path, "rb") as fh:
+        fh.seek(block.data_byte)
+        reader = pd.read_csv(
+            fh, sep=r"\s+", header=None, engine="c", dtype=np.float64,
+            usecols=list(usecols), names=[f"c{i}" for i in usecols],
+            nrows=total_cols * rows, chunksize=chunk_cols * rows,
+            on_bad_lines="error",
+        )
+        col0 = 0
+        for frame in reader:
+            arr = frame.to_numpy(dtype=np.float64, copy=False)
+            cc = arr.shape[0] // rows
+            if cc == 0:
+                continue
+            grid = arr[:cc * rows].reshape(cc, rows, ncols_tok).transpose(2, 1, 0)
+            yield grid, col0
+            col0 += cc
+
+
+def _wrap_pi(a):
+    """Wrap angles to (-pi, pi] — the seam-safe residual form used throughout."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def _ptx_fill_lut(vals: "np.ndarray", unwrap: bool,
+                  max_extrap_frac: float = _PTX_MAX_EXTRAP_FRACTION,
+                  ) -> "tuple[np.ndarray, np.ndarray]":
+    """Complete a per-index angle LUT (NaN where an index had no valid cell).
+
+    Indices with no measurement are linearly INTERPOLATED between populated
+    neighbours — exact for any smooth sweep, uniform or not — and the ENDS are
+    EXTRAPOLATED with the robust median step. Returns (filled, trusted), where
+    `trusted` is False further than `max_extrap_frac` of the axis beyond the
+    populated range.
+
+    Interior gaps are always trusted: a wholly-empty row bracketed by populated
+    rows is bounded on both sides by measurement, however wide the gap. Only the
+    ends are guesses, which is what the budget bounds.
+    """
+    n = vals.size
+    idx = np.arange(n, dtype=np.float64)
+    ok = np.isfinite(vals)
+    if int(ok.sum()) < 2:
+        # Nothing to interpolate along: only the measured indices are usable.
+        return np.where(ok, vals, 0.0), ok.copy()
+    v = vals[ok].astype(np.float64)
+    if unwrap:
+        v = np.unwrap(v)
+    i_ok = idx[ok]
+    filled = np.interp(idx, i_ok, v)
+    # np.interp CLAMPS outside its range, which would park every leading miss on
+    # the first measured angle. Replace both tails with the median-step line —
+    # a median, not a polyfit, so one anomalous LUT entry can't drag it.
+    step = float(np.median(np.diff(v) / np.diff(i_ok)))
+    lo, hi = i_ok[0], i_ok[-1]
+    filled = np.where(idx < lo, v[0] + step * (idx - lo), filled)
+    filled = np.where(idx > hi, v[-1] + step * (idx - hi), filled)
+    budget = max(1.0, max_extrap_frac * n)
+    trusted = (idx >= lo - budget) & (idx <= hi + budget)
+    return filled, trusted
+
+
+class _PtxGridModel:
+    """Per-index angle LUTs for one PTX block, built by streaming its cells.
+
+    PTX point coordinates are in the SCANNER-LOCAL frame, so the local spherical
+    angles ARE the raw instrument angles and the acquisition grid is an exact
+    separable outer product: zenith depends only on the row, azimuth only on the
+    column. The estimator is therefore a non-parametric per-index robust median,
+    not a fitted line — which is exact for non-uniform angular steps (FARO
+    quality-dependent grids, any resampled export), where a global linear fit
+    would bake the non-uniformity into every recovered miss.
+
+    The within-index scatter that falls out of the same computation is the
+    SEPARABILITY RESIDUAL, and it does three jobs at once: it gates whether the
+    recovery is trustworthy, it adjudicates the columns-vs-rows header ordering,
+    and it confirms the row->zenith / column->azimuth assignment. On real data
+    the wrong pairing scores ~4 orders of magnitude worse, so it is decisive.
+    """
+
+    def __init__(self, rows: int, cols: int):
+        self.rows, self.cols = rows, cols
+        self.az_lut = np.full(cols, np.nan)
+        self.az_mad = np.full(cols, np.nan)
+        self._row_med_banks: List["np.ndarray"] = []
+        self._row_mad_banks: List["np.ndarray"] = []
+        self._row_count = np.zeros(rows, np.int64)
+        self.trusted = False
+        self.reason = ""
+
+    def observe(self, grid: "np.ndarray", col0: int) -> "np.ndarray":
+        """Fold one chunk into the accumulators. `grid` is (>=3, rows, cc) with
+        x/y/z first. Returns the chunk's (rows, cc) valid mask so the caller can
+        reuse it without recomputing."""
+        x, y, z = grid[0], grid[1], grid[2]
+        rng2 = x * x + y * y + z * z
+        valid = rng2 > _PTX_MISS_RANGE2
+        hyp = np.hypot(x, y)
+        # arctan2(hypot, z) is well-conditioned across the whole sphere. arccos(z/r)
+        # loses precision at the poles and pi/2 - arcsin(z/r) at the horizon —
+        # which is exactly where a terrestrial scan puts most of its cells. It is
+        # also zenith DIRECTLY, so unlike the E57 path there is no 90-elevation
+        # conversion (and no min/max swap) anywhere downstream.
+        zen = np.arctan2(hyp, z)
+        az = np.arctan2(y, x)
+
+        # --- azimuth: per COLUMN, and a column lives entirely inside one chunk,
+        # so its statistic is complete here.
+        # A cell at the zenith/nadir has an arbitrary azimuth; exclude it.
+        az_ok = valid & (hyp > _PTX_POLE_SIN * np.sqrt(np.where(valid, rng2, 1.0)))
+        w = az_ok.astype(np.float64)
+        s = np.einsum("ij,ij->j", np.sin(az), w)
+        c = np.einsum("ij,ij->j", np.cos(az), w)
+        # The circular MEAN is seam-free; the median of the (now small, unwrapped)
+        # residuals about it supplies the outlier resistance. Together they give a
+        # robust circular median without any explicit unwrapping pass, because a
+        # single column never spans the +/-pi seam.
+        center = np.arctan2(s, c)
+        resid = np.where(az_ok, _wrap_pi(az - center[None, :]), np.nan)
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            off = np.nanmedian(resid, axis=0)
+            mad = np.nanmedian(np.abs(resid - off[None, :]), axis=0)
+        good = az_ok.sum(axis=0) >= _PTX_MIN_CELLS_PER_INDEX
+        cc = grid.shape[2]
+        self.az_lut[col0:col0 + cc] = np.where(
+            good, _wrap_pi(center + np.nan_to_num(off)), np.nan)
+        self.az_mad[col0:col0 + cc] = np.where(good, mad, np.nan)
+
+        # --- zenith: per ROW, and rows span the whole block, so bank this
+        # chunk's estimate and take a median-of-medians at the end. Memory is
+        # rows x n_chunks floats, never rows x cols.
+        zm = np.where(valid, zen, np.nan)
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            rmed = np.nanmedian(zm, axis=1)
+            rmad = np.nanmedian(np.abs(zm - rmed[:, None]), axis=1)
+        self._row_med_banks.append(rmed)
+        self._row_mad_banks.append(rmad)
+        self._row_count += valid.sum(axis=1)
+        return valid
+
+    def finish(self) -> None:
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            zen_lut = (np.nanmedian(np.column_stack(self._row_med_banks), axis=1)
+                       if self._row_med_banks else np.full(self.rows, np.nan))
+            zen_mad = (np.nanmedian(np.column_stack(self._row_mad_banks), axis=1)
+                       if self._row_mad_banks else np.full(self.rows, np.nan))
+        zen_lut = np.where(self._row_count >= _PTX_MIN_CELLS_PER_INDEX, zen_lut, np.nan)
+        self.zen_full, self.zen_ok = _ptx_fill_lut(zen_lut, unwrap=False)
+        self.az_full, self.az_ok = _ptx_fill_lut(self.az_lut, unwrap=True)
+        self.zen_full = np.clip(self.zen_full, 0.0, np.pi)
+
+        self.n_rows_pop = int(np.isfinite(zen_lut).sum())
+        self.n_cols_pop = int(np.isfinite(self.az_lut).sum())
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            self.zen_resid = float(np.nanmedian(zen_mad)) if self.n_rows_pop else np.nan
+            self.az_resid = float(np.nanmedian(self.az_mad)) if self.n_cols_pop else np.nan
+        self.zen_step = _ptx_median_step(zen_lut, unwrap=False)
+        self.az_step = _ptx_median_step(self.az_lut, unwrap=True)
+        self.az_span = _ptx_lut_span(self.az_lut, unwrap=True)
+        self.mono_zen = _ptx_monotonicity(zen_lut, unwrap=False)
+        self.mono_az = _ptx_monotonicity(self.az_lut, unwrap=True)
+        self.trusted, self.reason = self._gate()
+
+    def score(self) -> float:
+        """Residual in units of cell pitch, summed over both axes. Lower is
+        better; this is what adjudicates the header-ordering hypotheses."""
+        out = 0.0
+        for resid, step in ((self.zen_resid, self.zen_step),
+                            (self.az_resid, self.az_step)):
+            if not np.isfinite(resid) or not np.isfinite(step) or step <= 0:
+                return float("inf")
+            out += resid / step
+        return out
+
+    def _gate(self) -> "tuple[bool, str]":
+        if self.n_rows_pop < 2 or self.n_cols_pop < 2:
+            return False, (f"only {self.n_rows_pop} populated row(s) and "
+                           f"{self.n_cols_pop} populated column(s)")
+        for name, resid, step in (("zenith", self.zen_resid, self.zen_step),
+                                  ("azimuth", self.az_resid, self.az_step)):
+            if not np.isfinite(resid) or not np.isfinite(step):
+                return False, f"{name} angles could not be estimated"
+            if resid > max(_PTX_MAX_ANGULAR_RESIDUAL, 0.5 * abs(step)):
+                return False, (f"{name} varies within a single grid index "
+                               f"({math.degrees(resid):.3f} deg scatter vs a "
+                               f"{math.degrees(abs(step)):.3f} deg step)")
+        if self.mono_zen < 0.9 or self.mono_az < 0.9:
+            return False, "the angular sweep is not monotone across the grid"
+        if not np.isfinite(self.az_span) or self.az_span > 2.0 * np.pi + 0.2:
+            return False, "the azimuth sweep exceeds a full revolution"
+        return True, ""
+
+    def directions(self, rows_idx, cols_idx) -> "np.ndarray":
+        """Unit pulse directions in the SCANNER-LOCAL frame for grid cells."""
+        zen = self.zen_full[rows_idx]
+        az = self.az_full[cols_idx]
+        st = np.sin(zen)
+        return np.column_stack([st * np.cos(az), st * np.sin(az), np.cos(zen)])
+
+
+def _ptx_median_step(lut: "np.ndarray", unwrap: bool) -> float:
+    v = lut[np.isfinite(lut)]
+    if v.size < 2:
+        return float("nan")
+    idx = np.flatnonzero(np.isfinite(lut)).astype(np.float64)
+    if unwrap:
+        v = np.unwrap(v)
+    return float(np.median(np.diff(v) / np.diff(idx)))
+
+
+def _ptx_lut_span(lut: "np.ndarray", unwrap: bool) -> float:
+    v = lut[np.isfinite(lut)]
+    if v.size < 2:
+        return float("nan")
+    if unwrap:
+        v = np.unwrap(v)
+    return float(abs(v[-1] - v[0]))
+
+
+def _ptx_monotonicity(lut: "np.ndarray", unwrap: bool) -> float:
+    v = lut[np.isfinite(lut)]
+    if v.size < 3:
+        return 1.0
+    if unwrap:
+        v = np.unwrap(v)
+    d = np.diff(v)
+    if d.size == 0:
+        return 1.0
+    return float(max((d > 0).mean(), (d < 0).mean()))
+
+
+def _ptx_choose_shape(source_path: _Path, block: _PtxBlock) -> None:
+    """Settle whether header line 1 is the column count (the spec) or the row
+    count (some writers), and record the winner on the block.
+
+    Under the wrong reshape the index map becomes `(c*R + r) mod C`, which
+    scrambles the grid — so the separability residual explodes. The trust gate we
+    need anyway IS therefore the detector, and the same number simultaneously
+    covers a row-major writer and the R == C transpose. Scored on a bounded lead
+    sample so a multi-GB file doesn't pay for a second full pass.
+    """
+    def _score(rows: int) -> "tuple[float, bool]":
+        cells = min(block.n_lines, _PTX_HYPOTHESIS_SAMPLE_CELLS)
+        cols_seen = max(1, cells // max(1, rows))
+        model = _PtxGridModel(rows, cols_seen)
+        for grid, col0 in _ptx_iter_chunks(source_path, block, (0, 1, 2), rows,
+                                           max_cells=cols_seen * rows):
+            model.observe(grid, col0)
+        model.finish()
+        return model.score(), model.trusted
+
+    # H1 = the spec: line 1 columns, line 2 rows.
+    s1, ok1 = _score(block.n2)
+    if ok1:
+        block.rows, block.cols, block.swapped = block.n2, block.n1, False
+        return
+    s2, ok2 = _score(block.n1)
+    if ok2 and s2 < s1:
+        block.rows, block.cols, block.swapped = block.n1, block.n2, True
+        return
+    # Neither passed (or the swap was no better): keep the spec ordering for
+    # indexing. The block-level gate re-runs on the full data and will decide
+    # whether the misses are placeable.
+    block.rows, block.cols, block.swapped = block.n2, block.n1, False
+
+
+def _ptx_block_pose(block: _PtxBlock, source_name: str,
+                    warns: List[str]) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    """Resolve a block's pose to (rot_pts, rot_dir, trans).
+
+    PTX stores the transform for ROW-vector multiplication — `world = [x y z 1] @ M`
+    — with the translation in the LAST ROW. So the column-vector rotation is
+    `M[:3,:3].T`, which is the single easiest thing here to get backwards. A
+    transposed rotation yields a plausible-looking but wrong cloud, so it is
+    asserted in the tests.
+
+    `rot_pts` keeps any uniform scale the matrix carries (a PTX exported in mm
+    then transforms correctly); `rot_dir` is the unit rotation used for pulse
+    directions. Lines 4-6 hold the same rotation redundantly: the 4x4 wins when
+    it is usable, the axes are the fallback, and a disagreement is reported
+    rather than silently resolved.
+    """
+    def _usable(r: "np.ndarray") -> "tuple[bool, float]":
+        if not np.all(np.isfinite(r)):
+            return False, 0.0
+        g = r.T @ r
+        sc2 = float(np.trace(g)) / 3.0
+        if sc2 <= 1e-12:
+            return False, 0.0
+        if not np.allclose(g / sc2, np.eye(3), atol=1e-3):
+            return False, 0.0
+        if float(np.linalg.det(r)) <= 0.0:
+            return False, 0.0
+        return True, math.sqrt(sc2)
+
+    m_rot = np.ascontiguousarray(block.matrix4[:3, :3].T)
+    m_trans = block.matrix4[3, :3].copy()
+    ok_m, scale_m = _usable(m_rot)
+    identity_m = ok_m and np.allclose(m_rot / scale_m, np.eye(3), atol=1e-9) \
+        and np.allclose(m_trans, 0.0, atol=1e-9)
+
+    a_rot = np.ascontiguousarray(block.axes.T)
+    ok_a, scale_a = _usable(a_rot)
+    identity_a = ok_a and np.allclose(a_rot / scale_a, np.eye(3), atol=1e-9) \
+        and np.allclose(block.position, 0.0, atol=1e-9)
+
+    if ok_m and not (identity_m and ok_a and not identity_a):
+        rot_pts, trans, scale = m_rot, m_trans, scale_m
+        # Cross-check the redundant encodings; never silently pick one.
+        if ok_a and not np.allclose(a_rot / scale_a, rot_pts / scale, atol=1e-6):
+            warns.append(
+                f"PTX block {block.index}: the 4x4 transform and the scanner-axis "
+                "lines disagree; using the 4x4.")
+        if not np.allclose(block.position, trans, atol=1e-3):
+            d = float(np.linalg.norm(np.asarray(block.position) - trans))
+            warns.append(
+                f"PTX block {block.index}: the scanner position line and the "
+                f"transform translation differ by {d:.3f} m; using the transform.")
+    elif ok_a:
+        rot_pts, trans, scale = a_rot, np.asarray(block.position, np.float64), scale_a
+        warns.append(
+            f"PTX block {block.index}: the 4x4 transform was identity or "
+            "degenerate; using the scanner axis/position header lines.")
+    else:
+        rot_pts = np.eye(3)
+        trans = np.zeros(3)
+        scale = 1.0
+        warns.append(
+            f"PTX block {block.index}: neither the 4x4 transform nor the scanner "
+            "axis lines are a valid rotation; importing unregistered (identity "
+            "pose).")
+    return rot_pts, np.ascontiguousarray(rot_pts / scale), trans
+
+
+def _ptx_decompose_pose(rot_dir: "np.ndarray") -> "Optional[tuple[float, float, float]]":
+    """(yaw, pitch, roll) radians for `rot_dir == Rz(yaw) Ry(pitch) Rx(roll)`,
+    or None when the reconstruction doesn't round-trip.
+
+    The composition matches Helios's tilt/heading model (LiDAR.cpp applies roll
+    and pitch about the yaw-rotated body axes, which telescopes to this
+    fixed-axis Z-Y-X form). Verified by rebuilding rather than trusted, because
+    everything downstream that consumes it — `phi_min/max`, `azimuth_offset_deg`,
+    the tilt fields — is silently wrong if the convention is off.
+    """
+    pitch = -math.asin(max(-1.0, min(1.0, float(rot_dir[2, 0]))))
+    roll = math.atan2(float(rot_dir[2, 1]), float(rot_dir[2, 2]))
+    yaw = math.atan2(float(rot_dir[1, 0]), float(rot_dir[0, 0]))
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cr, sr = math.cos(roll), math.sin(roll)
+    rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    if not np.allclose(rz @ ry @ rx, rot_dir, atol=1e-9):
+        return None
+    return yaw, pitch, roll
+
+
+def _ptx_scan_params(block: _PtxBlock, model: _PtxGridModel,
+                     rot_dir: "np.ndarray", trans: "np.ndarray") -> dict:
+    """Recover ScanParameters from a PTX block header + its fitted angular grid.
+
+    PTX stores NO angles, so unlike `_e57_scan_params` every angular field here is
+    INFERRED. Grid resolution comes from the header and is always trustworthy; the
+    sweep is emitted only when the fit is trusted and the axis is well covered,
+    following the convention that whatever the file doesn't tell us is left out
+    for the renderer's default (blank stays blank).
+
+    Two traps. First, `zen_full` is ALREADY zenith (see `_PtxGridModel.observe`),
+    so there is deliberately no `90 - elevation` conversion here — look for the
+    E57 path's swap and you won't find it. Second, the azimuth LUT is in the
+    SCANNER-LOCAL frame while ScanParameters is world-frame, and the two agree
+    only under a pure-yaw pose; anything else omits the azimuth fields rather
+    than reporting a rotated sweep as if it were the instrument's.
+    """
+    params: dict = {"origin": [float(v) for v in trans]}
+    params["n_theta"] = int(block.rows)
+    params["n_phi"] = int(block.cols)
+    if not model.trusted:
+        return params
+
+    if model.n_rows_pop >= 0.5 * block.rows:
+        zt = model.zen_full[model.zen_ok] if model.zen_ok.any() else model.zen_full
+        params["theta_min"] = float(np.degrees(zt.min()))
+        params["theta_max"] = float(np.degrees(zt.max()))
+
+    ypr = _ptx_decompose_pose(rot_dir)
+    if ypr is None:
+        return params
+    yaw, pitch, roll = ypr
+    if max(abs(roll), abs(pitch)) >= math.radians(0.5):
+        # A tilted scanner: the local azimuth sweep is not the world one, so the
+        # azimuth fields are omitted entirely rather than reported rotated.
+        params["tilt_roll_deg"] = float(math.degrees(roll))
+        params["tilt_pitch_deg"] = float(math.degrees(pitch))
+        return params
+
+    if model.n_cols_pop >= 0.5 * block.cols:
+        # Helios measures phi CLOCKWISE FROM +Y (`arctan2(dx, dy)`), while the LUT
+        # is the mathematical atan2(y, x). For a pure yaw the world direction is
+        # Rz(yaw) applied to the local one, so phi = 90 - az_local - yaw.
+        #
+        # The endpoints must be read off the UNWRAPPED LUT. Wrapped, a sweep that
+        # crosses the seam reports two endpoints that happen to sit next to each
+        # other (a 360 deg scan came out as 90..92), which is not the sweep at all.
+        az_pop = model.az_lut[np.isfinite(model.az_lut)]
+        az_un = np.unwrap(az_pop)
+        span_deg = float(abs(math.degrees(az_un[-1] - az_un[0])))
+        step_deg = abs(math.degrees(model.az_step)) if np.isfinite(model.az_step) else 0.0
+        # The sweep covers the measured span PLUS the final cell's own width, so a
+        # 360 deg scan's LUT spans 360 - one step. Close that before deciding.
+        if span_deg + step_deg >= 359.5:
+            params["phi_min"], params["phi_max"] = 0.0, 360.0
+        else:
+            p0 = 90.0 - math.degrees(az_un[0]) - math.degrees(yaw)
+            p1 = 90.0 - math.degrees(az_un[-1]) - math.degrees(yaw)
+            # phi is a REFLECTION of az, so the sweep's low end is whichever
+            # endpoint maps lower. Normalise only the start and carry the span, so
+            # a sweep crossing north stays contiguous rather than folding to
+            # min=0/max=360 (matching `_e57_scan_params`, which also lets the pair
+            # run outside [0, 360)).
+            params["phi_min"] = float(min(p0, p1) % 360.0)
+            params["phi_max"] = float(params["phi_min"] + span_deg)
+    if abs(math.degrees(yaw)) > 1e-6:
+        params["azimuth_offset_deg"] = float(math.degrees(yaw))
+    return params
+
+
+def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
+                block_index: Optional[int] = None):
+    """Convert a PTX to LAS, recovering sky/miss points from the structured grid.
+
+    PTX is a COMPLETE rectangular raster: every beam the scanner fired gets a
+    line, and a beam that returned nothing is written with all-zero coordinates.
+    That makes it the richest possible source for the LAD inversion — but PTX
+    stores no per-cell angles, so a miss carries no direction of its own.
+
+    Because PTX coordinates are in the SCANNER-LOCAL frame, the local spherical
+    angles are the raw instrument angles and the grid is exactly separable
+    (zenith per row, azimuth per column). `_PtxGridModel` recovers both as robust
+    per-index medians, so every miss cell gets an analytic pulse direction and is
+    PLACED at `origin + dir * _MISS_GAP_DISTANCE`, matching how Helios stores a
+    miss and how `_e57_to_las` places the ones it can. When the fit can't be
+    trusted — or a cell's row/column sits too far past any measurement — the miss
+    is still KEPT and flagged, but left at the scanner origin and counted, again
+    exactly as the E57 path does; `row_index`/`column_index` are emitted either
+    way so the downstream Helios C++ recovery still has the grid to work from.
+
+    A file may hold several blocks (one per scan setup) with DIFFERENT dimensions
+    and poses; each is transformed by its own pose and they merge into one cloud.
+    The first block's origin and scan parameters are stashed in `_import_scan_meta`
+    for the create endpoint, mirroring E57's multi-scan behaviour.
+
+    With `out_las` set, writes that LAS and returns `(n, extra_dims, full_xyz)`;
+    `full_xyz` is the float64 world coordinate array, because PTX is an ASCII
+    source and the LAS synthesised here is 1 mm-quantized so it must not become
+    the session's source of truth.
+
+    With `out_las=None` it writes NOTHING and returns `(LasReadResult, scan_meta)`
+    — the arrays a CloudSession holds, ready for
+    `_do_create_cloud_session(preloaded=...)`. That is the path the importer
+    takes: the LAS in between existed only so the create path could read back
+    what this function had already computed, which measured a 0.91 GB temp file
+    per block and a 0.87 GB re-allocation, taking the per-block peak from 2.4 GB
+    to 3.9 GB. `_ptx_to_arrays` is the named entry point for it.
+    """
+    import laspy  # local: only when this code path runs
+
+    blocks, warns = _ptx_index_blocks_cached(source_path)
+    if block_index is not None:
+        # One block -> one scan position. The caller drives the fan-out (see
+        # `_do_create_multi_cloud_session`); here we simply convert the block it
+        # asked for, so its pose and grid become THE pose and grid of the
+        # resulting session rather than being averaged away into a merged cloud.
+        if not 0 <= block_index < len(blocks):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{source_path.name}: block {block_index} requested but the "
+                        f"file has {len(blocks)}."))
+        blocks = [blocks[block_index]]
+
+    # ---- Pass A: settle each block's shape, fit its angular grid, and collect
+    # the global bounds/intensity range the LAS header needs up front.
+    models: List[_PtxGridModel] = []
+    poses: List[tuple] = []
+    inten_lo, inten_hi = math.inf, -math.inf
+    lo = np.full(3, math.inf)
+    hi = np.full(3, -math.inf)
+    unplaceable = 0
+    for block in blocks:
+        _ptx_choose_shape(source_path, block)
+        if block.swapped:
+            warns.append(
+                f"PTX block {block.index} appears to declare rows before columns; "
+                f"using the {block.rows} x {block.cols} ordering its scan geometry "
+                "supports.")
+        rot_pts, rot_dir, trans = _ptx_block_pose(block, source_path.name, warns)
+        poses.append((rot_pts, rot_dir, trans))
+        model = _PtxGridModel(block.rows, block.cols)
+        for grid, col0 in _ptx_iter_chunks(source_path, block, (0, 1, 2, 3), block.rows):
+            valid = model.observe(grid, col0)
+            if valid.any():
+                iv = grid[3][valid]
+                if iv.size:
+                    inten_lo = min(inten_lo, float(iv.min()))
+                    inten_hi = max(inten_hi, float(iv.max()))
+                local = np.column_stack([grid[0][valid], grid[1][valid], grid[2][valid]])
+                world = local @ rot_pts.T + trans
+                lo = np.minimum(lo, world.min(axis=0))
+                hi = np.maximum(hi, world.max(axis=0))
+        model.finish()
+        if not model.trusted:
+            warns.append(
+                f"PTX block {block.index}: sky/miss directions could not be "
+                f"recovered from the scan grid ({model.reason}). Those points are "
+                "kept and flagged at the scanner origin.")
+        models.append(model)
+        # Placed misses sit a fixed distance from their own origin, so bound the
+        # header by that rather than deriving every direction twice.
+        lo = np.minimum(lo, trans - _MISS_GAP_DISTANCE)
+        hi = np.maximum(hi, trans + _MISS_GAP_DISTANCE)
+
+    total = sum(b.n_lines // b.rows * b.rows for b in blocks)
+    any_color = any(b.n_tokens >= 7 for b in blocks)
+    inten_span = inten_hi - inten_lo if inten_hi > inten_lo else 0.0
+
+    extra_dims = [{"slug": _MISS_SLUG, "label": _MISS_LABEL},
+                  {"slug": "row_index", "label": "Row Index"},
+                  {"slug": "column_index", "label": "Column Index"}]
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.floor(lo) if np.all(np.isfinite(lo)) else np.zeros(3)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+
+    # ---- Pass B: transform, place the misses from the finished LUTs, and fill
+    # the OUTPUT ARRAYS directly.
+    #
+    # These are the arrays a CloudSession holds, so handing them straight to
+    # `_do_create_cloud_session(preloaded=...)` skips writing a LAS and reading
+    # it back — measured on the reference file, that round trip cost a 0.91 GB
+    # temp LAS per block and re-allocated 0.87 GB of arrays this function had
+    # already computed, pushing the per-block peak from 2.4 GB to 3.9 GB. (The
+    # RIEGL importer made the same change for the same reason.)
+    #
+    # Every array is preallocated and filled by slice rather than concatenated
+    # from per-chunk pieces: at 19.9 M cells `positions` alone is 0.48 GB, and a
+    # concatenate would hold both copies at the peak of an already heavy import.
+    positions = np.empty((total, 3), dtype=np.float64)
+    out_intensity = np.zeros(total, dtype=np.uint16) if inten_span > 0 else None
+    out_colors = np.zeros((total, 3), dtype=np.uint16) if any_color else None
+    out_miss = np.empty(total, dtype=np.float32)
+    out_row = np.empty(total, dtype=np.float32)
+    out_col = np.empty(total, dtype=np.float32)
+    written = 0
+    miss_total = 0
+    for block, model, (rot_pts, rot_dir, trans) in zip(blocks, models, poses):
+        cols_used = (0, 1, 2, 3, 4, 5, 6) if block.n_tokens >= 7 else (0, 1, 2, 3)
+        for grid, col0 in _ptx_iter_chunks(source_path, block, cols_used, block.rows):
+            x, y, z = grid[0], grid[1], grid[2]
+            rng2 = x * x + y * y + z * z
+            valid = rng2 > _PTX_MISS_RANGE2
+            miss = ~valid
+            cc = grid.shape[2]
+            local = np.stack([x, y, z], axis=0)                 # (3, rows, cc)
+            world = np.tensordot(rot_pts, local, axes=(1, 0)) + trans[:, None, None]
+
+            if miss.any():
+                rr, ccs = np.nonzero(miss)
+                gcol = ccs + col0
+                place = model.trusted & model.zen_ok[rr] & model.az_ok[gcol]
+                if place.any():
+                    u = model.directions(rr[place], gcol[place])
+                    wd = u @ rot_dir.T
+                    wd /= np.linalg.norm(wd, axis=1, keepdims=True)
+                    placed = trans[None, :] + wd * _MISS_GAP_DISTANCE
+                    world[:, rr[place], ccs[place]] = placed.T
+                if (~place).any():
+                    world[:, rr[~place], ccs[~place]] = trans[:, None]
+                    unplaceable += int((~place).sum())
+                miss_total += int(miss.sum())
+
+            # `.T.ravel()` puts each (row, col) grid back into PTX file order
+            # (column-major), which is the order every output array is in.
+            n_chunk = block.rows * cc
+            sl = slice(written, written + n_chunk)
+            positions[sl, 0] = world[0].T.ravel()
+            positions[sl, 1] = world[1].T.ravel()
+            positions[sl, 2] = world[2].T.ravel()
+            if out_intensity is not None:
+                iv = np.where(valid, (grid[3] - inten_lo) / inten_span, 0.0)
+                out_intensity[sl] = np.clip(iv.T.ravel() * 65535.0, 0, 65535).astype(np.uint16)
+            if out_colors is not None and block.n_tokens >= 7:
+                # PTX colour is 0-255; *256 lifts it into the 16-bit LAS channel,
+                # matching every other converter. Misses go black.
+                for ci, gi in ((0, 4), (1, 5), (2, 6)):
+                    v = np.where(valid, grid[gi], 0.0).T.ravel()
+                    out_colors[sl, ci] = np.clip(v, 0, 255).astype(np.uint16) * 256
+            out_miss[sl] = miss.T.ravel()
+            rows_g, cols_g = np.meshgrid(
+                np.arange(block.rows, dtype=np.float32),
+                np.arange(col0, col0 + cc, dtype=np.float32), indexing="ij")
+            out_row[sl] = rows_g.T.ravel()
+            out_col[sl] = cols_g.T.ravel()
+            written += n_chunk
+
+    extras = {_MISS_SLUG: out_miss, "row_index": out_row, "column_index": out_col}
+    scan_meta = {
+        "origin": [float(v) for v in poses[0][2]],
+        "scan_origins": [[float(v) for v in p[2]] for p in poses],
+        "scan_params": _ptx_scan_params(blocks[0], models[0], poses[0][1], poses[0][2]),
+        "has_misses": miss_total > 0,
+        "miss_count": miss_total,
+        "unplaceable_miss_count": unplaceable,
+        "warnings": warns,
+    }
+    result = LasReadResult(
+        positions=positions, colors=out_colors, intensity=out_intensity,
+        extras=extras, extra_dims_meta=list(extra_dims),
+    )
+
+    if out_las is None:
+        return result, scan_meta
+
+    # LAS path: the arrays are already complete, so write them out in slices —
+    # a single full-length ScaleAwarePointRecord would be another ~0.7 GB
+    # transient at 19.9 M cells, which is the cost this restructure removes.
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        for lo_i in range(0, total, _PTX_CHUNK_CELLS):
+            hi_i = min(lo_i + _PTX_CHUNK_CELLS, total)
+            rec = laspy.ScaleAwarePointRecord.zeros(hi_i - lo_i, header=header)
+            rec.x = positions[lo_i:hi_i, 0]
+            rec.y = positions[lo_i:hi_i, 1]
+            rec.z = positions[lo_i:hi_i, 2]
+            if out_intensity is not None:
+                rec.intensity = out_intensity[lo_i:hi_i]
+            if out_colors is not None:
+                rec.red = out_colors[lo_i:hi_i, 0]
+                rec.green = out_colors[lo_i:hi_i, 1]
+                rec.blue = out_colors[lo_i:hi_i, 2]
+            for slug, arr in extras.items():
+                rec[slug] = arr[lo_i:hi_i]
+            writer.write_points(rec)
+
+    _import_scan_meta[str(out_las.resolve())] = scan_meta
+    return int(total), extra_dims, positions
+
+
+def _ptx_to_arrays(source_path: _Path,
+                   block_index: Optional[int] = None) -> "tuple[LasReadResult, dict]":
+    """One PTX block straight to in-RAM arrays — no intermediate LAS.
+
+    The named entry point for `_ptx_to_las(..., out_las=None)`; see its docstring
+    for why the LAS round trip is worth skipping.
+    """
+    return _ptx_to_las(source_path, None, block_index=block_index)
 
 
 def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
@@ -21006,8 +22257,38 @@ def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
     return [{"slug": d, "label": d} for d in dims if d.lower() not in origin_cols]
 
 
+# Formats that can hold SEVERAL scan positions in one file. Each becomes its own
+# Phytograph scan, because a scan is defined by its pose: merging positions into
+# one cloud leaves a single origin standing in for all of them, which silently
+# breaks LAD (the inversion takes one scanner origin), the sky/miss display shell,
+# and the row/column raster (per-scan indices collide).
+_MULTI_SCAN_EXTENSIONS = {"e57", "ptx"}
+
+
+def _source_scan_count(source_path: _Path) -> int:
+    """How many scan positions `source_path` holds. 1 for every format that can
+    only hold one, and on any probe failure — a file we can't count is imported
+    as a single scan, which is the pre-existing behaviour."""
+    ext = source_path.suffix.lower().lstrip(".")
+    try:
+        if ext == "ptx":
+            blocks, _ = _ptx_index_blocks_cached(source_path)
+            return max(1, len(blocks))
+        if ext == "e57":
+            import pye57
+            e = pye57.E57(str(source_path))
+            try:
+                return max(1, int(e.scan_count))
+            finally:
+                e.close()
+    except Exception:
+        return 1
+    return 1
+
+
 def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path,
                    column_plan: "Optional[ColumnPlan]" = None,
+                   scan_index: Optional[int] = None,
                    ) -> "tuple[_Path, bool, List[dict], Optional[np.ndarray], Optional[np.ndarray]]":
     """Get a LAS file path for `source_path`, converting from another format
     if needed.
@@ -21054,8 +22335,15 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
         return out, True, extra_dims, None, None
     if ext == "e57":
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims = _e57_to_las(source_path, out)
+        _, extra_dims = _e57_to_las(source_path, out, scan_index=scan_index)
         return out, True, extra_dims, None, None
+    if ext == "ptx":
+        # PTX is an ASCII source, so the same precision rule as the XYZ family
+        # applies: return the float64 coordinates rather than let the session read
+        # back the 1 mm-quantized LAS.
+        out = work_dir / (source_path.stem + ".las")
+        _, extra_dims, full_xyz = _ptx_to_las(source_path, out, block_index=scan_index)
+        return out, True, extra_dims, full_xyz, None
     raise HTTPException(
         status_code=400,
         detail=f"Unsupported source extension for octree conversion: .{ext}",
@@ -21830,6 +23118,173 @@ def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
     )
 
 
+def _ptx_probe_first_block(file_path: str) -> dict:
+    """Read ONLY the first PTX block's header (plus one data line) — O(1).
+
+    Deliberately does not run `_ptx_index_blocks`: that walks the entire file to
+    find block boundaries, and a multi-GB scan must not cost seconds in a preview
+    endpoint competing for the threadpool with everything else.
+    """
+    src = _Path(file_path)
+    with open(src, "rb") as fh:
+        block, _ = _ptx_read_header(fh, 0, 0, 1, src.name)
+        fh.seek(block.data_byte)
+        # Mean bytes per line over a sample, for a total-cell estimate. The same
+        # window supplies the wizard's preview rows — PTX is plain ASCII, so the
+        # rows are free to read (unlike E57, where sampling values means decoding
+        # binary point data).
+        sample = fh.read(1 << 16)
+        nl = sample.count(b"\n")
+    bytes_per_line = (len(sample) / nl) if nl else 0.0
+    est_cells = (int((src.stat().st_size - block.data_byte) / bytes_per_line)
+                 if bytes_per_line > 0 else block.n_cells)
+    lines = sample.decode("ascii", "replace").split("\n")
+    if nl:
+        del lines[-1]              # the window almost certainly cut one mid-number
+    return {"block": block, "est_cells": est_cells,
+            "lines": [l.strip() for l in lines if l.strip()]}
+
+
+def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
+    """Summarise a RIEGL raw project for the import wizard.
+
+    A `.riproject` is a DIRECTORY and its point data is only reachable through
+    RiVLib inside a container, so unlike every other preview this one cannot
+    read the file cheaply. Running the reader just to list columns would cost
+    ~10 s per position before the user has agreed to anything.
+
+    Instead the columns are declared: the reader's output schema is fixed code,
+    not something discovered per file, and the wizard only needs the names so
+    the user can pick which scalars to keep. The one genuinely per-scanner part
+    is that columns an instrument never populates are dropped at read time (a
+    VZ-1000 records no background_radiation); those simply won't appear on the
+    imported cloud, which is the same "the file didn't have it" outcome the
+    other formats produce.
+
+    Columns are NOT remappable — the layout is defined by the reader, exactly as
+    E57/PLY/PCD layouts are defined by their formats.
+    """
+    columns = [
+        PreviewColumn(index=0, header_name='x', detected_role='x',
+                      suggested_label='x', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=1, header_name='y', detected_role='y',
+                      suggested_label='y', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=2, header_name='z', detected_role='z',
+                      suggested_label='z', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=3, header_name='intensity', detected_role='intensity',
+                      suggested_label='intensity', suggested_slug='',
+                      type_hint='float', remappable=False),
+    ]
+    # The scalar columns the reader can produce, in wire order. `is_miss` is
+    # omitted for the same reason E57 omits it: a system-managed flag, not a
+    # user column — it drives the Hit/Miss scheme and the octree exclusion.
+    idx = 4
+    for slug in _RIEGL_STREAM_ATTRS:
+        if slug == 'is_miss':
+            continue
+        columns.append(PreviewColumn(
+            index=idx, header_name=slug, detected_role='extra',
+            suggested_label=_RIEGL_LABELS.get(
+                slug, slug.replace('_', ' ').title()),
+            suggested_slug=slug, type_hint='float', remappable=False))
+        idx += 1
+    # Time is carried in double precision as the LAD join key, so it is offered
+    # like any other scalar even though it never rides in the float32 extras.
+    columns.append(PreviewColumn(
+        index=idx, header_name='timestamp', detected_role='extra',
+        suggested_label='Timestamp', suggested_slug='timestamp',
+        type_hint='float', remappable=False))
+
+    positions = sorted(
+        d.name for d in Path(project_path).glob('ScanPos*') if d.is_dir()
+    )
+    warn = (
+        f"RIEGL raw project with {len(positions)} scan position(s). Sky/miss "
+        "points are recovered from the scanner's per-shot record and tagged "
+        "for LAD (hidden by default; use 'Show sky/miss points' to view). "
+        "Columns an instrument does not record are omitted automatically."
+    )
+    return PointCloudPreviewResponse(
+        kind='riproject', delimiter=None, has_header=True,
+        columns=columns, sample_rows=[], warning=warn,
+    )
+
+
+def _preview_ptx(file_path: str, max_rows: int = 20) -> PointCloudPreviewResponse:
+    """Summarise a PTX for the import wizard, with real sample rows.
+
+    Columns are fixed — PTX defines its own layout (`x y z intensity [r g b]`)
+    and `_ptx_to_las` reads those positions by spec — so they are not remappable;
+    offering a mapping the converter ignores would be worse than offering none.
+    But fixed schema does NOT mean no preview: PTX is plain ASCII sitting behind
+    a 10-line header, so its rows cost nothing to read, and seeing them is how a
+    user confirms the column count and the intensity/colour scales before
+    committing. (ASCII PLY, also fixed-schema, shows its rows for the same
+    reason; E57 does not, because sampling it means decoding binary point data.)
+
+    Rows that are the all-zero no-return sentinel are skipped where possible: a
+    scan commonly opens with a whole column of sky, and ten rows of zeros would
+    tell the user nothing about their data. `is_miss` is deliberately omitted
+    from the columns for the reason `_preview_e57` gives — it's a system-managed
+    flag the converter populates, not a user column.
+    """
+    probe = _ptx_probe_first_block(file_path)
+    block = probe["block"]
+    columns = [
+        PreviewColumn(index=0, header_name='x', detected_role='x',
+                      suggested_label='x', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=1, header_name='y', detected_role='y',
+                      suggested_label='y', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=2, header_name='z', detected_role='z',
+                      suggested_label='z', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=3, header_name='intensity', detected_role='intensity',
+                      suggested_label='intensity', suggested_slug='',
+                      type_hint='float', remappable=False),
+    ]
+    if block.n_tokens >= 7:
+        for i, (ch, role) in enumerate((('red', 'r255'), ('green', 'g255'),
+                                        ('blue', 'b255'))):
+            columns.append(PreviewColumn(
+                index=4 + i, header_name=ch, detected_role=role,
+                suggested_label=ch, suggested_slug='', type_hint='float',
+                remappable=False))
+
+    # More cells than the first block declares ⇒ the file holds further scan
+    # setups. Counting them exactly would mean walking the file, so say "1+".
+    multi = probe["est_cells"] > block.n_cells * 1.05
+    warn = (f"PTX structured scan, {'1+' if multi else '1'} scan position(s), "
+            f"first grid {block.n1} x {block.n2} = {block.n_cells:,} cells "
+            f"({block.n_tokens} columns). Sky/miss points are recovered from the "
+            "structured grid and tagged for LAD (hidden by default; use "
+            "'Show sky/miss points' to view).")
+
+    # Prefer rows with an actual return. A scan that opens on sky would otherwise
+    # preview as ten identical all-zero lines.
+    ntok = block.n_tokens
+    hits, raw = [], []
+    for line in probe["lines"]:
+        toks = line.split()
+        if len(toks) != ntok:
+            continue
+        raw.append(toks)
+        if any(t.strip("-") not in ("0", "0.0", "0.000000", "") for t in toks[:3]):
+            hits.append(toks)
+        if len(hits) >= max_rows:
+            break
+    sample_rows = (hits or raw)[:max_rows]
+
+    return PointCloudPreviewResponse(
+        kind='ptx', delimiter=None, has_header=True, columns=columns,
+        sample_rows=sample_rows, warning=warn,
+    )
+
+
 # Any coordinate whose magnitude exceeds this triggers a suggested global shift:
 # at ~1e4 m, float32's ~1e-7 relative precision already gives ~1 mm error, and it
 # degrades linearly past that (UTM ~1e6 → ~0.1 m). Below it, raw coordinates render
@@ -21871,6 +23326,14 @@ def _suggest_global_shift(file_path: str,
             import laspy
             with laspy.open(file_path) as reader:
                 mins = np.asarray(reader.header.mins, dtype=np.float64)
+        elif ext == 'ptx':
+            # PTX point coordinates are SCANNER-LOCAL (small by construction), so
+            # the body carries no shift signal at all — the registered world
+            # position is the header translation. Reading it is O(1), and an
+            # unregistered PTX has a zero translation, which falls below the
+            # threshold and correctly suggests nothing.
+            blk = _ptx_probe_first_block(file_path)["block"]
+            mins = np.asarray(blk.matrix4[3, :3], dtype=np.float64)
         if mins is None or mins.shape != (3,) or not np.all(np.isfinite(mins)):
             return None
         if not np.any(np.abs(mins) > _SHIFT_SUGGEST_THRESHOLD):
@@ -21889,7 +23352,15 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
     a `warning` and best-effort columns so the wizard can still offer
     "import with auto-detect"."""
     source = _Path(request.file_path).expanduser()
-    if not source.is_file():
+    # A .riproject is a DIRECTORY of scan positions, not a file — every other
+    # previewable format is a single file.
+    if source.suffix.lower() == '.riproject':
+        if not source.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not a directory: {request.file_path}",
+            )
+    elif not source.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
     max_rows = max(1, min(int(request.max_rows or 20), 100))
     ext = source.suffix.lower().lstrip('.')
@@ -21903,8 +23374,12 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
             resp = _preview_pcd(str(source))
         elif ext == 'e57':
             resp = _preview_e57(str(source))
+        elif ext == 'ptx':
+            resp = _preview_ptx(str(source), max_rows)
         elif ext in ('las', 'laz'):
             resp = _preview_las(str(source), max_rows)
+        elif ext == 'riproject':
+            resp = _preview_riproject(str(source))
         if resp is not None:
             # Probe coordinate magnitude and pre-fill a suggested global shift for
             # large (e.g. UTM) clouds, so the wizard can offer it on by default.
@@ -23421,6 +24896,11 @@ class CloudSessionCreateRequest(BaseModel):
     # bare cloud with no scanner geometry. E57 pose (resolved backend-side from the
     # file) takes precedence when both are present.
     origin: Optional[List[float]] = None
+    # Which scan position inside a multi-scan source (E57 with several scans, PTX
+    # with several blocks) this session is for. None = the whole file, merging
+    # every position into one cloud — the pre-multi-scan behaviour, kept for
+    # single-scan sources and for any caller that doesn't fan out.
+    scan_index: Optional[int] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -23502,7 +24982,8 @@ class BackfillMissesRequest(BaseModel):
 
 def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
                              progress=None, cancel_event=None,
-                             preloaded: "Optional[LasReadResult]" = None) -> dict:
+                             preloaded: "Optional[LasReadResult]" = None,
+                             preloaded_meta: "Optional[dict]" = None) -> dict:
     """The heavy worker behind `/api/cloud/session/create`, factored out so it can
     run OFF the event loop under `_bin_frame_streaming_response` and report
     per-stage progress via `progress(fraction, message)`.
@@ -23538,14 +25019,20 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             # scan position for no gain. `source_path` stays as provenance only,
             # exactly as CloudSession documents.
             las_path, las_is_temp = source_path, False
-            source_extra_dims = [
-                {"slug": k, "label": k} for k in preloaded.extras.keys()
-            ]
+            # Prefer the labels the producer supplied ("Miss", "Row Index", …).
+            # Falling back to slug==label here would relabel every extra dim to
+            # its raw slug in the octree sidecar and the renderer's colour-by menu.
+            source_extra_dims = (
+                [dict(ed) for ed in preloaded.extra_dims_meta]
+                if preloaded.extra_dims_meta
+                else [{"slug": k, "label": k} for k in preloaded.extras.keys()]
+            )
             full_xyz, source_origins = None, None
             _las = preloaded
         else:
             las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
                 source_path, request.ascii_format, tmp_dir, request.column_plan,
+                scan_index=request.scan_index,
             )
             _report(0.25, "Loading points into memory…")
             _cancel_checkpoint(progress)
@@ -23626,7 +25113,10 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         # E57 stashes the scanner origin + miss summary keyed by the temp LAS
         # path; pop it so we can surface them in the response (renderer uses the
         # origin for the scan params and miss-point display relocation).
-        scan_meta = _e57_scan_meta.pop(str(las_path.resolve()), None)
+        # `_import_scan_meta` is keyed by the temp LAS path, so a `preloaded`
+        # import — which writes no LAS — hands its pose/params in directly.
+        scan_meta = (preloaded_meta if preloaded_meta is not None
+                     else _import_scan_meta.pop(str(las_path.resolve()), None))
         if las_is_temp:
             try:
                 las_path.unlink()
@@ -23804,6 +25294,14 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             "directions are recovered from the scan grid during LAD."
         )
 
+    # Converter-level notes (PTX reports a swapped header, a degenerate or
+    # disagreeing pose, an untrusted angular fit, or a truncated final block this
+    # way). Spliced in beside the miss warnings so the user sees them on the same
+    # import toast rather than only in the backend log.
+    if scan_meta and scan_meta.get("warnings"):
+        miss_info.setdefault("warnings", []).extend(
+            str(w) for w in scan_meta["warnings"])
+
     # Surface the LAS GPS-time encoding so the renderer can record it on the cloud
     # and the user knows which clock the per-point time uses. A GPS Week Time clock
     # carries no absolute epoch, so a moving-platform trajectory join (attached
@@ -23876,6 +25374,128 @@ def create_cloud_session(request: CloudSessionCreateRequest, http_request: Reque
             # surface the real reason (an unsupported extension, a malformed column
             # plan, a PotreeConverter crash).
             logger.exception("create_cloud_session failed for %s", request.source_path)
+            detail = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
+            return json.dumps({"error": str(detail)}).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        _build, request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
+                                   progress=None, cancel_event=None) -> dict:
+    """Build ONE SESSION PER SCAN POSITION for a multi-scan source.
+
+    A scan is defined by its pose. A multi-scan E57 or multi-block PTX holds
+    several genuinely separate acquisitions, and merging them leaves one origin
+    standing in for all of them — which silently breaks the LAD inversion (it
+    takes a single scanner origin), puts the sky/miss display shell around the
+    wrong centre, and makes the per-scan `row_index`/`column_index` rasters
+    collide. So each position gets its own session, its own octree, and its own
+    `ScanParameters`.
+
+    Returns `{"scans": [ ... ], "scan_count": N}` where each entry is a
+    `_do_create_cloud_session` result plus a `scan_index` and a display `name`.
+    A single-scan source returns a one-element list, so the caller has one shape
+    to handle.
+
+    Per-position failures are isolated: the entry carries `error` instead of a
+    session and the remaining positions still import. Progress markers carry the
+    `[i/N]` prefix the renderer's counter parses.
+    """
+    n = _source_scan_count(source_path)
+    # A single-position file keeps the FULL basename it always had — that string
+    # becomes the scan's label, and shortening it to the stem would silently
+    # rename every existing import.
+    stem = source_path.stem
+    out: List[dict] = []
+    for i in range(n):
+        _cancel_checkpoint(progress)
+        # Each position gets its own request so `scan_index` selects it; every
+        # other field (world_shift above all) is shared, or the siblings would
+        # not be co-located.
+        sub = request.model_copy(update={"scan_index": i if n > 1 else None})
+        entry: dict = {"scan_index": i,
+                       "name": source_path.name if n == 1 else f"{stem} — scan {i + 1}"}
+
+        # Window each sub-import's own 0..1 sweep into ITS SLICE of the overall
+        # bar. Suppressing the inner progress entirely (the obvious way to stop N
+        # sub-imports rewinding the bar N times) would leave a single-scan import
+        # — the common case — with no per-stage fraction at all, which is exactly
+        # the 0%-for-the-whole-import bar the streaming progress exists to fix.
+        # The [i/N] prefix stays on the message so the renderer's counter parses.
+        lo, hi = i / n, (i + 1) / n
+        prefix = "" if n == 1 else f"[{i + 1}/{n}] "
+        is_ptx = source_path.suffix.lower() == ".ptx"
+        # PTX decodes to arrays BEFORE the session is built, and that decode is a
+        # real share of the position's work. Give it the front of the slice and
+        # map the session's own 0..1 into the remainder — otherwise the decode's
+        # marker sits ahead of the session's opening 0.02 and the bar visibly
+        # jumps forward then back.
+        sess_lo = lo + (hi - lo) * (0.35 if is_ptx else 0.0)
+
+        def _sub_progress(fraction, message="", _lo=sess_lo, _hi=hi, _p=prefix):
+            if progress is None:
+                return
+            f = None if fraction is None else _lo + (_hi - _lo) * max(0.0, min(1.0, fraction))
+            progress(f, f"{_p}{message}" if message else _p.strip())
+
+        if progress is not None:
+            progress(lo, f"{prefix}Importing scan position {i + 1} of {n}…" if n > 1
+                     else f"{prefix}Reading source file…")
+        try:
+            # PTX decodes straight to the arrays a session holds, skipping the
+            # write-a-LAS-then-read-it-back round trip. Measured on the reference
+            # file that saved a 0.91 GB temp LAS and a 0.87 GB re-allocation per
+            # block. Other formats keep the LAS route, which is also how their
+            # column plans and precision overrides are applied.
+            pre, pre_meta = None, None
+            if is_ptx:
+                pre, pre_meta = _ptx_to_arrays(
+                    source_path, block_index=(i if n > 1 else None))
+            entry["session"] = _do_create_cloud_session(
+                sub, source_path, progress=_sub_progress, cancel_event=cancel_event,
+                preloaded=pre, preloaded_meta=pre_meta)
+            # Drop this position's arrays before decoding the next one: the
+            # session owns them now, and holding a second reference would keep a
+            # whole block resident across the loop.
+            del pre, pre_meta
+        except ScanCancelled:
+            raise
+        except BaseException as exc:
+            logger.exception("multi-scan import failed for %s scan %d",
+                             source_path, i)
+            entry["error"] = str(getattr(exc, "detail", None) or exc
+                                 or exc.__class__.__name__)
+        out.append(entry)
+    if progress is not None:
+        progress(1.0, "Import complete.")
+    return {"scans": out, "scan_count": n}
+
+
+@app.post("/api/cloud/session/create-multi")
+def create_multi_cloud_session(request: CloudSessionCreateRequest, http_request: Request):
+    """Import a source as one session PER SCAN POSITION.
+
+    The plural sibling of `/api/cloud/session/create`. Multi-scan formats (E57
+    with several scans, PTX with several blocks) fan out here; every other format
+    returns a single-element list, so the renderer has one code path.
+
+    Same streaming + cancellation contract as the singular endpoint."""
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    run_id, cancel_event = _new_cancel_token()
+
+    def _build(progress):
+        try:
+            return json.dumps(_do_create_multi_cloud_session(
+                request, source_path, progress=progress, cancel_event=cancel_event,
+            )).encode("utf-8")
+        except ScanCancelled:
+            raise
+        except BaseException as exc:
+            logger.exception("create_multi_cloud_session failed for %s", request.source_path)
             detail = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
             return json.dumps({"error": str(detail)}).encode("utf-8")
 

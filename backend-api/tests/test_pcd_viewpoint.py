@@ -78,7 +78,7 @@ def test_pcd_to_las_stashes_non_identity_origin(tmp_path):
     assert n == 3
     assert extra_dims == []
 
-    meta = main._e57_scan_meta.get(str(out.resolve()))
+    meta = main._import_scan_meta.get(str(out.resolve()))
     assert meta is not None
     assert meta["origin"] == [7.0, 8.0, 9.0]
     assert meta["scan_params"]["origin"] == [7.0, 8.0, 9.0]
@@ -94,6 +94,6 @@ def test_pcd_to_las_identity_stashes_nothing(tmp_path):
     _write_pcd(src, "VIEWPOINT 0 0 0 1 0 0 0")
     out = tmp_path / "out.las"
 
-    main._e57_scan_meta.pop(str(out.resolve()), None)
+    main._import_scan_meta.pop(str(out.resolve()), None)
     main._pcd_to_las(src, out)
-    assert main._e57_scan_meta.get(str(out.resolve())) is None
+    assert main._import_scan_meta.get(str(out.resolve())) is None

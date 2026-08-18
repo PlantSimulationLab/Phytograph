@@ -105,7 +105,7 @@ def test_e57_converter_tags_and_places_misses(tmp_path):
     assert np.all(hit_dist < 100.0)
 
     # Scanner origin is captured for the create endpoint.
-    meta = main._e57_scan_meta.get(str(out.resolve()))
+    meta = main._import_scan_meta.get(str(out.resolve()))
     assert meta is not None
     assert np.allclose(meta["origin"], _ORIGIN)
     assert meta["has_misses"] is True
@@ -153,7 +153,7 @@ def test_e57_zeroed_misses_kept_flagged_not_dropped(tmp_path):
     miss_pos = pos[is_miss == 1]
     assert np.allclose(miss_pos, _ORIGIN)
 
-    meta = main._e57_scan_meta.get(str(out.resolve()))
+    meta = main._import_scan_meta.get(str(out.resolve()))
     assert meta["unplaceable_miss_count"] == 2
     assert meta["has_misses"] is True
 
@@ -211,7 +211,7 @@ def test_e57_multiscan_uses_per_scan_pose(tmp_path):
     assert len(near_o0) == 2
     assert len(near_o1) == 2
 
-    meta = main._e57_scan_meta.get(str(out.resolve()))
+    meta = main._import_scan_meta.get(str(out.resolve()))
     assert len(meta["scan_origins"]) == 2
     assert np.allclose(meta["scan_origins"][0], o0)
     assert np.allclose(meta["scan_origins"][1], o1)
@@ -554,7 +554,7 @@ def test_e57_grid_scan_recovers_resolution_from_real_header(tmp_path):
     out = tmp_path / "out.las"
     main._e57_to_las(src, out)
 
-    meta = main._e57_scan_meta.get(str(out.resolve()))
+    meta = main._import_scan_meta.get(str(out.resolve()))
     sp = meta["scan_params"]
     assert np.allclose(sp["origin"], _ORIGIN)
     # rows -> n_theta, columns -> n_phi (grid is trusted because indices exist).
@@ -571,7 +571,7 @@ def test_e57_flat_scan_does_not_fake_grid_resolution(tmp_path):
     out = tmp_path / "out.las"
     main._e57_to_las(src, out)
 
-    sp = main._e57_scan_meta.get(str(out.resolve()))["scan_params"]
+    sp = main._import_scan_meta.get(str(out.resolve()))["scan_params"]
     assert np.allclose(sp["origin"], _ORIGIN)
     assert "n_theta" not in sp
     assert "n_phi" not in sp

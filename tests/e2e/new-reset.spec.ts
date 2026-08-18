@@ -29,8 +29,9 @@ test('File → New clears all data and frees backend sessions', async () => {
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
     // Capture the backend session URL created by the import. The renderer POSTs
-    // /api/cloud/session/create; the response carries the new session_id. We
-    // reconstruct the per-session DELETE URL from that request's origin so we
+    // /api/cloud/session/create-multi, which returns ONE ENTRY PER SCAN POSITION
+    // (a file can hold several scanner setups); a plain .xyz yields exactly one.
+    // We reconstruct the per-session DELETE URL from that request's origin so we
     // can probe the backend directly after the reset.
     //
     // The response is a STREAM: PHP1 progress markers (which carry the run_id
@@ -48,7 +49,8 @@ test('File → New clears all data and frees backend sessions', async () => {
     await expect(original).toHaveAttribute('data-octree', 'true');
 
     const created = stripProgressMarkers(await (await createResponse).body());
-    const sessionId: string = created.session_id;
+    expect(created.scan_count, 'a plain .xyz must import as exactly one scan').toBe(1);
+    const sessionId: string = created.scans[0].session.session_id;
     expect(sessionId).toBeTruthy();
     const apiOrigin = new URL((await createResponse).url()).origin;
     const sessionUrl = `${apiOrigin}/api/cloud/session/${sessionId}`;

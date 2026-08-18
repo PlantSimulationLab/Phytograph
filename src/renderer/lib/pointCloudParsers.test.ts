@@ -13,11 +13,13 @@ import {
   plyHasFaces,
   parsePointCloud,
   parsePointCloudFromPath,
+  parsePointCloudsFromPath,
   parseSkeleton,
   parseSkeletonJSON,
   parseSkeletonOBJ,
   parseSTLMesh,
   parseXYZ,
+  looksLikeAsciiPointCloud,
   POINT_CLOUD_FORMATS,
   SKELETON_FORMATS,
   SUPPORTED_FORMATS,
@@ -874,6 +876,94 @@ describe('parsePointCloud (auto-detect)', () => {
       parsePointCloud(textFile('# this has no numbers\n', 'a.weird')),
     ).rejects.toThrow();
   });
+
+  // PTX is numeric ASCII, so the XYZ fallback used to ACCEPT this file and
+  // produce a silently wrong cloud: the 4x4 transform rows became four junk
+  // points at the origin and the `x y z intensity r g b` data row read its
+  // colour from (intensity, r, g). It is now genuinely supported, and because
+  // the raster + scanner pose only mean anything to the backend converter it is
+  // octree-only (like E57) rather than parsed here.
+  const PTX_SAMPLE = [
+    '1024', '1024',
+    '0 0 0', '1 0 0', '0 1 0', '0 0 1',
+    '1 0 0 0', '0 1 0 0', '0 0 1 0', '0 0 0 1',
+    '0.1 0.2 0.3 0.5 10 20 30',
+    '',
+  ].join('\n');
+
+  it('does not hand a path-less PTX to the XYZ parser', async () => {
+    // A Blob with no on-disk path can't reach the backend converter, and the
+    // XYZ fallback would mangle it. Refuse rather than import junk.
+    const file = textFile(PTX_SAMPLE, 'scan.ptx');
+    await expect(parsePointCloud(file)).rejects.toThrow(/PTX structured scan.*read from disk/s);
+  });
+
+  it('lists PTX among the supported formats', () => {
+    expect(POINT_CLOUD_FORMATS.map(f => f.ext)).toContain('.ptx');
+  });
+
+  it('names the other scanner formats it cannot read', async () => {
+    for (const [ext, needle] of [['fls', /FARO/], ['rcs', /ReCap/], ['zfs', /Z\+F/],
+                                 ['ptg', /PTG structured scan/]] as const) {
+      await expect(parsePointCloud(textFile('x', `scan.${ext}`))).rejects.toThrow(needle);
+    }
+  });
+
+  it('rejects an unknown binary extension from the head, not a full parse', async () => {
+    const bytes = new Uint8Array(4096);
+    bytes[0] = 0x89;
+    bytes[3] = 0x00;
+    const file = new File([bytes], 'scan.zzz');
+    const textSpy = vi.spyOn(file, 'text');
+    await expect(parsePointCloud(file)).rejects.toThrow(/Unsupported file format: \.zzz/);
+    expect(textSpy).not.toHaveBeenCalled();
+  });
+
+  it('lists every supported format in the rejection message', async () => {
+    await expect(parsePointCloud(textFile('nope nope\n', 'a.zzz'))).rejects.toThrow(
+      new RegExp(POINT_CLOUD_FORMATS.map(f => f.name).join(', ')),
+    );
+  });
+
+  it('rejects a numeric file with fewer than three columns', async () => {
+    await expect(parsePointCloud(textFile('1 2\n3 4\n5 6\n', 'a.zzz'))).rejects.toThrow(
+      /Unsupported file format: \.zzz/,
+    );
+  });
+});
+
+describe('looksLikeAsciiPointCloud', () => {
+  it('accepts a delimited coordinate table with a header row', async () => {
+    const body = Array.from({ length: 50 }, (_, i) => `${i} ${i + 1} ${i + 2}`).join('\n');
+    expect(await looksLikeAsciiPointCloud(textFile(`X,Y,Z\n${body}\n`, 'a.zzz'))).toBe(true);
+  });
+
+  it('accepts comma / tab / semicolon delimiters', async () => {
+    expect(await looksLikeAsciiPointCloud(textFile('1,2,3\n4,5,6\n', 'a.zzz'))).toBe(true);
+    expect(await looksLikeAsciiPointCloud(textFile('1\t2\t3\n4\t5\t6\n', 'a.zzz'))).toBe(true);
+    expect(await looksLikeAsciiPointCloud(textFile('1;2;3\n4;5;6\n', 'a.zzz'))).toBe(true);
+  });
+
+  it('rejects prose, markup and comment-only files', async () => {
+    expect(await looksLikeAsciiPointCloud(textFile('# only comments\n# here\n', 'a.zzz'))).toBe(false);
+    expect(await looksLikeAsciiPointCloud(textFile('<scene><n>1 2 3</n></scene>\n', 'a.zzz'))).toBe(false);
+    expect(await looksLikeAsciiPointCloud(textFile('hello there friend\n'.repeat(20), 'a.zzz'))).toBe(false);
+  });
+
+  it('rejects binary content', async () => {
+    const bytes = new Uint8Array([0x4c, 0x41, 0x53, 0x46, 0x00, 0x01, 0x02, 0xff, 0xfe]);
+    expect(await looksLikeAsciiPointCloud(new File([bytes], 'a.zzz'))).toBe(false);
+  });
+
+  it('only reads the first 64 KB of a large file', async () => {
+    const line = '1.5 2.5 3.5\n';
+    const file = textFile(line.repeat(40_000), 'big.zzz'); // ~480 KB
+    const sliceSpy = vi.spyOn(file, 'slice');
+    const textSpy = vi.spyOn(file, 'text');
+    expect(await looksLikeAsciiPointCloud(file)).toBe(true);
+    expect(sliceSpy).toHaveBeenCalledWith(0, 64 * 1024);
+    expect(textSpy).not.toHaveBeenCalled();
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -953,7 +1043,8 @@ describe('parsePointCloudFromPath', () => {
 
   // PLY / PCD / LAS / LAZ now route to create_cloud_session like the XYZ family —
   // every path-backed format produces a session-backed streaming octree.
-  it.each(['/p/cloud.ply', '/p/cloud.pcd', '/p/cloud.las', '/p/cloud.laz'])(
+  it.each(['/p/cloud.ply', '/p/cloud.pcd', '/p/cloud.las', '/p/cloud.laz',
+           '/p/cloud.e57', '/p/cloud.ptx'])(
     'routes %s to create_cloud_session',
     async (path) => {
       const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
@@ -990,5 +1081,93 @@ describe('format predicates and lists', () => {
       ...MESH_FORMATS,
       ...SKELETON_FORMATS,
     ]);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// parsePointCloudsFromPath — the plural path. A multi-scan E57 / multi-block
+// PTX becomes one cloud PER SCAN POSITION, because a scan is defined by its
+// pose and merging positions leaves one origin standing in for all of them.
+// ────────────────────────────────────────────────────────────────────────
+
+describe('parsePointCloudsFromPath', () => {
+  const sessionMeta = (id: string, overrides: Record<string, unknown> = {}) => ({
+    session_id: id,
+    cache_id: id.padEnd(40, 'z'),
+    cache_dir: `/cache/${id}`,
+    hierarchy_step_size: 5,
+    point_count: 2,
+    spacing: 0.1,
+    scale: [0.001, 0.001, 0.001],
+    offset: [0, 0, 0],
+    bounds: { min: [1, 2, 3], max: [4, 5, 6] },
+    attributes: [{ name: 'position', size: 12, type: 'int32', num_elements: 3 }],
+    ...overrides,
+  });
+
+  const multiResponse = (scans: unknown[]) => new Response(
+    JSON.stringify({ scans, scan_count: scans.length }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+
+  it('returns one entry per scan position, each with its own session and params', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'scan — scan 1',
+        session: sessionMeta('s0', { scan_params: { origin: [1, 2, 3], n_theta: 8 } }) },
+      { scan_index: 1, name: 'scan — scan 2',
+        session: sessionMeta('s1', { scan_params: { origin: [9, 9, 9], n_theta: 7 } }) },
+    ]));
+    const out = await parsePointCloudsFromPath('/abs/scan.ptx');
+    expect(out).toHaveLength(2);
+    expect(out.map(o => o.name)).toEqual(['scan — scan 1', 'scan — scan 2']);
+    expect(out.map(o => o.scanIndex)).toEqual([0, 1]);
+    // Each cloud is backed by ITS OWN session and carries ITS OWN scan params —
+    // that separation is the entire point of the split.
+    expect(out.map(o => o.data.octree?.sessionId)).toEqual(['s0', 's1']);
+    expect(out[0].data.octree?.scanParams?.n_theta).toBe(8);
+    expect(out[1].data.octree?.scanParams?.n_theta).toBe(7);
+    expect(out[1].data.octree?.scanParams?.origin).toEqual([9, 9, 9]);
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/api/cloud/session/create-multi');
+  });
+
+  it('returns a single element for an ordinary single-scan source', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'cloud.xyz', session: sessionMeta('only') },
+    ]));
+    const out = await parsePointCloudsFromPath('/abs/cloud.xyz');
+    expect(out).toHaveLength(1);
+    // The full basename, unchanged — this string becomes the scan's label.
+    expect(out[0].name).toBe('cloud.xyz');
+  });
+
+  it('keeps the positions that imported when one of them failed', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'a', error: 'octree build failed' },
+      { scan_index: 1, name: 'b', session: sessionMeta('ok') },
+    ]));
+    const out = await parsePointCloudsFromPath('/abs/scan.ptx');
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe('b');
+  });
+
+  it('surfaces the real reason when every position failed', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'a', error: 'grid was unreadable' },
+      { scan_index: 1, name: 'b', error: 'grid was unreadable' },
+    ]));
+    await expect(parsePointCloudsFromPath('/abs/scan.ptx'))
+      .rejects.toThrow(/grid was unreadable/);
+  });
+
+  it('does not use the multi endpoint for a format that cannot fan out', async () => {
+    // A path-less / non-octree route is inherently 1:1, so it must go through
+    // the singular path rather than asking the backend to split it.
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    const out = await parsePointCloudsFromPath('/abs/cloud.obj').catch(() => null);
+    for (const call of fetchSpy.mock.calls) {
+      expect(String(call[0])).not.toContain('create-multi');
+    }
+    expect(out === null || out.length === 1).toBe(true);
   });
 });

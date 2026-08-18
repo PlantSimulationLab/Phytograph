@@ -757,7 +757,7 @@ const BACKEND_PATH_EXTENSIONS = new Set([
 // flat fallback for Blob/no-path inputs that can't be octree'd. E57 is
 // octree-only (binary structured scan format; converted via pye57, recovering
 // sky/miss points) with no flat fallback.
-const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
+const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57', 'ptx']);
 
 export async function parsePointCloudFromPath(
   path: string,
@@ -809,9 +809,88 @@ export async function parsePointCloudFromPath(
     return buildPointCloudFromBackend(result, name);
   }
 
+  // Reject a known-unreadable format before readBinary — pulling a multi-GB
+  // scan across the IPC boundary just to throw is the slow failure this guard
+  // exists to prevent.
+  const unreadable = UNREADABLE_POINT_CLOUD_FORMATS[ext];
+  if (unreadable) throw new Error(unreadableFormatMessage(name, unreadable));
+
   const buf = await window.electronAPI.fs.readBinary(path);
   const file = new File([buf], name);
   return parsePointCloud(file);
+}
+
+/** One imported scan position: its cloud plus the display name for it. */
+export interface ImportedScanPosition {
+  data: PointCloudData;
+  /** File stem for a single-scan source; `<stem> — scan N` for a multi-scan one. */
+  name: string;
+  scanIndex: number;
+}
+
+/**
+ * Import a path as one cloud PER SCAN POSITION.
+ *
+ * The plural sibling of {@link parsePointCloudFromPath}. Only the octree route
+ * can fan out — a multi-scan E57 or multi-block PTX is decoded position by
+ * position in the backend, each getting its own session, octree and
+ * `ScanParameters`, because a scan is defined by its pose and merging positions
+ * leaves one origin standing in for all of them.
+ *
+ * Every other format (and every non-octree route) yields exactly one element, so
+ * callers never branch on the extension.
+ */
+export async function parsePointCloudsFromPath(
+  path: string,
+  asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
+  categoricalAttributes?: string[],
+  worldShift?: [number, number, number] | null,
+  continuousAttributes?: string[],
+  missDistanceThreshold?: number | null,
+  origin?: [number, number, number] | null,
+  opts?: ImportProgressOptions,
+): Promise<ImportedScanPosition[]> {
+  const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+
+  if (!OCTREE_PATH_EXTENSIONS.has(ext)) {
+    // Flat / in-renderer routes are inherently 1:1; reuse the singular path
+    // verbatim rather than duplicating its fallbacks.
+    const data = await parsePointCloudFromPath(
+      path, asciiFormat, columnPlan, categoricalAttributes, worldShift,
+      continuousAttributes, missDistanceThreshold, origin, opts,
+    );
+    return [{ data, name, scanIndex: 0 }];
+  }
+
+  const positions = await createCloudSessions(
+    path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
+    missDistanceThreshold ?? null, origin ?? null,
+    opts?.signal, opts?.onProgress, opts?.onRunId,
+  );
+
+  const ok = positions.filter(p => p.session && !p.error);
+  if (ok.length === 0) {
+    // Every position failed. Surface the first real reason rather than a bare
+    // "no scans" — the backend already isolated and described each failure.
+    const first = positions.find(p => p.error)?.error;
+    throw new Error(first ?? `No scan positions could be imported from ${name}.`);
+  }
+
+  return ok.map(p => ({
+    data: buildPointCloudFromOctree(p.session!, path, p.name, {
+      asciiFormat,
+      columnPlan,
+      categoricalAttributes,
+      sessionId: p.session!.session_id,
+      worldShift: p.session!.world_shift ?? null,
+      continuousAttributes,
+    }),
+    name: p.name,
+    scanIndex: p.scan_index,
+  }));
 }
 
 /**
@@ -1019,6 +1098,82 @@ export function buildPointCloudFromBackend(
   return data;
 }
 
+// Scan formats we deliberately don't read, named so the rejection is instant
+// and says something useful. They have to be listed explicitly for two
+// reasons. The binary ones (RCS, FLS, …) would otherwise be handed to the XYZ
+// parser, which reads the WHOLE file into a string before it can fail. And
+// PTX used to head this list for the second reason — it is plain numeric ASCII,
+// so it sailed past the sniff and then parsed *wrongly* (header block as junk
+// points, RGB read one column left). It is now genuinely supported: the backend
+// reads its raster and recovers sky/miss points from it. PTG stays because it is
+// PTX's BINARY sibling and shares nothing but the name.
+const UNREADABLE_POINT_CLOUD_FORMATS: Record<string, string> = {
+  ptg: 'a PTG structured scan (Leica, binary)',
+  fls: 'a FARO scan (FLS)',
+  fws: 'a FARO workspace (FWS)',
+  zfs: 'a Z+F scan (ZFS)',
+  zfprj: 'a Z+F project (ZFPRJ)',
+  rcp: 'an Autodesk ReCap project (RCP)',
+  rcs: 'an Autodesk ReCap scan (RCS)',
+  lgs: 'a Leica Cyclone published scan (LGS)',
+  cl3: 'a Topcon scan (CL3)',
+};
+
+function unreadableFormatMessage(fileName: string, what: string): string {
+  return (
+    `"${fileName}" is ${what}, which Phytograph can't read directly. ` +
+    `Export it as E57, LAS/LAZ, or plain XYZ text from your scanner software ` +
+    `and import that instead.`
+  );
+}
+
+/** Bytes of an unknown-extension file inspected before committing to a parse. */
+const ASCII_SNIFF_BYTES = 64 * 1024;
+
+/**
+ * Cheap head-sniff deciding whether an unknown-extension file is worth handing
+ * to `parseXYZ`. Reads only the first {@link ASCII_SNIFF_BYTES} — matching the
+ * budget `plyHasFaces`/`isQsmCsvFile` use — because `parseXYZ` reads the
+ * ENTIRE file into a string, splits it into one string per line and
+ * accumulates a `number[][]`. On a multi-GB scan that is minutes of frozen
+ * renderer and several GB of heap spent to arrive at "unsupported format".
+ */
+export async function looksLikeAsciiPointCloud(file: File): Promise<boolean> {
+  let text: string;
+  try {
+    text = await file.slice(0, ASCII_SNIFF_BYTES).text();
+  } catch {
+    return false;
+  }
+
+  // A binary container decodes to NULs / replacement characters, usually well
+  // before the first newline. Bail without tokenising anything.
+  if (text.includes('\0') || text.includes('�')) return false;
+
+  const lines = text.split('\n');
+  // The last line is probably cut mid-number by the slice — drop it, unless
+  // the whole file fit inside the sniff window.
+  if (file.size > ASCII_SNIFF_BYTES) lines.pop();
+
+  let checked = 0;
+  let numeric = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+    checked++;
+    const parts = line.split(/[,;\t ]+/);
+    if (parts.length >= 3 && parts.slice(0, 3).every(p => p !== '' && Number.isFinite(Number(p)))) {
+      numeric++;
+    }
+    if (checked >= 200) break;
+  }
+
+  // One header row of column names is normal (parseXYZ handles it), so allow a
+  // few non-numeric lines — but demand a clear majority, otherwise prose, JSON
+  // or XML with a stray numeric line would earn itself a full parse.
+  return checked > 0 && numeric >= Math.ceil(checked * 0.8);
+}
+
 // Auto-detect format and parse
 export async function parsePointCloud(file: File): Promise<PointCloudData> {
   const ext = file.name.toLowerCase().split('.').pop();
@@ -1044,6 +1199,20 @@ export async function parsePointCloud(file: File): Promise<PointCloudData> {
     case 'asc':
       return parseXYZ(file);
 
+    case 'ptx':
+      // PTX is octree-only: only the backend converter understands its raster
+      // and scanner pose, which is what makes the sky/miss recovery possible.
+      // It needs an explicit case rather than falling through to `default`,
+      // because PTX is plain numeric ASCII — the head sniff there accepts it and
+      // the XYZ parser then produces exactly the silently-wrong cloud this used
+      // to be rejected for (the header block as junk points near the origin, RGB
+      // read one column left).
+      throw new Error(
+        `"${file.name}" is a PTX structured scan, which has to be read from disk ` +
+        `so its scan grid and scanner pose can be recovered. Drag the file in, or ` +
+        `use File → Import — a PTX with no file path can't be imported.`,
+      );
+
     case 'xml':
       // Helios scan XML describes scan *parameters* and references a separate
       // point cloud file — it contains no coordinates itself. Importing it
@@ -1055,13 +1224,25 @@ export async function parsePointCloud(file: File): Promise<PointCloudData> {
         `that reads the scan parameters and the point cloud file it references.`,
       );
 
-    default:
-      // Try XYZ parser as fallback
-      try {
-        return await parseXYZ(file);
-      } catch {
-        throw new Error(`Unsupported file format: .${ext}. Supported formats: LAS, PLY, PCD, XYZ, TXT, CSV, PTS, ASC`);
+    default: {
+      const unreadable = UNREADABLE_POINT_CLOUD_FORMATS[ext ?? ''];
+      if (unreadable) throw new Error(unreadableFormatMessage(file.name, unreadable));
+
+      // Unknown extension: it may still be a delimited ASCII cloud under a
+      // house extension (.pt, .dat, a bare `scan1`). Decide from the first
+      // 64 KB rather than committing to a full parse — see
+      // looksLikeAsciiPointCloud for why that matters on a large file.
+      if (!(await looksLikeAsciiPointCloud(file))) {
+        throw new Error(
+          `Unsupported file format: .${ext}. ` +
+          `Supported formats: ${POINT_CLOUD_FORMATS.map(f => f.name).join(', ')}`,
+        );
       }
+      // Let parseXYZ's own failure through: "No point coordinates found in …"
+      // names the real problem, which the old blanket catch here replaced with
+      // a misleading "unsupported format".
+      return parseXYZ(file);
+    }
   }
 }
 
@@ -1070,6 +1251,7 @@ export const POINT_CLOUD_FORMATS = [
   { ext: '.las', name: 'LAS', desc: 'LiDAR Data Exchange' },
   { ext: '.laz', name: 'LAZ', desc: 'Compressed LiDAR' },
   { ext: '.e57', name: 'E57', desc: 'Structured scan (recovers sky/miss)' },
+  { ext: '.ptx', name: 'PTX', desc: 'Structured scan (recovers sky/miss)' },
   { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (ASCII)' },
   { ext: '.pcd', name: 'PCD', desc: 'Point Cloud Data (ASCII)' },
   { ext: '.xyz', name: 'XYZ', desc: 'X Y Z coordinates' },

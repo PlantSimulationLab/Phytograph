@@ -151,6 +151,12 @@
         "icon": "build/icon"
       },
       {
+        "ext": "ptx",
+        "name": "PTX Structured Scan",
+        "role": "Viewer",
+        "icon": "build/icon"
+      },
+      {
         "ext": "obj",
         "name": "OBJ Mesh",
         "role": "Viewer",

@@ -79,7 +79,8 @@ export interface ExportModalProps {
 
 // Per-scan data-only formats (Data only mode). The text formats (xyz/csv/txt)
 // and PLY get the column picker; the rest use their fixed schema.
-const SCAN_DATA_FORMATS = ['las', 'laz', 'ply', 'xyz', 'csv', 'txt', 'obj', 'e57'] as const;
+const SCAN_DATA_FORMATS = ['las', 'laz', 'ply', 'xyz', 'csv', 'txt', 'obj', 'e57', 'ptx'] as const;
+export type ScanDataFormat = typeof SCAN_DATA_FORMATS[number];
 
 const CLOUD_FORMATS: { id: 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj'; label: string; title?: string }[] = [
   { id: 'las', label: 'LAS' },
@@ -121,7 +122,7 @@ export function ExportModal({
   const [includeMisses, setIncludeMisses] = useState(true);
   const [writeXml, setWriteXml] = useState(true);
   // Data-only output format (revealed when writeXml is false).
-  const [scanDataFormat, setScanDataFormat] = useState<'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj' | 'e57'>('xyz');
+  const [scanDataFormat, setScanDataFormat] = useState<ScanDataFormat>('xyz');
   const [checkedScanIds, setCheckedScanIds] = useState<Set<string>>(new Set());
   // Grid export (XML mode only): off by default; when on, reveals a checklist of
   // the scene's voxel-box grids. An empty selection writes no <grid> blocks.
@@ -193,6 +194,10 @@ export function ExportModal({
   // columns for every format, LAS/LAZ included.
   const scanFormatTakesColumns = writeXml || supportsColumnSelection(scanDataFormat);
   const scanFormatIsOrdered = writeXml || !usesFixedColumnOrder(scanDataFormat);
+  // PTX emits every cell of the scan raster, so "include misses" is inert for it
+  // (an excluded miss is written as the same empty-cell sentinel).
+  const ptxSelected = !writeXml && scanDataFormat === 'ptx';
+  const missesEnabled = anyCheckedHasMisses && !ptxSelected;
   // LAS/LAZ scan data: lock intensity as well as geometry (see lockFixedDimsForLas).
   const activeScanColumns = useMemo(
     () => (!writeXml && usesFixedColumnOrder(scanDataFormat)
@@ -420,13 +425,26 @@ export function ExportModal({
                 </>
               )}
 
+              {/* PTX always writes the COMPLETE raster, so a cell with no return is
+                  recorded as the empty sentinel whether or not misses are
+                  "included" — the toggle can't change a byte. Say so rather than
+                  leaving a live-looking control the backend ignores. */}
+              {ptxSelected && (
+                <div data-testid="export-scan-ptx-note" className="text-[10px] text-neutral-400 my-2">
+                  PTX writes the full scan grid; cells with no return are recorded as
+                  empty, which is how they come back as sky/miss points on re-import.
+                </div>
+              )}
+
               <label
-                className={`flex items-center gap-2 text-[11px] my-2 ${anyCheckedHasMisses ? 'text-neutral-200 cursor-pointer' : 'text-neutral-500 cursor-not-allowed'}`}
-                title={anyCheckedHasMisses ? 'Write the sky/miss points (and the is_miss column).' : 'None of the checked scans carry sky/miss points.'}
+                className={`flex items-center gap-2 text-[11px] my-2 ${missesEnabled ? 'text-neutral-200 cursor-pointer' : 'text-neutral-500 cursor-not-allowed'}`}
+                title={ptxSelected
+                  ? 'PTX always writes every grid cell, so this makes no difference to the file.'
+                  : anyCheckedHasMisses ? 'Write the sky/miss points (and the is_miss column).' : 'None of the checked scans carry sky/miss points.'}
               >
                 <input
                   type="checkbox" data-testid="export-scan-include-misses"
-                  checked={includeMisses && anyCheckedHasMisses} disabled={!anyCheckedHasMisses}
+                  checked={includeMisses && missesEnabled} disabled={!missesEnabled}
                   onChange={(e) => setIncludeMisses(e.target.checked)} className="accent-green-600"
                 />
                 Include miss points
