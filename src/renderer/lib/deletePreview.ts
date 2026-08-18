@@ -104,6 +104,19 @@ export function deleteRegionToClipBoxes(region: PendingDeleteRegion): THREE.Matr
     });
   }
 
+  if (region.kind === 'spheres_union') {
+    // One axis-aligned box per sphere. The preview clip volume is a box list,
+    // so a sphere is approximated by its bounding cube — slightly generous at
+    // the corners, but WORLD-space and depth-bounded, unlike the screen-space
+    // kinds below. (The label brush previews through the label overlay, not
+    // through clip boxes; this branch exists so the shared region vocabulary
+    // stays total rather than falling through to the polygon case.)
+    return region.centers.map(([x, y, z], i) => {
+      const r = region.radii[i] ?? region.radii[0] ?? 1;
+      return boxMatrix([x - r, y - r, z - r], [x + r, y + r, z + r]);
+    });
+  }
+
   // polygon: use the screen-space bounding rect of the polygon points.
   const xs = region.points.map(p => p[0]);
   const ys = region.points.map(p => p[1]);

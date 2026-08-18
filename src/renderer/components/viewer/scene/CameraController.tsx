@@ -21,6 +21,7 @@ export function CameraController({
   bounds,
   hasContent,
   enabled = true,
+  zoomOnAltWheel = false,
   displayOffset,
   orbitPivot,
   pickDepth,
@@ -37,6 +38,14 @@ export function CameraController({
   };
   hasContent: boolean;
   enabled?: boolean;
+  /**
+   * Move zoom from plain wheel to Alt+wheel.
+   *
+   * Set while the label brush owns the wheel for its radius. Alt+wheel is
+   * otherwise dead (OrbitControls runs with enableZoom={false}), so this costs
+   * nothing when off and keeps zoom reachable when on.
+   */
+  zoomOnAltWheel?: boolean;
   // Render-only display offset (Layer 2). `bounds` is in WORLD space (it is also
   // the gizmo/crop source of truth and must stay world); the camera and orbit
   // target live in DISPLAY space (world − offset) so they're small near huge UTM
@@ -81,6 +90,10 @@ export function CameraController({
   orbitPivotRef.current = orbitPivot;
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
+  // Read at event time: the wheel listener is registered once, so a value read
+  // from the closure would freeze at its first-render setting.
+  const zoomOnAltWheelRef = useRef(zoomOnAltWheel);
+  zoomOnAltWheelRef.current = zoomOnAltWheel;
 
   // Depth probe for zoom-to-cursor, in a ref so the wheel listener (installed
   // once) always calls the current one without being torn down.
@@ -357,7 +370,16 @@ export function CameraController({
       if (!controls) return;
       // Only take over plain scroll. Modifier+wheel is left to whatever else
       // wants it (and to OrbitControls' own handling).
-      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      //
+      // EXCEPT while the label brush owns plain wheel for its radius: zoom then
+      // moves to Alt+wheel, which is otherwise dead (OrbitControls runs with
+      // enableZoom={false}, so a modifier+wheel does nothing at all today).
+      // Without this the user could size the brush but not zoom while painting.
+      if (zoomOnAltWheelRef.current) {
+        if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      } else if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) {
+        return;
+      }
 
       e.preventDefault();
       e.stopPropagation();

@@ -244,6 +244,23 @@ export type PendingDeleteRegion =
       view: number[];
       canvas: { width: number; height: number };
       invert?: boolean;
+    }
+  | {
+      /**
+       * The label brush: a union of WORLD-space spheres.
+       *
+       * Deliberately not the erase brush's `squares_union`. A square stamp is a
+       * screen-space test, so it extrudes through the whole cloud and paints
+       * the trunk behind the leaf you aimed at. A sphere is bounded in every
+       * direction, so it is depth-limited by its own geometry — and it carries
+       * no projection/view/canvas, which means the renderer's preview and the
+       * backend's replay evaluate the same closed form rather than two
+       * projection implementations that have to agree.
+       */
+      kind: 'spheres_union';
+      centers: Array<[number, number, number]>;
+      radii: number[];
+      invert?: boolean;
     };
 
 /**

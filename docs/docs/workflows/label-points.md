@@ -16,11 +16,13 @@ label anything you like.
    group), or open the command palette and choose **Label Points**.
 3. Pick the class you want to paint by clicking it in the class list. The
    number keys `1`–`9` select the first nine classes.
-4. Draw a **lasso** around the points to label: click to place each corner, then
-   press `Enter` (or double-click) to close it. Everything inside the lasso
-   takes the active class, and recolours straight away.
-5. Repeat with different classes as needed. **Undo** removes the last stroke.
-6. Click **Commit** to save the labels into the point cloud.
+4. Choose how you want to select points — **Lasso** or **Brush** (see
+   [Lasso or brush?](#lasso-or-brush) below).
+5. Paint. With the lasso, click to place each corner of an outline, then press
+   `Enter` (or double-click) to close it. With the brush, just drag. Points
+   selected take the active class and recolour straight away.
+6. Repeat with different classes as needed. **Undo** removes the last stroke.
+7. Click **Commit** to save the labels into the point cloud.
 
 Each class row shows how many points currently carry it, so you can see the
 counts move as you work.
@@ -31,6 +33,9 @@ counts move as you work.
     the camera freely, then press `L` again to carry on. The panel stays open
     and your class selection is kept.
 
+    The brush leaves orbiting alone — only dragging paints. Because the wheel
+    sizes the brush while it is active, zoom moves to **Alt+scroll**.
+
 The panel states what the next stroke will do in words, e.g.
 *"Painting **Leaf** over **any visible class**"*. Read that line if a stroke
 does not do what you expect.
@@ -40,6 +45,29 @@ does not do what you expect.
     unsaved strokes, and **File › New** warns you before discarding them.
     Phytograph has no project file, so uncommitted labelling is lost when the app
     closes — commit, then [export](import-export.md) if you want it on disk.
+
+## Lasso or brush?
+
+Both are always available; they answer different questions.
+
+| | Lasso | Brush |
+|---|---|---|
+| How you paint | Click each corner, `Enter` to close | Drag |
+| Best for | A precise outline around an irregular region | Fast touch-up and correction |
+| Depth | Selects at **every depth** inside the outline | Stops at the surface you are pointing at |
+
+The brush is a sphere that sits on the geometry under your cursor, so it does
+not paint the trunk behind the leaf you aimed at. Set its size with the scroll
+wheel or the `[` and `]` keys; the panel shows the current size in pixels. The
+size is in screen pixels, so the circle stays the same on screen as you zoom,
+and the sphere it corresponds to grows or shrinks in the cloud to match.
+
+If the cursor is not over any geometry the brush shows nothing and paints
+nothing, rather than guessing a depth and labelling points you cannot see.
+
+The lasso remains the better tool for covering a large region in one go — and,
+paired with a [cross-section](#work-in-a-cross-section), for classifying a cloud
+systematically.
 
 ## Class sets
 
@@ -176,7 +204,7 @@ Both are also in the Cross-section panel, and the Label panel's
 never aiming at points the old section is hiding.
 
 !!! note "Without a section, a lasso still cuts through"
-    If no section is active, orbit to an angle where the points you want are not
-    in front of anything else, or hide the classes you have already finished.
-
-    A depth-limited brush is planned as a further option.
+    If no section is active, switch to the **Brush**, which is depth-limited and
+    needs no section. Otherwise orbit to an angle where the points you want are
+    not in front of anything else, or hide the classes you have already
+    finished.

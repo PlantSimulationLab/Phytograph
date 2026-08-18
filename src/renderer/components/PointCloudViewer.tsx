@@ -96,6 +96,8 @@ import {
 import { SlabWireframe } from './viewer/gizmos/SlabWireframe';
 import { SlabCentrelinePreview } from './viewer/gizmos/SlabCentrelinePreview';
 import { SlabDragPreview } from './viewer/gizmos/SlabDragPreview';
+import { LabelBrushOctree } from './viewer/gizmos/LabelBrushOctree';
+import { LabelBrushCursor } from './viewer/gizmos/LabelBrushCursor';
 import { ClassPaletteEditor } from './viewer/panels/ClassPaletteEditor';
 import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOverride';
 import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
@@ -105,7 +107,7 @@ import {
 } from '../lib/classPalettes';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
 import { LabelPanel } from './viewer/panels/LabelPanel';
-import { MANUAL_CLASS_ATTRIBUTE } from '../lib/classification';
+import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
 import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
@@ -2088,6 +2090,21 @@ export default function PointCloudViewer({
   // toggling this ON freezes the view and makes clicks place lasso vertices.
   // Starts ON so opening the tool is immediately useful, and `L` toggles it.
   const [labelDrawing, setLabelDrawing] = useState(true);
+  /**
+   * Selection primitive for the label tool: the polygon lasso, or the sphere
+   * brush.
+   *
+   * Both are kept because they answer different questions. A lasso is precise
+   * around an irregular outline and is the right tool for "everything in this
+   * region"; a brush is faster for touch-up and is depth-limited, so it does
+   * not paint the trunk behind the leaf you aimed at.
+   */
+  const [labelTool, setLabelTool] = useState<'lasso' | 'brush'>('lasso');
+  /** Brush radius in CANVAS PIXELS — constant on screen, as a brush should be. */
+  const [labelBrushPx, setLabelBrushPx] = useState(28);
+  const [labelBrushCursor, setLabelBrushCursor] =
+    useState<{ center: THREE.Vector3; radius: number } | null>(null);
+  const [labelBrushPainting, setLabelBrushPainting] = useState(false);
   // Palette bound to the labelled cloud. Seeded from the cloud's OctreeRef when
   // the tool opens, else from the wood/leaf preset (the common correction case).
   const [labelPalette, setLabelPalette] = useState<ClassPalette | null>(null);
@@ -4058,11 +4075,76 @@ export default function PointCloudViewer({
     // they can start the next lasso would put the round trip back into the
     // interaction, just one step later. Strokes are applied in order server-side
     // and each carries its own id, so overlapping requests reconcile correctly.
-    if (labelTargetCloud && labelDrawing && cropDrawState === 'idle') {
+    // Only the LASSO arms the polygon overlay. In brush mode the overlay would
+    // sit over the canvas swallowing every mousedown, so the brush would never
+    // receive one.
+    if (labelTargetCloud && labelDrawing && labelTool === 'lasso' && cropDrawState === 'idle') {
       setCropDrawState('drawing-polygon');
       setPolygonInProgress([]);
+      return;
     }
-  }, [labelTargetCloud, labelDrawing, cropDrawState]);
+    // Switching TO the brush must also disarm an already-armed lasso. Not
+    // arming it is not enough: the overlay stays mounted from before the
+    // switch, fills the viewport, and swallows every mousedown — so the brush
+    // would never receive one and would appear completely dead.
+    if (labelTargetCloud && labelTool === 'brush' && cropDrawState === 'drawing-polygon') {
+      setCropDrawState('idle');
+      setPolygonInProgress([]);
+    }
+  }, [labelTargetCloud, labelDrawing, labelTool, cropDrawState]);
+
+  /** True while the sphere brush owns the pointer. */
+  const labelBrushActive = !!labelTargetCloud && labelDrawing && labelTool === 'brush';
+
+  // Brush radius: scroll wheel, or `[` / `]`.
+  //
+  // Wheel is the near-universal convention (Blender, QGIS, Photoshop,
+  // Segments.ai), which is why it is worth taking plain scroll from
+  // zoom-to-cursor while the brush is live — zoom moves to Alt+wheel for the
+  // duration (see CameraController's zoomOnAltWheel). Brackets are the
+  // wheel-free alternative, and matter on a trackpad where a deliberate small
+  // scroll is awkward.
+  //
+  // Registered CAPTURE-phase on window because CameraController's zoom handler
+  // is itself capture-phase on the canvas; bubbling here would let zoom consume
+  // the event first.
+  const labelBrushActiveRef = useRef(labelBrushActive);
+  labelBrushActiveRef.current = labelBrushActive;
+  useEffect(() => {
+    const BRUSH_MIN_PX = 4;
+    const BRUSH_MAX_PX = 250;
+    const clamp = (v: number) => Math.max(BRUSH_MIN_PX, Math.min(BRUSH_MAX_PX, v));
+
+    const onWheel = (e: WheelEvent) => {
+      if (!labelBrushActiveRef.current) return;
+      // Leave modified scroll alone — Alt+wheel is zoom while the brush is live.
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const canvas = document.querySelector('canvas[data-engine]');
+      if (!canvas || !(e.target instanceof Node) || !canvas.contains(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Proportional, so one notch feels the same at 8 px and at 200 px.
+      setLabelBrushPx((px) => clamp(Math.round(px * (e.deltaY < 0 ? 1.12 : 1 / 1.12))));
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (!labelBrushActiveRef.current) return;
+      if (e.key !== '[' && e.key !== ']') return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        || el.tagName === 'SELECT' || el.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      setLabelBrushPx((px) => clamp(Math.round(px * (e.key === ']' ? 1.12 : 1 / 1.12))));
+    };
+
+    window.addEventListener('wheel', onWheel, { capture: true, passive: false });
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('wheel', onWheel, { capture: true } as any);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, []);
 
   /**
    * Pull the authoritative per-class counts for `slug` and show them.
@@ -4373,6 +4455,22 @@ export default function PointCloudViewer({
         return pixel ? pointInPolygon(pixel, poly) : false;
       };
     }
+    if (region.kind === 'spheres_union') {
+      // World-space and camera-free: exactly what the backend's
+      // _spheres_union_mask computes, so preview and apply cannot drift.
+      // Squared distance, to skip a sqrt per point per sphere.
+      const { centers, radii } = region;
+      const r2 = radii.map((r) => r * r);
+      return (wx: number, wy: number, wz: number) => {
+        for (let i = 0; i < centers.length; i++) {
+          const dx = wx - centers[i][0];
+          const dy = wy - centers[i][1];
+          const dz = wz - centers[i][2];
+          if (dx * dx + dy * dy + dz * dz <= r2[i]) return true;
+        }
+        return false;
+      };
+    }
     // squares_union (the erase brush's shape) — not produced by the label tool
     // in Phase 1, but replayable if a stroke ever carries one.
     const { centers, half_sizes, projection, view, canvas } = region;
@@ -4404,6 +4502,21 @@ export default function PointCloudViewer({
    * sphere brush has an exact AABB).
    */
   const strokeAabb = useCallback((region: PendingDeleteRegion): THREE.Box3 | null => {
+    if (region.kind === 'spheres_union') {
+      // A sphere union HAS an exact AABB, unlike the screen-space regions —
+      // it is bounded in depth. That makes the overlay's per-tile rejection
+      // genuinely selective for brush strokes: a small stamp touches a handful
+      // of tiles instead of forcing a full replay over every loaded point.
+      const box = new THREE.Box3();
+      region.centers.forEach(([x, y, z], i) => {
+        const r = region.radii[i];
+        box.union(new THREE.Box3(
+          new THREE.Vector3(x - r, y - r, z - r),
+          new THREE.Vector3(x + r, y + r, z + r),
+        ));
+      });
+      return box.isEmpty() ? null : box;
+    }
     if (region.kind !== 'box') return null;
     return new THREE.Box3(
       new THREE.Vector3(region.min[0], region.min[1], region.min[2]),
@@ -15851,7 +15964,13 @@ export default function PointCloudViewer({
         <CameraController
           bounds={combinedBounds}
           hasContent={sceneHasContent}
-          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive}
+          // The label brush deliberately does NOT disable the camera outright,
+          // unlike erase: a sphere is the same volume from any angle, so
+          // orbiting between strokes is useful and safe. Only the drag ITSELF
+          // is suppressed, or a left-drag would paint and orbit at once.
+          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive && !labelBrushPainting}
+          // While the brush owns plain wheel for its radius, zoom moves to Alt.
+          zoomOnAltWheel={labelBrushActive}
           displayOffset={displayOffset}
           // The view turns about the scene origin — the point the 3D-cursor
           // marker shows — so panning no longer moves the rotation center. Same
@@ -16366,6 +16485,83 @@ export default function PointCloudViewer({
             />
           );
         })()}
+
+        {/* Label brush: world-space sphere stamps.
+
+            No camera freeze and no ortho override, unlike the erase brush — a
+            sphere is the same volume from any angle, so the user can orbit
+            mid-stroke. The stroke goes through the SAME paintLabelStroke as the
+            lasso, so slab bounding, the From-class gate, the live overlay and
+            undo all work on it with no extra wiring. */}
+        {labelBrushActive && labelTargetCloud && (() => {
+          const b = labelTargetCloud.data.bounds;
+          const cloudId = labelTargetCloud.id;
+          return (
+            <LabelBrushOctree
+              // Keyed on the CLOUD, not on the surrounding IIFE's identity. The
+              // gizmo registers DOM listeners on the canvas in an effect, so a
+              // remount that overlaps its predecessor leaves two live listener
+              // sets on the same element: the outgoing one keeps handling moves
+              // and nulls the cursor the incoming one just resolved, and the
+              // brush looks dead while every pick is succeeding.
+              key={labelTargetCloud.id}
+              // Resolved at EVENT time, not at render time.
+              //
+              // `onOctreeReady` writes octreeRegistryRef, which is a ref — so
+              // registration triggers no re-render. Passing the looked-up value
+              // as a prop meant the brush captured whatever was in the registry
+              // on the render that happened to mount it: usually null, because
+              // the octree registers while the cloud streams. It then only
+              // picked up an octree if some unrelated state change re-rendered
+              // the viewer afterwards, which is why the brush worked on some
+              // scenes and not others with no visible difference between them.
+              getOctree={() => octreeRegistryRef.current.get(cloudId) ?? null}
+              brushRadiusPx={labelBrushPx}
+              cloudCenter={{
+                x: b.center.x - displayOffset.x,
+                y: b.center.y - displayOffset.y,
+                z: b.center.z - displayOffset.z,
+              }}
+              onCursorChange={(c) => {
+                setLabelBrushCursor(c);
+                // E2E seam: whether the brush can currently FIND a surface. The
+                // anchor depends on a GPU/CPU pick against streamed geometry,
+                // so a spec that paints before the octree has tiles gets a
+                // correct refusal that looks like a broken brush.
+                (globalThis as any).__labelBrushCursor = c
+                  ? { ok: true, r: c.radius }
+                  : { ok: false };
+              }}
+              onPaintingChange={setLabelBrushPainting}
+              onStroke={(stroke) => {
+                // The gizmo works in DISPLAY space (that is what the camera and
+                // the picked points live in); regions are WORLD space, because
+                // the backend replays them against unshifted positions. Convert
+                // once, here, rather than making the gizmo carry the offset.
+                void paintLabelStrokeRef.current?.({
+                  kind: 'spheres_union',
+                  centers: stroke.centers.map(([x, y, z]) => [
+                    x + displayOffset.x, y + displayOffset.y, z + displayOffset.z,
+                  ] as [number, number, number]),
+                  radii: stroke.radii,
+                });
+              }}
+            />
+          );
+        })()}
+
+        {/* Where the brush will paint, in the active class's colour. */}
+        {labelBrushActive && labelBrushCursor && (
+          <LabelBrushCursor
+            center={labelBrushCursor.center}
+            radius={labelBrushCursor.radius}
+            painting={labelBrushPainting}
+            color={rgbToHex(
+              labelPalette?.classes.find(c => c.value === labelActiveClass)?.color
+                ?? [1, 1, 1],
+            )}
+          />
+        )}
 
         {/* Erase brush indicator (octree path): a camera-facing square outline
             at the cursor (the cross-section of the view-extruded erase volume),
@@ -17368,7 +17564,7 @@ export default function PointCloudViewer({
                           e.stopPropagation();
                           const picked = await window.electronAPI.dialog.open({
                             title: 'Attach point cloud data',
-                            filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
+                            filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
                           });
                           if (!picked) return;
                           const path = Array.isArray(picked) ? picked[0] : picked;
@@ -18648,6 +18844,9 @@ export default function PointCloudViewer({
             if (sid) void refreshLabelCounts(sid, next.slug);
           }}
           onEditPalette={() => setShowPaletteEditor(true)}
+          tool={labelTool}
+          onToolChange={setLabelTool}
+          brushPx={labelBrushPx}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}
           sectionActive={!!slab && sectionTargetCloud?.id === labelTargetCloud.id}

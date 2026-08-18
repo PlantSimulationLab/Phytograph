@@ -23518,6 +23518,44 @@ def _canonical_region(region: dict) -> str:
             int(w), int(h),
             "1" if invert else "0",
         )
+    if kind == "spheres_union":
+        invert = bool(region.get("invert", False))
+        centers = region.get("centers", [])
+        radii = region.get("radii", [])
+        if not isinstance(centers, list) or not isinstance(radii, list):
+            raise HTTPException(
+                status_code=400,
+                detail="region.centers and region.radii must be arrays.",
+            )
+        if len(centers) != len(radii):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"region.centers ({len(centers)}) and region.radii "
+                        f"({len(radii)}) must be the same length."),
+            )
+        if len(centers) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="region.centers must have at least one sphere.",
+            )
+        for c in centers:
+            if not isinstance(c, (list, tuple)) or len(c) != 3:
+                raise HTTPException(
+                    status_code=400,
+                    detail="each region.centers entry must be an [x, y, z] triple.",
+                )
+        for r in radii:
+            if not isinstance(r, (int, float)) or r <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="each region.radii entry must be a positive number.",
+                )
+        stamps = ";".join(
+            "{:.6g},{:.6g},{:.6g},{:.6g}".format(
+                float(c[0]), float(c[1]), float(c[2]), float(r))
+            for c, r in zip(centers, radii)
+        )
+        return "spheres_union|{}|{}".format(stamps, "1" if invert else "0")
     if kind == "slab":
         invert = bool(region.get("invert", False))
         a = region.get("a")
@@ -23557,7 +23595,7 @@ def _canonical_region(region: dict) -> str:
         )
     raise HTTPException(
         status_code=400,
-        detail=(f"region.kind must be 'box', 'polygon', 'squares_union', or "
+        detail=(f"region.kind must be 'box', 'polygon', 'squares_union', 'spheres_union', or "
                 f"'slab'. Got: {kind!r}"),
     )
 
@@ -23608,6 +23646,30 @@ def _scalar_filter_mask(vals: "np.ndarray", lo: float, hi: float,
         rounded = np.rint(vals).astype(np.int64)
         return np.isin(rounded, list(value_set))
     return (vals >= lo) & (vals <= hi)
+
+
+def _spheres_union_mask(
+    positions: "np.ndarray", centers: "np.ndarray", radii: "np.ndarray",
+) -> "np.ndarray":
+    """Boolean mask: True for points inside ANY of the world-space brush spheres.
+
+    The brush counterpart to `_squares_union_mask`, and deliberately a different
+    KIND of test. A square stamp is screen-space, so it extrudes through the
+    whole cloud and removes points at every depth behind it. A sphere is
+    world-space: it is inherently depth-limited, needs no projection matrix, no
+    canvas size and no frozen camera, and the membership test is a squared
+    distance. That makes preview/apply parity exact by construction — the
+    renderer evaluates the same closed form against the same numbers, so there
+    is no projection round-trip for the two sides to disagree about.
+
+    `positions` is (n, 3) world coordinates, `centers` is (k, 3), `radii` is
+    (k,). Compared squared to avoid k sqrt passes over the whole cloud.
+    """
+    mask = np.zeros(positions.shape[0], dtype=bool)
+    for i in range(centers.shape[0]):
+        d = positions - centers[i]
+        mask |= np.einsum("ij,ij->i", d, d) <= float(radii[i]) ** 2
+    return mask
 
 
 def _squares_union_mask(
@@ -23741,6 +23803,13 @@ def _region_mask(
         half_sizes = np.asarray(region["half_sizes"], dtype=np.float64)
         px = pixels if pixels is not None else _region_pixels(positions, region)
         mask = _squares_union_mask(px, centers, half_sizes)
+    elif kind == "spheres_union":
+        # World-space, so it never touches `pixels` — no projection needed.
+        mask = _spheres_union_mask(
+            positions,
+            np.asarray(region["centers"], dtype=np.float64),
+            np.asarray(region["radii"], dtype=np.float64),
+        )
     elif kind == "slab":
         mask = _slab_mask(positions, region)
     else:
@@ -23857,6 +23926,13 @@ class CropOctreeRegion(BaseModel):
     # in pixels (axis-aligned in screen space).
     centers: Optional[List[List[float]]] = None
     half_sizes: Optional[List[float]] = None
+    # Spheres-union fields (the label brush). Shares `centers` with the squares
+    # union, but the entries are WORLD-space [x, y, z] triples rather than
+    # screen pixels, and `radii` are world radii. A sphere is depth-limited by
+    # its own geometry, so unlike a square stamp it does NOT paint through the
+    # cloud — and it needs no projection/view/canvas, which is what makes
+    # preview and apply agree exactly. See `_spheres_union_mask`.
+    radii: Optional[List[float]] = None
     # Cross-section slab fields. WORLD-space and camera-free — see `_slab_mask`.
     # `a`/`b` are the horizontal centreline endpoints, `depth` the thickness,
     # `offset` how far the slab has been STEPPED along its normal from where it

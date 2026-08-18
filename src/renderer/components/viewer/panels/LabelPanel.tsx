@@ -1,4 +1,4 @@
-import { Brush, X, Undo2, Check, Eye, EyeOff, Palette, Shuffle } from 'lucide-react';
+import { Brush, X, Undo2, Check, Eye, EyeOff, Palette, Shuffle, Lasso } from 'lucide-react';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 
@@ -47,6 +47,11 @@ export interface LabelPanelProps {
   onSetFromAnyVisible: () => void;
   onUndoStroke: () => void;
   onCommit: () => void;
+  /** Selection primitive: lasso outline, or sphere brush. */
+  tool: 'lasso' | 'brush';
+  onToolChange: (t: 'lasso' | 'brush') => void;
+  /** Brush radius in screen pixels, shown so the wheel/bracket keys are discoverable. */
+  brushPx: number;
   /** Cycle to the next built-in preset vocabulary. */
   onCyclePreset: () => void;
   /** Open the editor to add/rename/recolour classes. */
@@ -74,6 +79,9 @@ export function LabelPanel({
   onSetFromAnyVisible,
   onUndoStroke,
   onCommit,
+  tool,
+  onToolChange,
+  brushPx,
   onCyclePreset,
   onEditPalette,
   onClose,
@@ -140,6 +148,48 @@ export function LabelPanel({
       >
         {drawing ? 'Drawing — view frozen (L)' : 'Start Drawing (L)'}
       </button>
+
+      {/* Lasso vs brush. Both are kept because they answer different questions:
+          a lasso is precise around an irregular outline, a brush is faster for
+          touch-up AND is depth-limited — it will not paint the trunk behind the
+          leaf you aimed at, which the screen-space lasso always does. */}
+      <div className="mb-3">
+        <div className="flex gap-1">
+          <button
+            data-testid="label-tool-lasso"
+            onClick={() => onToolChange('lasso')}
+            title="Click to place outline vertices; Enter closes the shape"
+            className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 ${
+              tool === 'lasso'
+                ? 'bg-blue-600 text-white'
+                : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+            }`}
+          >
+            <Lasso className="w-3 h-3" />
+            Lasso
+          </button>
+          <button
+            data-testid="label-tool-brush"
+            onClick={() => onToolChange('brush')}
+            title="Drag to paint. Depth-limited: it does not paint through the cloud"
+            className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 ${
+              tool === 'brush'
+                ? 'bg-blue-600 text-white'
+                : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+            }`}
+          >
+            <Brush className="w-3 h-3" />
+            Brush
+          </button>
+        </div>
+        {tool === 'brush' && (
+          <p data-testid="label-brush-size" data-brush-px={brushPx}
+            className="text-[9px] text-neutral-500 mt-1 leading-tight">
+            Size {brushPx}px — scroll or <kbd>[</kbd>/<kbd>]</kbd> to change.
+            Alt+scroll zooms while the brush is active.
+          </p>
+        )}
+      </div>
 
       {sectionActive && (
         <div
