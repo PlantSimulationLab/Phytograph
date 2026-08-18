@@ -293,10 +293,13 @@ def test_las_nonconstant_standard_dims_carried_as_scalars(tmp_path):
     # x/y/z handled as positions, never duplicated as a scalar.
     for skipped in ("X", "Y", "Z", "intensity", "las_X", "las_intensity"):
         assert skipped not in extras
-    # The label is the clean LAS name; the slug carries the prefix.
+    # The label is "LAS <name>", not the bare name: PotreeConverter emits its own
+    # built-in `classification` attribute (all zeros, since it never reads our
+    # extra dims), so a bare label put two indistinguishable "classification"
+    # entries in the colour-by list. The slug carries the prefix too.
     meta_by_slug = {ed["slug"]: ed["label"] for ed in extra_dims_meta}
-    assert meta_by_slug.get("las_classification") == "classification"
-    assert meta_by_slug.get("las_point_source_id") == "point_source_id"
+    assert meta_by_slug.get("las_classification") == "LAS classification"
+    assert meta_by_slug.get("las_point_source_id") == "LAS point_source_id"
 
 
 def test_carried_standard_dims_survive_session_to_las(tmp_path):
