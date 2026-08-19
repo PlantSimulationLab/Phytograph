@@ -24,6 +24,17 @@ const CPU_RAYCAST_POINT_BUDGET = 400_000;
 // handler drops out if it no longer holds it.
 let brushGeneration = 0;
 
+// Last pointer position seen over the canvas, at module scope.
+//
+// React StrictMode (and any camera/gl/scene identity change) remounts this
+// gizmo: mount1 → cleanup1 → mount2. The surviving listener set therefore
+// registers AFTER the pointer has already come to rest, and a stationary
+// pointer emits no further mousemove — so the new set would sit with no cursor
+// at all until the user happened to move again. On a freshly-loaded scene that
+// looks exactly like a dead brush. Replaying the last known position on mount
+// closes that window.
+let lastPointer: { clientX: number; clientY: number } | null = null;
+
 /** One brush stroke: the world-space spheres stamped while the button was down. */
 export interface BrushSphereStroke {
   centers: Array<[number, number, number]>;
@@ -165,15 +176,30 @@ export function LabelBrushOctree({
           loadedPoints += pts.geometry.getAttribute('position')?.count ?? 0;
         }
       });
-      if (loadedPoints <= CPU_RAYCAST_POINT_BUDGET) {
+      if (loadedPoints <= CPU_RAYCAST_POINT_BUDGET) try {
         const raycaster = new THREE.Raycaster();
         raycaster.ray.copy(ray);
+        // `camera` is REQUIRED even though the ray is set directly. three's fat
+        // lines (LineSegments2, used by scene overlays) read raycaster.camera
+        // during raycast and throw "Cannot read properties of null (reading
+        // 'near')" without it — an uncaught throw here unmounts the whole
+        // renderer, which presents as a blank window rather than as a brush
+        // problem. Assigned rather than passed to setFromCamera, which would
+        // rebuild the ray with perspective math and break the ortho override.
+        raycaster.camera = camera;
         const viewDist = camera.position.distanceTo(
           new THREE.Vector3(centerRef.current.x, centerRef.current.y, centerRef.current.z),
         );
         for (const frac of [0.02, 0.15]) {
           raycaster.params.Points = { threshold: Math.max(viewDist * frac, 1e-9) };
-          const hits = raycaster.intersectObjects(scene.children, true);
+          // Only point clouds. Intersecting the whole scene drags in overlay
+          // meshes and fat lines that this brush can never anchor on, and any
+          // one of them throwing takes the renderer down with it.
+          const targets: THREE.Object3D[] = [];
+          scene.traverseVisible((o) => {
+            if ((o as THREE.Points).isPoints && !isSceneOverlay(o)) targets.push(o);
+          });
+          const hits = raycaster.intersectObjects(targets, false);
           for (const h of hits) {
             if (!h.object.visible) continue;
             // Skip our own cursor sphere and every other overlay, or the brush
@@ -183,7 +209,7 @@ export function LabelBrushOctree({
             return h.point.clone();
           }
         }
-      }
+      } catch { /* a raycast failure must not take the renderer down */ }
 
       // Nothing under the cursor at all — empty sky.
       //
@@ -213,7 +239,20 @@ export function LabelBrushOctree({
       lastStampRef.current = world.clone();
     };
 
+    const resolveAt = (clientX: number, clientY: number) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const ndc = new THREE.Vector2(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -(((clientY - rect.top) / rect.height) * 2 - 1),
+      );
+      const world = anchorAt(ndc);
+      if (!world) return;
+      onCursorRef.current({ center: world, radius: worldRadiusAt(world) });
+    };
+
     const onMove = (e: MouseEvent) => {
+      lastPointer = { clientX: e.clientX, clientY: e.clientY };
       if (!owns()) return;
       const world = anchorAt(ndcOf(e));
       if (!world) {
@@ -280,6 +319,11 @@ export function LabelBrushOctree({
     // claims the drag; the rest can ride the normal bubble phase.
     el.addEventListener('mousedown', onDown, { capture: true });
     el.addEventListener('mousemove', onMove);
+
+    // Resolve a cursor straight away from the last known pointer position, so a
+    // listener set that registered after the pointer came to rest is not left
+    // waiting for a mousemove that never comes.
+    if (lastPointer) resolveAt(lastPointer.clientX, lastPointer.clientY);
     window.addEventListener('mouseup', onUp);
     el.addEventListener('mouseleave', onLeave);
     return () => {
