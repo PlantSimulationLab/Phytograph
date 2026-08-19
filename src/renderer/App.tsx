@@ -8,7 +8,7 @@ import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./compon
 import { scanDisplayName, type Scan, allocateScanColor } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
-import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
+import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
 import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
 
@@ -39,7 +39,12 @@ import type { FeedbackMode } from "./lib/feedback";
 // we have a disk path. Every supported point-cloud format is here; only inputs
 // without an on-disk path (Blob/test fixtures) fall back to the in-renderer
 // flat-array parsers.
-const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
+// Mirrors OCTREE_PATH_EXTENSIONS in pointCloudParsers.ts — these two must stay
+// in step. This set decides whether an import routes to the wizard + backend
+// octree at all, so an extension missing here never reaches the parser's list:
+// 'ptx' was added there and not here, and PTX imports silently fell through to
+// the flat in-renderer parser instead of opening the wizard.
+const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57', 'ptx']);
 import logoImage from "./assets/logo.png";
 
 type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml' | 'qsm';
@@ -358,22 +363,31 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     resolve?.(results);
   }, []);
 
-  // Build a Scan from a finished wizard result: run the real import with the
-  // chosen column plan, register any categorical slugs, and return the Scan.
-  // Shared by the single-file, multi-file, and XML import paths.
-  const buildScanFromWizardResult = useCallback(async (
+  // Build the Scans from a finished wizard result: run the real import with the
+  // chosen column plan, register any categorical slugs, and return one Scan PER
+  // SCAN POSITION. Shared by the single-file, multi-file, and XML import paths.
+  //
+  // Plural because a multi-scan source (a multi-block PTX, a multi-scan E57) is
+  // decoded position by position in the backend, each with its own session,
+  // octree and pose. A scan is defined by its pose, so merging positions would
+  // leave one origin standing in for all of them — which breaks every
+  // pose-dependent tool downstream (miss recovery, LAD, registration). Every
+  // other format yields exactly one element, so callers never branch on it.
+  const buildScansFromWizardResult = useCallback(async (
     result: WizardResult,
-    color: string,
+    // A GENERATOR, not a colour: a multi-scan file needs a distinct colour per
+    // position, and only the caller knows the scene's palette cursor.
+    nextColor: () => string,
     // Cancellation + per-stage progress for this one file's import. Optional so
     // callers that don't offer a cancel (none, currently) still work.
     opts?: ImportProgressOptions,
-  ): Promise<Scan> => {
+  ): Promise<Scan[]> => {
     const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, droppedSlugs, worldShift } = result;
     // Far-field miss-detection threshold is a user setting; thread it into the
     // import so the backend's distance fallback honours it (the primary
     // target_index==99 signal ignores it).
     const missDistanceThreshold = (await getSettings()).missDistanceThreshold;
-    const data = await parsePointCloudFromPath(
+    const positions = await parsePointCloudsFromPath(
       input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
       missDistanceThreshold, null, opts, droppedSlugs,
     );
@@ -385,6 +399,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // import creates a Scan with as much of ScanParameters filled as the format
     // recorded — fields the file omitted stay at their default. Plain formats
     // (XYZ/LAS/PLY/...) carry nothing, so params stays undefined as before.
+    return positions.map(({ data, name }) => {
     const fileScanParams = data.octree?.scanParams ?? null;
     const baseParams = input.params
       ?? (fileScanParams ? scanParametersFromFile(fileScanParams) : undefined);
@@ -400,14 +415,21 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       : baseParams;
     return {
       id: crypto.randomUUID(),
-      label: input.label ?? data.fileName ?? 'Scan',
+      // `name` already reads `<stem> — scan N` for a multi-scan source and the
+      // bare stem for a single one, so it is the right label whenever the file
+      // fanned out. An explicit wizard/XML label still wins, but only for a
+      // single position — applying it to every position would give a multi-scan
+      // import N identically-named scans.
+      label: (positions.length === 1 ? input.label : undefined) ?? name ?? data.fileName ?? 'Scan',
       visible: true,
-      color: input.color ?? color,
+      // Likewise: one explicit colour can only claim a single position.
+      color: (positions.length === 1 ? input.color : undefined) ?? nextColor(),
       data,
       params,
       sourcePath: input.path,
       asciiFormat,
     };
+    });
   }, []);
 
   // Import a Helios scan XML (scans + grids) from disk, routing into the same
@@ -744,9 +766,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           const controller = new AbortController();
           importAbortRef.current = controller;
           setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, fraction: null });
-          let newScan: Scan;
+          let imported: Scan[];
           try {
-            newScan = await buildScanFromWizardResult(results[0], getNextColor(), {
+            imported = await buildScansFromWizardResult(results[0], getNextColor, {
               signal: controller.signal,
               onProgress: (fraction, message) =>
                 setImportProgress(p => (p ? { ...p, fraction, hint: message || undefined } : p)),
@@ -758,10 +780,17 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             if (isImportCancel(err, controller.signal)) return;
             throw err;
           }
-          addScanTx(newScan, 'Import scan');
-          setSelectedScanIds(new Set([newScan.id]));
+          // One file, but possibly several scan positions out of it.
+          addScansTx(imported, imported.length > 1 ? 'Import scans' : 'Import scan');
+          setSelectedScanIds(new Set(imported.map(sc => sc.id)));
           setSettingsOpen(false);
-          showToast({ title: `Loaded ${newScan.data!.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
+          const total = imported.reduce((n, sc) => n + (sc.data?.pointCount ?? 0), 0);
+          showToast({
+            title: imported.length > 1
+              ? `Loaded ${total.toLocaleString()} points as ${imported.length} scan positions from ${file.name}`
+              : `Loaded ${total.toLocaleString()} points from ${file.name}`,
+            type: 'success',
+          });
         } else {
           // No on-disk path (Blob/test fixture): the wizard can't preview, so
           // fall back to the in-renderer flat parser with auto-detection.
@@ -804,7 +833,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
-  }, [getNextColor, openImportWizard, buildScanFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
+  }, [getNextColor, openImportWizard, buildScansFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[], opts?: ImportOptions) => {
@@ -1057,7 +1086,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             label: `Loading ${results[i].input.fileName}`, fraction: null,
           });
           try {
-            newScans.push(await buildScanFromWizardResult(results[i], getColorForFile(), {
+            newScans.push(...await buildScansFromWizardResult(results[i], getColorForFile, {
               signal: controller.signal,
               onProgress: (fraction, message) =>
                 setImportProgress(p => (p ? { ...p, fraction, hint: message || undefined } : p)),
@@ -1136,7 +1165,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     importRunIdRef.current = null;
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
-  }, [scans, openImportWizard, buildScanFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
+  }, [scans, openImportWizard, buildScansFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
