@@ -793,10 +793,10 @@ export const OCTREE_BUILTIN_ATTRIBUTES = new Set([
   // non-LAS sources); never user-meaningful as a colour-by field.
   'return number', 'number of returns',
   'scan angle rank', 'user data', 'point source id',
-  // NOT 'gps-time': it is renamed to `timestamp` when the octree view is built,
-  // and a timestamp is a genuine scalar — colourable, exportable, and the key
-  // LAD joins a trajectory on. A cloud that never had one reports an all-zero
-  // range, which the degenerate-range check already suppresses.
+  // NOT 'gps-time': on a LAS/LAZ or .riproject import it IS the real time
+  // column — colourable, exportable, and the key LAD joins a trajectory on. A
+  // cloud that never had one reports an all-zero range, which the
+  // degenerate-range filter below suppresses.
 ]);
 
 // Derive the selectable scalar-field options for an octree-backed cloud from
@@ -812,6 +812,23 @@ export function octreeScalarFieldOptions(
   if (!attributeRanges) return [];
   return Object.keys(attributeRanges)
     .filter((name) => !OCTREE_BUILTIN_ATTRIBUTES.has(name.toLowerCase()))
+    // Drop `gps-time` ONLY when it is a degenerate schema artifact.
+    //
+    // PotreeConverter writes the full LAS point schema even for an ASCII source,
+    // so a cloud carrying a real `timestamp` column ALSO reports an all-zero
+    // `gps-time`. Offering both shows the same quantity twice, one of them
+    // empty — and with the label applied they read identically in the menu.
+    //
+    // Scoped to the time column on purpose. A blanket degenerate filter would
+    // also hide an all-zero `classification`, which is deliberately KEPT: a user
+    // may have segmented into it, and an empty class column is meaningful there
+    // in a way an empty duplicate of an existing column is not.
+    .filter((name) => {
+      if (name !== OCTREE_GPS_TIME_ATTRIBUTE) return true;
+      const r = attributeRanges[name];
+      if (!r?.min?.length || !r?.max?.length) return true;  // no range ⇒ keep
+      return !(r.min.every((v) => v === 0) && r.max.every((v) => v === 0));
+    })
     .map((name) => ({ value: name, label: attributeLabels?.[name] ?? name }))
     .sort((a, b) => a.label.localeCompare(b.label));
 }
@@ -953,8 +970,10 @@ export function ladRange(
 //   1. session_id — a session-backed (octree) cloud: the backend triangulates its
 //      surviving in-RAM HIT points (deletions honored, sky/miss points excluded).
 //      This is the source of truth after ANY edit (crop/erase/backfill/segment),
-//      so the original file is never re-read. Sent with file_path as a restart
-//      fallback when the cloud has both.
+//      so the original file is never re-read. Sent ALONE, never with file_path:
+//      the file predates every edit and every import-wizard choice, so a
+//      "restart fallback" would silently compute on data the user never saw.
+//      A stale session must fail loudly and tell the user to re-import.
 //   2. file_path — a file-backed cloud with no session (Helios reads it from disk;
 //      tiny request body, original columns preserved).
 //   3. inline points — a FLAT in-RAM cloud with populated positions and neither a
@@ -966,12 +985,6 @@ export function ladRange(
 // pydantic parse. Returns true if a source was found, false if the scan has none.
 export function resolveHeliosScanSource(scan: Scan, entry: HeliosScanEntry): boolean {
   const sessionId = scan.data?.octree?.sessionId;
-  if (sessionId && scan.sourcePath) {
-    entry.session_id = sessionId;
-    entry.file_path = scan.sourcePath;
-    entry.ascii_format = scan.asciiFormat ?? null;
-    return true;
-  }
   if (sessionId) {
     entry.session_id = sessionId;
     return true;
@@ -1221,20 +1234,19 @@ export function buildLADRequest(
     // Source priority mirrors the backend's feed resolution:
     //   1. session_id — a session-backed (octree) cloud, fed from its in-RAM
     //      arrays (honors unbaked deletions, carries multi-return columns).
-    //   2. file_path — a file-backed cloud; Helios reads it from disk with its
-    //      own columns (no huge JSON, preserves multi-return columns in-file).
+    //   2. file_path — a cloud that never had a session; Helios reads it from
+    //      disk with its own columns (no huge JSON, multi-return preserved).
     //   3. inline points (+ scalar_columns) — an in-memory cloud with neither a
     //      session nor a source file (e.g. a synthetic full-waveform scan).
-    // When a cloud has BOTH a session and a source file, send both: the backend
-    // prefers the session (honoring unbaked deletions) but falls back to the
-    // file if the session is gone — e.g. after a backend restart, which orphans
-    // the in-memory session while the renderer still holds its id.
+    // A session-backed cloud sends session_id ALONE — never alongside file_path.
+    // The file predates every edit AND every import-wizard choice (column roles,
+    // dropped columns, global shift), so falling back to it after a backend
+    // restart would invert a different cloud and report a confident LAD for data
+    // the user never saw. A stale session is a hard error telling them to
+    // re-import. (`sourcePath` may not even be a point-cloud file — for a
+    // .riproject it is the project DIRECTORY, kept only as provenance.)
     const sessionId = scan.data?.octree?.sessionId;
-    if (sessionId && scan.sourcePath) {
-      entry.session_id = sessionId;
-      entry.file_path = scan.sourcePath;
-      entry.ascii_format = scan.asciiFormat ?? null;
-    } else if (sessionId) {
+    if (sessionId) {
       entry.session_id = sessionId;
     } else if (scan.sourcePath) {
       entry.file_path = scan.sourcePath;

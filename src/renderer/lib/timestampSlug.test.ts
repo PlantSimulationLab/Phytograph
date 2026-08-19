@@ -213,3 +213,59 @@ describe('the Scans panel and the Color-by picker agree', () => {
     expect(importedColumnsFor(s)).toContain('weird_col');
   });
 });
+
+describe('a degenerate gps-time never reaches the Color-by picker', () => {
+  // PotreeConverter writes the full LAS point schema even for an ASCII source,
+  // so a cloud carrying a real `timestamp` column ALSO reports an all-zero
+  // `gps-time`. Offering both showed the same quantity twice — once empty —
+  // and the empty one is indistinguishable in the menu.
+  //
+  // Not fixable with a name blocklist: `gps-time` IS the real column on a
+  // LAS/LAZ or .riproject import. An all-zero range is the discriminator.
+  it('hides the schema artifact when a real timestamp column exists', () => {
+    const opts = octreeScalarFieldOptions(
+      {
+        timestamp: { min: [100], max: [105] },
+        Deviation: { min: [0], max: [3] },
+        'gps-time': { min: [0], max: [0] },
+      },
+      { timestamp: 'Timestamp' },
+    ).map((o) => o.value);
+    expect(opts).toContain('timestamp');
+    expect(opts).not.toContain('gps-time');
+  });
+
+  it('keeps gps-time when it IS the real column', () => {
+    const opts = octreeScalarFieldOptions(
+      {
+        'gps-time': { min: [85.15], max: [233.57] },
+        reflectance: { min: [-40], max: [28] },
+      },
+      { 'gps-time': 'Timestamp' },
+    );
+    const ts = opts.find((o) => o.value === 'gps-time');
+    expect(ts).toBeDefined();
+    expect(ts!.label).toBe('Timestamp');
+  });
+
+  it('keeps an attribute with no range entry', () => {
+    // Absence of evidence isn't evidence of absence — never drop a column we
+    // simply have no range for.
+    const opts = octreeScalarFieldOptions(
+      { 'gps-time': { min: [], max: [] } }, {},
+    ).map((o) => o.value);
+    expect(opts).toContain('gps-time');
+  });
+
+  it('does NOT hide other degenerate columns', () => {
+    // The filter is scoped to the time column. An all-zero `classification` is
+    // deliberately kept — a user may have segmented into it, and an empty class
+    // column is meaningful in a way an empty duplicate of an existing column is
+    // not. A blanket degenerate filter broke this.
+    const opts = octreeScalarFieldOptions(
+      { classification: { min: [0], max: [0] }, Deviation: { min: [0], max: [3] } },
+      {},
+    ).map((o) => o.value);
+    expect(opts).toContain('classification');
+  });
+});

@@ -87,7 +87,13 @@ def test_reader_recovers_a_legacy_timestamp_extra_dim(tmp_path):
     r = main._read_las_into_arrays(p)
     assert r.timestamps is not None, "legacy extra-dim timestamps were not recovered"
     np.testing.assert_allclose(r.timestamps, _TS, atol=1e-4)
-    assert not [k for k in r.extras if main._canonical_slug_for_name(k) == "timestamp"]
+    # COPIED, not moved: `extra_dims_meta` is what reaches PotreeConverter, so
+    # removing the column here would strip it from the Color-by picker, the
+    # scalar filter, the point inspector and every export — which is what an
+    # earlier version of this fix did, breaking six E2E specs that drive those
+    # panels on an ASCII import.
+    assert "timestamp" in r.extras
+    assert "timestamp" in {ed["slug"] for ed in r.extra_dims_meta}
 
 
 def test_a_constant_timestamp_extra_dim_is_not_promoted(tmp_path):

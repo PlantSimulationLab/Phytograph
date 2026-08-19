@@ -20475,6 +20475,20 @@ def _read_points_and_extras(
                     if col is None:
                         continue
                     extras[slug] = np.asarray(col[keep])
+                # `timestamp` lives on its own float64 field, OUTSIDE `extras`
+                # (a float32 cast has a 62 ms step at full GPS week-seconds and
+                # would destroy multi-return pulse grouping), so the loop above
+                # cannot see it. Surface it here under the canonical slug or an
+                # export silently drops the column: `_resolve_export_columns`
+                # builds its `available` map from `extras` alone and quietly
+                # discards any requested slug it can't find.
+                #
+                # Rides the SAME `keep` mask as positions, inside the same lock
+                # hold, for the reason given above.
+                if (sess.timestamps is not None
+                        and 'timestamp' not in extras
+                        and sess.timestamps.shape[0] == sess.positions.shape[0]):
+                    extras['timestamp'] = np.asarray(sess.timestamps[keep])
             # Surface colours/intensity only when asked (export does; the compute
             # consumers don't need them and skip the copy). The session stores
             # both at LAS uint16 scale, but every consumer of this function's
@@ -25013,10 +25027,19 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
         if _ts_key is not None:
             _cand = np.asarray(extras[_ts_key], dtype=np.float64)
             if _cand.size and np.any(_cand != _cand.flat[0]):
+                # COPY, don't move. The float64 field is what the LAD join and
+                # Backfill Misses read, but the extras entry is what reaches the
+                # OCTREE — `extra_dims_meta` is handed to PotreeConverter, so
+                # deleting it here strips the column from the Color-by picker,
+                # the scalar filter, the point inspector and every export.
+                # (`_read_points_and_extras` re-derives the export column from
+                # the float64 field, but only for clouds that never had the
+                # extra dim in the first place.)
+                #
+                # The duplicate is not a problem: an ASCII import's `timestamp`
+                # extra dim and this field hold the same values, and every
+                # consumer prefers the float64 one when both are present.
                 timestamps = _cand
-                del extras[_ts_key]
-                extra_dims_meta = [ed for ed in extra_dims_meta
-                                   if str(ed.get("slug", "")) != _ts_key]
 
     # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
     # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
@@ -25175,6 +25198,10 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     # transient stacked on top of the session arrays. Chunking caps the record to
     # one block (`_LAS_WRITE_CHUNK` rows) at a time — same bytes on disk, a
     # fraction of the peak RAM. Mirrors `_xyz_to_las_stream`'s chunked writer.
+    # Does the session already carry the time as a named extra dim? If so the
+    # standard gps_time field must stay empty — see the note in the write loop.
+    _ts_is_extra = any(_canonical_slug_for_name(str(ed.get("slug", ""))) == 'timestamp'
+                       for ed in sess.extra_dims_meta)
     idx = np.flatnonzero(keep)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         for start in range(0, n, _LAS_WRITE_CHUNK):
@@ -25197,7 +25224,13 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
             # colour-by list. Timestamps live outside `extras` (they are float64,
             # the extras are float32), so the extra-dims loop above never
             # covered them; they need their own assignment.
-            if sess.timestamps is not None:
+            # Only when the column is not ALSO an extra dim. An ASCII import
+            # carries its time in a `timestamp` extra dim AND on the float64
+            # field; writing both here makes PotreeConverter emit two real
+            # columns for one quantity, so the Color-by picker offered
+            # `gps-time` and `timestamp` with identical ranges and the same
+            # "Timestamp" label — indistinguishable in the menu.
+            if sess.timestamps is not None and not _ts_is_extra:
                 record.gps_time = sess.timestamps[block]
             for ed in sess.extra_dims_meta:
                 record[ed["slug"]] = sess.extras[ed["slug"]][block]
