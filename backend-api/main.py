@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.68.0"
+BACKEND_VERSION = "0.68.1"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5642,6 +5642,23 @@ class HeliosScanEntry(BaseModel):
     # (Gtheta) leaf-area inversion, which needs no triangulation. Static scans
     # leave this None and behave exactly as before. Ignored by triangulation.
     trajectory: Optional[PoseStream] = None
+    # Opt-in escape hatch for reading points from `file_path` when the entry ALSO
+    # names a `session_id`. OFF by default and never set by the app.
+    #
+    # A cloud's file is read exactly once, at import; every edit after that
+    # (deletions, translation, filtering, segmentation labels, wizard column
+    # choices, role assignments, global shift) lives only in the session arrays.
+    # Re-reading the file to "recover" from a missing session does not recover
+    # anything — it computes on pre-edit, differently-parsed data and returns a
+    # silently wrong answer, which is strictly worse than an error. It is also
+    # not always a point-cloud file at all: a `.riproject` "source path" is a
+    # DIRECTORY of proprietary scans kept purely as provenance.
+    #
+    # So a stale `session_id` is a hard error, never a fallback. Set this only
+    # when the file is genuinely not a live cloud — unit tests driving the
+    # loaders directly, and any future read of an external file. Mirrors
+    # `PointSource.allow_file_source`.
+    allow_file_source: bool = False
 
 class HeliosGrid(BaseModel):
     """An explicit triangulation grid, derived from a voxel box in the UI.
@@ -5670,6 +5687,42 @@ class HeliosGrid(BaseModel):
     # excluded from the result. None => all columns kept.
     column_offsets: Optional[List[float]] = None
     kept_columns: Optional[List[bool]] = None
+
+def _resolve_scan_session(scan_entry, what: str):
+    """Fail loudly when a scan entry names a `session_id` the backend no longer has.
+
+    THE RULE: once a file is imported it is treated as if it does not exist. The
+    session arrays are the complete source of truth — they carry every edit
+    (deletions, translation, filtering, segmentation labels) AND every import-time
+    choice (wizard column roles, dropped columns, ASCII layout, global shift) that
+    the file on disk knows nothing about. Re-reading the file therefore does not
+    "recover" the cloud; it substitutes a different cloud and reports success. A
+    `.riproject` source path isn't even a readable point-cloud file — it is a
+    DIRECTORY kept only as provenance, which is how this surfaced: a hot-reload
+    dropped the session and the export fell through to the project directory,
+    reporting "Scan file not found" for a file that was never the data.
+
+    So: no fallback. `file_path` is for scans that never had a session at all;
+    a stale session is an error telling the user to re-import.
+
+    Returns the live CloudSession, or None when the entry names no session at all
+    (a genuinely file-backed or inline scan). Raises when the session is stale.
+    """
+    if not scan_entry.session_id:
+        return None
+    with _cloud_session_lock:
+        sess = _cloud_sessions.get(scan_entry.session_id)
+    if sess is not None:
+        return sess
+    if getattr(scan_entry, 'allow_file_source', False):
+        return None
+    raise ValueError(
+        f"Cloud session not found: {scan_entry.session_id}. The backend restarted "
+        f"since this cloud was imported, so its edited points are gone. {what} was "
+        "stopped rather than falling back to the original file, which would have "
+        "used pre-edit data (and none of the import options you chose). Re-import "
+        "the cloud and try again.")
+
 
 class HeliosTriangulationRequest(BaseModel):
     """Request model for Helios triangulation"""
@@ -6697,10 +6750,12 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
 
             session_id = scan_entry.session_id
-            session_present = False
-            if session_id is not None:
-                with _cloud_session_lock:
-                    session_present = session_id in _cloud_sessions
+            # Raises on a STALE session (id set, session gone) rather than letting
+            # control fall through to the `file_path` branch below, which would
+            # silently triangulate the pre-edit file. Returns None only when the
+            # entry names no session at all.
+            session_present = _resolve_scan_session(
+                scan_entry, "The triangulation") is not None
 
             if session_id is not None and session_present:
                 # Session source of truth: hits only, misses excluded.
@@ -6788,12 +6843,6 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                         bb_hi = np.maximum(bb_hi, hi)
                 n_theta, n_phi = _resolution(
                     scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
-            elif scan_entry.session_id is not None:
-                # session_id given but the session is gone and no file fallback.
-                raise ValueError(
-                    f"Cloud session not found: {scan_entry.session_id}. The "
-                    "backend may have restarted since import. Re-import the scan "
-                    "and try again.")
             else:
                 # Points mode (fallback): write inline points to a temp file.
                 points = scan_entry.points
@@ -7223,28 +7272,17 @@ def helios_triangulate(request: HeliosTriangulationRequest, http_request: Reques
 _SPACING_BRIDGE_RATIO = 3.0
 
 
-def _resolve_scan_positions(scan_entry, warnings: list) -> "np.ndarray":
+def _resolve_scan_positions(scan_entry) -> "np.ndarray":
     """Surviving (N,3) positions for one scan, by the same source priority as the
     triangulation/LAD paths: live session (honoring unbaked deletions, never
     re-reading the source) -> inline points -> source file. Positions only — the
-    spacing check needs no ray directions or multi-return columns."""
+    spacing check needs no ray directions or multi-return columns.
+
+    A `file_path` source is only for scans that never had a session; a stale
+    session raises (see _resolve_scan_session)."""
     import numpy as np
 
-    sess = None
-    if scan_entry.session_id:
-        with _cloud_session_lock:
-            sess = _cloud_sessions.get(scan_entry.session_id)
-        if sess is None and scan_entry.file_path:
-            warnings.append(
-                "The edited point-cloud session was no longer available (the "
-                "backend likely restarted), so the spacing check used the source "
-                "file on disk. Unbaked deletions were not applied."
-            )
-        elif sess is None:
-            raise ValueError(
-                f"Cloud session not found: {scan_entry.session_id}. The backend "
-                "may have restarted since import. Re-import the scan and try again."
-            )
+    sess = _resolve_scan_session(scan_entry, "The spacing check")
 
     if sess is not None:
         with _cloud_session_lock:
@@ -7317,7 +7355,7 @@ def _do_spacing_check(request: HeliosTriangulationRequest) -> dict:
 
     pooled = []
     for scan_entry in request.scans:
-        xyz = _resolve_scan_positions(scan_entry, warnings)
+        xyz = _resolve_scan_positions(scan_entry)
         if xyz.size == 0:
             continue
         if grid_center is not None:
@@ -8276,26 +8314,11 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # Resolve the live session if one was requested. A session is an
             # in-memory object that does NOT survive a backend restart, so the
             # renderer's session id can be stale (e.g. after a dev reload or a
-            # respawn). When that happens, fall back to the source file the
-            # renderer also sent — losing only unbaked deletions, which we warn
-            # about — instead of failing the whole computation.
-            sess = None
-            if scan_entry.session_id:
-                with _cloud_session_lock:
-                    sess = _cloud_sessions.get(scan_entry.session_id)
-                if sess is None and scan_entry.file_path:
-                    warnings.append(
-                        "The edited point-cloud session was no longer available "
-                        "(the backend likely restarted), so LAD used the source "
-                        "file on disk. Any unbaked deletions were not applied — "
-                        "re-apply them and recompute if needed."
-                    )
-                elif sess is None:
-                    raise ValueError(
-                        f"Cloud session not found: {scan_entry.session_id}. The "
-                        "backend may have restarted since import. Re-import the "
-                        "scan and try again."
-                    )
+            # respawn). That is a HARD ERROR, not a fall-back to the source file:
+            # the file predates every edit and every import-wizard choice, so
+            # inverting it would report a confident LAD for data the user never
+            # saw. See _resolve_scan_session.
+            sess = _resolve_scan_session(scan_entry, "The LAD computation")
 
             if sess is not None:
                 with _cloud_session_lock:
@@ -9220,9 +9243,11 @@ class ScanExportGrid(BaseModel):
 
 
 class ScanExportEntry(BaseModel):
-    """One scan to export. Point source is one of session_id / points / file_path
-    (resolved in that precedence, mirroring the LAD path). Scanner geometry is
-    written into the XML; translation is applied to the points on export."""
+    """One scan to export. Point source is EXACTLY one of session_id / points /
+    file_path (resolved in that precedence, mirroring the LAD path). A live cloud
+    sends `session_id` alone — never `session_id` plus `file_path`, because a
+    missing session must fail loudly rather than export the pre-edit file.
+    Scanner geometry is written into the XML; translation is applied on export."""
     origin: List[float]                          # [x, y, z] scanner position
     # "raster" (default) or "spinning_multibeam". Multibeam scans export via
     # beam_elevation_angles_deg; n_theta/theta_* are ignored for them.
@@ -9260,8 +9285,13 @@ class ScanExportEntry(BaseModel):
     session_id: Optional[str] = None             # live edited session (honors deletions)
     points: Optional[List[List[float]]] = None   # inline flat cloud
     scalar_columns: Optional[Dict[str, List[float]]] = None  # aligned per-point columns
-    file_path: Optional[str] = None              # source file fallback
+    file_path: Optional[str] = None              # file-backed scan with NO session
     ascii_format: Optional[str] = None
+    # See `HeliosScanEntry.allow_file_source`. A stale `session_id` is a hard
+    # error, never a silent fall-through to `file_path`: the file predates every
+    # edit and import-wizard choice, so exporting it writes data the user never
+    # saw. Off by default and never set by the app.
+    allow_file_source: bool = False
     # World-space offset applied to the points (viewer translation), or null.
     translation: Optional[List[float]] = None
     # Ordered ASCII column slugs chosen in the export modal (includes x y z plus
@@ -9319,14 +9349,7 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
 
     # Build a slug -> (N,) getter for whichever source backs this scan, matching
     # the LAD path: session (honors deletions) → inline columns → source file.
-    sess = None
-    if scan_entry.session_id:
-        with _cloud_session_lock:
-            sess = _cloud_sessions.get(scan_entry.session_id)
-        if sess is None and not (scan_entry.points or scan_entry.file_path):
-            raise ValueError(
-                f"Cloud session not found: {scan_entry.session_id}. The backend "
-                "may have restarted since import. Re-import the scan and try again.")
+    sess = _resolve_scan_session(scan_entry, "The export")
 
     if sess is not None:
         with _cloud_session_lock:
@@ -9453,14 +9476,7 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
     if len(origin) != 3:
         raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
 
-    sess = None
-    if scan_entry.session_id:
-        with _cloud_session_lock:
-            sess = _cloud_sessions.get(scan_entry.session_id)
-        if sess is None and not (scan_entry.points or scan_entry.file_path):
-            raise ValueError(
-                f"Cloud session not found: {scan_entry.session_id}. The backend "
-                "may have restarted since import. Re-import the scan and try again.")
+    sess = _resolve_scan_session(scan_entry, "The export")
 
     colors = None
     intensity = None

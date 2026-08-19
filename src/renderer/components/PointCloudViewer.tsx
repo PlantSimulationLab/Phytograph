@@ -8002,11 +8002,14 @@ export default function PointCloudViewer({
 
     const sessionId = cloud.data.octree?.sessionId;
     if (sessionId) {
+      // session_id ONLY — deliberately NOT accompanied by file_path. A cloud's
+      // file is read exactly once, at import; the session arrays carry every
+      // edit and every import-wizard choice the file knows nothing about, so a
+      // file "fallback" would export data the user never saw. If the session is
+      // gone (backend restart), the backend must fail loudly and say re-import.
+      // `sourcePath` is also not always a readable point-cloud file: for a
+      // .riproject it is the project DIRECTORY, kept purely as provenance.
       entry.session_id = sessionId;
-      if (cloud.sourcePath) {
-        entry.file_path = cloud.sourcePath;
-        entry.ascii_format = cloud.asciiFormat ?? null;
-      }
     } else if (cloud.sourcePath) {
       entry.file_path = cloud.sourcePath;
       entry.ascii_format = cloud.asciiFormat ?? null;

@@ -120,6 +120,35 @@ The backend also auto-rebuilds `libhelios` on startup when the C++ source is
 newer than the compiled lib, so a stale lib usually fixes itself on the next
 backend restart. A clean rebuild: `node scripts/build-pyhelios.mjs --clean`.
 
+## "Cloud session not found … Re-import the cloud and try again"
+
+A tool (export, triangulate, LAD, spacing check) refuses to run and names a
+session id. The backend restarted since that cloud was imported — in dev, the
+usual cause is uvicorn's `--reload` firing on a `backend-api/*.py` edit, which
+replaces the process and drops every in-memory `CloudSession`. The renderer
+still holds the old session id, and the on-disk octree keeps rendering, so
+nothing looks wrong until a tool needs the actual points.
+
+**Fix:** re-import the cloud.
+
+This is deliberately a hard error rather than a fall back to the file the cloud
+was imported from. **Once a file is imported, Phytograph treats it as if it no
+longer exists.** The session arrays are the complete source of truth: they carry
+every edit (deletions, translation, filtering, segmentation labels) *and* every
+choice made in the import wizard (column roles, dropped columns, global shift,
+ASCII layout). Re-reading the file would not restore the cloud — it would
+substitute a different one and report success, which is worse than an error.
+
+Some source paths are not readable point clouds at all. A `.riproject` "source
+path" is the project **directory**, kept only as provenance; the older
+fall-through surfaced it as the misleading `Scan file not found:
+/…/2018-02-23.002.riproject` when the real problem was the dropped session.
+
+The `allow_file_source` flag on `PointSource` / `HeliosScanEntry` /
+`ScanExportEntry` is the deliberate opt-in for files that are genuinely *not*
+live clouds (unit tests driving the loaders, external files). The app never
+sets it.
+
 ## Stale backend processes
 
 Since ports are resolved per instance, a leftover backend no longer blocks the

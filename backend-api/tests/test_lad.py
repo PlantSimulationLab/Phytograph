@@ -326,11 +326,13 @@ class TestLADRequestShaping:
         # Not the "no misses / no timestamp" warning — misses ARE present.
         assert not any("likely to be inaccurate" in w for w in result["warnings"])
 
-    def test_stale_session_falls_back_to_file_with_warning(self, tmp_path, stub_pyhelios):
-        # A session id the backend doesn't have (e.g. after a restart) must NOT
-        # 404 the whole computation when the scan also carries a source file —
-        # it falls back to the file and warns that unbaked edits were dropped.
-        # (is_miss column present so the inversion has misses to work with.)
+    def test_stale_session_never_falls_back_to_file(self, tmp_path, stub_pyhelios):
+        # A stale session id (backend restarted since import) must FAIL, even
+        # though the scan also carries a source file. The file predates every
+        # edit and every import-wizard choice (column roles, dropped columns,
+        # global shift), so inverting it would report a confident LAD for a
+        # cloud the user never saw — silently wrong, which is worse than an
+        # error. The old behaviour was to fall back with a warning.
         f = tmp_path / "scan.xyz"
         f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
         scan = main.HeliosScanEntry(
@@ -343,8 +345,29 @@ class TestLADRequestShaping:
             lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
         result = main._do_lad_computation(req)
 
+        assert result["success"] is False
+        err = result.get("error") or ""
+        # Names the real cause and the real remedy — not "Scan file not found".
+        assert "does-not-exist" in err
+        assert "Re-import" in err
+
+    def test_stale_session_may_read_file_with_explicit_opt_in(self, tmp_path, stub_pyhelios):
+        # The escape hatch (`allow_file_source`) exists for files that are NOT
+        # live clouds — unit tests driving the loaders, external files. The app
+        # never sets it; without it the entry above fails.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
+        scan = main.HeliosScanEntry(
+            session_id="does-not-exist", file_path=str(f),
+            ascii_format="x y z is_miss", allow_file_source=True,
+            origin=[0, 0, 5], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        result = main._do_lad_computation(req)
+
         assert result["success"] is True, result.get("error")
-        assert any("no longer available" in w for w in result["warnings"])
 
     def test_stale_session_without_file_errors_actionably(self, tmp_path, stub_pyhelios):
         # No fallback available: a clear, actionable error rather than a bare 404.

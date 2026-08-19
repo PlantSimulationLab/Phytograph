@@ -588,3 +588,80 @@ class TestScanExportErrors:
         resp = client.post("/api/scan/export-xml", json={"scans": [], "include_misses": True})
         assert resp.status_code == 200
         assert resp.json()["success"] is False
+
+
+class TestScanExportStaleSession:
+    """A stale `session_id` must FAIL — never fall back to re-reading the file.
+
+    The reported bug: a `.riproject` was imported, the dev backend hot-reloaded
+    (which drops all in-memory sessions), and the export fell through to the
+    `file_path` branch. That path was the .riproject DIRECTORY — provenance only,
+    never a readable point-cloud file — so the user got "Scan file not found:
+    /…/2018-02-23.002.riproject" for a file that was never the data source.
+
+    The deeper problem is not the confusing message. Once a file is imported it
+    must be treated as if it does not exist: the session arrays carry every edit
+    AND every import-wizard choice (column roles, dropped columns, global shift),
+    so a file fallback exports a DIFFERENT cloud and calls it success.
+    """
+
+    def _entry(self, **kw):
+        e = main.ScanExportEntry(
+            origin=[0.0, 0.0, 3.0], n_theta=20, n_phi=20,
+            theta_min=0, theta_max=180, phi_min=0, phi_max=360,
+            session_id="gone-after-restart", **kw)
+        return e
+
+    def test_riproject_directory_source_reports_the_real_cause(self, tmp_path):
+        # A .riproject "source path" is a directory, exactly as the importer
+        # records it for provenance.
+        proj = tmp_path / "2018-02-23.002.riproject"
+        proj.mkdir()
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._entry(file_path=str(proj))],
+            base_name="riegl", include_misses=True))
+        assert res["success"] is False
+        err = res["error"]
+        # The OLD failure blamed a missing file; the honest error names the
+        # stale session and tells the user what to actually do.
+        assert "Scan file not found" not in err
+        assert "gone-after-restart" in err
+        assert "Re-import" in err
+
+    def test_readable_source_file_is_still_not_used(self, tmp_path):
+        # The sharper case: the file EXISTS and would parse fine, so the old code
+        # exported it happily — silently shipping pre-edit points. Must still fail.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._entry(file_path=str(f), ascii_format="x y z")],
+            base_name="stale", include_misses=True))
+        assert res["success"] is False
+        assert "gone-after-restart" in res["error"]
+        assert not res.get("files")
+
+    def test_data_only_export_path_also_refuses(self, tmp_path):
+        # The data-only (write_xml=False) resolver is a SEPARATE function with its
+        # own copy of the source precedence, and had the same fall-through.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._entry(file_path=str(f), ascii_format="x y z")],
+            base_name="stale", include_misses=True,
+            write_xml=False, data_format="laz"))
+        assert res["success"] is False
+        assert "gone-after-restart" in res["error"]
+
+    def test_file_backed_scan_with_no_session_still_exports(self, tmp_path):
+        # The rule targets STALE SESSIONS, not file sources as such: a scan that
+        # never had a session (no session_id) still exports from its file.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[main.ScanExportEntry(
+                origin=[0.0, 0.0, 3.0], n_theta=20, n_phi=20,
+                theta_min=0, theta_max=180, phi_min=0, phi_max=360,
+                file_path=str(f), ascii_format="x y z")],
+            base_name="filebacked", include_misses=True))
+        assert res["success"] is True, res.get("error")

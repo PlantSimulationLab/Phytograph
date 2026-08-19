@@ -676,3 +676,52 @@ class TestDiagnosticsEndToEnd(TestSphereReproduction):
             d["kept"] + d["dropped_lmax"] + d["dropped_aspect"]
             + d["dropped_degenerate"])
         assert "Lmax" in result["error"]
+
+
+class TestTriangulationStaleSession:
+    """A stale `session_id` must fail, not silently triangulate the source file.
+
+    The session branch here gates on `session_id in _cloud_sessions`, so before
+    this fix a stale id simply fell through to the `elif scan_entry.file_path`
+    branch and meshed the pre-edit file — an unedited cloud reported as success.
+    The explicit stale-session error existed but only fired when NO file_path was
+    sent, which is precisely the case the renderer never produced.
+    """
+
+    def test_stale_session_with_file_path_errors(self, tmp_path):
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        req = main.HeliosTriangulationRequest(scans=[
+            main.HeliosScanEntry(session_id="gone-after-restart",
+                                 file_path=str(f), ascii_format="x y z",
+                                 origin=[0, 0, 5]),
+        ])
+        res = main._do_helios_computation(req)
+        assert res["success"] is False
+        assert "gone-after-restart" in res["error"]
+        assert "Re-import" in res["error"]
+
+    def test_riproject_directory_source_errors_on_the_session(self, tmp_path):
+        # The .riproject case: source path is a DIRECTORY (provenance only), so
+        # the old fall-through produced a misleading file-level failure.
+        proj = tmp_path / "2018-02-23.002.riproject"
+        proj.mkdir()
+        req = main.HeliosTriangulationRequest(scans=[
+            main.HeliosScanEntry(session_id="gone-after-restart",
+                                 file_path=str(proj), origin=[0, 0, 5]),
+        ])
+        res = main._do_helios_computation(req)
+        assert res["success"] is False
+        assert "Scan file not found" not in res["error"]
+        assert "gone-after-restart" in res["error"]
+
+    def test_file_backed_scan_with_no_session_is_unaffected(self, tmp_path, captured_xml):
+        # Control: no session_id at all → the file source is still legitimate.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        req = main.HeliosTriangulationRequest(scans=[
+            main.HeliosScanEntry(file_path=str(f), ascii_format="x y z",
+                                 origin=[0, 0, 5]),
+        ])
+        main._do_helios_computation(req)
+        assert captured_xml["scans_info"][0]["filepath"] == str(f)

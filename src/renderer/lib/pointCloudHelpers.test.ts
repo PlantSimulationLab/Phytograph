@@ -1495,12 +1495,28 @@ describe('buildHeliosTriangulationRequest / resolveHeliosScanSource', () => {
     expect(JSON.stringify(req).length).toBeLessThan(2_000);
   });
 
-  it('sends both session_id and file_path when the cloud still has its source path (restart fallback)', () => {
+  it('sends session_id ALONE for a session cloud that still has a source path', () => {
+    // Regression: file_path used to ride along as a "restart fallback". The file
+    // predates every edit and every import-wizard choice, so re-reading it after
+    // a backend restart computes on a different cloud and reports success. Worse,
+    // sourcePath is not always a point-cloud file — for a .riproject it is the
+    // project DIRECTORY, which produced a bogus "Scan file not found" on export.
+    // A stale session must reach the backend as session_id only, and fail loudly.
     const scan = scanOf(octreeCloud('sess-2'), { sourcePath: '/data/scan.xyz', asciiFormat: 'x y z' });
     const req = buildHeliosTriangulationRequest([scan], GRID);
     expect(req.scans[0].session_id).toBe('sess-2');
-    expect(req.scans[0].file_path).toBe('/data/scan.xyz');
+    expect(req.scans[0].file_path).toBeUndefined();
+    expect(req.scans[0].ascii_format).toBeUndefined();
     expect(req.scans[0].points).toBeUndefined();
+  });
+
+  it('sends session_id ALONE for a .riproject cloud (source path is a directory)', () => {
+    const scan = scanOf(octreeCloud('sess-riegl'), {
+      sourcePath: '/data/2018-02-23.002.riproject',
+    });
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.scans[0].session_id).toBe('sess-riegl');
+    expect(req.scans[0].file_path).toBeUndefined();
   });
 
   it('sends file_path for a file-backed cloud with no session', () => {

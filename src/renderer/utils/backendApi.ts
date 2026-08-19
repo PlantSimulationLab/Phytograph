@@ -1060,9 +1060,10 @@ export interface HeliosScanEntry {
   //   session_id — a session-backed (octree) cloud; the backend triangulates its
   //     in-RAM surviving HIT points (deletions honored, misses excluded). This is
   //     the source of truth after any edit (crop/erase/backfill/segment), so the
-  //     file is never re-read. Sent alongside file_path as a restart fallback.
+  //     file is never re-read, and file_path is NOT sent alongside it — a stale
+  //     session must fail loudly, not silently fall back to the pre-edit file.
   session_id?: string | null;
-  file_path?: string;       // Path to scan file on disk (file-backed cloud, no session)
+  file_path?: string;       // Path to scan file on disk (cloud that never had a session)
   ascii_format?: string | null;  // Column format e.g. "x y z timestamp" (auto-detected if omitted/null)
   points?: number[][];      // [[x, y, z], ...] flat in-RAM cloud (no session, no file)
   colors?: number[][];      // [[r, g, b], ...] point colors (0-1 range)
@@ -2393,7 +2394,9 @@ export async function exportPointCloudLasLaz(
 }
 
 // One scan to export to the Helios XML + per-scan ASCII bundle. Point source is
-// one of session_id / points / file_path (resolved in that order, backend-side).
+// EXACTLY one of session_id / points / file_path (resolved in that order,
+// backend-side). A session-backed cloud sends session_id alone: a stale session
+// is an error, never a fall-back to the pre-edit source file.
 export interface ScanExportEntry {
   origin: [number, number, number];
   // 'raster' (default) or 'spinning_multibeam'. Multibeam scans are exported via
