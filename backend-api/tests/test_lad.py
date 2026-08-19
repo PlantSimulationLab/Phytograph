@@ -951,8 +951,12 @@ class TestMultiReturnImportColumnMapping:
         positions, colors, intensity = _r.positions, _r.colors, _r.intensity
         extras, extra_dims_meta = _r.extras, _r.extra_dims_meta
         # The per-pulse columns survived the round-trip under canonical slugs.
-        assert {"timestamp", "target_index", "target_count"} <= set(extras), \
-            sorted(extras)
+        # `timestamp` is the exception: it rides the dedicated float64 field, not
+        # the float32 extras, because a float32 cast has a 62 ms step at full GPS
+        # week-seconds — enough to collapse the pulse grouping this test exists
+        # to verify.
+        assert {"target_index", "target_count"} <= set(extras), sorted(extras)
+        assert _r.timestamps is not None, "timestamp was not carried"
 
         sess = main.CloudSession(
             session_id="testmr01",
@@ -961,6 +965,7 @@ class TestMultiReturnImportColumnMapping:
             column_plan=plan,
             positions=positions, colors=colors, intensity=intensity,
             extras=extras, extra_dims_meta=extra_dims_meta,
+            timestamps=_r.timestamps,
             deleted=np.zeros(len(positions), dtype=bool),
             deleted_history=[],
             octree_cache_id=None,

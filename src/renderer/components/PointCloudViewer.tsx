@@ -118,6 +118,7 @@ import {
   generateShapeMesh,
   octreeScalarFieldOptions,
   importedColumnsFor,
+  displayLabelFor,
   assembleScanScalarFields,
   voxelMeshToHeliosGrid,
   gridSnapSignature,
@@ -19374,7 +19375,13 @@ export default function PointCloudViewer({
             if (!c) return [];
             return defaultExportColumns(c.data, {
               isLabel: (slug) => isCategoricalAttribute(slug),
-              labelFor: (slug) => c.data.octree?.attributeLabels?.[slug] ?? slug,
+              // The labels map is keyed by the octree BUFFER name, but the
+              // columns here are keyed by the CANONICAL slug — `gps-time`
+              // becomes `timestamp` on the way in — so a direct lookup misses
+              // for exactly that column and the picker fell back to the bare
+              // slug. Try the buffer name too, via the same mapping, so the
+              // export list reads "Timestamp" like every other panel.
+              labelFor: (slug) => displayLabelFor(slug, c.data.octree?.attributeLabels),
               // Octree/session clouds keep their points (and scalar columns) on
               // disk, so recover the available columns from the ASCII_format hint.
               asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,

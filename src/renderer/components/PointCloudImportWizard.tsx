@@ -46,6 +46,10 @@ export interface WizardResult {
   // these from the session's extras by name. ASCII skips do NOT appear here —
   // they ride the plan as role 'skip'.
   droppedSlugs: string[];
+  // `{source_slug: role}` for in-file formats — the columns the user reassigned
+  // in the wizard. Empty for a no-edit import, which then behaves exactly as
+  // before (pure backend auto-detection).
+  roleOverrides?: Record<string, string>;
   // The complement of `droppedSlugs` — the in-file slugs still ticked. Only the
   // RIEGL extract path uses it, because that endpoint takes a keep list.
   keptSlugs: string[];
@@ -230,6 +234,18 @@ interface ColumnConfig {
   label: string;           // rename target
   typeHint: string;
   remappable: boolean;
+  // The role the backend AUTO-DETECTED, kept so `roleOverrides` can send only
+  // what the user actually changed — an untouched column must not be pinned by
+  // an override, or a future improvement to auto-detection would be silently
+  // overridden by a stale choice the user never made.
+  detectedRole: string;
+  // Whether the column's ROLE may be reassigned on a fixed-layout format.
+  // Distinct from `remappable` (ASCII-only: the column's POSITION can move).
+  // An in-file scalar's name is an arbitrary vendor string, so auto-detection
+  // can't cover every spelling — this is what lets the user say "the column my
+  // file calls `shot_time` is the Timestamp" instead of leaving it an anonymous
+  // scalar that Backfill Misses and LAD then refuse.
+  roleAssignable?: boolean;
   // Untick the header's "Import" checkbox to drop the column. The two format
   // families need different machinery, so this flag drives both:
   //   - remappable (ASCII): unticking also sets role 'skip', which the backend
@@ -308,6 +324,8 @@ function configFromColumn(c: PreviewColumn): ColumnConfig {
     label: c.suggested_label,
     typeHint: c.type_hint,
     remappable: c.remappable,
+    detectedRole: role,
+    roleAssignable: c.role_assignable ?? false,
   };
 }
 
@@ -409,6 +427,29 @@ export function droppedSlugs(cfg: ScanConfig): string[] {
     .filter((c) => !c.imported && !c.remappable)
     .map((c) => canonicalSlugOf(c))
     .filter(Boolean);
+}
+
+// Role reassignments for an IN-FILE format, as `{source_slug: role}`.
+//
+// The counterpart to `droppedSlugs`: the file fixes the layout, so the
+// positional ColumnPlan can't carry the choice and it travels by slug instead.
+// Only columns the user actually CHANGED are sent — an untouched column is
+// auto-detected backend-side exactly as before, so a no-edit import stays
+// byte-identical.
+//
+// `extra`/`label`/`skip` are not canonical roles: 'extra' and 'label' differ
+// only in how the renderer colours the field (and are already expressed by the
+// rename box), and a dropped column travels in `droppedSlugs`.
+export function roleOverrides(cfg: ScanConfig): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const c of cfg.columns) {
+    if (!c.roleAssignable || !c.imported) continue;
+    if (c.role === c.detectedRole) continue;      // untouched
+    if (SCALAR_ROLES.has(c.role) || c.role === 'skip') continue;
+    const src = (c.headerName || c.slug || '').trim();
+    if (src) out[src] = c.role;
+  }
+  return out;
 }
 
 // The complement of `droppedSlugs` for an in-file scan: every scalar slug the
@@ -669,6 +710,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         continuousSlugs: continuousSlugs(c),
         droppedSlugs: droppedSlugs(c),
         keptSlugs: keptSlugs(c),
+        roleOverrides: roleOverrides(c),
         worldShift: effectiveShift(c),
         trajectory: c.trajectory,
       };
@@ -795,12 +837,20 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                             <select
                               data-testid="import-wizard-role"
                               value={col.imported ? col.role : 'skip'}
-                              disabled={(!col.remappable && !isScalar) || !col.imported}
+                              disabled={(!col.remappable && !col.roleAssignable && !isScalar) || !col.imported}
                               onChange={(e) => updateColumn(col.index, { role: e.target.value })}
                               className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               {(col.remappable
                                 ? ROLE_OPTIONS
+                                : col.roleAssignable
+                                  // A fixed-layout SCALAR: the layout is the
+                                  // file's, but the column's meaning is not —
+                                  // an ExtraBytes name is a vendor string we may
+                                  // not recognise. Offer the full role list
+                                  // minus the geometry roles, which genuinely
+                                  // are fixed by the reader.
+                                  ? ROLE_OPTIONS.filter((o) => !GEOMETRY_ROLES.has(o.value))
                                 : isScalar
                                   ? ROLE_OPTIONS.filter((o) => SCALAR_ROLES.has(o.value))
                                   // A dropped in-file column keeps 'Skip' as its

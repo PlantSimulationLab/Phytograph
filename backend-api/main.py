@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.67.0"
+BACKEND_VERSION = "0.68.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -411,11 +411,10 @@ def get_version():
 
 def _gpu_name() -> "str | None":
     """Best-effort human-readable GPU name via nvidia-smi (None if unavailable)."""
-    import subprocess
     try:
-        r = subprocess.run(
+        r = _spawn_run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5,
+            timeout=5,
         )
         if r.returncode == 0:
             first = r.stdout.strip().split("\n")[0].strip()
@@ -466,6 +465,80 @@ def device_info():
         "effective_path": path,
         "reason": reason,
     }
+
+
+class _SpawnResult:
+    """The three `subprocess.run` fields `_spawn_run`'s callers actually read."""
+
+    __slots__ = ("returncode", "stdout", "stderr")
+
+    def __init__(self, returncode: int, stdout: str, stderr: str):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
+    """`subprocess.run(capture_output=True)` without the fork().
+
+    Why this exists: the backend process has libhelios (GLFW via the
+    lidar->visualizer plugin), open3d and PROJ/libsqlite3 loaded, and
+    `subprocess.run` takes the fork()+exec() path -- CPython only reaches
+    `posix_spawn` when close_fds is False AND the executable is an absolute
+    path, and `capture_output=True` never satisfies the first. Forking that
+    loaded image crashes the child in the post-fork/pre-exec window while the
+    registered pthread_atfork handlers run: PROJ's handler tears down its
+    SQLite handle cache and segfaults (`SQLiteHandleCache::getHandle` ->
+    `sqlite3Close` -> `_os_log_preferences_refresh`).
+
+    The visible damage was NOT an error, because the caller's `except
+    Exception` sees a nonzero-exit child and reports the capability as absent:
+    Settings said "Docker is not running" on a machine where Docker was fine,
+    and macOS raised a "Python quit unexpectedly" dialog for every probe. Same
+    root cause as `_SegProc`, same cure -- posix_spawn never forks the loaded
+    image, so no atfork handler ever runs.
+
+    Output is collected through a temp FILE rather than a pipe: posix_spawn
+    file actions have no pipe-buffer draining, so a pipe could deadlock on a
+    chatty child. Returns a `_SpawnResult`; raises on a missing executable or a
+    blown timeout, exactly as `subprocess.run` would.
+    """
+    import tempfile
+
+    exe = shutil.which(argv[0]) if not os.path.dirname(argv[0]) else argv[0]
+    if not exe:
+        raise FileNotFoundError(argv[0])
+
+    with tempfile.TemporaryFile() as out:
+        fd = out.fileno()
+        pid = os.posix_spawn(
+            exe, [exe] + list(argv[1:]), os.environ,
+            file_actions=[
+                (os.POSIX_SPAWN_DUP2, fd, 1),
+                (os.POSIX_SPAWN_DUP2, fd, 2),
+            ],
+        )
+        deadline = time.monotonic() + timeout
+        while True:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            if time.monotonic() > deadline:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except OSError:
+                    pass
+                raise subprocess.TimeoutExpired(argv, timeout)
+            time.sleep(0.01)
+        out.seek(0)
+        data = out.read()
+
+    combined = data.decode("utf-8", "replace") if text else data
+    # stdout and stderr share one fd, so the capture is combined. Callers here
+    # only ever test the exit code or read stdout of a child that is silent on
+    # success, so handing the same text to both is faithful enough.
+    return _SpawnResult(os.waitstatus_to_exitcode(status), combined, combined)
 
 
 # ---------------------------------------------------------------------------
@@ -522,11 +595,10 @@ def _docker_present() -> bool:
     round-trips to the daemon: the CLI alone can be installed while Docker
     Desktop is stopped, which would otherwise read as available.
     """
-    import subprocess
     try:
-        r = subprocess.run(
+        r = _spawn_run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
-            capture_output=True, text=True, timeout=_RIEGL_DOCKER_TIMEOUT_S,
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
         return r.returncode == 0 and bool(r.stdout.strip())
     except Exception:
@@ -538,12 +610,29 @@ def _riegl_image_built() -> bool:
 
     It can only ever be built locally (never pulled) because building it is what
     binds the user's own RiVLib to the runtime.
+
+    Two probes, because `docker image inspect <name:tag>` is NOT reliable: with
+    Docker Desktop's containerd image store enabled, an image built locally can
+    resolve by ID while `inspect` on its name:tag answers "No such image" (the
+    tag is listed by `docker images` all the same). Trusting inspect alone made
+    a perfectly good image read as "not built", sending the user to rebuild
+    something they already had. `docker images -q <ref>` resolves the reference
+    correctly under both stores, so it is the primary probe and inspect is the
+    fallback for older CLIs.
     """
-    import subprocess
     try:
-        r = subprocess.run(
+        r = _spawn_run(
+            ["docker", "images", "-q", RIEGL_IMAGE],
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    except Exception:
+        pass
+    try:
+        r = _spawn_run(
             ["docker", "image", "inspect", RIEGL_IMAGE],
-            capture_output=True, text=True, timeout=_RIEGL_DOCKER_TIMEOUT_S,
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
         return r.returncode == 0
     except Exception:
@@ -1633,11 +1722,10 @@ def _kill_riegl_container(container_name: str, proc=None) -> None:
     terminated too so the poll loop's `communicate()` cannot block on a pipe
     that will never close.
     """
-    import subprocess
     try:
-        subprocess.run(
+        _spawn_run(
             ["docker", "kill", container_name],
-            capture_output=True, timeout=_RIEGL_DOCKER_TIMEOUT_S,
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
     except Exception:
         pass
@@ -7634,14 +7722,12 @@ def _las_to_lad_arrays(file_path: str, origin):
     dims = set(las.point_format.dimension_names)
 
     # Map LAD's slugs onto the LAS dimensions that carry them. LAS spells the
-    # per-return fields differently from our ASCII tokens, so accept either the
-    # app's own slug (round-tripped exports) or the LAS-standard name.
-    aliases = {
-        'timestamp': ('timestamp', 'gps_time'),
-        'target_index': ('target_index', 'return_number'),
-        'target_count': ('target_count', 'number_of_returns'),
-        _MISS_SLUG: (_MISS_SLUG,),
-    }
+    # per-return fields differently from our ASCII tokens, so resolve every
+    # dimension through the canonical table (`_CANONICAL_NAME_ALIASES`) rather
+    # than a local list — that local list is how `gps_time` could be understood
+    # here and not by the miss/backfill path.
+    wanted = ('timestamp', 'target_index', 'target_count', _MISS_SLUG)
+    aliases = {slug: _dims_for_slug(dims, slug) for slug in wanted}
     cache: dict = {}
     for slug, names in aliases.items():
         for name in names:
@@ -9584,8 +9670,19 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
         import laspy
         point_format = 3 if (colors is not None) else 1  # 1/3 carry intensity; 3 adds RGB
         header = laspy.LasHeader(point_format=point_format, version="1.4")
-        # Extra dimensions for any scalar columns (incl is_miss) so nothing is lost.
+        # `timestamp` rides the STANDARD gps_time field, not a float32 extra dim.
+        #
+        # Point formats 1 and 3 both carry a float64 gps_time, and that is where
+        # every other LAS reader (ours included) looks for a per-point time. As a
+        # float32 extra dim the values lose precision — ~15 us here, but 62 ms at
+        # full GPS week-seconds, enough to destroy multi-return pulse grouping —
+        # AND the standard field stays all-zero, so a re-import saw two columns:
+        # the extra dim holding the data, and the canonical channel reading zeros.
+        _ts_col = next((s for s in ordered
+                        if _canonical_slug_for_name(s) == 'timestamp'), None)
         for s in ordered:
+            if s == _ts_col:
+                continue
             header.add_extra_dim(laspy.ExtraBytesParams(name=s, type=np.float32))
         las = laspy.LasData(header)
         las.header.offsets = np.floor(xyz.min(axis=0)) if n else [0, 0, 0]
@@ -9602,6 +9699,10 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
             las.green = (c[:, 1] * 65535).astype(np.uint16)
             las.blue = (c[:, 2] * 65535).astype(np.uint16)
         for s in ordered:
+            if s == _ts_col:
+                # float64, into the standard field — see the header note above.
+                las.gps_time = np.asarray(scalars[s], dtype=np.float64)
+                continue
             las[s] = np.asarray(scalars[s], dtype=np.float32)
         ext = ".laz" if fmt == "laz" else ".las"
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
@@ -9660,13 +9761,10 @@ def _read_las_columns(file_path: str) -> dict:
         return {}
 
     dims = set(las.point_format.dimension_names)
-    aliases = {
-        'is_miss': ('is_miss',),
-        'timestamp': ('timestamp', 'gps_time'),
-        'target_index': ('target_index', 'return_number'),
-        'target_count': ('target_count', 'number_of_returns'),
-        'intensity': ('intensity',),
-    }
+    # Resolved through the canonical table, not a local copy — see the note in
+    # `_las_to_lad_arrays`.
+    wanted = ('is_miss', 'timestamp', 'target_index', 'target_count', 'intensity')
+    aliases = {slug: _dims_for_slug(dims, slug) for slug in wanted}
     out: dict = {}
     for slug, names in aliases.items():
         for name in names:
@@ -17935,9 +18033,13 @@ _MISS_ALIASES_NORMALISED = {re.sub(r'[^a-z0-9]+', '', a) for a in _MISS_ALIASES}
 
 def _normalise_miss_alias(name: str) -> Optional[str]:
     """Return `_MISS_SLUG` when `name` is any miss-flag spelling (is_miss / miss
-    / sky, case- and punctuation-insensitive), else None."""
-    base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
-    return _MISS_SLUG if base in _MISS_ALIASES_NORMALISED else None
+    / sky, case- and punctuation-insensitive), else None.
+
+    Thin wrapper over the canonical table so the miss spellings live in exactly
+    one place; kept as a named function because callers read better for it.
+    """
+    slug = _canonical_slug_for_name(name)
+    return _MISS_SLUG if slug == _MISS_SLUG else None
 
 
 # Per-pulse beam-origin triple. When all three are present these are GROUND-TRUTH
@@ -17978,9 +18080,128 @@ def _normalise_origin_alias(name: str) -> Optional[str]:
     """Return the canonical origin slug ('origin_x'/'origin_y'/'origin_z') when
     `name` is any beam-origin spelling (ox/oy/oz, xorigin/yorigin/zorigin,
     beamoriginx/y/z — case- and punctuation-insensitive), else None. Mirrors
-    `_normalise_miss_alias`, but maps to one of three axis-specific slugs."""
-    base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
-    return _ORIGIN_ALIAS_TO_SLUG.get(base)
+    `_normalise_miss_alias`, but maps to one of three axis-specific slugs.
+
+    Thin wrapper over the canonical table (see `_normalise_miss_alias`)."""
+    slug = _canonical_slug_for_name(name)
+    return slug if slug in _ORIGIN_SLUGS else None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE canonical name→slug table.
+#
+# A scalar column is only useful to Phytograph's tools once it lands under a
+# CANONICAL SLUG: Backfill Misses looks for `timestamp`, LAD's multi-return path
+# for `timestamp`/`target_index`/`target_count`, the miss filter for `is_miss`.
+# Source files spell these however their vendor pleased — RIEGL writes
+# `Reflectance`, LAS standardises `gps_time`, a Helios export writes
+# `Timestamp[s]`, and a user's own file might just say `time`.
+#
+# This table is the ONE place that knowledge lives. It previously existed in six
+# copies that did not share a source (two `aliases` dicts in the LAD readers,
+# `_normalise_miss_alias`, `_normalise_origin_alias`, `_role_from_header_name`,
+# and `role_for` in `_preview_las`), which is exactly why a `gps-time` column
+# could be recognised by the colour-by picker and simultaneously invisible to
+# Backfill Misses: each site had its own opinion and fixing one left the others
+# stale. Add a spelling HERE and every consumer gets it.
+#
+# Matching is on the NORMALISED form (see `_normalise_column_name`): unit
+# suffixes stripped (`Timestamp[s]` → `timestamp`), lower-cased, non-alphanumerics
+# removed (`gps_time`/`gps-time`/`GPS Time` → `gpstime`). So entries below are
+# written pre-normalised — no underscores, no punctuation, no capitals.
+#
+# NOTE the colour convention: this table maps colour to the '255-scale' roles
+# (`r255`/`g255`/`b255`) that the ASCII/LAS pipeline uses. The import WIZARD's
+# dropdown exposes plain `r`/`g`/`b` and handles the scale with a separate
+# per-scan toggle. The two vocabularies are deliberately distinct; do not
+# collapse them (see `ROLE_OPTIONS` in PointCloudImportWizard.tsx).
+_CANONICAL_NAME_ALIASES: "dict[str, tuple[str, ...]]" = {
+    'x': ('x', 'easting'),
+    'y': ('y', 'northing'),
+    'z': ('z', 'height', 'elevation'),
+    'r255': ('r', 'red', 'r255', 'red255'),
+    'g255': ('g', 'green', 'g255', 'green255'),
+    'b255': ('b', 'blue', 'b255', 'blue255'),
+    'intensity': ('intensity',),
+    'reflectance': ('reflectance', 'reflectivity'),
+    # Per-pulse multi-return columns. `time` is accepted because it is the
+    # obvious thing a user names the column and there is no competing meaning.
+    'timestamp': ('timestamp', 'gpstime', 'time'),
+    'target_index': ('targetindex', 'returnnumber'),
+    'target_count': ('targetcount', 'numberofreturns', 'numreturns'),
+    # Structured-scan raster indices.
+    'row_index': ('rowindex', 'row', 'scanrow', 'scanrowindex', 'rasterrow'),
+    'column_index': ('columnindex', 'column', 'col', 'scancolumn', 'scancol',
+                     'scancolumnindex', 'rastercolumn'),
+}
+# The miss flag and the beam-origin triple keep their own constants (they are
+# referenced directly elsewhere), but fold into the same table so there is still
+# exactly one lookup.
+_CANONICAL_NAME_ALIASES[_MISS_SLUG] = tuple(sorted(_MISS_ALIASES_NORMALISED))
+for _axis, _slug in enumerate(_ORIGIN_SLUGS):
+    _CANONICAL_NAME_ALIASES[_slug] = tuple(
+        a for triple in _BEAM_ORIGIN_ALIAS_SETS
+        for i_, a in enumerate(triple) if i_ == _axis
+    )
+
+# Reverse index: normalised spelling → canonical slug. Built once.
+#
+# A spelling must not map to two slugs; that would make resolution depend on
+# dict order. Asserted at import so a bad edit fails loudly at startup rather
+# than silently mis-assigning a column months later.
+_CANONICAL_ALIAS_TO_SLUG: "dict[str, str]" = {}
+for _slug, _names in _CANONICAL_NAME_ALIASES.items():
+    for _name in _names:
+        _prior = _CANONICAL_ALIAS_TO_SLUG.get(_name)
+        if _prior is not None and _prior != _slug:
+            raise RuntimeError(
+                f"ambiguous column alias {_name!r}: claimed by both "
+                f"{_prior!r} and {_slug!r} in _CANONICAL_NAME_ALIASES"
+            )
+        _CANONICAL_ALIAS_TO_SLUG[_name] = _slug
+
+
+def _normalise_column_name(name: str) -> str:
+    """Fold a source column name to its comparison form.
+
+    Strips a bracketed unit suffix (`Timestamp[s]`, `Reflectance[dB]`), lowers
+    case, and drops every non-alphanumeric character — so `gps_time`, `gps-time`,
+    `GPS Time` and `GpsTime` all collapse to `gpstime`.
+    """
+    base = re.sub(r'\[.*?\]', '', name)
+    return re.sub(r'[^a-z0-9]+', '', base.strip().lower())
+
+
+def _canonical_slug_for_name(name: str) -> Optional[str]:
+    """Canonical Phytograph slug for a source column name, or None if unknown.
+
+    None means "carry it as a plain scalar under its own name" — never a reason
+    to drop a column.
+    """
+    return _CANONICAL_ALIAS_TO_SLUG.get(_normalise_column_name(name))
+
+def _dims_for_slug(dims, slug: str) -> "tuple[str, ...]":
+    """Source dimension names that resolve to `slug`, best candidate FIRST.
+
+    A file can legitimately carry two spellings of the same quantity: Phytograph
+    exported real times in a float32 `timestamp` extra dim while leaving the LAS
+    standard `gps_time` field at zero, so both resolve to `timestamp`. `dims` is
+    a set, so without an explicit order the reader could pick the all-zero one
+    and silently import zeros.
+
+    Order: the canonical slug's own spelling first, then the remaining aliases in
+    the table's declared order. The explicit column is the more specific signal,
+    matching `role_for` in `_preview_las`.
+    """
+    present = {d for d in dims if _canonical_slug_for_name(d) == slug}
+    ordered = []
+    for cand in (slug,) + _CANONICAL_NAME_ALIASES.get(slug, ()):
+        for d in present:
+            if d not in ordered and _normalise_column_name(d) == _normalise_column_name(cand):
+                ordered.append(d)
+    ordered.extend(sorted(d for d in present if d not in ordered))
+    return tuple(ordered)
+
+
 
 
 def _canonical_drop_slugs(drop_slugs: "Optional[List[str]]") -> "tuple[str, ...]":
@@ -18041,6 +18262,99 @@ def _apply_drop_slugs(extras: "Optional[Dict[str, np.ndarray]]",
         extra_dims_meta = [ed for ed in extra_dims_meta
                            if str(ed.get("slug", "")).lower() not in drop]
     return extras, extra_dims_meta
+
+
+def _apply_role_overrides(extras: "Optional[Dict[str, np.ndarray]]",
+                          extra_dims_meta: "Optional[List[dict]]",
+                          role_overrides: "Optional[Dict[str, str]]",
+                          timestamps: "Optional[np.ndarray]" = None):
+    """Rename in-file scalar columns onto the canonical slugs the user chose.
+
+    The IN-FILE counterpart to the ASCII path's per-column role dropdown. Those
+    formats define their own layout, so there is no column position to reassign —
+    the choice arrives as `{source_slug: role}` and is applied here, at the same
+    convergence point as `_apply_drop_slugs`, before the session is built and the
+    octree rebuilt from these arrays.
+
+    Two roles are not float32 extras and are handled by the caller instead:
+    `timestamp` (float64, its own session field — precision matters for the
+    trajectory join) and the beam-origin triple. This function reports a
+    requested timestamp column back rather than moving it itself.
+
+    Returns `(extras, extra_dims_meta, timestamp_source)` where `timestamp_source`
+    is the source slug the user assigned to `timestamp`, or None.
+
+    Invariants preserved:
+      - `extras` and `extra_dims_meta` stay in LOCKSTEP — `_session_to_las`
+        indexes extras by every declared slug and KeyErrors otherwise.
+      - An exclusive role is claimed at most once; a second claim is ignored
+        (first wins), matching the wizard's own `dedupeExclusiveRoles`.
+      - A rename never silently destroys a column: if the target slug is already
+        taken by a column the user did NOT reassign, the rename is skipped.
+    """
+    if not role_overrides:
+        return extras, extra_dims_meta, None
+
+    # Normalise: source slugs are matched case-insensitively, like drop_slugs.
+    wanted = {str(k).strip().lower(): str(v).strip().lower()
+              for k, v in role_overrides.items() if k and v}
+    if not wanted:
+        return extras, extra_dims_meta, None
+
+    timestamp_source = None
+    claimed: set = set()
+    renames: "Dict[str, str]" = {}
+    for src, role in wanted.items():
+        if role in ('extra', 'label', 'skip'):
+            continue  # not a canonical role; the column keeps its own name
+        if role == 'timestamp':
+            if timestamp_source is None:
+                timestamp_source = src
+            continue
+        excl = _canonicalise_exclusive_role(role)
+        if excl is not None:
+            if excl in claimed:
+                continue  # first claim wins
+            claimed.add(excl)
+        renames[src] = role
+
+    if extras is None:
+        return extras, extra_dims_meta, timestamp_source
+
+    # Case-insensitive lookup of what the file actually gave us.
+    by_lower = {k.lower(): k for k in extras.keys()}
+    targets = {r for r in renames.values()}
+    for src, role in list(renames.items()):
+        actual = by_lower.get(src)
+        if actual is None:
+            del renames[src]          # the user named a column this file lacks
+            continue
+        # Refuse to clobber a column that is staying put under that name.
+        if role in extras and role != actual and role not in \
+                {by_lower.get(k) for k in renames}:
+            del renames[src]
+
+    if not renames:
+        return extras, extra_dims_meta, timestamp_source
+
+    lower_to_role = {k: v for k, v in renames.items()}
+    new_extras: "Dict[str, np.ndarray]" = {}
+    for k, v in extras.items():
+        new_extras[lower_to_role.get(k.lower(), k)] = v
+    new_meta = None
+    if extra_dims_meta is not None:
+        new_meta = []
+        for ed in extra_dims_meta:
+            slug = str(ed.get("slug", ""))
+            role = lower_to_role.get(slug.lower())
+            if role is None:
+                new_meta.append(ed)
+            else:
+                # Keep the file's own spelling as the label so the UI still
+                # shows the user what their file called the column.
+                new_meta.append({**ed, "slug": role,
+                                 "label": ed.get("label") or slug})
+    return new_extras, new_meta, timestamp_source
 
 
 # Singleton roles: a cloud carries exactly one column of each, so a wizard column
@@ -18418,6 +18732,20 @@ class PreviewColumn(BaseModel):
     suggested_slug: str
     type_hint: str
     remappable: bool
+    # Whether this column's ROLE can be reassigned even though the format's
+    # layout is fixed. Distinct from `remappable`, which means "the column's
+    # POSITION can be remapped" and is an ASCII-only concept.
+    #
+    # An ExtraBytes / E57 / .riproject scalar name is an arbitrary vendor string,
+    # so auto-detection cannot cover every spelling — a column called `t` or
+    # `shot_time` is the timestamp and only the user knows it. Without this the
+    # role dropdown was disabled for exactly the formats where names vary most,
+    # and Backfill Misses / LAD would then refuse the scan citing an internal
+    # slug the user never chose and could not set.
+    #
+    # False for geometry and the fixed standard dims: those genuinely ARE a
+    # defined layout, and reassigning them would break the reader.
+    role_assignable: bool = False
 
 
 class PointCloudPreviewResponse(BaseModel):
@@ -18503,61 +18831,17 @@ def _role_from_header_name(name: str) -> Optional[str]:
     'XYZ[0][m]'/'X' → x, 'Reflectance[dB]' → reflectance, 'Intensity' → intensity,
     'Red'/'R' → r255, etc. An unrecognised name returns None so the caller can
     carry it as an extra-dimension scalar (e.g. 'Deviation[]', 'Timestamp[s]').
+
+    Delegates to `_canonical_slug_for_name` — this function's only remaining job
+    is the indexed-position form, which is positional syntax rather than a name.
     """
     # Indexed position headers: 'XYZ[0][m]' → x, 'XYZ[1]' → y, 'XYZ[2]' → z.
+    # Not an alias (the same token means a different axis by index), so it stays
+    # here rather than in the table.
     m = re.match(r'\s*xyz\s*\[\s*([0-2])\s*\]', name.strip(), re.IGNORECASE)
     if m:
         return ('x', 'y', 'z')[int(m.group(1))]
-    base = re.sub(r'\[.*?\]', '', name).strip().lower()
-    base = re.sub(r'[^a-z0-9]+', '', base)
-    if base in ('x', 'easting'):
-        return 'x'
-    if base in ('y', 'northing'):
-        return 'y'
-    if base in ('z', 'height', 'elevation'):
-        return 'z'
-    if base in ('r', 'red', 'r255', 'red255'):
-        return 'r255'
-    if base in ('g', 'green', 'g255', 'green255'):
-        return 'g255'
-    if base in ('b', 'blue', 'b255', 'blue255'):
-        return 'b255'
-    if base in ('intensity',):
-        return 'intensity'
-    if base in ('reflectance', 'reflectivity'):
-        return 'reflectance'
-    # Per-pulse multi-return columns Helios's LAD path needs. Recognise the
-    # canonical names plus the common LAS aliases so a header-only ASCII export
-    # round-trips them under the canonical slug (see `_MULTI_RETURN_SLUGS`).
-    if base in ('timestamp', 'gpstime', 'time'):
-        return 'timestamp'
-    if base in ('targetindex', 'returnnumber'):
-        return 'target_index'
-    if base in ('targetcount', 'numberofreturns', 'numreturns'):
-        return 'target_count'
-    # Structured-scan raster indices (see `_GRID_INDEX_SLUGS`). Recognise the
-    # canonical slugs plus the common row/col header spellings so a scan export
-    # carrying its grid position round-trips into the recovery path.
-    if base in ('rowindex', 'row', 'scanrow', 'scanrowindex', 'rasterrow'):
-        return 'row_index'
-    if base in ('columnindex', 'column', 'col', 'scancolumn', 'scancol',
-                'scancolumnindex', 'rastercolumn'):
-        return 'column_index'
-    # Sky/miss flag (see `_MISS_ALIASES`). Pinned to the canonical `is_miss`
-    # slug so a header-carrying ASCII export round-trips the column the LAD path
-    # reads, matching the E57/structured-PLY recovery convention.
-    if base in _MISS_ALIASES_NORMALISED:
-        return _MISS_SLUG
-    # Per-pulse beam-origin triple (ox/oy/oz and aliases, see
-    # `_BEAM_ORIGIN_ALIAS_SETS`). A headered ASCII file with `ox oy oz` columns
-    # auto-maps to the canonical origin_x/y/z roles so LAD uses them directly,
-    # bypassing the trajectory join — exactly like the LAS ExtraBytes path. These
-    # are world/UTM coordinates, captured at full float64 precision (NOT as float32
-    # extras); the column-plan/streaming path keys off the canonical slug.
-    origin_slug = _normalise_origin_alias(name)
-    if origin_slug is not None:
-        return origin_slug
-    return None
+    return _canonical_slug_for_name(name)
 
 
 def _autodetect_xyz_columns(file_path: str) -> List[str]:
@@ -22522,17 +22806,42 @@ def _run_potree_converter(
 # _read_octree_metadata so the renderer can show clean picker labels
 # (e.g. slug 'Reflectance_dB' → label 'Reflectance [dB]') even on cache hits.
 _OCTREE_LABELS_FILENAME = "attribute_labels.json"
+# PotreeConverter's own name for the LAS gps_time dimension, and the DISPLAY name
+# Phytograph shows for it. The key must match what PotreeConverter writes into
+# metadata.json — it indexes the GPU buffer — while the label is what the user
+# reads in the Scans panel and the Color-by picker. Mirrors
+# OCTREE_GPS_TIME_ATTRIBUTE / the `timestamp` slug in the renderer.
+_OCTREE_GPS_TIME_ATTRIBUTE = "gps-time"
+_OCTREE_GPS_TIME_LABEL = "Timestamp"
 
 
 def _write_octree_labels(octree_dir: _Path, extra_dims: List[dict]) -> None:
     """Persist the slug→label map for an octree's extra dimensions.
 
-    No-op when there are no extra dims, so LAS/LAZ-sourced octrees don't grow
-    an empty sidecar. `extra_dims` is the list returned by `_xyz_to_las`.
+    `extra_dims` is the list returned by `_xyz_to_las`.
+
+    PotreeConverter names the per-point time column after the LAS dimension it
+    came from, `gps-time`, and that name is LOAD-BEARING: it is the key the
+    renderer looks the GPU buffer up by (`geometry.attributes[field]`), so it
+    must NOT be renamed in the octree itself — doing so silently breaks
+    colour-by, which was a real regression here.
+
+    But `gps-time` is not what a user should READ. Phytograph calls that
+    quantity `timestamp` everywhere else — the import wizard's role, the export
+    column, the tool gates — so surfacing the raw LAS spelling in the Scans
+    panel and the Color-by picker made one column look like two different
+    fields depending on which part of the UI you were in.
+
+    The sidecar is exactly the right place to reconcile that: it maps the buffer
+    key to a DISPLAY name, leaving the key itself untouched. Written for every
+    format, so LAS/LAZ, .riproject and ASCII all agree.
     """
-    if not extra_dims:
+    mapping = {ed["slug"]: ed["label"] for ed in (extra_dims or [])}
+    # The time column never rides in `extra_dims` — it is float64 and lives on
+    # its own session field — so it needs its label added explicitly.
+    mapping.setdefault(_OCTREE_GPS_TIME_ATTRIBUTE, _OCTREE_GPS_TIME_LABEL)
+    if not mapping:
         return
-    mapping = {ed["slug"]: ed["label"] for ed in extra_dims}
     (octree_dir / _OCTREE_LABELS_FILENAME).write_text(json.dumps(mapping))
 
 
@@ -22543,13 +22852,23 @@ def _read_octree_labels(octree_dir: _Path) -> dict:
     renderer falls back to showing the raw slug in that case.
     """
     p = octree_dir / _OCTREE_LABELS_FILENAME
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text())
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+    data: dict = {}
+    if p.is_file():
+        try:
+            loaded = json.loads(p.read_text())
+            if isinstance(loaded, dict):
+                data = loaded
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    # Applied on READ, not just at write time, because octrees are CACHED BY
+    # CONTENT HASH: re-importing the same file reuses the existing directory and
+    # never re-runs `_write_octree_labels`. A label added only at write time
+    # would therefore never reach any cloud a user had already imported — which
+    # is exactly how this fix appeared to do nothing after shipping.
+    #
+    # `setdefault` so a source that names the column itself still wins.
+    data.setdefault(_OCTREE_GPS_TIME_ATTRIBUTE, _OCTREE_GPS_TIME_LABEL)
+    return data
 
 
 def _read_octree_metadata(octree_dir: _Path) -> dict:
@@ -23053,18 +23372,34 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
         names = [d.name for d in pf.dimensions]
         # Present standard + extra dims; mark x/y/z and rgb/intensity roles.
         def role_for(n: str) -> str:
-            ln = n.lower()
-            if ln in ('x', 'y', 'z'):
-                return ln
-            if ln == 'red':
-                return 'r255'
-            if ln == 'green':
-                return 'g255'
-            if ln == 'blue':
-                return 'b255'
-            if ln == 'intensity':
-                return 'intensity'
-            return 'extra'
+            # Resolved through the canonical table (`_CANONICAL_NAME_ALIASES`),
+            # so the wizard agrees with what the READER will actually do — the
+            # two disagreeing is how a column could be shown as `gps_time` here
+            # and land under `timestamp` (or nowhere) after import.
+            #
+            # LAS colour dims are the 255-scale roles; the table already returns
+            # r255/g255/b255 for red/green/blue.
+            slug = _canonical_slug_for_name(n)
+            if slug is None:
+                return 'extra'
+            # A file can carry TWO spellings of the same quantity, and only one
+            # column may hold an exclusive role. Phytograph's own historical
+            # export is exactly this shape: real values in float32 extra dims
+            # (`timestamp`, `target_index`, `target_count`) alongside the LAS
+            # standard dims (`gps_time`, `return_number`, `number_of_returns`)
+            # left at zero. The wizard keeps the FIRST claimant and demotes the
+            # rest to 'skip', so if the all-zero standard dim won, the import
+            # would silently take zeros.
+            #
+            # `_dims_for_slug` puts the explicit/canonical spelling first — the
+            # same order the READER uses — so defer to it and report every other
+            # claimant as a plain scalar. Applies to every exclusive role, not
+            # just timestamp.
+            best = _dims_for_slug({d.name for d in pf.dimensions}, slug)
+            if best and best[0] != n:
+                return 'extra'
+            return slug
+
         extra_names = {d.name for d in pf.extra_dimensions}
         # Beam-origin ExtraBytes (ox/oy/oz or an alias set) are auto-consumed by
         # `_read_las_into_arrays` into the float64 `beam_origins` array — exactly
@@ -23095,6 +23430,11 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
                 suggested_label=n, suggested_slug=n if is_extra else '',
                 type_hint='categorical' if n.lower() == 'classification' else 'float',
                 remappable=False,
+                # Scalars can be reassigned; geometry cannot. An ExtraBytes name
+                # is a vendor string we may not recognise, so the user needs a
+                # way to say what it is. x/y/z are a defined layout — offering to
+                # reassign them would only create a broken import.
+                role_assignable=role not in ('x', 'y', 'z'),
             ))
         # Cheap value sample: read a small batch of points.
         try:
@@ -23237,9 +23577,14 @@ def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
         PreviewColumn(index=2, header_name='z', detected_role='z',
                       suggested_label='z', suggested_slug='', type_hint='float',
                       remappable=False),
+        # Assignable like every other scalar, matching the LAS preview: a user
+        # who wants the intensity channel treated as something else (or wants
+        # another column to BE the intensity) should not be blocked just because
+        # this reader happens to name the column itself. Geometry above stays
+        # locked — that genuinely is fixed by the reader.
         PreviewColumn(index=3, header_name='intensity', detected_role='intensity',
                       suggested_label='intensity', suggested_slug='',
-                      type_hint='float', remappable=False),
+                      type_hint='float', remappable=False, role_assignable=True),
     ]
     # The scalar columns the reader can produce, in wire order. `is_miss` is
     # omitted for the same reason E57 omits it: a system-managed flag, not a
@@ -23248,18 +23593,27 @@ def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
     for slug in _RIEGL_STREAM_ATTRS:
         if slug == 'is_miss':
             continue
+        # Resolve the role through the canonical table instead of hardcoding
+        # 'extra'. Several of these columns ARE first-class roles — reflectance,
+        # target_index, target_count — and reporting them as anonymous scalars
+        # made the wizard show "Scalar" for a column every downstream tool keys
+        # off by name (multi-return grouping, the reflectance colour mode).
+        # A column with no canonical role (amplitude, deviation, facet, …) still
+        # falls back to 'extra' and is carried under its own name.
         columns.append(PreviewColumn(
-            index=idx, header_name=slug, detected_role='extra',
+            index=idx, header_name=slug,
+            detected_role=_canonical_slug_for_name(slug) or 'extra',
             suggested_label=_RIEGL_LABELS.get(
                 slug, slug.replace('_', ' ').title()),
-            suggested_slug=slug, type_hint='float', remappable=False))
+            suggested_slug=slug, type_hint='float', remappable=False,
+            role_assignable=True))
         idx += 1
     # Time is carried in double precision as the LAD join key, so it is offered
     # like any other scalar even though it never rides in the float32 extras.
     columns.append(PreviewColumn(
-        index=idx, header_name='timestamp', detected_role='extra',
+        index=idx, header_name='timestamp', detected_role='timestamp',
         suggested_label='Timestamp', suggested_slug='timestamp',
-        type_hint='float', remappable=False))
+        type_hint='float', remappable=False, role_assignable=True))
 
     positions = sorted(
         d.name for d in Path(project_path).glob('ScanPos*') if d.is_dir()
@@ -24559,8 +24913,30 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
         name = d.name
         if name in _origin_skip:
             continue  # carried as float64 beam_origins, not a float32 scalar
-        extras[name] = np.asarray(las[name], dtype=np.float32)
-        extra_dims_meta.append({"slug": name, "label": name})
+        # An ExtraBytes name is an arbitrary vendor string — RIEGL writes
+        # `Reflectance`, another exporter `refl`. Downstream tools key off the
+        # CANONICAL slug, so carrying the raw name verbatim meant a perfectly
+        # ordinary reflectance column was invisible to the reflectance colour
+        # mode purely because of its capital R. Resolve it; keep the file's own
+        # spelling as the LABEL so the UI still shows the user what their file
+        # called it.
+        #
+        # Only when the canonical slug isn't already taken: a file carrying both
+        # `Reflectance` and `reflectance` would otherwise have the second clobber
+        # the first. First writer wins, matching `_dims_for_slug`'s ordering.
+        slug = _canonical_slug_for_name(name) or name
+        # The beam-origin slugs are only meaningful as a COMPLETE triple: the
+        # reader consumes ox/oy/oz together into float64 `beam_origins` and
+        # `_origin_skip` holds them when all three are present. Reaching here
+        # means the triple was INCOMPLETE (a lone `ox`, say), which is
+        # deliberately an ordinary scalar — renaming it to `origin_x` would
+        # advertise a triple that does not exist and could not be consumed.
+        if slug in _ORIGIN_SLUGS:
+            slug = name
+        if slug != name and slug in extras:
+            slug = name
+        extras[slug] = np.asarray(las[name], dtype=np.float32)
+        extra_dims_meta.append({"slug": slug, "label": name})
 
     # Auto-map LAS native per-pulse multi-return dimensions to the canonical
     # slugs Helios's LAD path reads (see `_MULTI_RETURN_SLUGS`). return_number
@@ -24618,6 +24994,29 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
                     if (int(las.header.global_encoding.value) & 1)
                     else 'gps_week'
                 )
+
+    # Fall back to a `timestamp` EXTRA dimension when the standard field carried
+    # nothing usable.
+    #
+    # Phytograph's own LAZ export writes exactly that shape — real times in a
+    # float32 extra dim, the standard gps_time field left at zero — so a scan
+    # exported and re-imported came back with its timestamps stranded in
+    # `extras` while the dedicated float64 field stayed None. The result was TWO
+    # visible columns: a lower-case `timestamp` holding the data, and an
+    # upper-case `Timestamp` (the canonical channel) reading all zeros.
+    #
+    # Resolved through the canonical table so any recognised spelling works, and
+    # the column is MOVED (not copied) so it cannot show up twice.
+    if timestamps is None:
+        _ts_key = next(
+            (k for k in extras if _canonical_slug_for_name(k) == 'timestamp'), None)
+        if _ts_key is not None:
+            _cand = np.asarray(extras[_ts_key], dtype=np.float64)
+            if _cand.size and np.any(_cand != _cand.flat[0]):
+                timestamps = _cand
+                del extras[_ts_key]
+                extra_dims_meta = [ed for ed in extra_dims_meta
+                                   if str(ed.get("slug", "")) != _ts_key]
 
     # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
     # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
@@ -25046,6 +25445,20 @@ class CloudSessionCreateRequest(BaseModel):
     # path's positional role='skip', which those formats can't express because
     # their layout is defined by the file rather than by the request.
     drop_slugs: Optional[List[str]] = None
+    # Per-column role reassignment for IN-FILE formats, `{source_slug: role}`.
+    #
+    # An ExtraBytes / E57 / .riproject column name is an arbitrary vendor string.
+    # Auto-detection (`_canonical_slug_for_name`) covers the spellings we know,
+    # but it cannot know that a column called `t` or `shot_time` is the
+    # timestamp — and until now the user had no way to say so: the wizard's role
+    # dropdown is disabled for these formats, so an unrecognised column could
+    # only ever be an anonymous scalar. Tools that key off a canonical slug
+    # (Backfill Misses, the LAD trajectory join, multi-return grouping) then
+    # refused the scan while naming an internal slug the user never chose.
+    #
+    # This renames the column at READ time; the source file is never modified.
+    # `{}` / None means pure auto-detection, exactly as before.
+    role_overrides: Optional[Dict[str, str]] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -25265,6 +25678,25 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         # signals, not read the column the user just removed.
         extras, extra_dims_meta = _apply_drop_slugs(
             extras, extra_dims_meta, request.drop_slugs)
+        # Rename the columns the user reassigned in the wizard. AFTER the drop
+        # pass so a column the user both dropped and renamed stays dropped, and
+        # BEFORE miss auto-detection so a column promoted to `is_miss` is seen by
+        # the detector — the same ordering rationale as the drop pass itself.
+        extras, extra_dims_meta, _ts_src = _apply_role_overrides(
+            extras, extra_dims_meta, request.role_overrides, timestamps)
+        if _ts_src is not None:
+            # `timestamp` is float64 in its own session field, not a float32
+            # extra — the LAD trajectory join and multi-return pulse grouping
+            # both need sub-microsecond precision that a float32 cast destroys
+            # (62 ms per step at full GPS week-seconds). So promoting a column to
+            # timestamp MOVES it out of extras rather than renaming it in place.
+            _src_key = next((k for k in (extras or {}) if k.lower() == _ts_src), None)
+            if _src_key is not None:
+                timestamps = np.asarray(extras[_src_key], dtype=np.float64)
+                extras = {k: v for k, v in extras.items() if k != _src_key}
+                if extra_dims_meta is not None:
+                    extra_dims_meta = [ed for ed in extra_dims_meta
+                                       if str(ed.get("slug", "")) != _src_key]
         # Intensity and colour are first-class session channels rather than
         # entries in `extras`, so they need dropping explicitly — the wizard
         # offers them a checkbox like any other column.

@@ -79,8 +79,7 @@ the file, with the first rows of real data shown underneath — and a
 dropdown at the top of each column for its role. Auto-detection fills the
 dropdowns in; you correct anything that's wrong before importing:
 
-- **Column roles** — for ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`,
-  `.asc`), each column's dropdown sets its role: **X / Y / Z**,
+- **Column roles** — each column's dropdown sets its role: **X / Y / Z**,
   **Red / Green / Blue**, **Intensity**, **Reflectance**,
   **Timestamp**, **Target Index**, **Target Count**,
   **Scan Row Index**, **Scan Column Index**, **Miss Flag**,
@@ -89,6 +88,21 @@ dropdowns in; you correct anything that's wrong before importing:
   **Label**, and **Skip** is a *singleton* — a cloud has exactly one of each —
   so assigning one to a column removes it from whichever column previously held
   it (that column drops to **Skip**).
+
+    For ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) every column is
+    freely assignable, including X / Y / Z.
+
+    For formats that carry named scalar fields (`.las`, `.laz`, `.riproject`)
+    the **geometry** columns are fixed by the file, but the scalar fields can be
+    reassigned. This matters because a scalar's name is whatever the exporting
+    software chose: Phytograph recognises the common spellings — `gps_time`,
+    `GpsTime`, `time` and `Timestamp[s]` all resolve to **Timestamp** — but it
+    cannot know that a column called `shot_time` is the same thing. Set its
+    dropdown to **Timestamp** and the tools that need one (Backfill Misses,
+    leaf-area density, multi-return grouping) will find it.
+
+    Reassigning a role only changes how Phytograph reads the column. Your
+    source file is never modified.
 - **Import (skip a column)** — every column except X / Y / Z carries an
   **Import** checkbox above its role dropdown. Untick it to leave that field
   out: its preview values grey out, and the column is never read. A skipped
@@ -97,11 +111,9 @@ dropdowns in; you correct anything that's wrong before importing:
   need keeps a cloud smaller and its field list shorter. X, Y, and Z have no
   checkbox because a cloud can't be imported without them.
 
-    Unlike the role dropdown, the checkbox works for **every** format. For
-    ASCII files it is the same thing as choosing the **Skip** role (the two
-    controls stay in sync). For formats that define their own layout
-    (`.las`, `.laz`, `.ply`, `.pcd`, `.e57`, `.ptx`, `.riproject`) the roles
-    can't be reassigned, but you can still drop individual fields this way.
+    The checkbox works for **every** format, including the ones whose roles
+    are fixed (`.ply`, `.pcd`, `.e57`, `.ptx`). For ASCII files it is the same
+    thing as choosing the **Skip** role (the two controls stay in sync).
 
     Unticking a field that other tools read — **Miss Flag**, the scan grid
     indices, or the multi-return trio — shows an inline warning naming what
@@ -216,7 +228,10 @@ dropdowns in; you correct anything that's wrong before importing:
 For `.ply`, `.pcd`, `.las`, `.laz` and `.ptx`, the column layout is defined
 inside the file, so X/Y/Z and color roles can't be reassigned — but you can still
 preview the fields, rename scalars, and switch any scalar between **Scalar**
-and **Label**. `.e57` is the one format with no sample rows: reading values out
+and **Label**. For `.las`, `.laz` and `.riproject` you can additionally assign a
+scalar its true role (see *Column roles* above), which is how you tell Phytograph
+that a field named something it doesn't recognise is really the timestamp,
+reflectance, or a multi-return column. `.e57` is the one format with no sample rows: reading values out
 of it means decoding its binary point data, so the wizard shows the structure
 only.
 

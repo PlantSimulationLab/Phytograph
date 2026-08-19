@@ -210,6 +210,23 @@ function swapScalarIntoIntensity(geometry: any, field: string): boolean {
   return true;
 }
 
+// True when the octree attribute is WIDER than a float32 (a `double` gps-time,
+// an int64 …), which is exactly the condition under which potree's decoder
+// pre-normalises the values into 0..1 before they reach the GPU buffer. See the
+// long note at the intensityRange assignment for why that matters.
+//
+// Read from potree's OWN parsed attribute table rather than the backend
+// metadata: it is the same object the decoder branched on, so the two can never
+// disagree, and it needs no extra plumbing through the octree ref.
+function isWideOctreeAttribute(octree: any, field: string): boolean {
+  const attrs = octree?.pcoGeometry?.pointAttributes?.attributes
+    ?? octree?.geometry?.pointAttributes?.attributes
+    ?? octree?.octreeGeometry?.pointAttributes?.attributes;
+  if (!Array.isArray(attrs)) return false;
+  const a = attrs.find((x: any) => x?.name === field);
+  return typeof a?.type?.size === 'number' && a.type.size > 4;
+}
+
 // Walk an octree's currently-loaded tiles and apply the scalar→intensity
 // buffer swap to each. Tiles stream in asynchronously, so this is called both
 // from the material effect (already-loaded tiles) and per-frame (newly
@@ -621,6 +638,35 @@ export function OctreePointCloud({
     }
     if (effectiveRange) {
       (m as any).intensityRange = effectiveRange;
+    }
+
+    // WIDE (>4-byte) ATTRIBUTES ARRIVE PRE-NORMALISED TO 0..1.
+    //
+    // potree's binary decoder special-cases any attribute whose type is larger
+    // than a float32, because the GPU buffer it fills is always a Float32Array
+    // and a float64 (or int64) value would lose precision on the way in:
+    //
+    //     if (attribute.type.size > 4) {
+    //       const [lo, hi] = attribute.range;
+    //       offset = lo; scale = 1 / (hi - lo);
+    //     }
+    //     buffer[i] = (value - offset) * scale;     // → 0..1
+    //
+    // So for a `double` column the shader's `intensity` attribute holds 0..1,
+    // NOT the raw values — while `effectiveRange` above was taken from the
+    // metadata's raw extrema. getIntensity() then computes
+    // (0..1 − 85.15) / 148.4 ≈ −0.57 for EVERY point, which clamps to the
+    // gradient's low texel: the cloud renders as one flat colour while the
+    // legend correctly reads 85–233. (4-byte columns skip potree's branch
+    // entirely, which is why the same data exported as a float32 extra dim
+    // colours correctly — the bug is the width, not the column.)
+    //
+    // The gradient stops are laid out on `effectiveRange`/`bandRange` below, so
+    // only the shader's value space is corrected here; the legend and the
+    // categorical band layout keep speaking in real units.
+    if (scalarActive && selectedScalarField && !labelIndexScheme
+        && isWideOctreeAttribute(octree, selectedScalarField)) {
+      (m as any).intensityRange = [0, 1];
     }
     // The labelling overlay writes DENSE PALETTE INDICES into the intensity
     // slot, so the shader's value space must be [0, n-1] to match. Without this

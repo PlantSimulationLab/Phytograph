@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
 import type { ClassPalette } from './classPalettes';
-import { OCTREE_GPS_TIME_ATTRIBUTE, TIMESTAMP_SLUG } from './pointCloudHelpers';
 import {
   importPointCloudByPath,
   importPointCloudLasLaz,
@@ -783,6 +782,9 @@ export async function parsePointCloudFromPath(
   // positional `columnPlan` can't describe — an ASCII skip rides the plan as
   // role 'skip' instead and never appears here.
   droppedSlugs?: string[] | null,
+  // Role reassignments from the wizard for an in-file format, `{slug: role}`.
+  // Only the columns the user changed; empty means pure auto-detection.
+  roleOverrides?: Record<string, string> | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -798,6 +800,7 @@ export async function parsePointCloudFromPath(
       path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
       missDistanceThreshold ?? null, origin ?? null,
       opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
+      roleOverrides ?? null,
     );
     return buildPointCloudFromOctree(meta, path, name, {
       asciiFormat,
@@ -857,6 +860,7 @@ export async function parsePointCloudsFromPath(
   origin?: [number, number, number] | null,
   opts?: ImportProgressOptions,
   droppedSlugs?: string[] | null,
+  roleOverrides?: Record<string, string> | null,
 ): Promise<ImportedScanPosition[]> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -868,6 +872,7 @@ export async function parsePointCloudsFromPath(
     const data = await parsePointCloudFromPath(
       path, asciiFormat, columnPlan, categoricalAttributes, worldShift,
       continuousAttributes, missDistanceThreshold, origin, opts, droppedSlugs,
+      roleOverrides,
     );
     return [{ data, name, scanIndex: 0 }];
   }
@@ -959,25 +964,15 @@ export function buildPointCloudFromOctree(
   const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
   const attributeLabels: Record<string, string> = {};
   for (const a of meta.attributes ?? []) {
-    // PotreeConverter names the per-point time column by its LAS dimension,
-    // `gps-time`, but EVERY Phytograph consumer keys off the slug `timestamp`:
-    // the export allowlist (_SCAN_EXPORT_SCALAR_COLUMNS), missColumnsAvailable
-    // (which gates Backfill Misses), and _MULTI_RETURN_SLUGS. Left unmapped the
-    // column is carried but invisible to all of them — it showed up in the
-    // colour-by picker under the wrong name and was absent from the export
-    // picker entirely. Normalise here, at the one seam where the octree's
-    // attribute view is built, rather than teaching each consumer both names.
-    let name = a.name;
-    if (name === OCTREE_GPS_TIME_ATTRIBUTE) {
-      // A cloud can carry BOTH: an ASCII import with an explicit `timestamp`
-      // column still gets PotreeConverter's degenerate all-zero `gps-time`
-      // alongside it. Renaming unconditionally would then either clobber the
-      // real column with zeros or offer it twice, so defer to an existing
-      // `timestamp` and drop this one — the degenerate-range check would have
-      // suppressed it anyway.
-      if (meta.attributes?.some((o) => o.name === TIMESTAMP_SLUG)) continue;
-      name = TIMESTAMP_SLUG;
-    }
+    // NOTE: the attribute name is kept EXACTLY as PotreeConverter wrote it
+    // ('gps-time', not the 'timestamp' slug). It is the key into the octree
+    // node's GPU buffer (`geometry.attributes[field]` in swapScalarIntoIntensity),
+    // so renaming it here silently breaks colour-by: the lookup misses, the swap
+    // no-ops, and the shader keeps the previous buffer — the legend reads the
+    // timestamp range while the points are still coloured by intensity.
+    // Display-name and slug normalisation belongs at the presentation layer
+    // (octreeAttributeSlug), never on the buffer key.
+    const name = a.name;
     if (Array.isArray(a.min) && Array.isArray(a.max)) {
       attributeRanges[name] = { min: a.min, max: a.max };
     }

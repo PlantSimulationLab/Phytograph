@@ -2566,6 +2566,10 @@ export interface PreviewColumn {
   suggested_slug: string;
   type_hint: string;              // integer | float | categorical | empty
   remappable: boolean;            // true for ASCII; false for PLY/PCD/LAS
+  // Whether the column's ROLE may be reassigned even though the layout is fixed
+  // (LAS/LAZ extra dims, .riproject scalars). Orthogonal to `remappable`, which
+  // is about column POSITION and is ASCII-only.
+  role_assignable?: boolean;
 }
 
 export interface PointCloudPreviewResponse {
@@ -3673,6 +3677,10 @@ export async function createCloudSession(
   // in-file formats (LAS/LAZ/PLY/PCD/E57/PTX) — an ASCII skip travels inside
   // `columnPlan` as role 'skip' and never reaches here.
   droppedSlugs?: string[] | null,
+  // Role reassignments from the wizard, `{source_slug: role}`. Only the columns
+  // the user actually changed; an in-file format's auto-detection is otherwise
+  // untouched. Empty/undefined → the previous behaviour exactly.
+  roleOverrides?: Record<string, string> | null,
 ): Promise<CloudSessionMetadata> {
   try {
     // The endpoint streams PHP1 progress markers ahead of its JSON tail, so it
@@ -3690,6 +3698,8 @@ export async function createCloudSession(
         miss_distance_threshold: missDistanceThreshold ?? null,
         origin: origin ?? null,
         drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
+        role_overrides: roleOverrides && Object.keys(roleOverrides).length
+          ? roleOverrides : null,
       },
       signal,
       600000,

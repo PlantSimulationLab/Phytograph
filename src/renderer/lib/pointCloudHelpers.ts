@@ -721,13 +721,70 @@ export function fuzzyMatch(query: string, text: string): number {
 //
 // NOTE: 'classification' is intentionally NOT filtered — it's a real LAS dim a
 // user may have segmented (ground/wood/leaf), so it stays selectable.
-// PotreeConverter emits the per-point time column under its LAS dimension name.
-// Phytograph's canonical slug for the same data is `timestamp` — what the export
-// allowlist, missColumnsAvailable and the multi-return columns all look for —
-// so the octree view is normalised onto that at build time (see
-// buildPointCloudFromOctree). These two names must stay together.
+// PotreeConverter emits the per-point time column under its LAS dimension name,
+// `gps-time`. Phytograph's canonical slug for the same data is `timestamp` —
+// what the export allowlist, missColumnsAvailable and the multi-return columns
+// all look for.
+//
+// The two names live at DIFFERENT layers and must not be conflated:
+//
+//   `gps-time`  is the octree BUFFER KEY. `swapScalarIntoIntensity` does a bare
+//               `geometry.attributes[field]` lookup, so colour-by only works if
+//               the name matches what PotreeConverter actually wrote. Renaming
+//               it in the octree view made that lookup miss and no-op, leaving
+//               the shader on the previous buffer: the legend showed the
+//               timestamp range while the points stayed coloured by intensity.
+//
+//   `timestamp` is the EXPORT/COMPUTE slug. The backend allowlist and the
+//               multi-return join key both use it.
+//
+// So the mapping happens at the presentation boundary, via these two helpers,
+// and never by rewriting the attribute name in `attributeRanges`.
 export const OCTREE_GPS_TIME_ATTRIBUTE = 'gps-time';
 export const TIMESTAMP_SLUG = 'timestamp';
+
+/** Octree buffer key → canonical Phytograph slug (identity for everything else). */
+export function octreeAttributeSlug(name: string): string {
+  return name === OCTREE_GPS_TIME_ATTRIBUTE ? TIMESTAMP_SLUG : name;
+}
+
+/**
+ * Display label for a column, given the octree's label map.
+ *
+ * The maps are keyed by the octree BUFFER name (`gps-time`), but callers hold
+ * the CANONICAL slug (`timestamp`) — the export picker renames on the way in.
+ * A direct lookup therefore misses for exactly that column, which is how the
+ * export list ended up showing a bare lowercase `timestamp` while the Scans
+ * panel and the Color-by picker both said "Timestamp".
+ *
+ * Falls back to the slug itself, so an unlabelled column still reads sensibly.
+ */
+export function displayLabelFor(
+  slug: string,
+  labels?: Record<string, string>,
+): string {
+  if (!labels) return slug;
+  if (labels[slug] !== undefined) return labels[slug];
+  const bufferKey = slugToOctreeAttribute(slug, Object.keys(labels));
+  return labels[bufferKey] ?? slug;
+}
+
+/** Canonical slug → octree buffer key. Inverse of `octreeAttributeSlug`. */
+export function slugToOctreeAttribute(
+  slug: string,
+  available: Iterable<string>,
+): string {
+  if (slug !== TIMESTAMP_SLUG) return slug;
+  // Only remap when the octree really carries PotreeConverter's spelling: an
+  // ASCII import can have a genuine `timestamp` attribute of its own.
+  for (const a of available) {
+    if (a === TIMESTAMP_SLUG) return TIMESTAMP_SLUG;
+  }
+  for (const a of available) {
+    if (a === OCTREE_GPS_TIME_ATTRIBUTE) return OCTREE_GPS_TIME_ATTRIBUTE;
+  }
+  return slug;
+}
 
 export const OCTREE_BUILTIN_ATTRIBUTES = new Set([
   'position', 'rgb', 'rgba', 'color', 'intensity',
@@ -1477,5 +1534,19 @@ export function importedColumnsFor(scan: {
   for (const geom of ['position', 'rgb', 'rgba', 'color', 'normal', 'indices', 'spacing']) {
     names.delete(geom);
   }
-  return [...names].sort((a, b) => a.localeCompare(b));
+  // Show the DISPLAY label, not the raw octree buffer key.
+  //
+  // The keys are PotreeConverter's own attribute names, and for the time column
+  // that is `gps-time` — an implementation detail of the LAS dimension it was
+  // read from. Phytograph calls that quantity `timestamp` in the import wizard,
+  // the export picker and every tool gate, and the Color-by dropdown already
+  // renders the label. Listing the raw key here made one column read as two
+  // different fields depending on which panel you were looking at.
+  //
+  // The labels map is keyed by the same buffer name, so this is a pure display
+  // substitution — nothing downstream keys off this list.
+  const labels = scan.data?.octree?.attributeLabels ?? {};
+  return [...names]
+    .map((n) => labels[n] ?? n)
+    .sort((a, b) => a.localeCompare(b));
 }

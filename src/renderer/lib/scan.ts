@@ -1,3 +1,4 @@
+import { octreeAttributeSlug } from './pointCloudHelpers';
 import type { PointCloudData } from './pointCloudTypes';
 import type { ScanParameters } from './scanParameters';
 
@@ -56,8 +57,18 @@ type WithData = { data?: PointCloudData };
 export function columnSlugs(scan: WithData): Set<string> {
   const slugs = new Set<string>();
   const oct = scan.data?.octree;
-  for (const k of Object.keys(oct?.attributeLabels ?? {})) slugs.add(k);
-  for (const k of Object.keys(oct?.attributeRanges ?? {})) slugs.add(k);
+  // Normalise the octree's BUFFER KEYS onto canonical slugs. PotreeConverter
+  // names the time column by its LAS dimension, `gps-time`, but every predicate
+  // here (and the backend) keys off `timestamp` — so without this a scan whose
+  // timestamps round-tripped through the LAS gps_time field reported no
+  // timestamp column at all, and Backfill Misses refused it with "no column
+  // 'timestamp'" while the Color-by picker happily listed `gps-time`.
+  //
+  // The buffer key itself must NOT be renamed at the source: it indexes the GPU
+  // buffer (see octreeAttributeSlug's note). Mapping it here, where the question
+  // is "which columns does this cloud carry?", keeps both layers correct.
+  for (const k of Object.keys(oct?.attributeLabels ?? {})) slugs.add(octreeAttributeSlug(k));
+  for (const k of Object.keys(oct?.attributeRanges ?? {})) slugs.add(octreeAttributeSlug(k));
   for (const k of Object.keys(scan.data?.scalarFields ?? {})) slugs.add(k);
   return slugs;
 }

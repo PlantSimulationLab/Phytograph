@@ -43,8 +43,18 @@ def _write_multireturn_xyz(path: Path) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
-def _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta):
-    """Build a CloudSession directly from in-RAM arrays (no octree)."""
+def _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta,
+                         timestamps=None):
+    """Build a CloudSession directly from in-RAM arrays (no octree).
+
+    `timestamps` mirrors what `create_cloud_session` does with
+    `LasReadResult.timestamps`: the per-point time lives on its own float64
+    field, NOT in the float32 `extras`, because a float32 cast has a 62 ms step
+    at full GPS week-seconds and would destroy multi-return pulse grouping.
+    Forwarding it here keeps the helper faithful to the production path — it
+    previously dropped the field, so a reader change that (correctly) moved the
+    column out of `extras` looked like a regression.
+    """
     n = len(positions)
     return main.CloudSession(
         session_id="testsess",
@@ -56,6 +66,7 @@ def _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta):
         intensity=intensity,
         extras=extras,
         extra_dims_meta=extra_dims_meta,
+        timestamps=timestamps,
         deleted=np.zeros(n, dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -74,7 +85,8 @@ def _session_from_xyz(xyz_path: Path, tmp_path: Path):
     intensity = _r.intensity
     extras = _r.extras
     extra_dims_meta = _r.extra_dims_meta
-    return _session_from_arrays(positions, colors, intensity, extras, extra_dims_meta)
+    return _session_from_arrays(positions, colors, intensity, extras,
+                                extra_dims_meta, _r.timestamps)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +168,14 @@ def test_ascii_import_preserves_multireturn_extras(tmp_path):
     sess = _session_from_xyz(f, tmp_path)
 
     assert len(sess.positions) == len(_MULTI_ROWS)
+    # `timestamp` lives on the dedicated float64 field, NOT in the float32
+    # extras: a float32 cast has a 62 ms step at full GPS week-seconds, which
+    # would collapse the very pulse grouping these columns exist for.
+    assert sess.timestamps is not None, "timestamp was not carried"
+    assert len(sess.timestamps) == len(_MULTI_ROWS)
     for slug in main._MULTI_RETURN_SLUGS:
+        if slug == "timestamp":
+            continue
         assert slug in sess.extras, f"missing extra {slug}"
         assert len(sess.extras[slug]) == len(_MULTI_ROWS)
 
@@ -187,10 +206,20 @@ def test_multireturn_extras_survive_delete_and_bake(tmp_path):
     sess.positions = sess.positions[keep]
     for slug in list(sess.extras.keys()):
         sess.extras[slug] = sess.extras[slug][keep]
+    # The dedicated timestamps field must be compacted in LOCKSTEP with the
+    # positions — `_session_to_lad_arrays` length-guards it and silently falls
+    # back to the float32 extra if they disagree, so a missed re-slice degrades
+    # precision instead of erroring.
+    if sess.timestamps is not None:
+        sess.timestamps = sess.timestamps[keep]
     sess.deleted = np.zeros(len(sess.positions), dtype=bool)
 
     assert len(sess.positions) == expected_remaining
+    assert sess.timestamps is not None
+    assert len(sess.timestamps) == expected_remaining
     for slug in main._MULTI_RETURN_SLUGS:
+        if slug == "timestamp":
+            continue
         assert len(sess.extras[slug]) == expected_remaining
     # The multi-return pulse is untouched by the delete.
     assert sess.extras["target_count"].max() > 1

@@ -1,3 +1,4 @@
+import { octreeAttributeSlug } from './pointCloudHelpers';
 // Column model for point-cloud / scan export. The export modal lets the user pick
 // which fields become columns — for every format except the fixed-schema ones
 // (OBJ carries geometry only; E57 and PTX define their own layout — PTX's is a
@@ -205,7 +206,11 @@ export function defaultExportColumns(
     // separately below so it keeps its dedicated slug and ordering.
     if (_OCTREE_NON_SCALAR.has(lower) || _OCTREE_COLOR_NAMES.has(lower)) continue;
     if (lower === 'intensity') continue;
-    if (!seen.has(name)) { seen.add(name); scalarSlugs.push(name); }
+    // Map PotreeConverter's buffer key onto the canonical export slug — the
+    // backend allowlist keys off `timestamp`, so offering the column as
+    // `gps-time` would export a name the writer then ignores.
+    const slug = octreeAttributeSlug(name);
+    if (!seen.has(slug)) { seen.add(slug); scalarSlugs.push(slug); }
   }
   for (const tok of fmtTokens) {
     if (_GEO_COLOR_TOKENS.has(tok) || tok === 'skip') continue;

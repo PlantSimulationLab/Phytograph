@@ -218,3 +218,142 @@ describe('PointCloudImportWizard — per-column Import checkbox', () => {
     expect((onComplete2.mock.calls[0][0][0] as WizardResult).categoricalSlugs).toEqual([]);
   });
 });
+
+// An in-file layout whose scalars may be ROLE-REASSIGNED (LAS/LAZ extra dims,
+// .riproject scalars). The layout is still the file's — geometry stays locked —
+// but a column's MEANING is not, because an ExtraBytes name is an arbitrary
+// vendor string. `shot_time` is the case that motivated this: auto-detection
+// cannot know it is the timestamp, and before this the user had no way to say
+// so, leaving Backfill Misses and LAD refusing the scan.
+const ASSIGNABLE_COLUMNS = [
+  col({ index: 0, header_name: 'X', detected_role: 'x', remappable: false }),
+  col({ index: 1, header_name: 'Y', detected_role: 'y', remappable: false }),
+  col({ index: 2, header_name: 'Z', detected_role: 'z', remappable: false }),
+  col({ index: 3, header_name: 'shot_time', detected_role: 'extra', remappable: false,
+        role_assignable: true, suggested_slug: 'shot_time', suggested_label: 'shot_time' }),
+  col({ index: 4, header_name: 'Amplitude', detected_role: 'extra', remappable: false,
+        role_assignable: true, suggested_slug: 'Amplitude', suggested_label: 'Amplitude' }),
+];
+
+/** The role <select> inside the cell for source column `index`. */
+function roleSelect(index: number): HTMLSelectElement | null {
+  const cell = document.querySelector(`[data-testid="import-wizard-column"][data-col-index="${index}"]`);
+  return cell?.querySelector('[data-testid="import-wizard-role"]') as HTMLSelectElement ?? null;
+}
+
+describe('PointCloudImportWizard — role assignment on fixed-layout formats', () => {
+  it('offers the full role list for an assignable scalar, minus geometry', async () => {
+    await open(ASSIGNABLE_COLUMNS, 'las');
+    const sel = roleSelect(3)!;
+    const values = [...sel.options].map((o) => o.value);
+
+    // The point of the feature: the canonical roles are reachable.
+    expect(values).toContain('timestamp');
+    expect(values).toContain('target_index');
+    expect(values).toContain('is_miss');
+    expect(values).toContain('reflectance');
+    // Still offered as a plain scalar / droppable.
+    expect(values).toContain('extra');
+    expect(values).toContain('label');
+    // Geometry is genuinely fixed by the reader — reassigning it would only
+    // produce a broken import.
+    expect(values).not.toContain('x');
+    expect(values).not.toContain('y');
+    expect(values).not.toContain('z');
+    expect(sel.disabled).toBe(false);
+  });
+
+  it('keeps geometry columns locked', async () => {
+    await open(ASSIGNABLE_COLUMNS, 'las');
+    // X/Y/Z are not role_assignable, so the select stays disabled.
+    expect(roleSelect(0)!.disabled).toBe(true);
+  });
+
+  it('sends only the column the user actually changed', async () => {
+    const onComplete = await open(ASSIGNABLE_COLUMNS, 'las');
+    fireEvent.change(roleSelect(3)!, { target: { value: 'timestamp' } });
+    submit();
+
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.roleOverrides).toEqual({ shot_time: 'timestamp' });
+    // Amplitude was left alone: pinning an untouched column would freeze it
+    // against any future improvement to auto-detection.
+    expect(result.roleOverrides).not.toHaveProperty('Amplitude');
+  });
+
+  it('sends nothing for a no-edit import', async () => {
+    const onComplete = await open(ASSIGNABLE_COLUMNS, 'las');
+    submit();
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.roleOverrides).toEqual({});
+  });
+
+  it('does not pin a column the backend ALREADY auto-detected', async () => {
+    // The load-bearing case for the untouched-column guard, and the one the
+    // all-'extra' fixture above cannot catch: this column arrives with a real
+    // canonical role. Echoing it back as an override would freeze today's
+    // detection into the request, so a later improvement to auto-detection
+    // (a new alias, a fixed misread) would be silently overridden by a choice
+    // the user never made.
+    const cols = [
+      col({ index: 0, header_name: 'X', detected_role: 'x', remappable: false }),
+      col({ index: 1, header_name: 'Y', detected_role: 'y', remappable: false }),
+      col({ index: 2, header_name: 'Z', detected_role: 'z', remappable: false }),
+      col({ index: 3, header_name: 'gps_time', detected_role: 'timestamp',
+            remappable: false, role_assignable: true,
+            suggested_slug: 'gps_time', suggested_label: 'gps_time' }),
+    ];
+    const onComplete = await open(cols, 'las');
+    submit();
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.roleOverrides).toEqual({});
+  });
+
+  it('sends the override when the user CHANGES an auto-detected role', async () => {
+    // The complement: the same column, actually reassigned, must be sent.
+    const cols = [
+      col({ index: 0, header_name: 'X', detected_role: 'x', remappable: false }),
+      col({ index: 1, header_name: 'Y', detected_role: 'y', remappable: false }),
+      col({ index: 2, header_name: 'Z', detected_role: 'z', remappable: false }),
+      col({ index: 3, header_name: 'gps_time', detected_role: 'timestamp',
+            remappable: false, role_assignable: true,
+            suggested_slug: 'gps_time', suggested_label: 'gps_time' }),
+      col({ index: 4, header_name: 'other', detected_role: 'extra',
+            remappable: false, role_assignable: true,
+            suggested_slug: 'other', suggested_label: 'other' }),
+    ];
+    const onComplete = await open(cols, 'las');
+    fireEvent.change(roleSelect(4)!, { target: { value: 'timestamp' } });
+    submit();
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.roleOverrides).toEqual({ other: 'timestamp' });
+  });
+
+  it('does not send extra/label as an override', async () => {
+    // They are not canonical roles — they only pick gradient vs discrete
+    // colouring, which the rename box already expresses.
+    const onComplete = await open(ASSIGNABLE_COLUMNS, 'las');
+    fireEvent.change(roleSelect(4)!, { target: { value: 'label' } });
+    submit();
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.roleOverrides).toEqual({});
+  });
+
+  it('a dropped column travels in droppedSlugs, not as an override', async () => {
+    const onComplete = await open(ASSIGNABLE_COLUMNS, 'las');
+    fireEvent.change(roleSelect(3)!, { target: { value: 'timestamp' } });
+    fireEvent.click(includeBox(3)!);   // then untick it
+    submit();
+
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.roleOverrides).toEqual({});
+    expect(result.droppedSlugs.length).toBeGreaterThan(0);
+  });
+
+  it('still restricts a NON-assignable in-file scalar to Scalar/Label', async () => {
+    // The pre-existing behaviour for formats we have not opened up (PLY/PCD).
+    await open(LAS_COLUMNS, 'las');
+    const values = [...roleSelect(3)!.options].map((o) => o.value);
+    expect(values.sort()).toEqual(['extra', 'label']);
+  });
+});

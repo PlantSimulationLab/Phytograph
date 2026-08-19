@@ -1017,7 +1017,7 @@ describe('parsePointCloudFromPath', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain('/api/cloud/session/create');
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null });
+    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null, role_overrides: null });
   });
 
   it('forwards the wizard column plan, carrying a skipped column as role "skip"', async () => {
