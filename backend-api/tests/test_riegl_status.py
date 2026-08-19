@@ -814,3 +814,122 @@ def test_per_request_path_overrides_environment(client, monkeypatch, tmp_path):
     ).json()
     assert b["rivlib_path"] == str(rivlib)
     assert b["available"] is True
+
+
+# ---------------------------------------------------------------------------
+# The probes must never fork() — see _spawn_run in main.py
+# ---------------------------------------------------------------------------
+#
+# The backend has libhelios (GLFW), open3d and PROJ/libsqlite3 loaded, and
+# fork()+exec() crashes the child in the post-fork/pre-exec window while the
+# registered pthread_atfork handlers run (PROJ tears down its SQLite handle
+# cache and segfaults). The damage was silent: the probe's `except Exception`
+# turned the dead child into "Docker is not running" on a machine where Docker
+# was healthy, and macOS raised a "Python quit unexpectedly" dialog per probe.
+#
+# Asserting on the *symptom* (no crash dialog) is not testable in-process, so
+# these lock the mechanism that causes it: the fork-based subprocess entry
+# points are never reached.
+
+
+def _forbid_fork(monkeypatch):
+    """Make any fork-based subprocess launch an immediate, loud failure."""
+    import subprocess as _sp
+
+    # BaseException, not AssertionError: every probe wraps its call in a bare
+    # `except Exception`, which would swallow the failure and let the test pass
+    # against the very code it is meant to catch.
+    class _Forked(BaseException):
+        pass
+
+    def _boom(*a, **k):
+        raise _Forked(
+            "probe used a fork()-based subprocess; must use _spawn_run"
+        )
+
+    monkeypatch.setattr(main, "_ForkGuard", _Forked, raising=False)
+
+    monkeypatch.setattr(_sp, "run", _boom)
+    monkeypatch.setattr(_sp, "Popen", _boom)
+    monkeypatch.setattr(os, "fork", _boom, raising=False)
+
+
+def test_docker_probe_does_not_fork(monkeypatch):
+    _forbid_fork(monkeypatch)
+    # Real call, real docker binary lookup: asserts only that it answers
+    # without forking, not what the answer is (CI may or may not have Docker).
+    try:
+        assert isinstance(main._docker_present(), bool)
+    except main._ForkGuard as e:
+        raise AssertionError(str(e)) from None
+
+
+def test_image_probe_does_not_fork(monkeypatch):
+    _forbid_fork(monkeypatch)
+    try:
+        assert isinstance(main._riegl_image_built(), bool)
+    except main._ForkGuard as e:
+        raise AssertionError(str(e)) from None
+
+
+def test_status_endpoint_does_not_fork(monkeypatch, client):
+    _forbid_fork(monkeypatch)
+    try:
+        res = client.get("/api/riegl/status")
+    except main._ForkGuard as e:
+        raise AssertionError(str(e)) from None
+    assert res.status_code == 200
+    assert res.json()["reason"]
+
+
+def test_spawn_run_reports_exit_code_and_output():
+    """_spawn_run must be a faithful stand-in for subprocess.run's fields."""
+    ok = main._spawn_run(["echo", "phytograph"], timeout=10)
+    assert ok.returncode == 0
+    assert "phytograph" in ok.stdout
+
+    bad = main._spawn_run(["sh", "-c", "exit 3"], timeout=10)
+    assert bad.returncode == 3
+
+
+def test_spawn_run_missing_executable_raises():
+    import pytest
+    with pytest.raises(FileNotFoundError):
+        main._spawn_run(["phytograph-no-such-binary-xyz"], timeout=5)
+
+
+def test_spawn_run_times_out():
+    import pytest
+    import subprocess as _sp
+    with pytest.raises(_sp.TimeoutExpired):
+        main._spawn_run(["sleep", "5"], timeout=0.3)
+
+
+def test_image_probe_survives_containerd_inspect_miss(monkeypatch):
+    """`docker image inspect name:tag` lies under the containerd image store.
+
+    With Docker Desktop's containerd image store enabled, a locally-built image
+    resolves by ID and is listed by `docker images`, yet `image inspect` on its
+    name:tag answers "No such image". Trusting inspect alone reported a present
+    image as missing and told the user to rebuild what they already had.
+    """
+    calls = []
+
+    def fake_spawn(argv, timeout=10.0, text=True):
+        calls.append(argv)
+        if argv[1] == "images":            # `docker images -q <ref>` resolves it
+            return main._SpawnResult(0, "974cc428e166\n", "")
+        return main._SpawnResult(1, "", "No such image")  # inspect misses
+
+    monkeypatch.setattr(main, "_spawn_run", fake_spawn)
+    assert main._riegl_image_built() is True
+    assert any(a[1] == "images" for a in calls)
+
+
+def test_image_probe_false_when_truly_absent(monkeypatch):
+    """Both probes missing still means absent — the fallback must not rubber-stamp."""
+    def fake_spawn(argv, timeout=10.0, text=True):
+        return main._SpawnResult(1, "", "No such image")
+
+    monkeypatch.setattr(main, "_spawn_run", fake_spawn)
+    assert main._riegl_image_built() is False

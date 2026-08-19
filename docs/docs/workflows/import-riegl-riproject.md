@@ -152,6 +152,13 @@ That same toast always reminds you the scans are unregistered.
 : The chosen folder isn't a RiVLib root. Pick the level containing `bin/`,
   `include/` and `lib/`.
 
+**"Docker is not running" while Docker Desktop is clearly up.**
+: Fixed in v0.68.0. Older builds probed Docker with a call that forked the
+  backend process; with the LiDAR and PROJ libraries loaded, the forked child
+  crashed before it could run `docker`, which the probe read as "Docker
+  absent" (and macOS reported as *"Python quit unexpectedly"*). Update, or
+  restart the app if you are on the current version.
+
 **The import is slower than RiSCAN PRO.**
 : Expected. RiVLib runs natively there; here it runs under x86 emulation inside
   a container, and Phytograph additionally builds a level-of-detail octree so
