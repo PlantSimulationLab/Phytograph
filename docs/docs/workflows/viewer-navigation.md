@@ -107,6 +107,10 @@ In the right-side properties panel, toggle:
 - **Axes** — the bottom-left orientation gizmo. On by default; turn it off
   to clear the corner.
 - **Scan markers** — the scanner position markers in the 3D view.
+- **Origin marker** — the red-and-white ring that marks the
+  [scene origin](clean-point-cloud.md#setting-the-scene-origin). Unchecking it hides the
+  marker (and its gizmo); the pivot itself is unchanged. It stays hidden on an
+  empty viewport regardless, so it never covers the import prompt.
 
 The **orientation gizmo** in the bottom-left corner (red = X, green = Y,
 blue = Z) always tracks the current camera orientation; click its axis

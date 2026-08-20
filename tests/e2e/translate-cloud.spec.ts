@@ -669,6 +669,19 @@ test.describe('translate cloud', () => {
     return panel;
   }
 
+  // The "Origin marker" checkbox now lives with Grid/Axes in the Display panel
+  // (it's a viewport display setting, not an origin setting), which starts
+  // collapsed — so open it once and hand back the checkbox.
+  async function originMarkerCheckbox() {
+    const { page } = session;
+    const box = page.getByTestId('display-origin-marker');
+    if (!(await box.isVisible())) {
+      await page.getByRole('button', { name: 'Display' }).click();
+      await expect(box).toBeVisible();
+    }
+    return box;
+  }
+
   // Read the three origin inputs as numbers. Requires the panel to be open.
   async function readOriginFields(): Promise<[number, number, number]> {
     const { page } = session;
@@ -755,7 +768,8 @@ test.describe('translate cloud', () => {
     await expect(panel).toBeVisible();
     // No override yet, but the fields are populated and the marker is drawn.
     await expect(panel).toHaveAttribute('data-has-origin', 'false');
-    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    await expect(page.locator('[data-scene-bounds-size]'))
+      .toHaveAttribute('data-origin-marker-visible', 'true');
 
     const origin = await readOriginFields();
     const viewerEl = page.locator('[data-scene-bounds-size]');
@@ -800,10 +814,10 @@ test.describe('translate cloud', () => {
 
     // Disarm click-to-place: this test's viewport clicks are about marker
     // selection, and an armed picker would swallow them.
-    const panel = await openSceneOriginPanel({ armed: false });
-    // The origin still exists and is editable — only its marker is suppressed.
-    await expect(panel).toHaveAttribute('data-marker-visible', 'false');
+    await openSceneOriginPanel({ armed: false });
     const viewer = page.locator('[data-scene-bounds-size]');
+    // The origin still exists and is editable — only its marker is suppressed.
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'false');
     // Empty scene: bounds fall back to a ±5 box at the world origin, so the
     // ground-anchored default origin is laterally (0,0) and vertically that
     // box's floor.
@@ -822,7 +836,7 @@ test.describe('translate cloud', () => {
     await importTiny();
     await expect(page.getByTestId('empty-viewer-hint')).toBeHidden();
     await openSceneOriginPanel({ armed: false });
-    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'true');
     const loaded = await worldToScreen(await readOriginFields());
     await clickMarkerAt(loaded.x + RING_PX, loaded.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
@@ -909,7 +923,7 @@ test.describe('translate cloud', () => {
     await importTiny();
 
     // Disarm click-to-place — this test clicks the marker, not the picker.
-    const panel = await openSceneOriginPanel({ armed: false });
+    await openSceneOriginPanel({ armed: false });
     const origin = await readOriginFields();
     const viewer = page.locator('[data-scene-bounds-size]');
 
@@ -919,8 +933,9 @@ test.describe('translate cloud', () => {
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
 
     // Hiding the marker drops the selection AND the hit target...
-    await page.getByTestId('scene-origin-show-marker').uncheck();
-    await expect(panel).toHaveAttribute('data-marker-visible', 'false');
+    const markerBox = await originMarkerCheckbox();
+    await markerBox.uncheck();
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'false');
     await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
     await clickMarkerAt(p.x + RING_PX, p.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
@@ -928,8 +943,8 @@ test.describe('translate cloud', () => {
     // ...while the origin itself is untouched.
     expect(await readOriginFields()).toEqual(origin);
 
-    await page.getByTestId('scene-origin-show-marker').check();
-    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    await markerBox.check();
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'true');
     await page.getByTestId('scene-origin-close').click();
   });
 

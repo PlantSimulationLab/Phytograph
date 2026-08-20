@@ -111,13 +111,15 @@ In the **Scene Origin** panel you can:
 - Type exact **X / Y / Z** world coordinates.
 - **Center on selection** — snap the origin to the middle of the selected
   cloud(s).
-- **Show origin marker** — uncheck to hide the marker (and its gizmo). The
-  pivot itself is unchanged; it just stops drawing over your scene.
 - **Reset to scene center** — drop your placement and return the origin to
   its default: laterally the middle of the loaded scene, vertically its base.
 
 The origin returns to that default when you start a new scene
 (**File → New**).
+
+To hide the marker (and its gizmo) without moving the pivot, uncheck
+**Origin marker** in the **Display** panel in the lower-right corner, where it
+sits with the other viewport toggles.
 
 ## Crop
 

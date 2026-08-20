@@ -15245,6 +15245,10 @@ export default function PointCloudViewer({
       // showing its translation gizmo). The gizmo lives in the canvas and has no
       // DOM of its own, so this is the only way to assert on it.
       data-origin-selected={originSelected ? 'true' : 'false'}
+      // Test hook: whether the scene-origin marker is actually drawn. Its
+      // checkbox lives in the Display panel, but the marker also stands down on
+      // an empty scene, so the checkbox alone doesn't tell you.
+      data-origin-marker-visible={showOriginMarker && sceneHasContent ? 'true' : 'false'}
       // Record the press location so onPointerMissed can reject orbit-drags
       // (native event has no R3F `delta`). Bubbles up from the canvas.
       onPointerDown={(e) => { viewportPointerDownRef.current = { x: e.clientX, y: e.clientY }; }}
@@ -19267,11 +19271,6 @@ export default function PointCloudViewer({
             origin={sceneOrigin}
             isCustom={sceneOriginOverride !== null}
             placeMode={originPlaceMode}
-            showMarker={showOriginMarker}
-            // The marker stands down on an empty viewport (it would sit on top of
-            // the "Drag scan files here" hint), so say so rather than showing a
-            // ticked box next to nothing.
-            markerSuppressed={!sceneHasContent}
             canMoveToSelection={canMoveToSelection}
             onCoordChange={(axis, value) => {
               // Base on the EFFECTIVE origin, so editing one axis of the default
@@ -19282,7 +19281,6 @@ export default function PointCloudViewer({
               setSceneOriginOverride(next);
             }}
             onTogglePlaceMode={() => setOriginPlaceMode(m => !m)}
-            onToggleShowMarker={() => setShowOriginMarker(v => !v)}
             onMoveToSelection={() => {
               const c = selectionCenter();
               if (c) setSceneOriginOverride(c);
@@ -19749,6 +19747,20 @@ export default function PointCloudViewer({
               <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
                 <input data-testid="display-scan-markers" type="checkbox" checked={showScanMarkers} onChange={(e) => setShowScanMarkers(e.target.checked)} className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500" />
                 Scan markers
+              </label>
+              {/* The scene-origin marker. Hiding it leaves the pivot itself
+                  untouched — only the gizmo and its click target go away. On an
+                  empty viewport the marker stands down regardless (it would sit
+                  on top of the "Drag scan files here" hint), so say so rather
+                  than showing a ticked box next to nothing. */}
+              <label
+                className={`flex items-center gap-2 ${sceneHasContent ? 'text-neutral-300 cursor-pointer' : 'text-neutral-500 cursor-default'}`}
+                title={sceneHasContent
+                  ? 'Show the scene-origin marker in the viewport (the pivot itself is unchanged)'
+                  : 'The origin marker is hidden until something is loaded'}
+              >
+                <input data-testid="display-origin-marker" type="checkbox" checked={showOriginMarker} onChange={(e) => setShowOriginMarker(e.target.checked)} className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500" />
+                Origin marker
               </label>
             </div>
           </div>
