@@ -29,7 +29,10 @@ import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { RieglProjectDialog } from "./components/RieglProjectDialog";
+import {
+  RieglProjectDialog,
+  type RieglProjectSelection,
+} from "./components/RieglProjectDialog";
 import StatusPill from "./components/StatusPill";
 import { getSettings } from "./lib/store";
 import { isRieglProjectPath, parseRieglProgress } from "./lib/rieglProject";
@@ -1363,10 +1366,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // needs no RIEGL-specific handling at all.
   const [rieglProjectPath, setRieglProjectPath] = useState<string | null>(null);
   const [rieglRivlibPath, setRieglRivlibPath] = useState<string | null>(null);
-  const rieglResolveRef = useRef<((scans: string[] | null) => void) | null>(null);
+  const rieglResolveRef = useRef<
+    ((selection: RieglProjectSelection | null) => void) | null
+  >(null);
 
   const chooseRieglScans = useCallback(
-    (path: string): Promise<string[] | null> =>
+    (path: string): Promise<RieglProjectSelection | null> =>
       new Promise((resolve) => {
         rieglResolveRef.current = resolve;
         setRieglProjectPath(path);
@@ -1374,12 +1379,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     [],
   );
 
-  // `presetPath` skips the picker: a dropped .riproject folder already knows
+  // `presetPath` skips the picker: a dropped RIEGL project folder already knows
   // its path (see onDropCapture), and re-prompting would be absurd.
   const handleImportRieglProject = useCallback(async (presetPath?: string) => {
     const picked = presetPath ?? await window.electronAPI?.dialog.open({
       directory: true,
-      title: 'Select a RIEGL project (.riproject)',
+      title: 'Select a RIEGL project (.riproject or .PROJ)',
     });
     if (typeof picked !== 'string' || !picked) return;
 
@@ -1390,9 +1395,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // The dialog runs the inspect itself so its own spinner covers the wait,
     // and it surfaces a 503 (Docker down / RiVLib unset) inline rather than as
     // a toast detached from the thing the user just clicked.
-    const chosen = await chooseRieglScans(picked);
+    const selection = await chooseRieglScans(picked);
     setRieglProjectPath(null);
-    if (!chosen || chosen.length === 0) return;
+    if (!selection || selection.scans.length === 0) return;
+    const chosen = selection.scans;
 
     // Let the user pick which scalars to keep, as every other path-backed
     // import does. One wizard step covers the whole project: the reader
@@ -1402,7 +1408,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       { path: picked, fileName: picked.split('/').pop() ?? 'RIEGL project' },
     ]);
     if (!wizard) return;
-    // `.riproject` is a fixed-layout format, so the choice arrives as
+    // A RIEGL project is a fixed-layout format, so the choice arrives as
     // `droppedSlugs` (the wizard's Import checkboxes) rather than inside a
     // positional column plan, which is always null here. The extract endpoint
     // takes a KEEP list, so invert: everything the preview offered, minus the
@@ -1440,7 +1446,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               fraction,
             };
           }),
-      });
+      }, selection.frame);
       if (importCancelledRef.current) return;
 
       // The backend already built a cloud session (and its octree) for every
@@ -1468,8 +1474,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             new Set([...scans.map((sc) => sc.color), ...newScans.map((sc) => sc.color)]),
           ),
           data,
-          // The scan pattern from the position's .pat file, its instrument, and
-          // the GNSS origin prior all ride in on scan_params.
+          // The scan pattern (.pat or .scn), the instrument, the origin and —
+          // on a registered import — the pose decomposed into heading and tilt
+          // all ride in on scan_params.
           params: s.scan_params
             ? scanParametersFromFile(s.scan_params)
             : undefined,
@@ -1480,10 +1487,23 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       if (newScans.length > 0 && !importCancelledRef.current) {
         handleAddScans(newScans);
         const warned = project.scans.filter((s: RieglScanPosition) => s.warning);
+        // Say what actually happened. A .PROJ is routinely a MIX — some
+        // positions surveyed, some falling back to a metre-level prior — so a
+        // blanket "run ICP" is as unhelpful as a blanket "they're aligned".
+        const placed = okScans.filter(
+          (s: RieglScanPosition) => s.registration === 'registered',
+        ).length;
+        const unplaced = newScans.length - placed;
+        const alignment =
+          selection.frame === 'registered' && placed > 0
+            ? unplaced > 0
+              ? `${placed} placed by the project's registration; ${unplaced} from a metre-level prior — run ICP on those.`
+              : 'Placed by the project\u2019s own registration — no ICP needed.'
+            : 'Scans are unregistered — run ICP to align them.';
         showToast({
           title: `Imported ${newScans.length} RIEGL scan position${newScans.length > 1 ? 's' : ''}`,
           message:
-            'Scans are unregistered — run ICP to align them.' +
+            alignment +
             (warned.length ? ` ${warned.length} had multi-return warnings.` : ''),
           type: warned.length ? 'warning' : 'success',
         });
@@ -2123,8 +2143,9 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       onDropCapture={(e) => {
         try {
           const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
-          // A dropped .riproject is a DIRECTORY. react-dropzone expands a
-          // folder into its contents, so by `onDrop` it has already become ~100
+          // A dropped RIEGL project (.riproject or .PROJ) is a DIRECTORY.
+          // react-dropzone expands a folder into its contents, so by `onDrop`
+          // it has already become ~100
           // .rxp/.jpg/.ppm files and the generic importer rejects every one of
           // them ("Unsupported file format: .ppm"). This capture phase sees the
           // un-expanded entry, which is the only place the folder can still be

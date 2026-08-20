@@ -8,6 +8,28 @@ describe('isRieglProjectPath', () => {
     expect(isRieglProjectPath('/data/SCAN.RIPROJECT')).toBe(true);
   });
 
+  it('matches a .PROJ from a newer instrument', () => {
+    // Newer instruments (VZ-2000i and friends) write .PROJ, conventionally
+    // upper-case on disk.
+    expect(isRieglProjectPath('/data/2024-07-18.PROJ')).toBe(true);
+    expect(isRieglProjectPath('/data/2024-07-18.PROJ/')).toBe(true);
+    expect(isRieglProjectPath('/data/2024-07-18.proj')).toBe(true);
+  });
+
+  it('does NOT match files inside a .PROJ', () => {
+    // A .PROJ nests its scans TWO levels deep, so there is more inside it to be
+    // mistaken for the project than there was in a .riproject.
+    expect(
+      isRieglProjectPath('/p.PROJ/ScanPos001.SCNPOS/scans/240718_102357.rxp'),
+    ).toBe(false);
+    expect(
+      isRieglProjectPath('/p.PROJ/ScanPos001.SCNPOS/scans/240718_102357.rdbx'),
+    ).toBe(false);
+    expect(isRieglProjectPath('/p.PROJ/ScanPos001.SCNPOS')).toBe(false);
+    expect(isRieglProjectPath('/p.PROJ/project.json')).toBe(false);
+    expect(isRieglProjectPath('/p.PROJ/Voxels1.VPP/VPP.vop')).toBe(false);
+  });
+
   it('does NOT match files inside the project', () => {
     // THE REPORTED BUG: dropping the folder expanded it into ~100 files, each
     // rejected by the generic importer ("Unsupported file format: .ppm").
@@ -22,6 +44,11 @@ describe('isRieglProjectPath', () => {
   it('does not match unrelated point clouds', () => {
     expect(isRieglProjectPath('/data/cloud.las')).toBe(false);
     expect(isRieglProjectPath('/data/riproject.las')).toBe(false);
+    expect(isRieglProjectPath('/data/proj.las')).toBe(false);
+    // ".proj" is a common enough word that a substring match would be a real
+    // hazard; only a genuine suffix counts.
+    expect(isRieglProjectPath('/data/myproject')).toBe(false);
+    expect(isRieglProjectPath('/data/cloud.projected.las')).toBe(false);
   });
 
   it('is safe on empty input', () => {

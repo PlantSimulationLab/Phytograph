@@ -422,8 +422,36 @@ export async function buildRieglImage(
 }
 
 /** One scan position inside a raw RIEGL project. */
+/**
+ * How well a scan position is placed.
+ *
+ * - `registered` — a real registration result (a .PROJ's plane or voxel .sopv).
+ *   Placed to the registration's own accuracy, millimetres in practice.
+ * - `prior` — only the inclinometer/compass/GNSS estimate. Metre-level; the
+ *   user should refine it with ICP.
+ * - `none` — no pose at all: an aborted acquisition, or any .riproject, which
+ *   carries no registration whatsoever.
+ */
+export type RieglRegistration = 'registered' | 'prior' | 'none';
+
+export type RieglFrame = 'local' | 'registered';
+
 export interface RieglScanPosition {
   name: string;
+  /** How this position is placed — see RieglRegistration. */
+  registration?: RieglRegistration;
+  /**
+   * SOCS -> project-frame transform as a 4x4, row-major. Present only for a
+   * .PROJ, and only when the position has a pose. The backend applies it; this
+   * is here so the UI can describe the placement.
+   */
+  sop?: number[][];
+  /**
+   * project.json's own verdict on this position's registration, kept distinct
+   * from `registration`: a position can be absent from the manifest entirely
+   * (an aborted acquisition) and still hold perfectly good point data.
+   */
+  manifest_success?: boolean | null;
   /**
    * The cloud session the backend built for this position, present after
    * extraction. The importer streams points straight into a session — no
@@ -434,10 +462,17 @@ export interface RieglScanPosition {
   /** Exact after extraction; a bounded probe read during inspect. */
   point_count?: number;
   point_count_probed?: number;
+  /**
+   * Approximate count from the .rxp's size. A .PROJ preview reads no points at
+   * all (all its metadata is in JSON sidecars), so this is the only figure
+   * available before extraction — approximate, not a floor like
+   * `point_count_probed`.
+   */
+  point_count_estimated?: number;
   size_bytes?: number;
   max_returns_per_pulse?: number;
   instrument?: { model?: string; serial?: string };
-  /** The commanded scan pattern from the position's .pat file. */
+  /** The commanded scan pattern, from the position's .pat or .scn file. */
   scan_params?: ScanParamsFromFile & {
     theta_increment?: number;
     phi_increment?: number;
@@ -465,28 +500,44 @@ export interface RieglProject {
     longitude: number;
     height_m: number;
   } | null;
+  /** Which layout the backend detected. */
+  layout?: 'riproject' | 'proj';
+  /** The reader container's contract version. */
+  reader_version?: number;
+  /** The frame the points were placed in. */
+  frame?: RieglFrame;
   /**
-   * ALWAYS false for a raw project. Raw scanner data carries no registration
-   * (that is what RiSCAN PRO produces), so every position sits in its own
-   * frame; the GNSS-derived `origin_prior` is a metres-level seed for ICP, not
-   * a placement. The import UI must not imply otherwise.
+   * Whether ANY position carried a real registration. Always false for a
+   * .riproject: raw scanner data carries no registration (that is what RiSCAN
+   * PRO produces), so every position sits in its own frame and the
+   * GNSS-derived `origin_prior` is a metres-level seed for ICP, not a
+   * placement. A .PROJ reports what it actually found — check
+   * `registered_count` and each position's `registration`, because a project
+   * is routinely a mix.
    */
   registered: boolean;
+  /** How many positions carried a real registration. */
+  registered_count?: number;
   scans: RieglScanPosition[];
   /** Extraction only: the directory holding the written LAS files. */
   extract_dir?: string;
 }
 
-/** List a raw RIEGL project's scan positions without extracting point data. */
+/** List a RIEGL project's scan positions without extracting point data. */
 export async function inspectRieglProject(
   projectPath: string,
   rivlibPath: string | null,
   signal?: AbortSignal,
+  frame: RieglFrame = 'registered',
 ): Promise<RieglProject> {
   const res = await fetch(`${getBackendUrl()}/api/riegl/project/inspect`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project_path: projectPath, rivlib_path: rivlibPath }),
+    body: JSON.stringify({
+      project_path: projectPath,
+      rivlib_path: rivlibPath,
+      frame,
+    }),
     signal,
   });
   if (!res.ok) {
@@ -517,6 +568,12 @@ export async function extractRieglProject(
    */
   keepColumns?: string[] | null | ImportProgressOptions,
   opts?: ImportProgressOptions,
+  /**
+   * `registered` applies each position's SOP so a .PROJ's scans land
+   * pre-aligned; `local` keeps scanner-local coordinates, which is all a
+   * .riproject can offer and what a user wanting the exact LAD raster picks.
+   */
+  frame: RieglFrame = 'registered',
 ): Promise<RieglProject> {
   // Tolerate the options object being passed in the keepColumns position.
   // A caller written against the older 4-arg signature does exactly that, and
@@ -539,6 +596,7 @@ export async function extractRieglProject(
       scans,
       rivlib_path: rivlibPath,
       keep_columns: keep,
+      frame,
     },
     options?.signal,
     // ~14 M points per position, plus LAS writing, under x86 emulation: a

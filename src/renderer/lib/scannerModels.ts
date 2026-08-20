@@ -132,6 +132,8 @@ export type ScannerModelId =
   | 'generic'
   | 'riegl_vz400i'
   | 'riegl_vz1000'
+  | 'riegl_vz2000i'
+  | 'riegl_vz_series'
   | 'leica_p40'
   | 'leica_blk360'
   | 'leica_blk360_g2'
@@ -263,6 +265,58 @@ export const SCANNER_MODELS: ScannerModel[] = [
       // the laser PRR rather than the effective measurement rate; the latter is
       // what this field means elsewhere, so the datasheet figure is used.
       pulseRateHz: 122000,
+    },
+  },
+  {
+    id: 'riegl_vz2000i',
+    label: 'RIEGL VZ-2000i',
+    // Shares the V-Line body mesh with the VZ-400i and VZ-1000, for the reason
+    // given on the VZ-1000: one housing family, close enough in proportion that
+    // a separate model would be noise.
+    meshUrl: rieglVzUrl,
+    meshFormat: 'obj',
+    // The family figure, not a VZ-2000i datasheet value — the shared mesh is
+    // scaled to it, so it sets the marker's apparent size and nothing else.
+    heightMeters: 0.308,
+    preset: {
+      pattern: 'raster',
+      // Full-waveform pulsed TLS, like the rest of the V-Line.
+      returnMode: 'multi',
+      maxReturns: 15,
+      // Vertical (line) FOV 100°, horizontal (frame) 360°. Verified against a
+      // real acquisition's .scn, which commands thetaStart 30 / thetaStop 130
+      // and phi 0–360 — RIEGL's own pattern for this instrument.
+      zenithMinDeg: 30,
+      zenithMaxDeg: 130,
+      azimuthMinDeg: 0,
+      azimuthMaxDeg: 360,
+      // Beam divergence and pulse rate are deliberately ABSENT. This instrument
+      // reports them per scan program: the reference capture ran the "300 kHz"
+      // program and reported pulse_repetition_rate = 300,671 Hz, which is the
+      // laser PRR, not the effective measurement rate this field means
+      // elsewhere. Pinning either to a single constant would be a guess, so the
+      // form default stands — the same call the VZ-400i makes on exit aperture.
+    },
+  },
+  {
+    id: 'riegl_vz_series',
+    label: 'RIEGL VZ-series',
+    // A body for a V-Line scanner we have no specific entry for (VZ-600i,
+    // VZ-4000, …). It exists so such a scan gets a plausible instrument marker
+    // instead of the neutral sphere, WITHOUT claiming a model number it cannot
+    // support: labelling a VZ-600i "VZ-400i" would put a wrong figure in the
+    // scan info panel and in the exported <scannerModel>. Give it its own
+    // entry, and add the real model when one turns up.
+    meshUrl: rieglVzUrl,
+    meshFormat: 'obj',
+    heightMeters: 0.308,
+    preset: {
+      // Only what the whole line shares. No sweep and no optics: those genuinely
+      // differ across the series (the long-range VZ-4000/VZ-6000 do not use the
+      // 100° vertical FOV the shorter-range models do), and this entry stands in
+      // for an instrument we have not identified.
+      pattern: 'raster',
+      returnMode: 'multi',
     },
   },
   {

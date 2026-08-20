@@ -110,7 +110,7 @@ nav:
       - Getting around:
           - Import & export: workflows/import-export.md
           - Export from RiPROCESS: workflows/export-from-riprocess.md
-          - Import a RIEGL raw project: workflows/import-riegl-riproject.md
+          - Import a RIEGL project: workflows/import-riegl-project.md
           - Viewer navigation: workflows/viewer-navigation.md
       - 1. Pre-processing:
           - Clean a point cloud: workflows/clean-point-cloud.md

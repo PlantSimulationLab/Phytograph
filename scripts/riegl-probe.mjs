@@ -1,4 +1,4 @@
-// Reads a RIEGL raw project (.riproject) by running RIEGL's closed-source
+// Reads a RIEGL project (.riproject or .PROJ) by running RIEGL's closed-source
 // RiVLib inside a linux/amd64 container. This is Phase 1 of the RIEGL import
 // work: it proves the read path end-to-end with no Phytograph involvement, and
 // doubles as the tool for checking whether a given project is readable.
@@ -15,13 +15,13 @@
 // bullseye base image expects.
 //
 // Usage:
-//   node scripts/riegl-probe.mjs <project.riproject>
-//   node scripts/riegl-probe.mjs <project.riproject> --count-points   # exact totals (slower)
-//   node scripts/riegl-probe.mjs <project.riproject> --json           # raw JSON
+//   node scripts/riegl-probe.mjs <project.riproject|.PROJ>
+//   node scripts/riegl-probe.mjs <project.riproject|.PROJ> --count-points   # exact totals (slower)
+//   node scripts/riegl-probe.mjs <project.riproject|.PROJ> --json           # raw JSON
 //
 //   # extract to LAS (Phase 2) — all positions, or a chosen subset:
-//   node scripts/riegl-probe.mjs <project.riproject> --out ./extracted
-//   node scripts/riegl-probe.mjs <project.riproject> --out ./extracted \
+//   node scripts/riegl-probe.mjs <project.riproject|.PROJ> --out ./extracted
+//   node scripts/riegl-probe.mjs <project.riproject|.PROJ> --out ./extracted \
 //        --scans ScanPos001 ScanPos003
 //
 // Configuration:
@@ -314,7 +314,7 @@ function report(data, countPoints) {
     console.log('Anchor:   — (no GNSS fix in any scan)');
   }
 
-  const countLabel = countPoints ? 'points' : 'points(probed)';
+  const countLabel = countPoints ? 'points' : 'points(approx)';
   console.log(
     `\n${'scan'.padEnd(12)}${countLabel.padStart(15)}` +
       `${'E (m)'.padStart(10)}${'N (m)'.padStart(10)}${'U (m)'.padStart(9)}  instrument`,
@@ -326,7 +326,12 @@ function report(data, countPoints) {
       console.log(`${s.name.padEnd(12)}  ERROR: ${s.error}`);
       continue;
     }
-    const count = countPoints ? s.point_count : s.point_count_probed;
+    // A .PROJ needs no point decoding to be inspected, so it reports an
+    // estimate from the file size rather than a probed floor. Fall back to it,
+    // or the column is empty for every position of a .PROJ.
+    const count = countPoints
+      ? s.point_count
+      : (s.point_count_probed ?? s.point_count_estimated);
     const enu = s.enu;
     const e = enu ? enu.east_m.toFixed(2).padStart(10) : '—'.padStart(10);
     const n = enu ? enu.north_m.toFixed(2).padStart(10) : '—'.padStart(10);
@@ -362,7 +367,7 @@ function main() {
   if (!args.project) {
     fail(
       'no project given.',
-      'Usage: node scripts/riegl-probe.mjs <project.riproject> [--count-points] [--json]',
+      'Usage: node scripts/riegl-probe.mjs <project.riproject|.PROJ> [--count-points] [--json]',
     );
   }
 

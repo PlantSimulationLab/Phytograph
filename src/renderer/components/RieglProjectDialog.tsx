@@ -1,28 +1,79 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { X, Loader2, AlertTriangle } from 'lucide-react';
-import { inspectRieglProject, type RieglProject } from '../utils/backendApi';
+import {
+  inspectRieglProject,
+  type RieglFrame,
+  type RieglProject,
+  type RieglScanPosition,
+} from '../utils/backendApi';
+
+export interface RieglProjectSelection {
+  scans: string[];
+  frame: RieglFrame;
+}
 
 export interface RieglProjectDialogProps {
-  /** Absolute path to the .riproject directory, or null when closed. */
+  /** Absolute path to the .riproject / .PROJ directory, or null when closed. */
   projectPath: string | null;
   rivlibPath: string | null;
-  /** Resolves with the chosen scan-position names, or null if cancelled. */
-  onResolve: (scans: string[] | null) => void;
+  /** Resolves with the chosen positions and frame, or null if cancelled. */
+  onResolve: (selection: RieglProjectSelection | null) => void;
 }
 
 /**
- * Scan-position picker for a raw RIEGL project.
+ * Scan-position picker for a RIEGL project (.riproject or .PROJ).
  *
- * A .riproject holds several scan positions and a user rarely wants all of
- * them — each is ~750 MB of LAS once extracted, so choosing up front avoids
+ * A project holds several scan positions and a user rarely wants all of them —
+ * each is hundreds of megabytes once decoded, so choosing up front avoids
  * minutes of work per unwanted position.
  *
- * The dialog also carries the one thing about raw RIEGL data that will surprise
- * people: the scans are UNREGISTERED. They come off the scanner in their own
- * frames, and the GNSS-derived layout shown here is a metres-level prior for
- * seeding ICP — not a placement. Saying so before the import is cheaper than
- * explaining a pile of overlapping clouds afterwards.
+ * The dialog also carries the thing about the data that will surprise people,
+ * which differs by layout:
+ *
+ *   .riproject — the scans are UNREGISTERED. They come off the scanner in their
+ *     own frames, and the GNSS-derived layout shown here is a metres-level prior
+ *     for seeding ICP, not a placement.
+ *   .PROJ — registration is present but usually PARTIAL. In the reference olive
+ *     project only 9 of 24 positions registered; the rest fall back to the
+ *     inclinometer/GNSS prior and still want ICP. Showing that per position
+ *     beats explaining a partly-aligned pile afterwards.
+ *
+ * Inspect always runs in the `registered` frame regardless of the checkbox
+ * below, because that is what yields the SOPs the plan view draws. The checkbox
+ * only decides what the EXTRACT is asked for, so toggling it costs no round
+ * trip.
  */
+
+const REGISTRATION_BADGE: Record<
+  string,
+  { label: string; title: string; className: string }
+> = {
+  registered: {
+    label: 'registered',
+    title: 'Placed by the project\u2019s own registration result.',
+    className: 'text-lime-400',
+  },
+  prior: {
+    label: 'prior only',
+    title:
+      'No registration result — placed from the inclinometer/compass/GNSS ' +
+      'estimate, which is accurate to about a metre. Refine with ICP.',
+    className: 'text-amber-400',
+  },
+  none: {
+    label: 'no pose',
+    title: 'No pose at all — this position imports at the origin.',
+    className: 'text-amber-400',
+  },
+};
+
+/** Plan-view position: the surveyed pose when there is one, else the GNSS prior. */
+function planPoint(s: RieglScanPosition): { e: number; n: number } | null {
+  if (s.sop) return { e: s.sop[0][3], n: s.sop[1][3] };
+  if (s.enu) return { e: s.enu.east_m, n: s.enu.north_m };
+  return null;
+}
+
 export function RieglProjectDialog({
   projectPath,
   rivlibPath,
@@ -31,18 +82,26 @@ export function RieglProjectDialog({
   const [project, setProject] = useState<RieglProject | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Opt OUT of registration, not into it: a project that carries poses should
+  // use them by default, and the user who wants the exact scanner-local LAD
+  // raster is the one making the deliberate choice.
+  const [keepLocal, setKeepLocal] = useState(false);
 
   useEffect(() => {
     if (!projectPath) {
       setProject(null);
       setError(null);
       setSelected(new Set());
+      setKeepLocal(false);
       return;
     }
     const controller = new AbortController();
     setProject(null);
     setError(null);
-    inspectRieglProject(projectPath, rivlibPath, controller.signal)
+    // Always 'registered': this is what makes the reader resolve each SOP, which
+    // is what the plan view and the per-position badges are drawn from. The
+    // frame the user picks applies to the extract, not to this preview.
+    inspectRieglProject(projectPath, rivlibPath, controller.signal, 'registered')
       .then((p) => {
         setProject(p);
         // Default to everything: a user who opened the project probably wants
@@ -65,14 +124,16 @@ export function RieglProjectDialog({
     });
   }, []);
 
-  // Plan-view extents of the GNSS layout, used to normalise the mini-map.
+  // Plan-view extents, used to normalise the mini-map. Drawn from the surveyed
+  // poses where a project has them and the GNSS prior otherwise, so a .PROJ
+  // shows its real geometry rather than a metres-level approximation of it.
   const layout = useMemo(() => {
     const pts = (project?.scans ?? [])
-      .map((s) => s.enu)
-      .filter((e): e is { east_m: number; north_m: number; up_m: number } => !!e);
+      .map(planPoint)
+      .filter((pt): pt is { e: number; n: number } => !!pt);
     if (pts.length === 0) return null;
-    const es = pts.map((p) => p.east_m);
-    const ns = pts.map((p) => p.north_m);
+    const es = pts.map((p) => p.e);
+    const ns = pts.map((p) => p.n);
     const pad = 2;
     return {
       minE: Math.min(...es) - pad,
@@ -86,6 +147,13 @@ export function RieglProjectDialog({
 
   const scans = project?.scans ?? [];
   const anyGnss = scans.some((s) => s.gnss);
+  const isProj = project?.layout === 'proj';
+  const registeredCount = scans.filter(
+    (s) => s.registration === 'registered',
+  ).length;
+  // A .PROJ is imported registered unless the user opts out; a .riproject has
+  // no pose to apply, so it is always scanner-local whatever the checkbox says.
+  const useRegistered = isProj && !keepLocal;
   // Positions that CAN be imported. A failed read is shown (so its error is
   // visible) but is never selectable, so it must not count toward "all".
   const selectableNames = scans.filter((s) => !s.error).map((s) => s.name);
@@ -175,7 +243,23 @@ export function RieglProjectDialog({
                     </span>
                   </label>
                   {scans.map((s) => {
-                    const count = s.point_count ?? s.point_count_probed;
+                    // Three tiers of certainty, and the prefix says which:
+                    // exact after extraction, a floor from a bounded probe, or
+                    // an estimate from the file size when nothing was decoded
+                    // (a .PROJ preview reads no points at all).
+                    const count =
+                      s.point_count ??
+                      s.point_count_probed ??
+                      s.point_count_estimated;
+                    const countPrefix =
+                      s.point_count != null
+                        ? ''
+                        : s.point_count_probed != null
+                          ? '\u2265'
+                          : '~';
+                    const badge = s.registration
+                      ? REGISTRATION_BADGE[s.registration]
+                      : undefined;
                     const sp = s.scan_params;
                     return (
                       <label
@@ -210,9 +294,7 @@ export function RieglProjectDialog({
                               <>
                                 {count != null && (
                                   <>
-                                    {/* An inspect only probes a prefix, so the
-                                        count is a floor, not a total. */}
-                                    {s.point_count != null ? '' : '≥'}
+                                    {countPrefix}
                                     {count.toLocaleString('en-US')} pts
                                   </>
                                 )}
@@ -223,20 +305,32 @@ export function RieglProjectDialog({
                                     {sp.phi_min}–{sp.phi_max}°
                                   </>
                                 )}
-                                {/* Whether this position has a GNSS fix decides
-                                    where its cloud lands: with one it is placed
-                                    at its surveyed offset, without one it
-                                    imports at the origin on top of everything
-                                    else. Worth knowing per-scan, before the
-                                    import rather than after. */}
+                                {/* What decides where this cloud lands. On a
+                                    registered import that is the pose and how
+                                    it was obtained; otherwise it is whether
+                                    there is a GNSS fix at all, since without
+                                    one the position imports at the origin on
+                                    top of everything else. Either way it is
+                                    worth knowing per-scan BEFORE the import. */}
                                 {' · '}
-                                <span
-                                  data-testid={`riegl-scan-gnss-${s.name}`}
-                                  data-gnss={s.gnss ? 'true' : 'false'}
-                                  className={s.gnss ? 'text-neutral-500' : 'text-amber-400'}
-                                >
-                                  {s.gnss ? 'GNSS ✓' : 'no GNSS'}
-                                </span>
+                                {useRegistered && badge ? (
+                                  <span
+                                    data-testid={`riegl-scan-registration-${s.name}`}
+                                    data-registration={s.registration}
+                                    title={badge.title}
+                                    className={badge.className}
+                                  >
+                                    {badge.label}
+                                  </span>
+                                ) : (
+                                  <span
+                                    data-testid={`riegl-scan-gnss-${s.name}`}
+                                    data-gnss={s.gnss ? 'true' : 'false'}
+                                    className={s.gnss ? 'text-neutral-500' : 'text-amber-400'}
+                                  >
+                                    {s.gnss ? 'GNSS ✓' : 'no GNSS'}
+                                  </span>
+                                )}
                               </>
                             )}
                           </div>
@@ -256,16 +350,15 @@ export function RieglProjectDialog({
                     className="w-40 h-40 shrink-0 rounded bg-neutral-900/60 border border-neutral-700"
                   >
                     {scans.map((s) => {
-                      if (!s.enu) return null;
+                      const pt = planPoint(s);
+                      if (!pt) return null;
                       const x =
-                        ((s.enu.east_m - layout.minE) /
-                          (layout.maxE - layout.minE)) *
+                        ((pt.e - layout.minE) / (layout.maxE - layout.minE)) *
                         100;
                       // SVG y grows downward; north should point up.
                       const y =
                         100 -
-                        ((s.enu.north_m - layout.minN) /
-                          (layout.maxN - layout.minN)) *
+                        ((pt.n - layout.minN) / (layout.maxN - layout.minN)) *
                           100;
                       const on = selected.has(s.name);
                       return (
@@ -282,17 +375,67 @@ export function RieglProjectDialog({
                 )}
               </div>
 
+              {/* Only a .PROJ has poses to apply, so the choice is only shown
+                  where it exists. Offering it on a .riproject would imply an
+                  alignment that raw scanner data simply does not carry. */}
+              {isProj && (
+                <label
+                  data-testid="riegl-frame-toggle"
+                  data-keep-local={keepLocal ? 'true' : 'false'}
+                  className="mt-4 flex items-start gap-2 px-2 py-2 rounded bg-neutral-900/50 border border-neutral-700/60 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    data-testid="riegl-keep-local"
+                    checked={keepLocal}
+                    onChange={(e) => setKeepLocal(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span className="text-[11px] text-neutral-400">
+                    <span className="text-neutral-300">
+                      Keep scanner-local coordinates
+                    </span>
+                    <span className="block mt-0.5">
+                      Imports each position unregistered, in its own frame, as a
+                      .riproject does. Leaf Area Density models a scan as an
+                      origin plus a &theta;/&phi; sweep with no tilt, so this is
+                      the exact case for it &mdash; at the cost of scans that
+                      are not aligned to each other and ground that is not
+                      level.
+                    </span>
+                  </span>
+                </label>
+              )}
+
               <div className="mt-4 space-y-1.5 text-[11px] text-amber-300/90">
                 <div className="flex items-start gap-1.5">
                   <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
-                  <span data-testid="riegl-unregistered-warning">
-                    These scans are <strong>not registered</strong>. Raw scanner
-                    data has no alignment, so each position imports into its own
-                    frame
-                    {anyGnss
-                      ? ', offset by its GNSS fix — a metres-level starting point for ICP, not a placement.'
-                      : '. No GNSS fix was found, so all positions import at the origin.'}
-                  </span>
+                  {useRegistered ? (
+                    <span data-testid="riegl-registration-summary">
+                      <strong>
+                        {registeredCount} of {scans.length}
+                      </strong>{' '}
+                      position(s) carry a registration and are placed from it.
+                      {registeredCount < scans.length && (
+                        <>
+                          {' '}
+                          The rest fall back to the scanner&rsquo;s own
+                          inclinometer/GNSS estimate &mdash; accurate to about a
+                          metre, so refine them with ICP.
+                        </>
+                      )}
+                    </span>
+                  ) : (
+                    <span data-testid="riegl-unregistered-warning">
+                      These scans are <strong>not registered</strong>.
+                      {isProj
+                        ? ' The project\u2019s registration is being skipped at your request, so each position imports into its own frame'
+                        : ' Raw scanner data has no alignment, so each position imports into its own frame'}
+                      {anyGnss
+                        ? ', offset by its GNSS fix — a metres-level starting point for ICP, not a placement.'
+                        : '. No GNSS fix was found, so all positions import at the origin.'}
+                    </span>
+                  )}
                 </div>
                 <div className="text-neutral-500 pl-5">
                   Sky/miss points are recovered from the scanner's per-shot
@@ -318,7 +461,12 @@ export function RieglProjectDialog({
             <button
               data-testid="riegl-dialog-import"
               disabled={selected.size === 0}
-              onClick={() => onResolve([...selected])}
+              onClick={() =>
+                onResolve({
+                  scans: [...selected],
+                  frame: useRegistered ? 'registered' : 'local',
+                })
+              }
               className="px-3 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Import {selected.size > 0 ? selected.size : ''}

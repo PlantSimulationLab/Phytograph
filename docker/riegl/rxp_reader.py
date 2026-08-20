@@ -1,4 +1,4 @@
-"""Read RIEGL raw scanner projects (.riproject) via RiVLib's scanifc C API.
+"""Read RIEGL raw scanner projects (.riproject and .PROJ) via RiVLib's scanifc C API.
 
 Runs INSIDE the container built by the Dockerfile beside this file; RiVLib is
 bind-mounted at /rivlib. Nothing here imports from the Phytograph backend — the
@@ -24,10 +24,29 @@ WHERE EACH PIECE OF METADATA ACTUALLY LIVES — this cost real digging, so:
     "status protocol")`, which writes the housekeeping stream to a text file as
     a side effect of reading points.
 
-COORDINATES ARE SCANNER-LOCAL. Raw projects carry no registration (that is what
-RiSCAN PRO produces), so every scan position is its own frame with the origin at
-the scanner. The GNSS fix is what lets the caller lay positions out relative to
-one another; it is a metres-level prior for ICP, not survey-grade truth.
+TWO PROJECT LAYOUTS, ONE DECODE PATH. Both are directories of scan positions
+whose points are .rxp, so everything from _Scanifc down is shared and only
+discovery and metadata differ:
+
+  * .riproject — the older on-instrument layout. Flat `ScanPosNNN/` folders
+    holding `<stamp>.rxp` + `<stamp>.pat`. No manifest, no registration.
+  * .PROJ      — the newer layout (VZ-2000i and friends). `ScanPosNNN.SCNPOS/`
+    holding `scans/<stamp>.rxp` + `<stamp>.scn`, beside a `project.json`
+    manifest and per-position pose/SOP sidecars. Registration IS present.
+
+The .PROJ also writes a `<stamp>.rdbx` (RIEGL's MTA-resolved RDB2 cloud) beside
+each .rxp. We deliberately read the .rxp instead: the .rdbx needs RIEGL's
+separate rdblib SDK as a second licensed dependency, and it contains no
+no-return shots — which is exactly what collect_misses recovers and what LAD
+needs. MTA ambiguity is not a concern at the ranges this is used for (the
+reference project's unambiguous range is 497 m against a 142 m scan extent).
+
+COORDINATE FRAMES. A .riproject carries no registration (that is what RiSCAN PRO
+produces), so every scan position is its own frame with the origin at the
+scanner, and its GNSS fix is a metres-level prior for ICP rather than
+survey-grade truth. A .PROJ carries real SOPs, so `--frame registered` places
+each position in the project frame directly; see load_sop for the chain and
+decompose_sop for how the rotation is folded into ScanParameters.
 """
 
 from __future__ import annotations
@@ -339,6 +358,232 @@ def parse_pat(path: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# .scn — the commanded scan pattern in a .PROJ project
+# ---------------------------------------------------------------------------
+
+
+def parse_scn(path: str) -> dict | None:
+    """Parse a .PROJ `.scn` file into the SAME shape `parse_pat` returns.
+
+    A .PROJ writes the scan pattern as JSON instead of the .riproject's
+    `SCN_SET_RECT_FOV(...)` text line, but the numbers mean exactly the same
+    thing, so the two parsers deliberately converge on one dict and everything
+    downstream stays layout-agnostic:
+
+        {"fov": {"thetaStart": 30, "thetaStop": 130, "thetaIncrement": 0.0398,
+                 "phiStart": 0,    "phiStop": 360,   "phiIncrement": 0.08}}
+
+    RIEGL theta is zenith measured from +Z in both layouts, which is already
+    Phytograph/Helios's convention. Do not "fix" it.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+    fov = doc.get("fov") if isinstance(doc, dict) else None
+    if not isinstance(fov, dict):
+        return None
+
+    try:
+        theta_min = float(fov["thetaStart"])
+        theta_max = float(fov["thetaStop"])
+        phi_min = float(fov["phiStart"])
+        phi_max = float(fov["phiStop"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    def _inc(key: str) -> float:
+        try:
+            return float(fov.get(key, 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    theta_inc = _inc("thetaIncrement")
+    phi_inc = _inc("phiIncrement")
+
+    params: dict = {
+        "theta_min": theta_min,
+        "theta_max": theta_max,
+        "phi_min": phi_min,
+        "phi_max": phi_max,
+        "theta_increment": theta_inc,
+        "phi_increment": phi_inc,
+    }
+    if theta_inc > 0:
+        params["n_theta"] = int(round((theta_max - theta_min) / theta_inc)) + 1
+    if phi_inc > 0:
+        # Same fencepost rule as parse_pat: phi sweeps a full circle where the
+        # last column coincides with the first, so this is a sample count.
+        params["n_phi"] = int(round((phi_max - phi_min) / phi_inc))
+    return params
+
+
+# ---------------------------------------------------------------------------
+# .PROJ pose / SOP sidecars
+# ---------------------------------------------------------------------------
+#
+# A .PROJ carries real registration results, which a .riproject does not. Every
+# transform is a small JSON file holding a 3x3 rotation plus a translation:
+#
+#     {"matrix3x3": [[...],[...],[...]], "translation": {"x":..,"y":..,"z":..}}
+#
+# THE CHAIN, VERIFIED NUMERICALLY against the project's own projectmap.json
+# `coords_prcs` for all 9 registered positions of the reference olive project
+# (max residual 7.8e-7 m):
+#
+#     SOP_PRCS = VPP.vop  o  plane_registration.sopv
+#
+# The per-position `Voxels1.VPP/ScanPosNNN.vop` files are NOT part of this
+# chain. Composing them in shifts every position by 8-41 cm. They are voxel
+# bookkeeping; leave them alone.
+#
+# PRCS IS A TRUE ENU FRAME. Deriving the local up/north from project.pop and
+# expressing them back in PRCS gives (2e-11, -2e-10, 1) and (2e-11, 1, 2e-10) —
+# so +Z is true up and +Y is true north to 1e-11. Registered scans therefore
+# land plumb-level and north-aligned, which is why the SOP rotation decomposes
+# into a large yaw (the scanner heading) plus a sub-2-degree plumb tilt.
+
+_SOP_SOURCES = (
+    # (filename, registration status). First hit wins.
+    ("plane_registration.sopv", "registered"),
+    ("voxel_registration.sopv", "registered"),
+    ("pose_estimation.sop", "prior"),
+)
+
+
+def _matrix_from_sop(path: str) -> np.ndarray | None:
+    """Load a RIEGL JSON transform sidecar as a 4x4."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    rot = doc.get("matrix3x3")
+    trans = doc.get("translation")
+    if not isinstance(rot, list) or len(rot) != 3:
+        return None
+    out = np.eye(4, dtype=np.float64)
+    try:
+        out[:3, :3] = np.asarray(rot, dtype=np.float64).reshape(3, 3)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(trans, dict):
+        try:
+            out[:3, 3] = [
+                float(trans.get("x", 0.0)),
+                float(trans.get("y", 0.0)),
+                float(trans.get("z", 0.0)),
+            ]
+        except (TypeError, ValueError):
+            return None
+    return out
+
+
+def load_sop(pos_dir: str, vpp_dir: str | None) -> tuple[np.ndarray, str]:
+    """Resolve one scan position's SOCS -> PRCS transform and its provenance.
+
+    Returns (4x4, status) where status is one of:
+
+      "registered" — a .sopv from plane (or coarse voxel) registration. Placed
+                     to the registration's own accuracy, millimetres here.
+      "prior"      — only pose_estimation.sop, i.e. the inclinometer/compass/
+                     GNSS estimate. Metre-level; the user should refine by ICP.
+      "none"       — no pose at all (an aborted acquisition). Identity.
+
+    The reference position is the reason "prior" is a first-class outcome and
+    not an error: ScanPos001 of the reference project has NO .sopv, only
+    pose_estimation.sop, whose euler angles (0.821, -1.356, -27.723) match its
+    row in all_sopv.csv exactly. Registration has nothing to register the first
+    position against, so its SOP legitimately comes from the pose estimate.
+    """
+    vpp = np.eye(4, dtype=np.float64)
+    if vpp_dir:
+        loaded = _matrix_from_sop(os.path.join(vpp_dir, "VPP.vop"))
+        if loaded is not None:
+            vpp = loaded
+
+    for filename, status in _SOP_SOURCES:
+        sop = _matrix_from_sop(os.path.join(pos_dir, filename))
+        if sop is not None:
+            return vpp @ sop, status
+
+    return np.eye(4, dtype=np.float64), "none"
+
+
+def decompose_sop(sop: np.ndarray) -> dict:
+    """Split a SOP into the three knobs ScanParameters can actually hold.
+
+    ScanParameters has no field for a general registration rotation — only
+    `origin`, `azimuthOffsetDeg` (heading), and `tiltRollDeg`/`tiltPitchDeg`
+    (plumb tilt). That is enough here precisely BECAUSE PRCS is a true ENU
+    frame (see the chain note above): the SOP rotation is a large yaw plus the
+    instrument's genuine sub-2-degree tilt off plumb, which is exactly what
+    those fields describe.
+
+    Yaw/pitch/roll are the intrinsic Z-Y-X decomposition, matching
+    _ptx_decompose_pose in the backend so the two importers agree.
+
+    NOTE ON DIVERGING FROM THE PTX RULE. _ptx_scan_params drops the azimuth
+    sweep entirely once |roll| or |pitch| reaches 0.5 deg, because for a generic
+    PTX pose those angles are an unmodellable rotation and reporting a rotated
+    sweep as the instrument's own would be a lie. Here they are not generic:
+    they are the inclinometer reading (pose_estimation.sop's `accuracy` block
+    quotes ~0.01 deg on both), so emitting the tilt AND the yaw-corrected phi
+    window is the honest description, not a fudge.
+    """
+    rot = np.asarray(sop, dtype=np.float64)[:3, :3]
+    # Clamp guards against a rotation that is a hair outside [-1, 1] after the
+    # matrix multiply, which would make asin raise.
+    pitch = math.degrees(math.asin(max(-1.0, min(1.0, -rot[2, 0]))))
+    roll = math.degrees(math.atan2(rot[2, 1], rot[2, 2]))
+    yaw = math.degrees(math.atan2(rot[1, 0], rot[0, 0]))
+    return {"yaw_deg": yaw, "pitch_deg": pitch, "roll_deg": roll}
+
+
+def _pose_gnss(path: str) -> dict | None:
+    """Read the GNSS fix out of a .PROJ `final.pose`.
+
+    A .riproject can only reach its GNSS through the housekeeping stream, which
+    means decoding points just to learn where the scanner stood. A .PROJ states
+    it as JSON, so this is a few hundred bytes instead of a bounded prefix read
+    of a 150 MB file. Height is `altitude`, which is ellipsoidal and matches the
+    EPSG::4979 the file declares — same datum the hk path yields, so both feed
+    gnss_to_enu unchanged.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    gnss = doc.get("gnss") if isinstance(doc, dict) else None
+    if not isinstance(gnss, dict):
+        return None
+    try:
+        lat = float(gnss["latitude"])
+        lon = float(gnss["longitude"])
+        height = float(gnss.get("altitude", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (_LAT_RANGE[0] <= lat <= _LAT_RANGE[1]):
+        return None
+    if not (_LON_RANGE[0] <= lon <= _LON_RANGE[1]):
+        return None
+    return {
+        "latitude": lat,
+        "longitude": lon,
+        "height_m": height,
+        "height_datum": "ellipsoidal",
+        "satellites": gnss.get("numSatellites"),
+        "fix_info": gnss.get("fixInfo"),
+    }
+
+
+
+# ---------------------------------------------------------------------------
 # hk_gps_hr — scanner GNSS position
 # ---------------------------------------------------------------------------
 
@@ -439,8 +684,124 @@ def parse_hk_inclination(hk_path: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def find_scan_positions(project_dir: str) -> list[dict]:
-    """Enumerate ScanPos* directories and the files each one contributes.
+LAYOUT_RIPROJECT = "riproject"
+LAYOUT_PROJ = "proj"
+
+# A .PROJ nests its scans one level deeper than a .riproject and suffixes the
+# position directory. Everything else that differs (pattern file, GNSS source,
+# registration) hangs off that one structural fact.
+_PROJ_SCANPOS_GLOB = "ScanPos*.SCNPOS"
+_PROJ_MANIFEST = "project.json"
+
+# Companion streams that sit beside the real .rxp and must never be mistaken for
+# it: .mon.rxp is the housekeeping subset, .residual.rxp the MTA leftovers.
+_RXP_COMPANIONS = (".mon.rxp", ".residual.rxp")
+
+
+def detect_layout(project_dir: str) -> str:
+    """Classify a RIEGL project directory by its structure, not its suffix.
+
+    Structure rather than the folder name because the two layouts are told
+    apart reliably by what is inside them, while the suffix is only a
+    convention: the reference .PROJ is a directory of ScanPosNNN.SCNPOS beside a
+    project.json manifest, and a .riproject is a flat set of ScanPosNNN folders
+    with no manifest at all.
+    """
+    if glob.glob(os.path.join(project_dir, _PROJ_SCANPOS_GLOB)) or os.path.isfile(
+        os.path.join(project_dir, _PROJ_MANIFEST)
+    ):
+        return LAYOUT_PROJ
+    return LAYOUT_RIPROJECT
+
+
+def _main_rxp(candidates: list[str]) -> str | None:
+    hits = [p for p in sorted(candidates) if not p.endswith(_RXP_COMPANIONS)]
+    return hits[0] if hits else None
+
+
+def _read_proj_manifest(project_dir: str) -> dict:
+    """Index project.json's registration list by scan-position name.
+
+    Used only to ENRICH filesystem discovery, never to drive it — see
+    find_scan_positions for why.
+    """
+    try:
+        with open(os.path.join(project_dir, _PROJ_MANIFEST), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    out: dict = {"_scanner": doc.get("scanner") or {}, "_location": doc.get("location")}
+    reg = doc.get("registration") or {}
+    for item in reg.get("scanpositions") or []:
+        if isinstance(item, dict) and item.get("name"):
+            out[item["name"]] = item
+    return out
+
+
+def _find_proj_positions(project_dir: str) -> list[dict]:
+    """Enumerate a .PROJ's scan positions from the FILESYSTEM.
+
+    Discovery is deliberately filesystem-driven and only enriched by
+    project.json, because the manifest is an incomplete record of what was
+    acquired. In the reference olive project there are 25 ScanPos*.SCNPOS
+    directories but the manifest lists 23: ScanPos019 holds a perfectly good
+    17 MB .rxp from an aborted acquisition and appears nowhere in the manifest,
+    and ScanPos025 is an empty shell. Trusting the manifest would silently drop
+    real point data; trusting the filesystem and skipping positions with no .rxp
+    handles both.
+    """
+    manifest = _read_proj_manifest(project_dir)
+    vpp_default = os.path.join(project_dir, "Voxels1.VPP")
+
+    positions: list[dict] = []
+    for pos_dir in sorted(glob.glob(os.path.join(project_dir, _PROJ_SCANPOS_GLOB))):
+        if not os.path.isdir(pos_dir):
+            continue
+        name = os.path.basename(pos_dir)
+        if name.endswith(".SCNPOS"):
+            name = name[: -len(".SCNPOS")]
+
+        rxp = _main_rxp(glob.glob(os.path.join(pos_dir, "scans", "*.rxp")))
+        if rxp is None:
+            # ScanPos025: directory exists, nothing was ever written into it.
+            continue
+
+        stem = os.path.basename(rxp)[: -len(".rxp")]
+        scn = os.path.join(pos_dir, "scans", stem + ".scn")
+        pose = os.path.join(pos_dir, "final.pose")
+
+        entry = manifest.get(name) or {}
+        vpp_name = entry.get("vpp")
+        vpp_dir = os.path.join(project_dir, vpp_name) if vpp_name else vpp_default
+        if not os.path.isdir(vpp_dir):
+            vpp_dir = None
+
+        sop, status = load_sop(pos_dir, vpp_dir)
+        positions.append(
+            {
+                "name": name,
+                "layout": LAYOUT_PROJ,
+                "rxp_path": rxp,
+                "pat_path": None,
+                "scn_path": scn if os.path.exists(scn) else None,
+                "pose_path": pose if os.path.exists(pose) else None,
+                "pos_dir": pos_dir,
+                "size_bytes": os.path.getsize(rxp),
+                "sop": sop,
+                "registration": status,
+                # The manifest's own verdict, kept distinct from `registration`:
+                # a position can carry a .sopv and still be flagged failed, and
+                # a position can be absent from the manifest entirely.
+                "manifest_success": entry.get("success"),
+            }
+        )
+    return positions
+
+
+def _find_riproject_positions(project_dir: str) -> list[dict]:
+    """Enumerate a raw .riproject's ScanPos* directories.
 
     A raw .riproject is a flat directory of ScanPos### folders plus top-level
     poslog_*.rxp files; there is no manifest to parse (unlike a RiSCAN project,
@@ -455,25 +816,44 @@ def find_scan_positions(project_dir: str) -> list[dict]:
     for scan_dir in sorted(glob.glob(os.path.join(project_dir, "ScanPos*"))):
         if not os.path.isdir(scan_dir):
             continue
-        rxps = [
-            p
-            for p in sorted(glob.glob(os.path.join(scan_dir, "*.rxp")))
-            if not p.endswith(".mon.rxp")
-        ]
-        if not rxps:
+        rxp = _main_rxp(glob.glob(os.path.join(scan_dir, "*.rxp")))
+        if rxp is None:
             continue
-        rxp = rxps[0]
         stem = os.path.basename(rxp)[: -len(".rxp")]
         pat = os.path.join(scan_dir, stem + ".pat")
         positions.append(
             {
                 "name": os.path.basename(scan_dir),
+                "layout": LAYOUT_RIPROJECT,
                 "rxp_path": rxp,
                 "pat_path": pat if os.path.exists(pat) else None,
+                "scn_path": None,
+                "pose_path": None,
+                "pos_dir": scan_dir,
                 "size_bytes": os.path.getsize(rxp),
+                # Raw projects carry no registration whatsoever.
+                "sop": None,
+                "registration": "none",
+                "manifest_success": None,
             }
         )
     return positions
+
+
+def find_scan_positions(project_dir: str) -> list[dict]:
+    """Enumerate scan positions in either supported project layout."""
+    if detect_layout(project_dir) == LAYOUT_PROJ:
+        return _find_proj_positions(project_dir)
+    return _find_riproject_positions(project_dir)
+
+
+def scan_params_for(pos: dict) -> dict | None:
+    """Parse whichever scan-pattern file this layout uses."""
+    if pos.get("scn_path"):
+        return parse_scn(pos["scn_path"])
+    if pos.get("pat_path"):
+        return parse_pat(pos["pat_path"])
+    return None
 
 
 def _uri(path: str) -> str:
@@ -1007,7 +1387,10 @@ def extract_scan(
 # progress and diagnostics stay on stderr.
 
 _STREAM_MAGIC = b"PHRX"
-_STREAM_VERSION = 2
+# 3: added the .PROJ layout — per-scan `registration`/`sop`, project `layout`,
+#    and the `--frame` option. The bump is what makes a stale reader image fail
+#    loudly ("Rebuild the reader image") instead of reporting a .PROJ as empty.
+_STREAM_VERSION = 3
 
 # (filename, dtype, columns-per-point)
 _ARRAY_SPEC = (
@@ -1250,23 +1633,75 @@ def stream_scan(
         ifc.close(handle)
 
 
-def _attach_scan_params_extras(entry: dict) -> None:
-    """Fold the instrument id and the GNSS origin prior into `scan_params`.
+FRAME_REGISTERED = "registered"
+FRAME_LOCAL = "local"
+
+# A sweep this wide is a full circle, and rotating a full circle is a no-op — so
+# it is left at 0..360 rather than shifted into a arbitrary-looking window.
+_FULL_SWEEP_DEG = 359.5
+
+
+def _rotate_phi_window(params: dict, yaw_deg: float) -> None:
+    """Counter-rotate the azimuth sweep so it describes the WORLD frame.
+
+    scan_params' phi is the scanner's own azimuth sweep. Once the cloud has been
+    rotated into PRCS by the SOP, LAD and gap-fill bin returns by their
+    world-frame phi against this window, so the window has to move with them or
+    every return lands in the wrong column.
+
+    Helios measures phi CLOCKWISE FROM +Y while a yaw is a counter-clockwise
+    rotation about +Z, so the world sweep is the local one MINUS the yaw. This
+    is the same relation _ptx_scan_params encodes as `phi = 90 - az - yaw`,
+    where the `90 - az` half is only PTX converting its mathematical atan2 LUT
+    into that clockwise convention — a conversion RIEGL's phi does not need.
+    """
+    if "phi_min" not in params or "phi_max" not in params:
+        return
+    span = float(params["phi_max"]) - float(params["phi_min"])
+    if abs(span) >= _FULL_SWEEP_DEG:
+        params["phi_min"], params["phi_max"] = 0.0, 360.0
+        return
+    params["phi_min"] = float((float(params["phi_min"]) - yaw_deg) % 360.0)
+    params["phi_max"] = float(params["phi_min"] + span)
+
+
+def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
+    """Fold the instrument id, the origin and any pose into `scan_params`.
 
     The renderer builds a Scan's ScanParameters from this one object
     (scanParametersFromFile), so everything it should populate has to live here
-    rather than beside it. `origin` is required by that contract; it is the
-    GNSS-derived ENU offset when we have a fix, and the scanner's own origin
-    (0,0,0 — raw scans are unregistered) when we don't.
+    rather than beside it. `origin` is required by that contract.
+
+    Which origin depends on the frame:
+
+      FRAME_LOCAL      — the GNSS-derived ENU offset when we have a fix, and the
+                         scanner's own origin (0,0,0) when we don't. This is the
+                         only option for a .riproject, which carries no pose.
+      FRAME_REGISTERED — the SOP translation, i.e. where the instrument actually
+                         stood in PRCS, with the rotation split across
+                         azimuth_offset_deg and the tilt fields.
     """
     params = entry.get("scan_params")
     if params is None:
-        # No .pat file: still surface origin + instrument so the Scan gets a
+        # No pattern file: still surface origin + instrument so the Scan gets a
         # position and a marker, just without the angular sweep.
         params = {}
         entry["scan_params"] = params
 
-    params["origin"] = entry.get("origin_prior") or [0.0, 0.0, 0.0]
+    sop = entry.get("sop")
+    if frame == FRAME_REGISTERED and sop is not None:
+        matrix = np.asarray(sop, dtype=np.float64)
+        params["origin"] = [float(v) for v in matrix[:3, 3]]
+        ypr = decompose_sop(matrix)
+        _rotate_phi_window(params, ypr["yaw_deg"])
+        if abs(ypr["yaw_deg"]) > 1e-6:
+            params["azimuth_offset_deg"] = ypr["yaw_deg"]
+        # Emitted alongside the azimuth rather than instead of it — see
+        # decompose_sop for why this diverges from the PTX rule.
+        params["tilt_roll_deg"] = ypr["roll_deg"]
+        params["tilt_pitch_deg"] = ypr["pitch_deg"]
+    else:
+        params["origin"] = entry.get("origin_prior") or [0.0, 0.0, 0.0]
 
     model = (entry.get("instrument") or {}).get("model")
     if model:
@@ -1275,33 +1710,83 @@ def _attach_scan_params_extras(entry: dict) -> None:
         params["scanner_model"] = model
 
 
-def cmd_inspect(args: argparse.Namespace) -> int:
-    """Report every scan position in a project without extracting point data."""
-    ifc = _Scanifc()
-    positions = find_scan_positions(args.project)
-    if not positions:
-        print(
-            json.dumps(
-                {
-                    "error": f"No ScanPos* directories found in {args.project}. "
-                    "Is this a raw .riproject directory?"
-                }
-            )
-        )
-        return 1
+# Rough bytes-per-echo for a V-Line .rxp, calibrated on VZ-2000i data
+# (17,252,868 bytes -> 1,171,668 echoes). Only ever used to put an approximate
+# size in front of the user when the fast path skips decoding; anything that
+# needs a real count decodes.
+_RXP_BYTES_PER_ECHO = 14.7
 
+_NO_POSITIONS_ERROR = (
+    "No scan positions found in {project}. Expected either a .riproject "
+    "(ScanPosNNN/ holding <stamp>.rxp) or a .PROJ "
+    "(ScanPosNNN.SCNPOS/scans/ holding <stamp>.rxp)."
+)
+
+
+def _proj_instrument(project_dir: str) -> dict:
+    """Instrument identity from project.json, so inspect need not open a scan.
+
+    Only model and serial are available here — the beam/PRR/range figures live
+    in RiVLib's meta blob and are not worth a decode just to preview a list.
+    """
+    scanner = _read_proj_manifest(project_dir).get("_scanner") or {}
+    out: dict = {}
+    if scanner.get("type"):
+        out["model"] = scanner["type"]
+    if scanner.get("serialnumber"):
+        out["serial"] = scanner["serialnumber"]
+    return out
+
+
+def _inspect_proj(args: argparse.Namespace, positions: list[dict]) -> tuple[list[dict], list]:
+    """Fast metadata pass for a .PROJ — no point decoding at all.
+
+    A .riproject hides its GNSS in the housekeeping stream, so previewing one
+    means decoding a bounded prefix of every position: roughly ten seconds each,
+    and the reference project has 24 of them. A .PROJ states everything in JSON
+    sidecars (project.json, final.pose, .scn), so the whole preview is a few
+    hundred bytes per position and returns effectively instantly.
+    """
+    instrument = _proj_instrument(args.project)
+    scans: list[dict] = []
+    fixes: list[dict | None] = []
+    for pos in positions:
+        entry: dict = {
+            "name": pos["name"],
+            "rxp_path": pos["rxp_path"],
+            "size_bytes": pos["size_bytes"],
+            "registration": pos["registration"],
+            "manifest_success": pos.get("manifest_success"),
+            "point_count_estimated": int(pos["size_bytes"] / _RXP_BYTES_PER_ECHO),
+        }
+        if instrument:
+            entry["instrument"] = dict(instrument)
+        params = scan_params_for(pos)
+        if params:
+            entry["scan_params"] = params
+        if pos.get("sop") is not None:
+            entry["sop"] = [[float(v) for v in row] for row in pos["sop"]]
+        fix = _pose_gnss(pos["pose_path"]) if pos.get("pose_path") else None
+        entry["gnss"] = fix
+        fixes.append(fix)
+        scans.append(entry)
+    return scans, fixes
+
+
+def _inspect_riproject(args, ifc, positions: list[dict]) -> tuple[list[dict], list]:
+    """Metadata pass for a raw .riproject — needs a bounded decode per position."""
     hk_dir = args.hk_dir or "/tmp"
     os.makedirs(hk_dir, exist_ok=True)
 
     scans: list[dict] = []
     fixes: list[dict | None] = []
-
     for pos in positions:
         hk_path = os.path.join(hk_dir, f"hk_{pos['name']}.txt")
         entry: dict = {
             "name": pos["name"],
             "rxp_path": pos["rxp_path"],
             "size_bytes": pos["size_bytes"],
+            "registration": pos["registration"],
         }
         try:
             info = read_scan(
@@ -1319,10 +1804,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         except RxpError as exc:
             entry["error"] = str(exc)
 
-        if pos["pat_path"]:
-            pat = parse_pat(pos["pat_path"])
-            if pat:
-                entry["scan_params"] = pat
+        params = scan_params_for(pos)
+        if params:
+            entry["scan_params"] = params
         fix = parse_hk_gps(hk_path)
         entry["gnss"] = fix
         incl = parse_hk_inclination(hk_path)
@@ -1330,6 +1814,23 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             entry["inclination_raw"] = incl
         fixes.append(fix)
         scans.append(entry)
+    return scans, fixes
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Report every scan position in a project without extracting point data."""
+    ifc = _Scanifc()
+    layout = detect_layout(args.project)
+    positions = find_scan_positions(args.project)
+    if not positions:
+        print(json.dumps({"error": _NO_POSITIONS_ERROR.format(project=args.project)}))
+        return 1
+
+    frame = getattr(args, "frame", FRAME_LOCAL)
+    if layout == LAYOUT_PROJ:
+        scans, fixes = _inspect_proj(args, positions)
+    else:
+        scans, fixes = _inspect_riproject(args, ifc, positions)
 
     for entry, enu in zip(scans, gnss_to_enu(fixes)):
         entry["enu"] = enu
@@ -1337,18 +1838,26 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         # the layout it will actually get.
         if enu is not None:
             entry["origin_prior"] = [enu["east_m"], enu["north_m"], enu["up_m"]]
-        _attach_scan_params_extras(entry)
+        _attach_scan_params_extras(entry, frame)
 
     print(
         json.dumps(
             {
                 "project": args.project,
+                "layout": layout,
+                "reader_version": _STREAM_VERSION,
                 "rivlib_version": ifc.version(),
                 "scan_count": len(scans),
                 "gnss_anchor": anchor_of(fixes),
-                # Raw projects carry no registration; say so here too so the
-                # selection UI can warn before the user commits to an import.
-                "registered": False,
+                "frame": frame,
+                # A .riproject carries no registration at all; a .PROJ is
+                # registered to whatever extent its per-position status says.
+                "registered": any(
+                    s.get("registration") == "registered" for s in scans
+                ),
+                "registered_count": sum(
+                    1 for s in scans if s.get("registration") == "registered"
+                ),
                 "scans": scans,
             },
             indent=2,
@@ -1440,10 +1949,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
         except RxpError as exc:
             entry["error"] = str(exc)
 
-        if pos["pat_path"]:
-            pat = parse_pat(pos["pat_path"])
-            if pat:
-                entry["scan_params"] = pat
+        params = scan_params_for(pos)
+        if params:
+            entry["scan_params"] = params
         fix = parse_hk_gps(hk_path)
         entry["gnss"] = fix
         incl = parse_hk_inclination(hk_path)
@@ -1509,15 +2017,11 @@ def cmd_stream(args: argparse.Namespace) -> int:
     and safe to load.
     """
     ifc = _Scanifc()
+    layout = detect_layout(args.project)
     positions = find_scan_positions(args.project)
     if not positions:
         print(
-            json.dumps(
-                {
-                    "error": f"No ScanPos* directories found in {args.project}. "
-                    "Is this a raw .riproject directory?"
-                }
-            ),
+            json.dumps({"error": _NO_POSITIONS_ERROR.format(project=args.project)}),
             file=sys.stderr,
         )
         return 1
@@ -1541,31 +2045,40 @@ def cmd_stream(args: argparse.Namespace) -> int:
     hk_dir = args.hk_dir or "/tmp"
     os.makedirs(hk_dir, exist_ok=True)
 
-    # Pass 1 (cheap): scan-pattern + instrument + GNSS for every position, so
-    # the header is complete before any bytes of payload go out. This costs a
-    # bounded prefix read per position, which is what `inspect` already does.
+    # Pass 1 (cheap): scan-pattern + instrument + GNSS + pose for every
+    # position, so the header is complete before any bytes of payload go out.
+    # For a .riproject this costs a bounded prefix read per position, which is
+    # what `inspect` already does; for a .PROJ it is pure JSON sidecar reads.
+    frame = getattr(args, "frame", FRAME_LOCAL)
     header_scans: list[dict] = []
     fixes: list[dict | None] = []
+    proj_instrument = _proj_instrument(args.project) if layout == LAYOUT_PROJ else {}
     for pos in positions:
-        hk_path = os.path.join(hk_dir, f"hk_{pos['name']}.txt")
-        entry: dict = {"name": pos["name"]}
-        try:
-            info = read_scan(
-                ifc, pos["rxp_path"], hk_path,
-                count_points=False, max_points=args.probe_points,
-            )
-            entry["instrument"] = info.get("instrument", {})
-        except RxpError as exc:
-            entry["error"] = str(exc)
-        if pos["pat_path"]:
-            pat = parse_pat(pos["pat_path"])
-            if pat:
-                entry["scan_params"] = pat
-        fix = parse_hk_gps(hk_path)
+        entry: dict = {"name": pos["name"], "registration": pos["registration"]}
+        if pos.get("sop") is not None:
+            entry["sop"] = [[float(v) for v in row] for row in pos["sop"]]
+        if layout == LAYOUT_PROJ:
+            if proj_instrument:
+                entry["instrument"] = dict(proj_instrument)
+            fix = _pose_gnss(pos["pose_path"]) if pos.get("pose_path") else None
+        else:
+            hk_path = os.path.join(hk_dir, f"hk_{pos['name']}.txt")
+            try:
+                info = read_scan(
+                    ifc, pos["rxp_path"], hk_path,
+                    count_points=False, max_points=args.probe_points,
+                )
+                entry["instrument"] = info.get("instrument", {})
+            except RxpError as exc:
+                entry["error"] = str(exc)
+            fix = parse_hk_gps(hk_path)
+            incl = parse_hk_inclination(hk_path)
+            if incl:
+                entry["inclination_raw"] = incl
+        params = scan_params_for(pos)
+        if params:
+            entry["scan_params"] = params
         entry["gnss"] = fix
-        incl = parse_hk_inclination(hk_path)
-        if incl:
-            entry["inclination_raw"] = incl
         fixes.append(fix)
         header_scans.append(entry)
 
@@ -1573,14 +2086,22 @@ def cmd_stream(args: argparse.Namespace) -> int:
         entry["enu"] = enu
         if enu is not None:
             entry["origin_prior"] = [enu["east_m"], enu["north_m"], enu["up_m"]]
-        _attach_scan_params_extras(entry)
+        _attach_scan_params_extras(entry, frame)
 
     header = {
         "project": args.project,
+        "layout": layout,
+        "reader_version": _STREAM_VERSION,
         "rivlib_version": ifc.version(),
         "scan_count": len(header_scans),
         "gnss_anchor": anchor_of(fixes),
-        "registered": False,
+        "frame": frame,
+        "registered": any(
+            s.get("registration") == "registered" for s in header_scans
+        ),
+        "registered_count": sum(
+            1 for s in header_scans if s.get("registration") == "registered"
+        ),
         "scans": header_scans,
     }
     raw = json.dumps(header).encode("utf-8")
@@ -1639,14 +2160,15 @@ def cmd_stream(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="rxp_reader", description="Read RIEGL .riproject data via RiVLib."
+        prog="rxp_reader",
+        description="Read RIEGL .riproject / .PROJ data via RiVLib.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     inspect = sub.add_parser(
         "inspect", help="List scan positions with metadata, FOV and GNSS."
     )
-    inspect.add_argument("project", help="Path to the .riproject directory")
+    inspect.add_argument("project", help="Path to the .riproject or .PROJ directory")
     inspect.add_argument(
         "--count-points",
         action="store_true",
@@ -1663,12 +2185,18 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument(
         "--hk-dir", default=None, help="Directory for demultiplexed housekeeping files."
     )
+    inspect.add_argument(
+        "--frame",
+        choices=(FRAME_REGISTERED, FRAME_LOCAL),
+        default=FRAME_LOCAL,
+        help='Coordinate frame for the emitted points. "registered" applies each position\'s SOP so scans land pre-aligned in the project frame (.PROJ only); "local" keeps scanner-local coordinates, which is the only option a .riproject supports.',
+    )
     inspect.set_defaults(func=cmd_inspect)
 
     extract = sub.add_parser(
         "extract", help="Extract scan positions to LAS plus a JSON sidecar."
     )
-    extract.add_argument("project", help="Path to the .riproject directory")
+    extract.add_argument("project", help="Path to the .riproject or .PROJ directory")
     extract.add_argument(
         "--out", required=True, help="Output directory for the .las files"
     )
@@ -1688,7 +2216,7 @@ def main(argv: list[str] | None = None) -> int:
         "stream",
         help="Stream scan points to stdout as raw arrays (no LAS written).",
     )
-    stream.add_argument("project", help="Path to the .riproject directory")
+    stream.add_argument("project", help="Path to the .riproject or .PROJ directory")
     stream.add_argument(
         "--scans", nargs="*", default=None,
         help="Scan position names to stream (default: all).",
@@ -1702,6 +2230,12 @@ def main(argv: list[str] | None = None) -> int:
     stream.add_argument(
         "--out", required=True,
         help="Directory for the raw array files (bind-mounted from the host).",
+    )
+    stream.add_argument(
+        "--frame",
+        choices=(FRAME_REGISTERED, FRAME_LOCAL),
+        default=FRAME_LOCAL,
+        help='Coordinate frame for the emitted points. "registered" applies each position\'s SOP so scans land pre-aligned in the project frame (.PROJ only); "local" keeps scanner-local coordinates, which is the only option a .riproject supports.',
     )
     stream.set_defaults(func=cmd_stream)
 

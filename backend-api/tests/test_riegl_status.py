@@ -14,6 +14,9 @@ machine running them happens to have Docker up or a RiVLib download present.
 import json
 import os
 
+import pytest
+from fastapi import HTTPException
+
 import main
 
 
@@ -933,3 +936,180 @@ def test_image_probe_false_when_truly_absent(monkeypatch):
 
     monkeypatch.setattr(main, "_spawn_run", fake_spawn)
     assert main._riegl_image_built() is False
+
+
+# ---------------------------------------------------------------------------
+# .PROJ: the registered frame
+# ---------------------------------------------------------------------------
+
+
+def _riegl_arrays(n_hit=4, dirs=None):
+    """Hits at the scanner plus misses out on the far-field shell."""
+    import numpy as np
+
+    dirs = np.zeros((0, 3)) if dirs is None else np.asarray(dirs, dtype=np.float64)
+    n_miss = dirs.shape[0]
+    n = n_hit + n_miss
+    return {
+        "positions": np.vstack([np.zeros((n_hit, 3)), dirs * 20000.0]),
+        "reflectance": np.zeros(n, dtype=np.float32),
+        "amplitude": np.zeros(n, dtype=np.float32),
+        "deviation": np.zeros(n, dtype=np.float32),
+        "target_index": np.zeros(n, dtype=np.float32),
+        "target_count": np.zeros(n, dtype=np.float32),
+        "is_miss": np.concatenate([
+            np.zeros(n_hit, dtype=np.float32),
+            np.ones(n_miss, dtype=np.float32),
+        ]),
+    }
+
+
+def test_a_sop_rotates_as_well_as_translates():
+    """A .PROJ's placement is a full rigid transform, not a shift.
+
+    The GNSS-prior path only ever translated, because a .riproject has no
+    rotation to apply. A registered position does: the reference project's
+    positions differ from each other by 23-31 degrees of heading, so applying
+    the translation alone would leave every cloud correctly located and
+    completely mis-oriented — which looks plausible in a thumbnail and is
+    obviously wrong the moment two scans overlap.
+    """
+    import numpy as np
+
+    arrays = _riegl_arrays(n_hit=2)
+    arrays["positions"] = np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    # 90 degrees about +Z, then a translation.
+    sop = [[0.0, -1.0, 0.0, 5.0],
+           [1.0, 0.0, 0.0, -2.0],
+           [0.0, 0.0, 1.0, 0.5],
+           [0.0, 0.0, 0.0, 1.0]]
+    res = main._riegl_arrays_to_las_result(arrays, sop=sop)
+    assert res.positions[0] == pytest.approx([5.0, -1.0, 0.5])
+    assert res.positions[1] == pytest.approx([3.0, -2.0, 0.5])
+
+
+def test_the_sop_supersedes_the_gnss_prior():
+    """Passing both would place the cloud twice.
+
+    `origin` is the metres-level GNSS seed and the SOP is the surveyed pose;
+    applying them together would offset every registered cloud by the prior on
+    top of its real position.
+    """
+    import numpy as np
+
+    arrays = _riegl_arrays(n_hit=1)
+    arrays["positions"] = np.zeros((1, 3))
+    sop = [[1.0, 0.0, 0.0, 5.0],
+           [0.0, 1.0, 0.0, -2.0],
+           [0.0, 0.0, 1.0, 0.5],
+           [0.0, 0.0, 0.0, 1.0]]
+    res = main._riegl_arrays_to_las_result(
+        arrays, origin=[100.0, 100.0, 100.0], sop=sop
+    )
+    assert res.positions[0] == pytest.approx([5.0, -2.0, 0.5])
+
+
+def test_misses_are_rotated_with_their_hits():
+    """A miss is a real ray direction, so it must turn with the scanner.
+
+    Rotating hits but not misses would fan the sky points away from the beams
+    that cast them, and LAD's transmission term reads exactly that pairing.
+    """
+    import numpy as np
+
+    dirs = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    arrays = _riegl_arrays(n_hit=2, dirs=dirs)
+    sop = [[0.0, -1.0, 0.0, 5.0],
+           [1.0, 0.0, 0.0, -2.0],
+           [0.0, 0.0, 1.0, 0.5],
+           [0.0, 0.0, 0.0, 1.0]]
+    res = main._riegl_arrays_to_las_result(arrays, sop=sop)
+
+    m = res.extras["is_miss"] == 1
+    assert int(m.sum()) == 3
+    scanner = np.array([5.0, -2.0, 0.5])
+    # Still exactly 20 km from the instrument...
+    assert np.linalg.norm(res.positions[m] - scanner, axis=1) == pytest.approx(
+        20000.0, rel=1e-9
+    )
+    # ...and along the ROTATED directions: +X maps to +Y under a 90 deg yaw.
+    rotated = (np.asarray(sop)[:3, :3] @ dirs.T).T
+    assert res.positions[m] - scanner == pytest.approx(rotated * 20000.0, rel=1e-9)
+
+
+def test_a_malformed_pose_is_refused_rather_than_broadcast():
+    """A 3x3 would broadcast silently and place the cloud somewhere arbitrary."""
+    arrays = _riegl_arrays(n_hit=1)
+    with pytest.raises(HTTPException) as exc:
+        main._riegl_arrays_to_las_result(
+            arrays, sop=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+    assert exc.value.status_code == 500
+    assert "4x4" in str(exc.value.detail)
+
+
+def test_frame_validation_rejects_an_unknown_frame():
+    assert main._validate_riegl_frame(None) == main.RIEGL_FRAME_LOCAL
+    assert main._validate_riegl_frame("registered") == main.RIEGL_FRAME_REGISTERED
+    with pytest.raises(HTTPException) as exc:
+        main._validate_riegl_frame("prcs")
+    assert exc.value.status_code == 400
+
+
+def test_a_stale_reader_image_is_named_as_the_problem():
+    """An old image reports a .PROJ as empty, which reads as broken data.
+
+    The reader is baked into a container the user builds by hand and nothing
+    rebuilds automatically, so this is the likely first experience of the
+    feature. The version check is what turns "no scan positions found" into a
+    message with a fix in it.
+    """
+    main._require_reader_version({"reader_version": main._RIEGL_MIN_READER_VERSION})
+    for doc in ({}, {"reader_version": 2}, {"reader_version": None}):
+        with pytest.raises(HTTPException) as exc:
+            main._require_reader_version(doc)
+        assert exc.value.status_code == 500
+        assert "Build reader image" in str(exc.value.detail)
+
+
+def test_both_project_suffixes_are_previewable(tmp_path):
+    """The wizard preview must accept a .PROJ directory, not 404 on it.
+
+    Every other previewable format is a FILE, so the dispatcher's is_file()
+    guard rejects a project directory unless the suffix is special-cased.
+    """
+    for name, scanpos in (
+        ("old.riproject", "ScanPos001"),
+        ("new.PROJ", "ScanPos001.SCNPOS"),
+    ):
+        proj = tmp_path / name
+        (proj / scanpos).mkdir(parents=True)
+        resp = main._preview_riproject(str(proj))
+        assert resp.kind == "riproject"
+        assert "1 scan position(s)" in resp.warning
+        slugs = [c.suggested_slug for c in resp.columns]
+        assert "reflectance" in slugs and "timestamp" in slugs
+        # is_miss is a system flag, not a user column.
+        assert "is_miss" not in slugs
+
+    # And the .PROJ wording names the layout the user actually picked.
+    assert ".PROJ" in main._preview_riproject(str(tmp_path / "new.PROJ")).warning
+
+
+def test_a_proj_directory_is_not_rejected_as_a_missing_file(client, tmp_path):
+    proj = tmp_path / "2024-07-18.PROJ"
+    (proj / "ScanPos001.SCNPOS" / "scans").mkdir(parents=True)
+    (proj / "project.json").write_text("{}")
+    res = client.post("/api/pointcloud/preview", json={"file_path": str(proj)})
+    assert res.status_code == 200, res.text
+    assert res.json()["kind"] == "riproject"
+
+
+def test_a_riegl_project_file_is_rejected_with_a_useful_message(client, tmp_path):
+    """Picking a file INSIDE the project is the likely mistake, in both layouts."""
+    stray = tmp_path / "240718_102357.rxp"
+    stray.write_bytes(b"\0")
+    with pytest.raises(HTTPException) as exc:
+        main._validate_riegl_project(str(stray))
+    assert exc.value.status_code == 400
+    assert ".PROJ" in str(exc.value.detail)

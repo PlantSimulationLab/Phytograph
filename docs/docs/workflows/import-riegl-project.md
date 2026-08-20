@@ -1,8 +1,20 @@
-# Import a RIEGL raw project (.riproject)
+# Import a RIEGL project (.riproject / .PROJ)
 
-This walkthrough covers importing **raw RIEGL scanner data** — a `.riproject`
+This walkthrough covers importing **raw RIEGL scanner data** — a project
 directory straight off a V-Line instrument — without going through RiSCAN PRO
 first.
+
+Two on-instrument layouts are supported, and Phytograph tells them apart by
+what is inside the folder rather than by its name:
+
+| Layout | Written by | What it carries |
+| --- | --- | --- |
+| `.riproject` | Older instruments (e.g. VZ-1000) | Scan positions only; **no registration** |
+| `.PROJ` | Newer instruments (e.g. VZ-2000i) | Scan positions **plus the instrument's own registration** |
+
+The import path is otherwise identical: same menu item, same picker, same
+decoding. The one behavioural difference is that a `.PROJ`'s scans can land
+already aligned — see [Which frame the points land in](#which-frame-the-points-land-in).
 
 If your data has already been through RiSCAN PRO or RiPROCESS, you don't need
 this: export to LAS/LAZ or E57 and use the ordinary
@@ -53,21 +65,33 @@ Phytograph reads it from wherever you put it. Nothing is copied into the app.
 
 Either:
 
-- **File → Import → RIEGL Project…** and pick the `.riproject` folder, or
-- **drag the `.riproject` folder** onto the viewer.
+- **File → Import → RIEGL Project (.riproject / .PROJ)…** and pick the project
+  folder, or
+- **drag the project folder** onto the viewer.
 
-Phytograph reads the project's metadata (a few seconds) and opens a picker
-listing every scan position:
+Phytograph reads the project's metadata and opens a picker listing every scan
+position:
 
-- **Point count** — a lower bound (`≥`). The picker only probes the start of
-  each file rather than decoding it; the exact count appears after import.
+- **Point count** — approximate. A `.riproject` shows a lower bound (`≥`) from
+  probing the start of each file; a `.PROJ` shows an estimate (`~`) from the
+  file size, because it needs to decode nothing at all. The exact count appears
+  after import.
 - **Sweep** — the commanded field of view, e.g. `30–130° × 0–360°`.
-- **Instrument** — e.g. `VZ-1000`.
-- **GNSS ✓ / no GNSS** — whether that position recorded a satellite fix. This
-  decides where its points land (see below).
+- **Instrument** — e.g. `VZ-1000`, `VZ-2000i`.
+- **Placement** — for a `.PROJ` being imported registered, how that position is
+  placed: **registered**, **prior only**, or **no pose** (see below). For a
+  `.riproject`, **GNSS ✓ / no GNSS** instead, since that is what decides where
+  its points land.
 
-A small plan view shows the positions laid out by their GNSS fixes, so an
-implausible layout is visible before you commit to the import.
+A small plan view shows the layout — from the surveyed poses where the project
+has them, and from the GNSS fixes otherwise — so an implausible layout is
+visible before you commit to the import.
+
+!!! note "A `.PROJ` opens much faster"
+    A `.riproject` hides its GNSS inside the point stream, so previewing one
+    means decoding the start of every position: roughly ten seconds each. A
+    `.PROJ` states everything in small JSON sidecars, so a 24-position project
+    lists in about a second.
 
 Every readable position is selected already, so untick the ones you don't want
 and click **Import**. The header checkbox toggles them all at once — it reads
@@ -90,10 +114,13 @@ the reason shown inline.
 
 ## What you get, and what you don't
 
-### The scans are not registered
+### Which frame the points land in
 
-Raw scanner data carries **no alignment** — that is what RiSCAN PRO produces.
-Each position is recorded in its own frame, with the scanner at its origin.
+#### A `.riproject` is never registered
+
+Raw scanner data from an older instrument carries **no alignment** — that is
+what RiSCAN PRO produces. Each position is recorded in its own frame, with the
+scanner at its origin.
 
 Where a position has a **GNSS fix**, Phytograph places it at that fix's offset
 from the project centroid. This is a *starting point*, not a registration: the
@@ -102,6 +129,42 @@ instrument's built-in GNSS is metres-accurate, not survey-grade. Use it to seed
 
 Where a position has **no fix**, it imports at the origin — so several such
 positions will sit on top of one another until you register them.
+
+#### A `.PROJ` usually is, but only partly
+
+A newer instrument registers on board as it goes, and stores the result per
+position. Phytograph uses it by default: the scans land **already aligned**, in
+a frame whose **+Z is true up and +Y is true north**, so the ground is level
+and no ICP is needed between them.
+
+Registration routinely **fails for some positions**, so the picker reports each
+one:
+
+| Badge | Meaning |
+| --- | --- |
+| **registered** | Placed by the project's own registration result — accurate to millimetres |
+| **prior only** | Registration failed here. Placed from the scanner's inclinometer, compass and GNSS instead — accurate to about a metre. **Refine with ICP.** |
+| **no pose** | No position information at all (an aborted acquisition). Imports at the origin |
+
+The summary under the list says how many of each you are about to get, and the
+toast after the import repeats it. In one 24-position orchard project we tested
+against, 8 positions registered and 15 fell back to the prior — a normal
+outcome, not a fault.
+
+#### Keeping scanner-local coordinates instead
+
+The picker offers **Keep scanner-local coordinates** for a `.PROJ`. Ticking it
+imports every position unregistered, exactly as a `.riproject` behaves.
+
+This exists for [Leaf Area Density](../concepts/leaf-area-density.md). LAD
+models a scan as an origin plus a θ/φ sweep, with **no scanner tilt**. In the
+scanner's own frame that description is exact. Once a scan is rotated into the
+project frame, the instrument's real tilt off plumb — under 2° in our reference
+project — is no longer represented, and the LAD raster carries that much error.
+
+So: leave it unticked for a levelled, mutually-aligned scene, which is what
+almost every workflow wants. Tick it when you are running LAD on a single
+position and want the angular model to be exact.
 
 ### Sky/miss points are recovered exactly
 
@@ -124,13 +187,14 @@ To see them, turn on **Show sky/miss points** for the scan.
 
 | Field | Notes |
 | --- | --- |
-| Position (x, y, z) | Scanner-local, offset by the GNSS fix where present |
+| Position (x, y, z) | Registered into the project frame, or scanner-local offset by the GNSS fix |
 | Reflectance | dB relative to a white diffuse target; drives the default colouring |
 | Amplitude | dB |
 | Deviation | Pulse-shape distortion measure |
 | Target index / count | Per-pulse return numbering, for multi-return analysis |
-| Scan parameters | Sweep and resolution from the position's `.pat` file |
-| Instrument | Recognised models get their marker and beam defaults |
+| Scan parameters | Sweep and resolution from the position's `.pat` (`.riproject`) or `.scn` (`.PROJ`) file |
+| Scanner heading and tilt | `.PROJ` only, when imported registered: recovered from the pose |
+| Instrument | Named by the file, and used for the scan's marker. The V-Line models have their own entries (VZ-400i, VZ-1000, VZ-2000i); another VZ is marked as **RIEGL VZ-series** rather than being labelled as a model it isn't |
 
 Multi-return numbering is derived by grouping returns that share a pulse
 timestamp. If that grouping ever disagrees with the scanner's own echo
@@ -138,7 +202,9 @@ classification, the toast shown when the import finishes says how many positions
 were affected, and those two columns should not be trusted for multi-return work
 on those scans — the points themselves are unaffected.
 
-That same toast always reminds you the scans are unregistered.
+That same toast says how the scans were placed — how many were registered, how
+many came from a prior and still want ICP, or that they are unregistered
+altogether.
 
 ## Troubleshooting
 
@@ -169,6 +235,24 @@ That same toast always reminds you the scans are unregistered.
   folder of loose `.rxp` files is not a project.
 
 **The picker opens but lists no scan positions.**
-: Positions are found by looking for sub-directories named `ScanPos…` — the
-  layout RIEGL's V-Line instruments write. A project organised any other way
-  isn't recognised.
+: Positions are found by looking for sub-directories named `ScanPos…`
+  (`.riproject`) or `ScanPos….SCNPOS` (`.PROJ`) — the layouts RIEGL's V-Line
+  instruments write. A project organised any other way isn't recognised. A
+  position whose folder exists but holds no `.rxp` is skipped rather than
+  listed as broken.
+
+**"The RIEGL reader image is out of date."**
+: The reader lives inside the container image you built, and nothing rebuilds it
+  automatically — so a version that predates `.PROJ` support cannot read one.
+  Click **Build reader image** again in Settings.
+
+**A `.PROJ` imports, but the scans are not aligned.**
+: Check the badges in the picker. If they say **prior only**, the instrument's
+  own registration failed for those positions and they are placed to about a
+  metre; run [ICP](register-compare.md) to refine them. Also check you did not
+  leave **Keep scanner-local coordinates** ticked.
+
+**A `.PROJ` holds `.rdbx` files — are those used?**
+: No. Phytograph reads the `.rxp` beside them. The `.rdbx` is RIEGL's processed
+  cloud and would need a second licensed library to open, and it does not
+  contain the no-return shots that Leaf Area Density depends on.

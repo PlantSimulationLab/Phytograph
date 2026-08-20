@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.68.3"
+BACKEND_VERSION = "0.69.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -884,9 +884,30 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
             pass
 
 
+# Coordinate frame for an imported RIEGL project. "local" keeps each position
+# in its own scanner frame (the only thing a .riproject can offer); "registered"
+# applies the position's SOP so a .PROJ's scans land pre-aligned.
+# Both RIEGL project layouts are directories. `.riproject` is the older
+# on-instrument format; `.PROJ` is what newer instruments (VZ-2000i and friends)
+# write. Matched case-insensitively because the newer one is conventionally
+# upper-case on disk.
+_RIEGL_PROJECT_SUFFIXES = ('.riproject', '.proj')
+_RIEGL_PROJECT_EXTS = tuple(s.lstrip('.') for s in _RIEGL_PROJECT_SUFFIXES)
+
+RIEGL_FRAME_LOCAL = "local"
+RIEGL_FRAME_REGISTERED = "registered"
+_RIEGL_FRAMES = (RIEGL_FRAME_LOCAL, RIEGL_FRAME_REGISTERED)
+
+# The reader's stream/header version this backend speaks. Bumped whenever the
+# reader's output contract changes, which is how a stale container image is
+# caught (see _read_riegl_header and _require_reader_version).
+_RIEGL_MIN_READER_VERSION = 3
+
+
 class RieglProjectInspectRequest(BaseModel):
     project_path: str
     rivlib_path: Optional[str] = None
+    frame: Optional[str] = None
 
 
 def _riegl_project_mounts(status: dict, project: Path) -> List[tuple]:
@@ -902,19 +923,60 @@ def _riegl_project_mounts(status: dict, project: Path) -> List[tuple]:
     ]
 
 
-def _validate_riproject(project_path: str) -> Path:
+def _validate_riegl_project(project_path: str) -> Path:
     project = Path(project_path)
     if not project.is_dir():
-        # A .riproject is a DIRECTORY of ScanPos* folders, not a file — the most
-        # likely mistake is picking one of the .rxp files inside it.
+        # Both layouts are a DIRECTORY of scan positions, not a file — the most
+        # likely mistake is picking one of the .rxp files inside one.
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{project_path} is not a directory. Select the .riproject "
-                "folder itself, not a file inside it."
+                f"{project_path} is not a directory. Select the .riproject or "
+                ".PROJ folder itself, not a file inside it."
             ),
         )
     return project
+
+
+def _validate_riegl_frame(frame: Optional[str]) -> str:
+    if frame is None:
+        return RIEGL_FRAME_LOCAL
+    if frame not in _RIEGL_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown RIEGL frame {frame!r}. Expected one of "
+                + ", ".join(_RIEGL_FRAMES)
+                + "."
+            ),
+        )
+    return frame
+
+
+def _require_reader_version(doc: dict) -> None:
+    """Reject a container image older than the contract this backend speaks.
+
+    The reader lives inside phytograph-riegl:latest, which the user builds and
+    which nothing rebuilds automatically. A stale image predating .PROJ support
+    would not error on a .PROJ — it would report it as having no scan positions,
+    which reads as "your data is broken" rather than "your image is old". The
+    version check turns that into the one message with a fix in it.
+
+    Checked on INSPECT because inspect runs first; _read_riegl_header makes the
+    same check on the extract stream.
+    """
+    version = doc.get("reader_version")
+    if isinstance(version, int) and version >= _RIEGL_MIN_READER_VERSION:
+        return
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "The RIEGL reader image is out of date (reports version "
+            f"{version if version is not None else 'none'}, needs "
+            f"{_RIEGL_MIN_READER_VERSION}). Rebuild it: Settings -> RIEGL "
+            "RiVLib folder -> Build reader image."
+        ),
+    )
 
 
 @app.post("/api/riegl/project/inspect")
@@ -930,21 +992,25 @@ def riegl_project_inspect(request: RieglProjectInspectRequest):
     housekeeping records (where GNSS lives) as a side effect of reading points.
     """
     status = _resolve_riegl_runtime(request.rivlib_path)
-    project = _validate_riproject(request.project_path)
+    project = _validate_riegl_project(request.project_path)
+    frame = _validate_riegl_frame(request.frame)
 
     out = _run_riegl_container(
-        ["inspect", "/project"],
+        ["inspect", "/project", "--frame", frame],
         _riegl_project_mounts(status, project),
-        # Bounded prefix reads only; a 6-position project takes ~30 s.
+        # Bounded prefix reads only; a 6-position .riproject takes ~30 s. A
+        # .PROJ needs no point reads at all and returns effectively instantly.
         timeout_s=600.0,
     )
     try:
-        return json.loads(out)
+        doc = json.loads(out)
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=500,
             detail="RIEGL reader returned malformed JSON.",
         )
+    _require_reader_version(doc)
+    return doc
 
 
 class RieglProjectExtractRequest(BaseModel):
@@ -959,11 +1025,15 @@ class RieglProjectExtractRequest(BaseModel):
     # recorded. `is_miss` is always retained regardless: it is a system flag
     # driving the Hit/Miss scheme and the hits-only octree, not a user column.
     keep_columns: Optional[List[str]] = None
+    # "registered" applies each position's SOP (a .PROJ only); "local" keeps
+    # scanner-local coordinates, which is all a .riproject can offer.
+    frame: Optional[str] = None
 
 
 def _riegl_arrays_to_las_result(
     arrays: dict, origin: "Optional[List[float]]" = None,
     keep_columns: "Optional[List[str]]" = None,
+    sop: "Optional[List[List[float]]]" = None,
 ) -> "LasReadResult":
     """Adapt streamed RIEGL arrays to the shape the session builder consumes.
 
@@ -980,15 +1050,34 @@ def _riegl_arrays_to_las_result(
     sky/miss points onto the display shell, and `world_shift` is SUBTRACTED, so
     neither can place a cloud. The arrays are the only place the shift can happen.
 
+    `sop` supersedes `origin` when given: a .PROJ carries real registration, so
+    the placement is a full rigid transform (rotate, then translate) rather than
+    a shift, and the two are mutually exclusive — passing both would apply the
+    GNSS prior on top of the surveyed pose. The rotation is applied to EVERY
+    point including the recovered misses, which is correct because a miss is a
+    real ray direction scaled out to the far-field shell: rotating the hits but
+    not the misses would fan the sky points away from the beams that cast them.
+    (The E57 importer does the same on its own pose, transforming points and
+    miss directions together.)
+
     `intensity` is the display channel, derived from RIEGL reflectance the same
     way the LAS writer did — dB relative to a white diffuse target, negative for
     most natural surfaces, so it is rescaled over PDAL's -25..+5 dB window
     rather than cast. Full-precision reflectance is kept in `extras`.
     """
     xyz = arrays["positions"]
-    if origin is not None and len(origin) == 3:
-        # New array: the caller's buffer may still be referenced by the stream
-        # decoder, and mutating it in place would be a surprising side effect.
+    # New array in both branches: the caller's buffer may still be referenced by
+    # the stream decoder, and mutating it in place would be a surprising side
+    # effect.
+    if sop is not None:
+        matrix = np.asarray(sop, dtype=np.float64)
+        if matrix.shape != (4, 4):
+            raise HTTPException(
+                status_code=500,
+                detail=f"RIEGL scan pose is not a 4x4 matrix (got {matrix.shape}).",
+            )
+        xyz = xyz @ matrix[:3, :3].T + matrix[:3, 3]
+    elif origin is not None and len(origin) == 3:
         xyz = xyz + np.asarray(origin, dtype=np.float64)
     n = int(xyz.shape[0])
 
@@ -1118,15 +1207,25 @@ def riegl_project_extract(
     That is deliberate — it keeps the container boundary dumb and means the
     directory-shaped .riproject never has to be understood downstream.
 
-    Points are in the SCANNER'S OWN FRAME. Raw projects carry no registration
-    (that is what RiSCAN PRO produces), so every position sits at its own
-    origin; `origin_prior` is the GNSS-derived ENU offset for seeding ICP, not
-    a registration. `registered: false` in the response says so explicitly.
+    WHICH FRAME THE POINTS ARRIVE IN depends on the request and the layout:
+
+      frame="local" (and every .riproject, which has no other option) — the
+        SCANNER'S OWN FRAME. Raw projects carry no registration (that is what
+        RiSCAN PRO produces), so every position sits at its own origin;
+        `origin_prior` is the GNSS-derived ENU offset for seeding ICP, not a
+        registration.
+      frame="registered" — each position's SOP is applied, so a .PROJ's scans
+        land pre-aligned in the project frame. Per-position `registration` says
+        how well: "registered" is the surveyed pose, "prior" is only the
+        inclinometer/GNSS estimate and still wants ICP, "none" is unplaced.
+
+    The response's `registered` flag reports what actually happened rather than
+    being hardcoded, so the caller can tell the user whether to run ICP.
 
     Streams PHP1 progress and honours /api/cancel/{run_id}.
     """
     status = _resolve_riegl_runtime(request.rivlib_path)
-    project = _validate_riproject(request.project_path)
+    project = _validate_riegl_project(request.project_path)
 
     # No output directory: this import writes no intermediate files at all.
     # Sweep any left by older versions so their gigabytes are reclaimed.
@@ -1167,7 +1266,8 @@ def riegl_project_extract(
     except OSError:
         pass  # can't stat the volume: let the write fail naturally
 
-    args = ["stream", "/project", "--out", "/out"]
+    frame = _validate_riegl_frame(request.frame)
+    args = ["stream", "/project", "--out", "/out", "--frame", frame]
     if request.scans:
         args += ["--scans"] + list(request.scans)
 
@@ -1230,18 +1330,33 @@ def riegl_project_extract(
             # NO INTERMEDIATE LAS. The arrays are already in RAM and
             # CloudSession's source of truth IS arrays, so writing them out just
             # to read them back cost ~10 s and ~1.6 GB of disk per position.
+            # A registered import places points by the position's SOP; a local
+            # one shifts them by the GNSS prior. They are mutually exclusive —
+            # see _riegl_arrays_to_las_result — so pick exactly one here. The
+            # reader only emits `sop` for a layout that has one, so a .riproject
+            # falls through to the prior no matter what frame was asked for.
+            sop = info.get("sop") if frame == RIEGL_FRAME_REGISTERED else None
+            origin_prior = info.get("origin_prior")
             sess_req = CloudSessionCreateRequest(
                 source_path=str(project),
                 miss_distance_threshold=request.miss_distance_threshold,
-                origin=info.get("origin_prior"),
+                # The session's own `origin` is the scanner position: where the
+                # beams came FROM, which is what projects sky points onto the
+                # display shell. Under a SOP that is its translation.
+                origin=(
+                    [float(r[3]) for r in sop[:3]] if sop is not None
+                    else origin_prior
+                ),
             )
             try:
                 info["session"] = _do_create_cloud_session(
                     sess_req, project, progress=None,
                     cancel_event=cancel_event,
                     preloaded=_riegl_arrays_to_las_result(
-                        arrays, origin=info.get("origin_prior"),
+                        arrays,
+                        origin=None if sop is not None else origin_prior,
                         keep_columns=request.keep_columns,
+                        sop=sop,
                     ),
                 )
             except ScanCancelled:
@@ -1578,7 +1693,9 @@ def _tail_json_lines(log_path: str) -> List[dict]:
 _RIEGL_TRANSPORT_BYTES_PER_POSITION = 2_000_000_000
 
 _RIEGL_STREAM_MAGIC = b"PHRX"
-_RIEGL_STREAM_VERSION = 2
+# Same number the inspect path checks — one contract, one constant, so the
+# two can never drift into accepting an image the other rejects.
+_RIEGL_STREAM_VERSION = _RIEGL_MIN_READER_VERSION
 
 # Column order and dtypes, matching rxp_reader._ARRAY_SPEC exactly. A mismatch
 # here would silently transpose or misread attributes rather than error.
@@ -23867,9 +23984,9 @@ def _ptx_probe_first_block(file_path: str) -> dict:
 def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
     """Summarise a RIEGL raw project for the import wizard.
 
-    A `.riproject` is a DIRECTORY and its point data is only reachable through
-    RiVLib inside a container, so unlike every other preview this one cannot
-    read the file cheaply. Running the reader just to list columns would cost
+    A `.riproject` or `.PROJ` is a DIRECTORY and its point data is only
+    reachable through RiVLib inside a container, so unlike every other preview
+    this one cannot read the file cheaply. Running the reader just to list columns would cost
     ~10 s per position before the user has agreed to anything.
 
     Instead the columns are declared: the reader's output schema is fixed code,
@@ -23931,11 +24048,20 @@ def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
         suggested_label='Timestamp', suggested_slug='timestamp',
         type_hint='float', remappable=False, role_assignable=True))
 
-    positions = sorted(
-        d.name for d in Path(project_path).glob('ScanPos*') if d.is_dir()
-    )
+    # Layout-aware, mirroring rxp_reader.detect_layout: a .PROJ suffixes its
+    # position directories and nests the scans, a .riproject does neither. Only
+    # the COUNT is needed here, so this stays a cheap directory listing rather
+    # than a reader invocation.
+    root = Path(project_path)
+    proj_dirs = sorted(d.name for d in root.glob('ScanPos*.SCNPOS') if d.is_dir())
+    if proj_dirs or (root / 'project.json').is_file():
+        positions = proj_dirs
+        kind_label = "RIEGL project (.PROJ)"
+    else:
+        positions = sorted(d.name for d in root.glob('ScanPos*') if d.is_dir())
+        kind_label = "RIEGL raw project"
     warn = (
-        f"RIEGL raw project with {len(positions)} scan position(s). Sky/miss "
+        f"{kind_label} with {len(positions)} scan position(s). Sky/miss "
         "points are recovered from the scanner's per-shot record and tagged "
         "for LAD (hidden by default; use 'Show sky/miss points' to view). "
         "Columns an instrument does not record are omitted automatically."
@@ -24085,9 +24211,9 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
     a `warning` and best-effort columns so the wizard can still offer
     "import with auto-detect"."""
     source = _Path(request.file_path).expanduser()
-    # A .riproject is a DIRECTORY of scan positions, not a file — every other
-    # previewable format is a single file.
-    if source.suffix.lower() == '.riproject':
+    # A RIEGL project is a DIRECTORY of scan positions, not a file — every
+    # other previewable format is a single file.
+    if source.suffix.lower() in _RIEGL_PROJECT_SUFFIXES:
         if not source.is_dir():
             raise HTTPException(
                 status_code=400,
@@ -24111,7 +24237,7 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
             resp = _preview_ptx(str(source), max_rows)
         elif ext in ('las', 'laz'):
             resp = _preview_las(str(source), max_rows)
-        elif ext == 'riproject':
+        elif ext in _RIEGL_PROJECT_EXTS:
             resp = _preview_riproject(str(source))
         if resp is not None:
             # Probe coordinate magnitude and pre-fill a suggested global shift for

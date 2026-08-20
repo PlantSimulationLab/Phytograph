@@ -139,7 +139,7 @@ choice made in the import wizard (column roles, dropped columns, global shift,
 ASCII layout). Re-reading the file would not restore the cloud — it would
 substitute a different one and report success, which is worse than an error.
 
-Some source paths are not readable point clouds at all. A `.riproject` "source
+Some source paths are not readable point clouds at all. A RIEGL project "source
 path" is the project **directory**, kept only as provenance; the older
 fall-through surfaced it as the misleading `Scan file not found:
 /…/2018-02-23.002.riproject` when the real problem was the dropped session.

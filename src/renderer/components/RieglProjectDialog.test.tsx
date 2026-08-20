@@ -36,6 +36,61 @@ const PROJECT = {
   ],
 };
 
+// A .PROJ: registration is present but PARTIAL, which is the normal case (the
+// reference olive project registered 9 of 24). Covers all three placement
+// states plus a position that is absent from the manifest entirely.
+const PROJ = {
+  project: '/data/2024-07-18.PROJ',
+  layout: 'proj',
+  reader_version: 3,
+  rivlib_version: '7.1.0',
+  frame: 'registered',
+  scan_count: 3,
+  gnss_anchor: { latitude: 39.6044, longitude: -122.2588, height_m: 32.18 },
+  registered: true,
+  registered_count: 1,
+  scans: [
+    {
+      name: 'ScanPos001',
+      registration: 'registered',
+      point_count_estimated: 10_350_000,
+      instrument: { model: 'VZ-2000i' },
+      scan_params: { origin: [0, 0, 0] as [number, number, number], theta_min: 30, theta_max: 130, phi_min: 0, phi_max: 360 },
+      sop: [
+        [1, 0, 0, -0.1877],
+        [0, 1, 0, 0.1886],
+        [0, 0, 1, 0.3316],
+        [0, 0, 0, 1],
+      ],
+      gnss: { latitude: 39.6044, longitude: -122.2588, height_m: 33.3, height_datum: 'ellipsoidal' },
+      enu: { east_m: 0, north_m: 0, up_m: 0 },
+    },
+    {
+      name: 'ScanPos012',
+      registration: 'prior',
+      point_count_estimated: 9_000_000,
+      instrument: { model: 'VZ-2000i' },
+      manifest_success: false,
+      sop: [
+        [1, 0, 0, 1.5],
+        [0, 1, 0, -3.2],
+        [0, 0, 1, 0.4],
+        [0, 0, 0, 1],
+      ],
+      gnss: { latitude: 39.6045, longitude: -122.2589, height_m: 33.1, height_datum: 'ellipsoidal' },
+      enu: { east_m: 1.4, north_m: -3.1, up_m: 0.1 },
+    },
+    {
+      name: 'ScanPos019',
+      registration: 'none',
+      point_count_estimated: 1_170_000,
+      instrument: { model: 'VZ-2000i' },
+      gnss: null,
+      enu: null,
+    },
+  ],
+};
+
 beforeEach(() => {
   vi.mocked(inspectRieglProject).mockResolvedValue(PROJECT as never);
 });
@@ -87,7 +142,7 @@ describe('RieglProjectDialog', () => {
     await userEvent.click(screen.getByTestId('riegl-scan-check-ScanPos002'));
     await userEvent.click(screen.getByTestId('riegl-dialog-import'));
 
-    expect(onResolve).toHaveBeenCalledWith(['ScanPos001']);
+    expect(onResolve).toHaveBeenCalledWith({ scans: ['ScanPos001'], frame: 'local' });
   });
 
   it('resolves null on cancel so the caller imports nothing', async () => {
@@ -167,7 +222,10 @@ describe('RieglProjectDialog select-all', () => {
     await userEvent.click(screen.getByTestId('riegl-dialog-import'));
     // A failed position must never be swept in by "all" — the import would
     // then be asked for something it cannot produce.
-    expect(onResolve).toHaveBeenCalledWith(['ScanPos001', 'ScanPos002']);
+    expect(onResolve).toHaveBeenCalledWith({
+      scans: ['ScanPos001', 'ScanPos002'],
+      frame: 'local',
+    });
   });
 
   it('shows an indeterminate state when only some are selected', async () => {
@@ -205,6 +263,111 @@ describe('RieglProjectDialog GNSS note', () => {
     const note = screen.getByTestId('riegl-scan-gnss-ScanPos001');
     expect(note.dataset.gnss).toBe('false');
     expect(note.textContent).toMatch(/no GNSS/i);
+  });
+});
+
+describe('RieglProjectDialog .PROJ registration', () => {
+  beforeEach(() => {
+    vi.mocked(inspectRieglProject).mockResolvedValue(PROJ as never);
+  });
+
+  it('inspects in the registered frame regardless of the toggle', async () => {
+    // The SOPs the plan view and the badges are drawn from only exist when the
+    // reader resolves them, so the preview must always ask for them. Getting
+    // this wrong would leave a .PROJ looking exactly like a .riproject.
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-scan-row-ScanPos001')).toBeTruthy());
+    expect(vi.mocked(inspectRieglProject).mock.calls[0][3]).toBe('registered');
+  });
+
+  it('marks each position with how it was placed', async () => {
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId('riegl-scan-registration-ScanPos001')).toBeTruthy(),
+    );
+    expect(
+      screen.getByTestId('riegl-scan-registration-ScanPos001').dataset.registration,
+    ).toBe('registered');
+    // The distinction that matters to the user: "prior" is placed, but only to
+    // about a metre, so it still needs ICP. Showing it as registered would let
+    // a metre of error pass as a survey.
+    const prior = screen.getByTestId('riegl-scan-registration-ScanPos012');
+    expect(prior.dataset.registration).toBe('prior');
+    expect(prior.textContent).toMatch(/prior/i);
+    expect(
+      screen.getByTestId('riegl-scan-registration-ScanPos019').dataset.registration,
+    ).toBe('none');
+  });
+
+  it('summarises how much of the project is really registered', async () => {
+    // A .PROJ is routinely a MIX, so a blanket "these are aligned" would be a
+    // lie about two thirds of this project.
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-registration-summary')).toBeTruthy());
+    const text = screen.getByTestId('riegl-registration-summary').textContent ?? '';
+    expect(text).toMatch(/1 of 3/);
+    expect(text).toMatch(/ICP/);
+    expect(screen.queryByTestId('riegl-unregistered-warning')).toBeNull();
+  });
+
+  it('reports an estimated point count as approximate, not as a floor', async () => {
+    // A .PROJ preview decodes nothing, so this number is neither exact nor a
+    // lower bound. Reusing the probe path's "≥" would misrepresent it.
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-scan-row-ScanPos001')).toBeTruthy());
+    const row = screen.getByTestId('riegl-scan-row-ScanPos001');
+    expect(row.textContent).toMatch(/~10,350,000 pts/);
+    expect(row.textContent).not.toMatch(/\u2265/);
+  });
+
+  it('opting out of registration switches the frame and the warning back', async () => {
+    const onResolve = vi.fn();
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={onResolve} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-keep-local')).toBeTruthy());
+
+    await userEvent.click(screen.getByTestId('riegl-keep-local'));
+
+    // The unregistered warning comes back, the summary goes away, and the rows
+    // fall back to reporting GNSS rather than a placement they no longer get.
+    expect(screen.queryByTestId('riegl-registration-summary')).toBeNull();
+    expect(screen.getByTestId('riegl-unregistered-warning')).toBeTruthy();
+    expect(screen.getByTestId('riegl-scan-gnss-ScanPos001')).toBeTruthy();
+
+    await userEvent.click(screen.getByTestId('riegl-dialog-import'));
+    expect(onResolve).toHaveBeenCalledWith(
+      expect.objectContaining({ frame: 'local' }),
+    );
+  });
+
+  it('imports registered by default', async () => {
+    const onResolve = vi.fn();
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={onResolve} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-dialog-import')).toBeTruthy());
+    await userEvent.click(screen.getByTestId('riegl-dialog-import'));
+    expect(onResolve).toHaveBeenCalledWith(
+      expect.objectContaining({ frame: 'registered' }),
+    );
+  });
+
+  it('offers no frame choice for a .riproject', async () => {
+    // Raw scanner data has no pose to apply, so the checkbox would imply an
+    // alignment that does not exist.
+    vi.mocked(inspectRieglProject).mockResolvedValue(PROJECT as never);
+    render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-scan-row-ScanPos001')).toBeTruthy());
+    expect(screen.queryByTestId('riegl-keep-local')).toBeNull();
+    expect(screen.getByTestId('riegl-unregistered-warning')).toBeTruthy();
+  });
+
+  it('draws the plan view from the surveyed poses when there are any', async () => {
+    // The GNSS prior and the SOP disagree by metres; plotting the prior for a
+    // project that knows better would show a layout the import will not produce.
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-layout-plan')).toBeTruthy());
+    // ScanPos019 has neither a pose nor a fix, so it is simply not plotted.
+    expect(
+      screen.getByTestId('riegl-layout-plan').querySelectorAll('circle').length,
+    ).toBe(2);
   });
 });
 

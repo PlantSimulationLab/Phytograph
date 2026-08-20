@@ -324,10 +324,12 @@ export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters 
       // Leave the scan static if the reconstructed trajectory can't be mapped.
     }
   }
-  // The instrument, when the format names it (RIEGL raw projects do). An id we
-  // don't have a preset for is LEFT UNSET rather than approximated: a wrong
-  // model would silently substitute another instrument's beam divergence and
-  // FOV into the scan, and "unknown scanner" is the honest state.
+  // The instrument, when the format names it (RIEGL projects do). This records
+  // IDENTITY only — the model's preset is applied solely when a user picks a
+  // model in the Scan Parameters dialog, and both the Helios export and the LAD
+  // path read the optics (beam divergence, exit diameter) off the parameters
+  // themselves. So naming a near-relative here cannot substitute another
+  // instrument's physics into the scan; it selects a marker mesh and a label.
   const modelId = scannerModelIdFromFile(src.scanner_model);
   if (modelId) p.scannerModel = modelId;
   return p;
@@ -341,13 +343,30 @@ export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters 
 const FILE_SCANNER_MODEL_IDS: Record<string, import('./scannerModels').ScannerModelId> = {
   vz1000: 'riegl_vz1000',
   vz400i: 'riegl_vz400i',
+  vz2000i: 'riegl_vz2000i',
   minivux3uav: 'riegl_minivux3uav',
 };
+
+// A RIEGL V-Line scanner with no entry of its own — "VZ-600i", "VZ-4000" —
+// resolves to the family marker rather than the neutral sphere, so a scan that
+// plainly had an instrument does not render as a featureless ball.
+//
+// It maps to `riegl_vz_series`, NOT to a specific sibling. Aliasing it to the
+// VZ-400i would put a model number the file never reported into the scan info
+// panel and into the exported <scannerModel>; "RIEGL VZ-series" is the honest
+// answer for an instrument we can place in a family but not identify. Models we
+// DO know get an exact entry above and are labelled exactly.
+//
+// Anchored to `vz` + a digit rather than matching anything unrecognised: a
+// Velodyne or Livox identity must not acquire a RIEGL body.
+const VZ_SERIES_RE = /^vz\d/;
 
 export function scannerModelIdFromFile(
   raw: string | undefined,
 ): import('./scannerModels').ScannerModelId | undefined {
   if (!raw) return undefined;
   const key = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
-  return FILE_SCANNER_MODEL_IDS[key];
+  const exact = FILE_SCANNER_MODEL_IDS[key];
+  if (exact) return exact;
+  return VZ_SERIES_RE.test(key) ? 'riegl_vz_series' : undefined;
 }

@@ -13,6 +13,8 @@ describe('scannerModels catalog', () => {
       'generic',
       'riegl_vz400i',
       'riegl_vz1000',
+      'riegl_vz2000i',
+      'riegl_vz_series',
       'leica_p40',
       'leica_blk360',
       'leica_blk360_g2',

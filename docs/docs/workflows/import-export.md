@@ -6,8 +6,8 @@ Three entry points. All accept the same set of formats — see
 **[File formats](../reference/file-formats.md)** for the full list.
 
 !!! tip "RIEGL raw projects"
-    A `.riproject` is a *directory* of scan positions, not a file, so it has its
-    own path: **[Import a RIEGL raw project](import-riegl-riproject.md)**. Data
+    A RIEGL `.riproject` / `.PROJ` is a *directory* of scan positions, not a file, so it has its
+    own path: **[Import a RIEGL project](import-riegl-project.md)**. Data
     that has already been through RiSCAN PRO or RiPROCESS should be exported to
     LAS/E57 and imported normally.
 
@@ -92,7 +92,7 @@ dropdowns in; you correct anything that's wrong before importing:
     For ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) every column is
     freely assignable, including X / Y / Z.
 
-    For formats that carry named scalar fields (`.las`, `.laz`, `.riproject`)
+    For formats that carry named scalar fields (`.las`, `.laz`, RIEGL projects)
     the **geometry** columns are fixed by the file, but the scalar fields can be
     reassigned. This matters because a scalar's name is whatever the exporting
     software chose: Phytograph recognises the common spellings — `gps_time`,
@@ -228,7 +228,7 @@ dropdowns in; you correct anything that's wrong before importing:
 For `.ply`, `.pcd`, `.las`, `.laz` and `.ptx`, the column layout is defined
 inside the file, so X/Y/Z and color roles can't be reassigned — but you can still
 preview the fields, rename scalars, and switch any scalar between **Scalar**
-and **Label**. For `.las`, `.laz` and `.riproject` you can additionally assign a
+and **Label**. For `.las`, `.laz` and RIEGL projects you can additionally assign a
 scalar its true role (see *Column roles* above), which is how you tell Phytograph
 that a field named something it doesn't recognise is really the timestamp,
 reflectance, or a multi-return column. `.e57` is the one format with no sample rows: reading values out

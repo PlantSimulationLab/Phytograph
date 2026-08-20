@@ -21,8 +21,9 @@ You need geometry in the scene to scan: typically a generated
    The label appears on the scanner marker in the 3D view.
 
 3. **Scanner model** — pick the instrument the scan represents. Choosing
-   a specific model (RIEGL VZ-400i, Leica ScanStation P40, Leica BLK360
-   (G1), Leica BLK360 (G2), FARO Focus S350, Velodyne HDL-32E, RIEGL
+   a specific model (RIEGL VZ-400i, VZ-1000 or VZ-2000i, RIEGL VZ-series
+   for another V-Line scanner, Leica ScanStation P40, Leica BLK360 (G1),
+   Leica BLK360 (G2), FARO Focus S350, Velodyne HDL-32E, RIEGL
    miniVUX-3UAV, or a Livox rosette — **Mid-40**, **Mid-70**, **Avia**)
    does two things:
 
