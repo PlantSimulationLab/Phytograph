@@ -184,7 +184,17 @@ export interface CrownFitOptions {
   alpha: number | null;
   // Export a per-crown metrics CSV after the fit completes.
   exportCsv: boolean;
+  // Base name for the exported files (''  => derived from the first scan's name).
+  exportBaseName: string;
+  // Format for the crown MESH files written beside the CSV. Only alpha crowns get
+  // one: a concave hull has no analytic parameters, so the mesh IS the model and
+  // has to travel with the table. The parametric shapes are fully described by
+  // their params columns, so they get no mesh file and an empty mesh_file cell.
+  meshFormat: CrownMeshFormat;
 }
+
+export type CrownMeshFormat = 'obj' | 'ply' | 'stl';
+export const CROWN_MESH_FORMATS: CrownMeshFormat[] = ['obj', 'ply', 'stl'];
 
 // Fuzziness is capped at this maximum in the UI: past ~0.5 the trim gets too
 // aggressive to be useful, and the useful working range is the low end.
@@ -195,6 +205,8 @@ export const DEFAULT_CROWN_FIT_OPTIONS: CrownFitOptions = {
   strictness: 0.2,
   alpha: null,
   exportCsv: false,
+  exportBaseName: '',
+  meshFormat: 'obj',
 };
 
 export const CROWN_FIT_OPTIONS_STORE_KEY = 'crownFit.options';
@@ -215,7 +227,12 @@ export function coerceCrownFitOptions(stored: unknown): CrownFitOptions {
     typeof s.alpha === 'number' && Number.isFinite(s.alpha) && s.alpha > 0 ? s.alpha : null;
   const exportCsv =
     typeof s.exportCsv === 'boolean' ? s.exportCsv : DEFAULT_CROWN_FIT_OPTIONS.exportCsv;
-  return { shape, strictness, alpha, exportCsv };
+  const exportBaseName =
+    typeof s.exportBaseName === 'string' ? s.exportBaseName : DEFAULT_CROWN_FIT_OPTIONS.exportBaseName;
+  const meshFormat: CrownMeshFormat = CROWN_MESH_FORMATS.includes(s.meshFormat as CrownMeshFormat)
+    ? (s.meshFormat as CrownMeshFormat)
+    : DEFAULT_CROWN_FIT_OPTIONS.meshFormat;
+  return { shape, strictness, alpha, exportCsv, exportBaseName, meshFormat };
 }
 
 // ==================== Crown mesh colors ====================

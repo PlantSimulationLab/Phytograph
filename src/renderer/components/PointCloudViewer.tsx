@@ -25,7 +25,10 @@ import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { QSMPopup, type QSMStartOptions } from './QSMPopup';
 import { CrownFitPopup, type CrownFitStartArgs } from './CrownFitPopup';
 import { CROWN_SHAPE_LABELS, crownColorForTreeId, allocateCrownColor, type CrownFitScanEligibility } from '../lib/crownFit';
-import { downloadFile as saveToFile, saveBinaryFileQuiet, saveTextFileQuiet } from '../utils/fileDownload';
+import {
+  buildCrownCsv, crownExportBaseName, crownMeshFileName, joinExportPath, type CrownCsvRow,
+} from '../lib/crownExport';
+import { saveBinaryFileQuiet, saveTextFileQuiet } from '../utils/fileDownload';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
@@ -13814,6 +13817,77 @@ export default function PointCloudViewer({
     };
   }, []);
 
+  // Write the crown table, plus a mesh file per ALPHA crown.
+  //
+  // Why alpha is special: the CSV carries each fit's defining parameters, so a
+  // parametric crown's row fully reproduces its solid. A concave hull has no such
+  // parameters — the mesh IS the model — so those crowns are written as mesh files
+  // beside the CSV and named in its mesh_file column, which is what keeps the
+  // table a complete record rather than a set of bbox statistics.
+  //
+  // That also decides the destination: no alpha crowns means exactly one file, so
+  // the native Save dialog is right; alpha crowns mean N+1 files, which a save
+  // dialog can't express, so we ask for a FOLDER instead (mirroring handleExportQSMs).
+  // Returns a sentence for the completion toast, or '' if the user cancelled.
+  const exportCrownTable = useCallback(async (
+    args: CrownFitStartArgs, rows: CrownCsvRow[],
+  ): Promise<string> => {
+    const base = crownExportBaseName(args.exportBaseName, rows[0]?.scanName ?? '');
+    const csvName = `${base}.csv`;
+    const alphaRows = rows.filter(r => r.crown.shape === 'alpha');
+
+    if (alphaRows.length === 0) {
+      const path = await saveTextFileQuiet(buildCrownCsv(rows, args.strictness), csvName);
+      return path ? ` Wrote ${csvName}.` : '';
+    }
+
+    // Name every alpha crown's mesh first, so the names are already in the rows
+    // by the time the CSV is serialized — the column and the files can't drift.
+    const used = new Set<string>();
+    for (const r of alphaRows) {
+      r.meshFile = crownMeshFileName(
+        base, r.scanName, r.crown.tree_instance_id, args.meshFormat, used);
+    }
+    const csv = buildCrownCsv(rows, args.strictness);
+
+    if (!window.electronAPI) {
+      // Plain-browser dev: no folder to write into. Save the table alone rather
+      // than silently dropping it, and say what's missing.
+      await saveTextFileQuiet(csv, csvName);
+      showToast({
+        type: 'warning', title: 'Crown Export',
+        message: 'Crown meshes need the desktop app; only the CSV was saved.',
+      });
+      return '';
+    }
+
+    const picked = await window.electronAPI.dialog.open({
+      directory: true, title: 'Choose a folder for the crown export',
+    });
+    const dir = typeof picked === 'string' ? picked : null;
+    if (!dir) return ''; // cancelled
+
+    for (const r of alphaRows) {
+      const data = crownToMeshData(r.crown);
+      let content: string;
+      if (args.meshFormat === 'ply') {
+        content = serializeMeshPly(data);
+      } else if (args.meshFormat === 'stl') {
+        content = serializeMeshStl(data);
+      } else {
+        // A fitted crown carries no materials, so serializeMeshObj emits just the
+        // .obj — no .mtl sibling to write.
+        const files = serializeMeshObj(data, { baseName: r.meshFile!.replace(/\.obj$/, '') });
+        content = files.find(f => f.name.endsWith('.obj'))?.text ?? '';
+      }
+      await window.electronAPI.fs.writeText(joinExportPath(dir, r.meshFile!), content);
+    }
+    await window.electronAPI.fs.writeText(joinExportPath(dir, csvName), csv);
+
+    const n = alphaRows.length;
+    return ` Wrote ${csvName} + ${n} crown mesh${n === 1 ? '' : 'es'}.`;
+  }, [crownToMeshData, showToast]);
+
   // Fit crown shapes to one or more scans (one crown per tree), add each as a
   // mesh with per-crown metrics, and optionally export a metrics CSV. Mirrors the
   // triangulation/LAD multi-scan flow: buildPointSource per scan (session_id
@@ -13834,7 +13908,7 @@ export default function PointCloudViewer({
       ...args.scanIds.map(id => scans.find(s => s.id === id)?.color).filter((c): c is string => !!c),
     ]);
     // Rows for the CSV: one per fitted crown, across every scan.
-    const csvRows: { scanName: string; crown: CrownFitCrown }[] = [];
+    const csvRows: CrownCsvRow[] = [];
     const allWarnings: string[] = [];
     // Overall progress = (scans finished + current scan's own fraction) / total.
     // Advances smoothly across scans, and within a scan the backend's per-tree
@@ -13921,32 +13995,15 @@ export default function PointCloudViewer({
         showToast({ type: 'warning', title: 'Crown Fit', message: w });
       }
       if (allMeshes.length > 0) {
+        // Export BEFORE the completion toast, so one toast reports both the fit
+        // and what actually landed on disk (the old path used the toasting
+        // saveToFile, which stacked a second "Download Complete" on top).
+        const exportNote = args.exportCsv ? await exportCrownTable(args, csvRows) : '';
         showToast({
           type: 'success',
           title: 'Crown Fit Complete',
-          message: `Fitted ${allMeshes.length} crown${allMeshes.length === 1 ? '' : 's'}.`,
+          message: `Fitted ${allMeshes.length} crown${allMeshes.length === 1 ? '' : 's'}.${exportNote}`,
         });
-        if (args.exportCsv) {
-          const esc = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
-          const header = [
-            'scan_name', 'tree_instance_id', 'shape', 'tree_height_m', 'crown_volume_m3',
-            'crown_center_x', 'crown_center_y', 'crown_center_z',
-            'crown_dim_x_m', 'crown_dim_y_m', 'crown_dim_z_m',
-            'crown_surface_area_m2', 'num_points_used', 'strictness',
-          ];
-          const rows = csvRows.map(({ scanName, crown }) => {
-            const m = crown.metrics;
-            return [
-              scanName, String(crown.tree_instance_id), crown.shape,
-              m.tree_height_m.toFixed(4), m.crown_volume_m3.toFixed(4),
-              m.crown_center[0].toFixed(4), m.crown_center[1].toFixed(4), m.crown_center[2].toFixed(4),
-              m.crown_dims_m[0].toFixed(4), m.crown_dims_m[1].toFixed(4), m.crown_dims_m[2].toFixed(4),
-              m.surface_area_m2.toFixed(4), String(m.num_points_used), String(args.strictness),
-            ];
-          });
-          const csv = [header, ...rows].map(r => r.map(esc).join(',')).join('\n') + '\n';
-          await saveToFile(csv, 'crown_metrics.csv');
-        }
       } else {
         showToast({ type: 'error', title: 'Crown Fit', message: 'No crowns were fitted.' });
       }
@@ -13963,7 +14020,7 @@ export default function PointCloudViewer({
       crownFitAbortRef.current = null;
       crownFitRunIdRef.current = null;
     }
-  }, [crownFitRunning, clouds, scans, meshes, buildPointSource, crownToMeshData, addMeshes, onHideScan]);
+  }, [crownFitRunning, clouds, scans, meshes, buildPointSource, crownToMeshData, exportCrownTable, addMeshes, onHideScan]);
 
   // Cancel an in-flight crown fit: stop the backend worker (frees its memory) if
   // a run-id arrived, then abort the fetch (the streaming disconnect also kills

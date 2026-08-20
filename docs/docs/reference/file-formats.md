@@ -233,6 +233,26 @@ point clouds) does not carry arbitrary per-vertex scalar fields.
 | `crown_surface_area_m2` | Fitted-mesh surface area. |
 | `num_points_used` | Points used after fuzzy trimming. |
 | `strictness` | The fuzziness value used for the fit. |
+| `param_a_m`, `param_b_m`, `param_c_m` | Semi-extent along x/y/z. Ellipsoid + prism only. |
+| `param_base_radius_m`, `param_height_m` | Cone only. |
+| `param_alpha_m`, `param_alpha_auto` | Alpha shape only: the radius used, and whether the fit chose it. |
+| `mesh_vertices`, `mesh_triangles` | Size of the fitted mesh. |
+| `mesh_file` | The crown's mesh file, relative to the CSV. Alpha shapes only; empty otherwise. |
+
+The `param_*` columns are the **fit parameters** — what it takes to
+rebuild the solid, rather than describe it. A column always means the
+same thing: `param_a/b/c_m` are the semi-extent along x/y/z for both
+box-like shapes (an ellipsoid's semi-axes, a prism's half-extents).
+Columns that don't apply to a row's shape are left empty.
+
+There is no separate parameter column for the shape's center: for the
+ellipsoid, prism, and cone it is exactly `crown_center_x/y/z`.
+
+An alpha shape has no analytic parameters — a concave hull's geometry
+*is* the result — so those crowns are written as mesh files beside the
+CSV (`.obj`, `.ply`, or `.stl`, your choice) and `mesh_file` names the
+one belonging to each row. That export writes several files, so it asks
+for a **folder** instead of a save location.
 
 ## Skeletons
 
@@ -394,6 +414,35 @@ flat.
 
 An XML with only `<grid>` blocks (no `<scan>`) imports just the grids.
 
+### Files holding several scan positions
+
+Two point-cloud formats can hold **several scanner setups in one file**: a
+**multi-block `.ptx`** (one block per setup) and a **multi-scan `.e57`**.
+Phytograph imports these as **one scan per position** — each with its own
+pose, its own grid, and its own scan parameters. Every other format holds a
+single position and imports as one scan.
+
+The scans are named after the file without its extension — `plot3.ptx`
+holding three blocks imports as `plot3 — scan 1`, `plot3 — scan 2`,
+`plot3 — scan 3`. A single-position file keeps its full file name
+(extension included) unchanged.
+
+They are **not merged into one cloud**, because a merged cloud would have to
+pick one origin to stand in for all of them, and that origin is used for real
+work:
+
+- [Leaf area density](../workflows/estimate-leaf-area-density.md) inverts
+  transmission from a **single scanner origin**; the wrong one silently
+  corrupts the result.
+- [Sky/miss points](#skymiss-points) are displayed on a shell centred on the
+  scanner, which would sit around the wrong point.
+- The per-scan `row_index` / `column_index` rasters of two setups would
+  collide.
+
+All positions from one file share a single world shift, so they stay
+correctly co-located relative to each other. If one position fails to import,
+it's reported on its own and the remaining positions still import.
+
 ### Scan parameters recovered from the point-cloud file
 
 Some point-cloud formats embed the scanner's geometry in the file header. When
@@ -412,9 +461,11 @@ file *doesn't* record is left at its default (blank), exactly as before.
 
 - **E57** is the richest source: each scan's pose (origin + rotation) is applied
   to its points, and the angular sweep and grid resolution are read when the
-  file includes them. A multi-scan E57 uses the first scan's parameters for the
-  merged cloud. E57 elevation (measured from the horizontal plane) is converted
-  to Phytograph's zenith angle automatically.
+  file includes them. A multi-scan E57 imports as one scan per position, each
+  reading its own parameters — see
+  [Files holding several scan positions](#files-holding-several-scan-positions).
+  E57 elevation (measured from the horizontal plane) is converted to
+  Phytograph's zenith angle automatically.
 - **PCD** records only a sensor origin (`VIEWPOINT`); it's used only when it
   differs from the identity default that most files leave in place.
 - **LAS/LAZ, PLY, and ASCII** carry no standard scanner-geometry fields, so an

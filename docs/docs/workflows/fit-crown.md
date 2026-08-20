@@ -3,8 +3,9 @@
 Fit a simple geometric **shape to a tree's crown** and read off per-tree
 metrics — **tree height, crown volume, crown center, and crown
 dimensions**. Each fitted crown becomes a mesh in the scene with its
-statistics attached, and you can export every crown's metrics to a CSV
-(one row per crown).
+statistics attached, and you can export every crown to a CSV table (one
+row per crown) that records the shape's **fit parameters**, not just its
+statistics.
 
 Fitting is done **per scan**, and — for a cloud that carries tree labels
 — **per tree** within a scan. You can select several scans at once and
@@ -71,8 +72,10 @@ tools write and adapts the fit to what's present:
    the trim works.
 5. *(Alpha shape only)* Optionally override the **alpha radius** — leave
    blank for automatic.
-6. *(Optional)* Tick **Export crown metrics to CSV** to be prompted for a
-   file when the fit completes.
+6. *(Optional)* Tick **Export crown table to CSV**. Give the export a
+   **file name** (it defaults to the first selected scan's name), and —
+   for an alpha shape — pick the **crown mesh format** (OBJ, PLY or STL).
+   The line under the name field previews exactly what will be written.
 7. Click **Fit crowns**.
 
 ## Results
@@ -91,10 +94,35 @@ visible; re-show them from the Scans panel any time.
 
 ### CSV export
 
-With **Export crown metrics to CSV** ticked, you're prompted for a save
-location and Phytograph writes one **row per crown**. See
-[File formats](../reference/file-formats.md#crown-metrics-csv) for the
-column list.
+With **Export crown table to CSV** ticked, Phytograph writes one **row
+per crown** when the fit completes. Each row carries the crown's metrics
+*and* the parameters that define its shape — an ellipsoid's semi-axes, a
+cone's base radius and height — so a row is enough to rebuild the solid.
+See [File formats](../reference/file-formats.md#crown-metrics-csv) for
+the column list.
+
+#### Alpha shapes also write a mesh
+
+An alpha shape has no such parameters: it's a concave hull, so its
+**geometry is the result**. Those crowns therefore get a **mesh file
+written alongside the CSV**, and the row's `mesh_file` column names it.
+
+Because that means more than one file, an alpha export asks you to
+**choose a folder** rather than a save location; the CSV and every crown
+mesh are written into it together. The mesh file names are
+`<file name>_<scan>_tree<N>.<ext>` (or `…_crown` when the whole cloud was
+fitted as a single tree).
+
+The other three shapes need no mesh — their parameter columns already
+describe them completely — so they leave `mesh_file` empty and are saved
+through the ordinary save dialog as a single CSV.
+
+!!! tip "Exporting a crown mesh on its own"
+
+    Any fitted crown is a normal mesh in the scene, so you can also select
+    it and export it from the **Export** window at any time — see
+    [Import & export](import-export.md). The `mesh_file` column exists so
+    that a *table* stays a complete record without that extra step.
 
 ## See also
 

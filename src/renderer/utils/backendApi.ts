@@ -4555,6 +4555,37 @@ export interface CrownMetrics {
   crown_top_z: number;
   surface_area_m2: number;
   num_points_used: number;
+  // Mesh size. Fixed for the parametric shapes; data-dependent for an alpha hull,
+  // where it's the only honest measure of how big the exported mesh is.
+  num_vertices?: number;
+  num_triangles?: number;
+}
+
+/**
+ * The parameters that DEFINE a fitted crown — what it takes to rebuild the solid,
+ * as opposed to the summary statistics in CrownMetrics. Keys are shape-dependent:
+ *
+ * - ellipsoid / prism: `a_m`/`b_m`/`c_m`, the semi-extent along x/y/z (the
+ *   ellipsoid's semi-axes, the prism's half-extents) — the same meaning in both.
+ * - cone: `base_radius_m` + `height_m`.
+ * - alpha: `alpha_m` (auto-grown unless the user overrode it, hence `alpha_auto`)
+ *   and `watertight`. A concave hull has NO analytic parameters, so these describe
+ *   the fit but can't reproduce it — the mesh has to travel with the table.
+ *
+ * The shape's center is deliberately absent: for all three parametric shapes it is
+ * exactly `metrics.crown_center` (the fitted mesh's AABB center).
+ *
+ * Optional so a backend that predates it degrades to blank columns, not a crash.
+ */
+export interface CrownFitParams {
+  a_m?: number;
+  b_m?: number;
+  c_m?: number;
+  base_radius_m?: number;
+  height_m?: number;
+  alpha_m?: number;
+  alpha_auto?: boolean;
+  watertight?: boolean;
 }
 
 export interface CrownFitCrown {
@@ -4564,6 +4595,7 @@ export interface CrownFitCrown {
   triangles: number[];        // flat indices
   normals: number[];          // flat per-vertex xyz
   metrics: CrownMetrics;
+  params?: CrownFitParams;    // shape-dependent; see CrownFitParams
 }
 
 export interface CrownFitRequest {

@@ -10,7 +10,9 @@ import {
   CROWN_SHAPE_LABELS,
   CROWN_FIT_OPTIONS_STORE_KEY,
   MAX_STRICTNESS,
+  CROWN_MESH_FORMATS,
   type CrownShape,
+  type CrownMeshFormat,
   type CrownFitScanEligibility,
 } from '../lib/crownFit';
 import { ObjectPicker, type PickerItem } from './ObjectPicker';
@@ -26,6 +28,10 @@ export interface CrownFitStartArgs {
   strictness: number;
   alpha: number | null;
   exportCsv: boolean;
+  // Base name for the exported files; '' means "use the first scan's name".
+  exportBaseName: string;
+  // Format for the mesh files written beside the CSV (alpha crowns only).
+  meshFormat: CrownMeshFormat;
   eligibility: Map<string, CrownFitScanEligibility>;
 }
 
@@ -117,6 +123,13 @@ export function CrownFitPopup({
 
   const canFit = selectedScanIds.size > 0;
 
+  // Placeholder for the base-name field: the first selected scan's name, which is
+  // what the export falls back to when the field is left empty.
+  const firstScanName = useMemo(() => {
+    const first = scans.find((sc) => selectedScanIds.has(sc.id));
+    return first ? scanDisplayName(first) : 'crowns';
+  }, [scans, selectedScanIds]);
+
   const handleFit = useCallback(() => {
     if (!canFit) return;
     const finalOpts = { ...opts };
@@ -128,6 +141,8 @@ export function CrownFitPopup({
       strictness: finalOpts.strictness,
       alpha: finalOpts.alpha,
       exportCsv: finalOpts.exportCsv,
+      exportBaseName: finalOpts.exportBaseName,
+      meshFormat: finalOpts.meshFormat,
       eligibility,
     });
     onClose();
@@ -267,7 +282,12 @@ export function CrownFitPopup({
             </div>
           )}
 
-          {/* CSV export toggle. downloadFile opens the native save dialog itself. */}
+          {/* Table export. The CSV carries the fit PARAMETERS as well as the
+              metrics, so a parametric crown's row fully describes its solid. An
+              alpha shape has no analytic parameters — the mesh is the model — so
+              those crowns also get a mesh file written beside the CSV and named
+              in its mesh_file column, which is why the format picker appears
+              only for alpha. */}
           <label className="flex items-center gap-2 text-xs text-neutral-300 cursor-pointer">
             <input
               type="checkbox"
@@ -276,8 +296,57 @@ export function CrownFitPopup({
               onChange={(e) => setOpts((o) => ({ ...o, exportCsv: e.target.checked }))}
               className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-green-500 focus:ring-0"
             />
-            Export crown metrics to CSV (one row per crown)
+            Export crown table to CSV (one row per crown)
           </label>
+
+          {opts.exportCsv && (
+            <div className="pl-5 space-y-2">
+              <div>
+                <label className="block text-xs font-medium text-neutral-300 mb-1">
+                  File name
+                </label>
+                <input
+                  type="text"
+                  data-testid="crown-export-name"
+                  placeholder={firstScanName}
+                  value={opts.exportBaseName}
+                  onChange={(e) => setOpts((o) => ({ ...o, exportBaseName: e.target.value }))}
+                  className="w-56 bg-neutral-700 text-neutral-100 text-xs rounded px-2 py-1 border border-neutral-600 focus:outline-none focus:border-neutral-500"
+                />
+                <div className="text-[10px] text-neutral-500 mt-1" data-testid="crown-export-preview">
+                  {`${(opts.exportBaseName.trim() || firstScanName)}.csv`}
+                  {opts.shape === 'alpha'
+                    ? ` + one .${opts.meshFormat} per crown`
+                    : ''}
+                </div>
+              </div>
+
+              {opts.shape === 'alpha' && (
+                <div>
+                  <label className="text-xs font-medium text-neutral-300 mb-1 flex items-center gap-1">
+                    Crown mesh format
+                    <InfoHint
+                      label="Crown mesh format"
+                      text="An alpha shape has no shape parameters to tabulate — its geometry IS the result. So each alpha crown is written as a mesh file next to the CSV, and the row's mesh_file column names it. The other shapes are fully described by their parameter columns and write no mesh."
+                    />
+                  </label>
+                  <select
+                    data-testid="crown-mesh-format"
+                    value={opts.meshFormat}
+                    onChange={(e) => setOpts((o) => ({ ...o, meshFormat: e.target.value as CrownMeshFormat }))}
+                    className="w-28 bg-neutral-700 text-neutral-100 text-xs rounded px-2 py-1 border border-neutral-600 focus:outline-none focus:border-neutral-500"
+                  >
+                    {CROWN_MESH_FORMATS.map((f) => (
+                      <option key={f} value={f}>{f.toUpperCase()}</option>
+                    ))}
+                  </select>
+                  <div className="text-[10px] text-neutral-500 mt-1">
+                    You'll be asked for a folder — the CSV and the crown meshes are written together.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-700 bg-neutral-800/90">

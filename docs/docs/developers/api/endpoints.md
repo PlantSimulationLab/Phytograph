@@ -23,7 +23,7 @@ The tables are grouped by feature area. To find a handler, grep `^@app\.` in
 | GET | `/api/models` | `main.py` | List available fitting models |
 | POST | `/api/fit/custom` | `main.py` | Fit a user-supplied model expression |
 | POST | `/api/fit/prospect` | `main.py` | PROSPECT leaf optical model |
-| POST | `/api/fit/crown` | `main.py` | Fit crown shapes + derive per-tree metrics. Streams PHP1 progress ahead of a JSON tail (one entry per fitted crown); cancelable via the run-id token |
+| POST | `/api/fit/crown` | `main.py` | Fit crown shapes + derive per-tree metrics. Streams PHP1 progress ahead of a JSON tail (one entry per fitted crown: mesh arrays, a `metrics` block, and a shape-dependent `params` block giving the fit's defining parameters); cancelable via the run-id token |
 
 ## LaTeX & export
 

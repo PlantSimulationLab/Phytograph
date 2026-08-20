@@ -7,6 +7,7 @@ they're filtered (not left to inflate the extent ~1000x and hang the fit).
 """
 import asyncio
 import json
+import math
 import queue
 import time
 
@@ -389,3 +390,105 @@ def test_cancel_interrupts_the_fit_before_any_tree_is_fitted():
     )
     with pytest.raises(main.ScanCancelled):
         main._do_crown_fit(req, progress=reporter)
+
+
+# ==================== Shape parameters (`params`) ====================
+#
+# Every fit reports the parameters that DEFINE its solid, so an exported crown
+# table is a record of the shape rather than only summary statistics. Before
+# this, fit_crown computed the semi-axes / base radius / alpha radius and threw
+# them all away, leaving the CSV unable to reproduce any crown — most visibly
+# for the alpha shape, which has no analytic parameters at all.
+
+
+@pytest.mark.parametrize("shape,keys", [
+    ("ellipsoid", {"a_m", "b_m", "c_m"}),
+    ("prism", {"a_m", "b_m", "c_m"}),
+    ("cone", {"base_radius_m", "height_m"}),
+    ("alpha", {"alpha_m", "alpha_auto", "watertight"}),
+])
+def test_each_shape_reports_its_defining_params(shape, keys):
+    import crown_fit as cf
+    rng = np.random.default_rng(0)
+    pts = _leaf_blob(rng)
+    res = cf.fit_crown(pts, shape, 0.5, baseline_z=0.0)
+    params = res["params"]
+    assert set(params) == keys
+    for k in keys:
+        v = params[k]
+        if isinstance(v, bool):
+            continue
+        assert np.isfinite(v) and v > 0, f"{shape}.{k} = {v!r}"
+
+
+def test_ellipsoid_params_reproduce_its_volume():
+    """a/b/c are the real semi-axes: 4/3·pi·a·b·c must equal the reported volume."""
+    import crown_fit as cf
+    rng = np.random.default_rng(3)
+    res = cf.fit_crown(_leaf_blob(rng), "ellipsoid", 0.2, 0.0)
+    p, m = res["params"], res["metrics"]
+    expected = 4.0 / 3.0 * math.pi * p["a_m"] * p["b_m"] * p["c_m"]
+    assert abs(expected - m["crown_volume_m3"]) < 1e-6 * expected
+    # Semi-axes are HALF the reported bbox dimensions (an ellipsoid's bbox is
+    # exactly its axes), which is what makes a/b/c directly comparable to the
+    # prism's half-extents.
+    assert np.allclose([p["a_m"], p["b_m"], p["c_m"]],
+                       np.array(m["crown_dims_m"]) / 2.0, atol=1e-6)
+
+
+def test_prism_params_are_half_extents():
+    """a/b/c mean the same thing for both box-like shapes: the semi-extent along
+    x/y/z. So 8·a·b·c is the prism's volume."""
+    import crown_fit as cf
+    rng = np.random.default_rng(4)
+    res = cf.fit_crown(_leaf_blob(rng), "prism", 0.2, 0.0)
+    p, m = res["params"], res["metrics"]
+    expected = 8.0 * p["a_m"] * p["b_m"] * p["c_m"]
+    assert abs(expected - m["crown_volume_m3"]) < 1e-6 * expected
+    assert np.allclose([p["a_m"], p["b_m"], p["c_m"]],
+                       np.array(m["crown_dims_m"]) / 2.0, atol=1e-6)
+
+
+def test_cone_params_reproduce_its_volume_and_height():
+    import crown_fit as cf
+    rng = np.random.default_rng(5)
+    res = cf.fit_crown(_leaf_blob(rng), "cone", 0.2, 0.0)
+    p, m = res["params"], res["metrics"]
+    expected = 1.0 / 3.0 * math.pi * p["base_radius_m"] ** 2 * p["height_m"]
+    assert abs(expected - m["crown_volume_m3"]) < 1e-6 * expected
+    # The cone spans the crown's full vertical extent, so its height parameter is
+    # the mesh's Z dimension.
+    assert abs(p["height_m"] - m["crown_dims_m"][2]) < 1e-6
+
+
+def test_alpha_reports_the_radius_it_actually_used():
+    """An auto-grown alpha is chosen by the fit, not the user, so it must be
+    reported — it's the only scalar that characterises the hull. An explicit
+    override is echoed back verbatim with alpha_auto False."""
+    import crown_fit as cf
+    rng = np.random.default_rng(6)
+    pts = _leaf_blob(rng)
+
+    auto = cf.fit_crown(pts, "alpha", 0.2, 0.0)["params"]
+    assert auto["alpha_auto"] is True
+    assert auto["alpha_m"] > 0
+    # Auto-grow searches multiples of the mean NN spacing; the blob is metres
+    # across with ~1500 points, so a sane radius is well under the crown size.
+    assert auto["alpha_m"] < 10.0
+
+    forced = cf.fit_crown(pts, "alpha", 0.2, 0.0, alpha=auto["alpha_m"] * 1.5)["params"]
+    assert forced["alpha_auto"] is False
+    assert abs(forced["alpha_m"] - auto["alpha_m"] * 1.5) < 1e-9
+
+
+@pytest.mark.parametrize("shape", ["ellipsoid", "prism", "cone", "alpha"])
+def test_metrics_report_mesh_size(shape):
+    """num_vertices/num_triangles match the returned arrays — for an alpha hull
+    they're the only honest measure of how big the exported mesh is."""
+    import crown_fit as cf
+    rng = np.random.default_rng(7)
+    res = cf.fit_crown(_leaf_blob(rng), shape, 0.2, 0.0)
+    m = res["metrics"]
+    assert m["num_vertices"] == len(res["vertices"])
+    assert m["num_triangles"] == len(res["triangles"])
+    assert m["num_vertices"] > 0 and m["num_triangles"] > 0

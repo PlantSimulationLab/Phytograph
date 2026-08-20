@@ -185,6 +185,31 @@ describe('coerceCrownFitOptions', () => {
     expect(coerceCrownFitOptions({ alpha: -2 }).alpha).toBeNull();
     expect(coerceCrownFitOptions({ alpha: 0.5 }).alpha).toBe(0.5);
   });
+
+  it('fills in the export settings a pre-existing stored blob lacks', () => {
+    // Anyone who used crown fitting before the export fields existed has a
+    // persisted object without them; it must still coerce to valid options
+    // rather than leaving the base name / mesh format undefined.
+    const legacy = { shape: 'cone', strictness: 0.3, alpha: null, exportCsv: true };
+    const o = coerceCrownFitOptions(legacy);
+    expect(o.exportBaseName).toBe(DEFAULT_CROWN_FIT_OPTIONS.exportBaseName);
+    expect(o.meshFormat).toBe(DEFAULT_CROWN_FIT_OPTIONS.meshFormat);
+    expect(o.shape).toBe('cone');
+    expect(o.exportCsv).toBe(true);
+  });
+
+  it('keeps a valid mesh format and rejects anything else', () => {
+    expect(coerceCrownFitOptions({ meshFormat: 'ply' }).meshFormat).toBe('ply');
+    expect(coerceCrownFitOptions({ meshFormat: 'stl' }).meshFormat).toBe('stl');
+    expect(coerceCrownFitOptions({ meshFormat: 'gltf' as never }).meshFormat)
+      .toBe(DEFAULT_CROWN_FIT_OPTIONS.meshFormat);
+  });
+
+  it('keeps a stored base name, and ignores a non-string one', () => {
+    expect(coerceCrownFitOptions({ exportBaseName: 'plot3_crowns' }).exportBaseName)
+      .toBe('plot3_crowns');
+    expect(coerceCrownFitOptions({ exportBaseName: 42 as never }).exportBaseName).toBe('');
+  });
 });
 
 describe('crown colours', () => {

@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.69.0"
+BACKEND_VERSION = "0.70.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -3789,7 +3789,8 @@ class CrownFitRequest(BaseModel):
 def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
     """Read the session's world-frame points + labels, fit one crown per tree,
     return {success, crowns:[{tree_instance_id, shape, vertices, triangles,
-    normals, metrics}], warnings}. Runs off-thread under the streaming wrapper."""
+    normals, metrics, params}], warnings}. Runs off-thread under the streaming
+    wrapper."""
     import crown_fit as cf
 
     def _report(frac, msg):
@@ -3902,6 +3903,9 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
             "triangles": res["triangles"].reshape(-1).tolist(),
             "normals": res["normals"].reshape(-1).tolist(),
             "metrics": res["metrics"],
+            # The parameters that DEFINE this shape (semi-axes / base radius +
+            # height / alpha radius). Shape-dependent keys — see crown_fit.py.
+            "params": res["params"],
         })
 
     _report(1.0, "Finalizing")

@@ -1,11 +1,42 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
+import { stubOpenDialog } from './helpers/stubOpenDialog';
+
+// Split a CSV line, honouring the RFC4180 quoting buildCrownCsv emits.
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quoted) {
+      if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else cur += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { out.push(cur); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+// Read a cell by COLUMN NAME, so the assertions survive a column being appended.
+function cellsByName(csvText: string): Record<string, string>[] {
+  const lines = csvText.trim().split('\n');
+  const header = splitCsvLine(lines[0]);
+  return lines.slice(1).map(l => {
+    const cells = splitCsvLine(l);
+    expect(cells).toHaveLength(header.length);
+    return Object.fromEntries(header.map((h, i) => [h, cells[i]]));
+  });
+}
 
 // tree_wood_leaf.xyz is a synthetic single tree: a vertical trunk + two angled
 // branches ("wood") and 11 leaf blobs ("leaf"), 4240 points. The workflow:
@@ -106,14 +137,89 @@ test('fits a crown to leaf points and reports metrics + CSV', async () => {
     await expect(async () => {
       expect((await getSaveDialogCalls(app)).length).toBeGreaterThan(0);
     }).toPass({ timeout: 30_000 });
-    const csv = readFileSync(csvPath, 'utf8').trim().split('\n');
-    expect(csv[0]).toContain('crown_volume_m3');
-    expect(csv[0]).toContain('tree_height_m');
-    expect(csv.length).toBe(2); // header + one crown
-    const cols = csv[1].split(',');
-    // shape column = ellipsoid; volume column > 0.
-    expect(cols[2]).toBe('ellipsoid');
-    expect(Number(cols[4])).toBeGreaterThan(0);
+    const csvText = readFileSync(csvPath, 'utf8');
+    expect(csvText.split('\n').filter(Boolean)).toHaveLength(2); // header + one crown
+    const [row] = cellsByName(csvText);
+    expect(row.shape).toBe('ellipsoid');
+    expect(Number(row.crown_volume_m3)).toBeGreaterThan(0);
+    expect(Number(row.tree_height_m)).toBeGreaterThan(0);
+
+    // The row records the FIT, not just statistics: an ellipsoid's semi-axes are
+    // present and reproduce its reported volume (4/3·pi·a·b·c). Before this the
+    // table carried no shape parameters at all, so no row could rebuild its crown.
+    const a = Number(row.param_a_m), b = Number(row.param_b_m), c = Number(row.param_c_m);
+    for (const v of [a, b, c]) expect(v).toBeGreaterThan(0);
+    expect((4 / 3) * Math.PI * a * b * c).toBeCloseTo(Number(row.crown_volume_m3), 2);
+    // Parameters belonging to the other shapes stay blank.
+    expect(row.param_base_radius_m).toBe('');
+    expect(row.param_alpha_m).toBe('');
+    // An ellipsoid is fully described by those parameters, so it writes no mesh.
+    expect(row.mesh_file).toBe('');
+    expect(Number(row.mesh_vertices)).toBeGreaterThan(0);
+
+    // ---------------------------------------------------------------------
+    // 5) Alpha shape: the case that motivated the mesh sidecar. A concave hull
+    // has no analytic parameters, so the export must additionally write the
+    // crown's MESH and name it in the row — otherwise the table describes a
+    // crown it cannot reproduce. Re-uses the already-segmented cloud rather
+    // than re-running the 60s wood segmentation.
+    // ---------------------------------------------------------------------
+    const outDir = mkdtempSync(join(tmpdir(), 'crown-export-'));
+    await stubOpenDialog(app, outDir);
+
+    await page.getByTestId('tool-fit-crown').click();
+    await expect(popup).toBeVisible();
+    const alphaRow = popup.locator('[data-testid="picker-row"][data-object-id]').first();
+    const alphaCheck = alphaRow.locator('input[type="checkbox"]');
+    if (!(await alphaCheck.isChecked())) await alphaCheck.check();
+
+    await page.getByTestId('crown-shape-select').selectOption('alpha');
+    await page.getByTestId('crown-export-csv').check();
+    await page.getByTestId('crown-export-name').fill('alpha_crowns');
+    // The mesh-format picker exists ONLY for alpha (the other shapes write no
+    // mesh), and the preview tells the user both files are coming.
+    await page.getByTestId('crown-mesh-format').selectOption('ply');
+    await expect(page.getByTestId('crown-export-preview'))
+      .toHaveText('alpha_crowns.csv + one .ply per crown');
+
+    await page.getByTestId('crown-fit-run').click();
+    const alphaMesh = page.locator('[data-testid="mesh-row"][data-mesh-name*="crown (Alpha shape)"]');
+    await expect(alphaMesh).toBeVisible({ timeout: 180_000 });
+    await expect(page.getByTestId('crown-fit-running')).toBeHidden({ timeout: 60_000 });
+
+    // The table landed in the folder the user chose — not behind a Save panel,
+    // which can only name one file and this export writes two.
+    const alphaCsvPath = join(outDir, 'alpha_crowns.csv');
+    await expect(async () => { expect(existsSync(alphaCsvPath)).toBe(true); })
+      .toPass({ timeout: 30_000 });
+    const [alphaCsvRow] = cellsByName(readFileSync(alphaCsvPath, 'utf8'));
+    expect(alphaCsvRow.shape).toBe('alpha');
+    // The alpha radius the fit actually used is reported (auto-grown here, since
+    // the radius field was left blank) — the one scalar that characterises a hull.
+    expect(Number(alphaCsvRow.param_alpha_m)).toBeGreaterThan(0);
+    expect(alphaCsvRow.param_alpha_auto).toBe('true');
+    // …and the parametric columns stay blank, because a hull has none.
+    expect(alphaCsvRow.param_a_m).toBe('');
+    expect(alphaCsvRow.param_base_radius_m).toBe('');
+
+    // The mesh_file column names a file that really exists beside the CSV, and
+    // that file is this crown's geometry — its vertex count matches the row.
+    expect(alphaCsvRow.mesh_file).toBe('alpha_crowns_tree_wood_leaf_crown.ply');
+    const meshPath = join(outDir, alphaCsvRow.mesh_file);
+    expect(existsSync(meshPath)).toBe(true);
+    const ply = readFileSync(meshPath, 'utf8');
+    expect(ply.startsWith('ply')).toBe(true);
+    const plyVerts = Number(ply.match(/element vertex (\d+)/)?.[1] ?? '0');
+    const plyFaces = Number(ply.match(/element face (\d+)/)?.[1] ?? '0');
+    expect(plyVerts).toBe(Number(alphaCsvRow.mesh_vertices));
+    expect(plyFaces).toBe(Number(alphaCsvRow.mesh_triangles));
+    // The written geometry is the ALPHA hull, not the ellipsoid's mesh: a hull is
+    // data-dependent, whereas every ellipsoid fit emits the same fixed UV sphere.
+    expect(plyVerts).not.toBe(Number(row.mesh_vertices));
+    expect(plyFaces).not.toBe(Number(row.mesh_triangles));
+    // And it hugs the crown rather than enclosing it, so it bounds less volume
+    // than the ellipsoid fitted to the same points.
+    expect(Number(alphaCsvRow.crown_volume_m3)).toBeLessThan(Number(row.crown_volume_m3));
   } finally {
     await close();
   }

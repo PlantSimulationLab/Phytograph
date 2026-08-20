@@ -35,7 +35,7 @@ describe('downloadFile (text)', () => {
     ['skeleton.obj', 'OBJ', 'obj'],
     ['skeleton.ply', 'PLY', 'ply'],
     ['scans.xml', 'XML', 'xml'],
-    ['crown_metrics.csv', 'CSV', 'csv'],
+    ['oak_crowns.csv', 'CSV', 'csv'],
   ])('derives the dialog filter from %s', async (filename, label, ext) => {
     const save = vi.fn(async () => `/tmp/${filename}`);
     window.electronAPI.dialog.save = save;
