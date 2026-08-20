@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.68.1"
+BACKEND_VERSION = "0.68.2"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -9247,7 +9247,14 @@ class ScanExportEntry(BaseModel):
     file_path (resolved in that precedence, mirroring the LAD path). A live cloud
     sends `session_id` alone — never `session_id` plus `file_path`, because a
     missing session must fail loudly rather than export the pre-edit file.
-    Scanner geometry is written into the XML; translation is applied on export."""
+    Scanner geometry is written into the XML; translation is applied on export.
+
+    Only `origin` and a point source are required: the Export window lists every
+    cloud in the scene, so an entry may carry no scan geometry at all. The data
+    formats need none of it — only the Helios XML bundle and PTX do, and the UI
+    blocks those rows rather than sending them."""
+    # Display name, used only for progress messages ("Writing plot A (2/5)").
+    label: Optional[str] = None
     origin: List[float]                          # [x, y, z] scanner position
     # "raster" (default) or "spinning_multibeam". Multibeam scans export via
     # beam_elevation_angles_deg; n_theta/theta_* are ignored for them.
@@ -9598,11 +9605,18 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tupl
             "scalars": scalars, "ordered": ordered, "world_shift": world_shift}
 
 
-def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
+def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> tuple:
     """Write one resolved scan (from _resolve_scan_for_format) to the requested
     format. Returns (filename, raw_bytes). ASCII formats honor the chosen column
     order; binary/structured formats use their fixed schema (xyz + colour +
     intensity + scalars where the format supports them).
+
+    `progress(fraction, message)` — optional; the text formats build their rows
+    in a per-point Python loop that runs for minutes on a multi-million-point
+    cloud, so they report every ~65 k rows. It doubles as the cancel poll (the
+    reporter raises), which is why the callback is checked rather than the row
+    count alone. The binary/structured writers hand off to laspy/open3d and are
+    opaque, so they report nothing.
     """
     import numpy as np
     import tempfile
@@ -9647,6 +9661,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
             for s in ordered:
                 row.append(str(scalars[s][i]))
             lines.append(delim.join(row))
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.{fmt}", ("\n".join(lines)).encode("utf-8")
 
     # ---- OBJ (vertices only) ----
@@ -9654,6 +9670,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
         lines = [f"# Scan exported from Phytograph", f"# {n} points"]
         for i in range(n):
             lines.append(f"v {xyz[i,0]:.6f} {xyz[i,1]:.6f} {xyz[i,2]:.6f}")
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.obj", ("\n".join(lines)).encode("utf-8")
 
     # ---- PLY (ascii; preserves colour + scalar fields) ----
@@ -9679,6 +9697,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
             for s in ordered:
                 row += f" {float(scalars[s][i]):.6f}"
             lines.append(row)
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.ply", ("\n".join(lines)).encode("utf-8")
 
     # ---- LAS / LAZ (laspy) ----
@@ -9978,7 +9998,7 @@ def _ptx_first_per_cell(cell: "np.ndarray", rank: "np.ndarray"):
 
 
 def _ptx_write_stream(fh, resolved: dict, scan_entry,
-                      max_cells: int = _PTX_MAX_CELLS) -> dict:
+                      max_cells: int = _PTX_MAX_CELLS, progress=None) -> dict:
     """Format one scan as PTX into the binary stream `fh`. Returns grid stats.
 
     Points are written SCANNER-LOCAL (`world - origin`) under an identity
@@ -10087,6 +10107,11 @@ def _ptx_write_stream(fh, resolved: dict, scan_entry,
             if rgb is not None:
                 buf[tgt, 4:7] = rgb[sl]
         fh.write((row_fmt * m % tuple(buf.ravel())).encode("ascii"))
+        # The raster is the whole cost of a PTX, and it is already chunked — so
+        # a live percentage here is free (and also the cancel poll: this loop is
+        # minutes long for a 10 M-cell scan).
+        if progress is not None:
+            progress(c1 / n_cells, f"writing raster {c1:,} / {n_cells:,} cells")
 
     return {"rows": n_rows, "cols": n_cols, "cells": n_cells,
             "filled": int(pcell.size), "collapsed": collapsed,
@@ -10094,7 +10119,7 @@ def _ptx_write_stream(fh, resolved: dict, scan_entry,
 
 
 def _emit_ptx_file(name: str, resolved: dict, scan_entry,
-                   dest: Optional[Path]) -> dict:
+                   dest: Optional[Path], progress=None) -> dict:
     """One `files` entry for a PTX scan.
 
     With `dest` the raster is formatted STRAIGHT INTO THE FILE and never
@@ -10107,7 +10132,7 @@ def _emit_ptx_file(name: str, resolved: dict, scan_entry,
         tmp = target.with_name(target.name + ".part")
         try:
             with open(tmp, "wb") as fh:
-                stats = _ptx_write_stream(fh, resolved, scan_entry)
+                stats = _ptx_write_stream(fh, resolved, scan_entry, progress=progress)
             os.replace(tmp, target)
         except BaseException:
             # Never leave a truncated .ptx behind — a partial raster is a valid-
@@ -10121,7 +10146,7 @@ def _emit_ptx_file(name: str, resolved: dict, scan_entry,
                 "bytes": target.stat().st_size, "written": True, "grid": stats}
     buf = io.BytesIO()
     stats = _ptx_write_stream(buf, resolved, scan_entry,
-                              max_cells=_PTX_MAX_INLINE_CELLS)
+                              max_cells=_PTX_MAX_INLINE_CELLS, progress=progress)
     entry = _emit_scan_export_file(name, buf.getvalue(), False, None)
     entry["grid"] = stats
     return entry
@@ -10144,7 +10169,57 @@ def _emit_scan_export_file(name: str, raw_bytes: bytes, is_xml: bool,
             "is_xml": is_xml, "bytes": len(raw_bytes), "written": False}
 
 
-def _do_scan_export(request: "ScanExportRequest") -> dict:
+def _scan_entry_points_estimate(scan_entry) -> float:
+    """Rough point count for one export entry, used to WEIGHT the progress bar.
+
+    A batch is routinely lopsided — one 25 M-point cloud next to three 10 k
+    scans — so an equal slice per object would jump to 75% in a blink and then
+    sit still for the rest of the export. Everything here is O(1): a session
+    knows its array length, an inline entry its list length, and a file its size
+    (~32 bytes/point is close enough for a progress bar; it never has to be
+    right, only proportional). Returns 0.0 when nothing is knowable, which the
+    caller reads as "fall back to equal weights".
+    """
+    if scan_entry.session_id:
+        with _cloud_session_lock:
+            sess = _cloud_sessions.get(scan_entry.session_id)
+        if sess is not None:
+            # Deliberately NOT (~sess.deleted).sum(): this is a bar weight, and
+            # the full length is O(1) where the mask is O(N) per entry.
+            return float(sess.positions.shape[0])
+    if scan_entry.points:
+        return float(len(scan_entry.points))
+    if scan_entry.file_path:
+        try:
+            return float(os.path.getsize(scan_entry.file_path)) / 32.0
+        except OSError:
+            return 0.0
+    return 0.0
+
+
+def _scan_export_weights(scans) -> "list[tuple[float, float]]":
+    """Per-entry [lo, hi) slices of a 0..1 bar, weighted by point count."""
+    est = [_scan_entry_points_estimate(s) for s in scans]
+    total = sum(est)
+    if total <= 0:
+        n = max(len(scans), 1)
+        return [(i / n, (i + 1) / n) for i in range(len(scans))]
+    bounds = []
+    acc = 0.0
+    for e in est:
+        lo = acc / total
+        acc += e
+        bounds.append((lo, acc / total))
+    return bounds
+
+
+def _scan_entry_label(scan_entry, index: int) -> str:
+    """Name for progress messages: the viewer's label, else a 1-based ordinal."""
+    return (getattr(scan_entry, "label", None) or f"object {index + 1}").strip()
+
+
+def _do_scan_export(request: "ScanExportRequest", progress=None,
+                    cancel_event=None) -> dict:
     """Export the request's scans, one data file per scan. Two modes:
 
     * write_xml=True  → a Helios scan bundle: <base>.xml + <base>_<id>.xyz, via
@@ -10170,9 +10245,14 @@ def _do_scan_export(request: "ScanExportRequest") -> dict:
 
     try:
         if request.write_xml:
-            return _do_scan_export_xml(request, base, dest)
-        return _do_scan_export_data(request, base, dest)
+            return _do_scan_export_xml(request, base, dest, progress=progress)
+        return _do_scan_export_data(request, base, dest, progress=progress)
     except HTTPException:
+        raise
+    except ScanCancelled:
+        # MUST precede the blanket handler below: ScanCancelled is an Exception,
+        # so flattening it into {"success": False} would send the renderer a
+        # normal frame and toast "Export Failed" for what the user asked for.
         raise
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -10181,7 +10261,7 @@ def _do_scan_export(request: "ScanExportRequest") -> dict:
 
 
 def _do_scan_export_xml(request: "ScanExportRequest", base: str,
-                        dest: Optional[Path] = None) -> dict:
+                        dest: Optional[Path] = None, progress=None) -> dict:
     """XML+data mode: Helios scan bundle via PyHelios exportScans().
 
     `dest` (when set) is the validated directory the files are written into
@@ -10198,7 +10278,18 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
     cloud = LiDARCloud()
     cloud.disableMessages()
     total_points = 0
-    for scan_entry in request.scans:
+    n = len(request.scans)
+    weights = _scan_export_weights(request.scans)
+    # The bar's shape here is dictated by PyHelios: this loop only LOADS scans
+    # into the cloud (resolve + a copy into C++), and the actual write is one
+    # opaque exportScans() call. So the loop gets a weighted 0..0.70 head and the
+    # write parks at 0.72 with a label that says what it's doing, rather than a
+    # synthetic creep that would claim progress nobody is making.
+    for i, scan_entry in enumerate(request.scans):
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(weights[i][0] * 0.70,
+                     f"Loading {_scan_entry_label(scan_entry, i)} ({i + 1}/{n})")
         # A Livox rosette (Risley) has no Ntheta x Nphi grid or angular sweep, so
         # the grid-based Helios XML/ASCII export can't represent it. The renderer
         # already excludes such scans from the bundle; guard here too so a stray
@@ -10292,15 +10383,25 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
 
     with tempfile.TemporaryDirectory() as tmpdir:
         xml_path = os.path.join(tmpdir, f"{base}.xml")
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            # A cancel requested from here on can only land when exportScans()
+            # returns: it is a single C++ call with no poll point inside it, the
+            # same contract every other monolithic Helios call in this file has.
+            progress(0.72, "Writing Helios scan bundle")
         cloud.exportScans(xml_path)
         # PyHelios exportScans() writes only <scan> blocks. To round-trip the
         # scene's grids (e.g. sphere.xml's voxel box), inject the requested
         # <grid> blocks just before the closing </helios>.
         if request.grids:
+            if progress is not None:
+                progress(0.90, "Writing grid definitions")
             _inject_grids_into_helios_xml(xml_path, request.grids)
         # PyHelios has no scanner-model concept, so inject a <scannerModel> tag into
         # each <scan> block (in order) for non-generic instruments, so the renderer
         # re-imports the same instrument identity.
+        if progress is not None:
+            progress(0.93, "Writing scanner metadata")
         _inject_scanner_models_into_helios_xml(
             xml_path, [s.scanner_model for s in request.scans])
         # Inject the precise return mode (single+selection / multi+maxReturns) so
@@ -10309,17 +10410,36 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
             xml_path, [{'mode': s.return_mode, 'selection': s.return_selection,
                         'max_returns': s.max_returns} for s in request.scans])
         files = []
-        for name in sorted(os.listdir(tmpdir)):
-            with open(os.path.join(tmpdir, name), "rb") as fh:
-                files.append(_emit_scan_export_file(
-                    name, fh.read(), name.lower().endswith(".xml"), dest))
+        names = sorted(os.listdir(tmpdir))
+        written: "list[Path]" = []
+        try:
+            for j, name in enumerate(names):
+                _cancel_checkpoint(progress)
+                if progress is not None:
+                    progress(0.95 + 0.05 * (j / max(len(names), 1)), f"Saving {name}")
+                with open(os.path.join(tmpdir, name), "rb") as fh:
+                    files.append(_emit_scan_export_file(
+                        name, fh.read(), name.lower().endswith(".xml"), dest))
+                if dest is not None:
+                    written.append(dest / name)
+        except ScanCancelled:
+            # Same rule as the data path: a cancelled bundle must not leave a
+            # partial set of files that looks like a complete one.
+            for path in written:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            raise
 
+    if progress is not None:
+        progress(1.0, f"Wrote {len(files)} file(s)")
     return {"success": True, "files": files, "point_count": total_points,
             "scan_count": len(request.scans)}
 
 
 def _do_scan_export_data(request: "ScanExportRequest", base: str,
-                         dest: Optional[Path] = None) -> dict:
+                         dest: Optional[Path] = None, progress=None) -> dict:
     """Data-only mode: one <base>_<id>.<fmt> per scan in `data_format`.
 
     `dest` (when set) is the validated directory each file is written into
@@ -10340,29 +10460,94 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
 
     files = []
     total_points = 0
-    for i, scan_entry in enumerate(request.scans):
-        resolved = _resolve_scan_for_format(scan_entry, want_misses, force_slugs=force)
-        total_points += int(resolved["positions"].shape[0])
-        if is_ptx:
-            # Bypasses _write_scan_to_bytes' (name, bytes) contract so a large
-            # raster can stream straight to disk — see _emit_ptx_file.
-            files.append(_emit_ptx_file(f"{base}_{i}.ptx", resolved, scan_entry, dest))
-            continue
-        name, raw_bytes = _write_scan_to_bytes(resolved, fmt, f"{base}_{i}")
-        files.append(_emit_scan_export_file(name, raw_bytes, False, dest))
-        # Drop the reference before resolving the next scan: with dest set the
-        # bytes are already on disk, so holding them would rebuild the very
-        # all-scans-in-memory peak dest_dir exists to avoid.
-        del raw_bytes
+    n = len(request.scans)
+    weights = _scan_export_weights(request.scans)
+    # Files already on disk, so a cancel can take them back out again: a
+    # half-written batch that LOOKS complete is worse than no batch at all.
+    written: "list[Path]" = []
+    try:
+        for i, scan_entry in enumerate(request.scans):
+            lo, hi = weights[i]
+            label = _scan_entry_label(scan_entry, i)
+            _cancel_checkpoint(progress)
+            if progress is not None:
+                progress(lo, f"Reading {label} ({i + 1}/{n})")
+            resolved = _resolve_scan_for_format(scan_entry, want_misses, force_slugs=force)
+            total_points += int(resolved["positions"].shape[0])
+            # Writers report their own inner chunk loops through this: it maps a
+            # 0..1 within-object fraction onto the object's slice of the bar, and
+            # doubles as the cancel poll for a long single-object export.
+            span = hi - lo
+            head = lo + 0.15 * span
 
+            def sub(frac, message, _head=head, _span=span, _label=label):
+                _cancel_checkpoint(progress)
+                if progress is not None:
+                    progress(_head + max(0.0, min(1.0, frac)) * (_span * 0.85),
+                             f"{_label}: {message}")
+
+            if progress is not None:
+                progress(head, f"Writing {label} ({i + 1}/{n})")
+            if is_ptx:
+                # Bypasses _write_scan_to_bytes' (name, bytes) contract so a large
+                # raster can stream straight to disk — see _emit_ptx_file.
+                entry = _emit_ptx_file(f"{base}_{i}.ptx", resolved, scan_entry, dest,
+                                       progress=sub)
+                files.append(entry)
+                if dest is not None:
+                    written.append(dest / entry["name"])
+                continue
+            name, raw_bytes = _write_scan_to_bytes(resolved, fmt, f"{base}_{i}",
+                                                   progress=sub)
+            files.append(_emit_scan_export_file(name, raw_bytes, False, dest))
+            if dest is not None:
+                written.append(dest / name)
+            # Drop the reference before resolving the next scan: with dest set the
+            # bytes are already on disk, so holding them would rebuild the very
+            # all-scans-in-memory peak dest_dir exists to avoid.
+            del raw_bytes
+    except ScanCancelled:
+        for path in written:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+
+    if progress is not None:
+        progress(1.0, f"Wrote {len(files)} file(s)")
     return {"success": True, "files": files, "point_count": total_points,
             "scan_count": len(request.scans)}
 
 
 @app.post("/api/scan/export-xml")
-def scan_export_xml(request: "ScanExportRequest"):
-    """Export scans to a Helios XML + per-scan ASCII bundle (base64 files)."""
-    return _do_scan_export(request)
+def scan_export_xml(request: "ScanExportRequest", http_request: Request):
+    """Export objects to a Helios XML bundle or per-object data files.
+
+    Streams PHP1 progress markers ahead of its JSON tail (same transport as
+    /api/pointcloud/export). A batch export is one blocking round-trip covering
+    every checked object, so without this the UI could only show an
+    indeterminate spinner for what is routinely tens of seconds of formatting —
+    and had no way to stop it. The markers also make the run CANCELLABLE via
+    /api/cancel/{run_id}; a cancel unwinds through ScanCancelled and takes the
+    already-written files back out with it.
+
+    The JSON tail is the same ScanExportResponse shape as before; only the
+    transport changed.
+    """
+    # Validate the destination BEFORE the stream opens: once the 200 + first
+    # chunk is out, an HTTPException can only reach the client as a truncated
+    # body, so a bad path would surface as a decode error instead of its own
+    # message. Resolving here also means the worker's later call is a no-op.
+    if request.dest_dir:
+        _resolve_export_dest_dir(request.dest_dir)
+
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_scan_export(request, progress=progress, cancel_event=cancel_event)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 # ==================== SYNTHETIC LIDAR SCANNING ====================

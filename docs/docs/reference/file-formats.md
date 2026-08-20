@@ -4,9 +4,9 @@
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes x/y/z + RGB only (LAS 1.2, point format 0/2 — no intensity, no classification), while a **scan export** writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the scan path for full-fidelity round-trips. |
+| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes x/y/z + RGB only (LAS 1.2, point format 0/2 — no intensity, no classification), while the **batch export** (two or more objects checked, or any scan) writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the batch path for full-fidelity round-trips — it takes plain clouds too, so checking a second object is enough to get it. |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
-| `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-scan (one `.e57` per scan) via the scan export's **Data only** mode, carrying x/y/z, intensity, and colour. |
+| `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and colour. |
 | `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** writes only x/y/z + optional RGB. Structured/organized PLYs recover sky/miss points (see below). |
 | `.pcd` | ✅ | — | Point Cloud Data format (PCL). Import only; parsed via Open3D, which drops non-standard scalar fields. |
 | `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. macOS only, and needs Docker plus a user-supplied RiVLib: see **[Import a RIEGL raw project](../workflows/import-riegl-riproject.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**; sky/miss points are recovered from the scanner's per-shot record, so LAD works. |

@@ -254,7 +254,7 @@ test('respects the chosen columns in the exported scan ASCII_format', async () =
 
   // The export scan list labels each scan by its Scans-panel display name.
   const exportRowNames = await page.getByTestId('export-scan-row')
-    .evaluateAll((els) => els.map((e) => e.getAttribute('data-scan-name')));
+    .evaluateAll((els) => els.map((e) => e.getAttribute('data-label')));
   expect(exportRowNames).toContain((panelName ?? '').trim());
 
   // The scan section's column picker is present with x/y/z + the scan's

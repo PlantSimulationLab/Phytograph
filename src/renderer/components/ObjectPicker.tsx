@@ -24,6 +24,15 @@ interface ObjectPickerProps {
   /** Message shown when there are no eligible items. */
   emptyMessage?: string;
   label?: string;
+  /**
+   * How "select all" is offered. 'link' (default) is the compact All/None text
+   * button every tool dialog uses; 'checkbox' is the tri-state master checkbox
+   * (see RieglProjectDialog), for dialogs where the list is the
+   * primary control and a checkbox reads like the rows beneath it.
+   */
+  selectAllControl?: 'link' | 'checkbox';
+  /** Row test id, for callers whose specs already target a different one. */
+  rowTestId?: string;
   'data-testid'?: string;
 }
 
@@ -34,6 +43,8 @@ export function ObjectPicker({
   mode = 'multi',
   emptyMessage = 'No eligible objects.',
   label = 'Objects',
+  selectAllControl = 'link',
+  rowTestId = 'picker-row',
   'data-testid': testId,
 }: ObjectPickerProps) {
   const toggle = useCallback(
@@ -49,8 +60,14 @@ export function ObjectPicker({
     [mode, selectedIds, onChange],
   );
 
+  // "All" only ever covers the rows the caller left selectable — a disabled row
+  // is one the current operation cannot take, so sweeping it in would produce a
+  // selection the submit has to silently drop again.
   const selectable = items.filter(i => !i.disabledReason);
   const allSelected = selectable.length > 0 && selectable.every(i => selectedIds.has(i.id));
+  const someSelected = selectable.some(i => selectedIds.has(i.id));
+  const toggleAll = () =>
+    onChange(allSelected ? new Set() : new Set(selectable.map(i => i.id)));
 
   return (
     <div data-testid={testId}>
@@ -61,15 +78,37 @@ export function ObjectPicker({
             ({selectedIds.size}/{items.length} selected)
           </span>
         </div>
-        {mode === 'multi' && (
+        {mode === 'multi' && selectAllControl === 'link' && (
           <div className="flex items-center gap-2">
             <button
-              onClick={() => onChange(allSelected ? new Set() : new Set(selectable.map(i => i.id)))}
+              onClick={toggleAll}
               className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
             >
               {allSelected ? 'None' : 'All'}
             </button>
           </div>
+        )}
+        {mode === 'multi' && selectAllControl === 'checkbox' && (
+          <label
+            className={`flex items-center gap-1.5 text-[10px] ${
+              selectable.length === 0
+                ? 'text-neutral-600 cursor-not-allowed'
+                : 'text-neutral-400 hover:text-neutral-200 cursor-pointer'
+            }`}
+          >
+            <input
+              type="checkbox"
+              data-testid={testId ? `${testId}-select-all` : undefined}
+              // Indeterminate is a DOM property, not an attribute, so it can only
+              // be set through a ref — the partial state is the common one here.
+              ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+              checked={allSelected}
+              disabled={selectable.length === 0}
+              onChange={toggleAll}
+              className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-green-500 focus:ring-0 focus:ring-offset-0"
+            />
+            {allSelected ? 'Deselect all' : 'Select all'}
+          </label>
         )}
       </div>
 
@@ -85,8 +124,11 @@ export function ObjectPicker({
             return (
               <label
                 key={item.id}
-                data-testid="picker-row"
+                data-testid={rowTestId}
                 data-object-id={item.id}
+                data-label={item.label}
+                data-checked={isSelected ? 'true' : 'false'}
+                data-disabled={disabled ? 'true' : 'false'}
                 title={item.disabledReason}
                 className={`flex items-center gap-2 px-3 py-2 border-b border-neutral-700/50 transition-colors ${
                   disabled

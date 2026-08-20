@@ -2399,9 +2399,15 @@ export async function exportPointCloudLasLaz(
 // is an error, never a fall-back to the pre-edit source file.
 export interface ScanExportEntry {
   origin: [number, number, number];
-  // 'raster' (default) or 'spinning_multibeam'. Multibeam scans are exported via
-  // beam_elevation_angles_deg; n_theta/theta_* are ignored for them.
-  scan_pattern?: 'raster' | 'spinning_multibeam';
+  // Display name, used only for the export's progress messages ("Writing
+  // plot_A…"). The backend ignores it everywhere else.
+  label?: string;
+  // 'raster' (default), 'spinning_multibeam', or 'risley_prism'. Multibeam scans
+  // are exported via beam_elevation_angles_deg; n_theta/theta_* are ignored for
+  // them. A Risley rosette can only be written to the DATA formats — the Helios
+  // XML bundle and PTX both need a grid it doesn't have, and the backend rejects
+  // it for the bundle with its own message.
+  scan_pattern?: 'raster' | 'spinning_multibeam' | 'risley_prism';
   beam_elevation_angles_deg?: number[];  // degrees above horizon (multibeam only)
   n_theta?: number;
   n_phi?: number;
@@ -2478,35 +2484,37 @@ export interface ScanExportResponse {
 }
 
 /**
- * Export one or more scans to a Helios XML metadata file + one ASCII data file
- * per scan (re-loadable via PyHelios loadXML). Preserves the `is_miss` flag and
- * other per-hit scalar columns, applies viewer translation, and honors session
- * edits — so the bundle round-trips losslessly back into Phytograph/Helios.
+ * Export one or more objects: either a Helios XML metadata file + one ASCII data
+ * file per scan (re-loadable via PyHelios loadXML), or one data file per object
+ * in a chosen format. Preserves the `is_miss` flag and other per-hit scalar
+ * columns, applies viewer translation, and honors session edits — so the bundle
+ * round-trips losslessly back into Phytograph/Helios.
+ *
+ * Streams PHP1 progress markers ahead of its JSON tail, so `onProgress` gets a
+ * real per-object percentage rather than an indeterminate spinner, and `signal`
+ * + `onRunId` make it cancellable (POST /api/cancel/{runId} stops the backend
+ * work; aborting the signal tears down the fetch).
+ *
+ * 10 minute budget, matching the point-cloud export: a multi-scan LAZ bundle is
+ * tens of seconds of formatting. fetchJsonWithProgress refreshes the deadline on
+ * every chunk, so a slow-but-streaming export is never killed mid-write.
  */
 export async function exportScanXml(
-  request: ScanExportRequest
+  request: ScanExportRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<ScanExportResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 120000, '/api/scan/export-xml');
-
   try {
-    const response = await fetch(`${baseUrl}/api/scan/export-xml`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
+    return await fetchJsonWithProgress<ScanExportResponse>(
+      '/api/scan/export-xml', request, signal, 600000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Scan XML export failed:', error);
-    throw error;
+    console.error('Scan export failed:', error);
+    // Same treatment the point-cloud export gets: a raw fetch failure here is
+    // almost always "the backend went away", which needs saying in those words.
+    // A user cancel arrives as a reason-less AbortError; the caller checks its
+    // own signal first, so wrapping it is harmless.
+    throw describeBackendError(error, 'Scan export');
   }
 }
 

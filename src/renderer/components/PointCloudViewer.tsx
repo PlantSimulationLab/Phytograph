@@ -216,7 +216,7 @@ import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
 import { ExportModal } from './ExportModal';
-import { defaultExportColumns, buildAsciiExport, cellValue } from '../lib/exportColumns';
+import { defaultExportColumns, buildAsciiExport, cellValue, type ExportColumn } from '../lib/exportColumns';
 import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
@@ -7892,9 +7892,16 @@ export default function PointCloudViewer({
     return null;
   }, [getDisplayData, buildPointSource, writeToPath]);
 
-  const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null = null) => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
+  const exportPointCloud = useCallback(async (
+    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
+    columns: string[] | null = null,
+    // The Export window names the cloud explicitly (it is whatever is CHECKED in
+    // its object list, which is seeded from — but no longer tied to — the scene
+    // selection). Other callers still mean "the selected cloud".
+    cloudId?: string,
+  ) => {
+    const id = cloudId ?? (selectedIds.size === 1 ? Array.from(selectedIds)[0] : undefined);
+    if (!id) return;
     const cloud = clouds.find(c => c.id === id);
     if (!cloud) return;
 
@@ -7963,40 +7970,13 @@ export default function PointCloudViewer({
   // Build the export entry for one scan-bearing cloud (source precedence
   // session → file → inline, plus viewer translation and the is_miss column).
   // Returns null when the cloud has no scanner params or no point data.
-  const buildScanExportEntry = useCallback((cloudId: string): ScanExportEntry | null => {
-    const cloud = clouds.find(c => c.id === cloudId);
-    if (!cloud || !cloud.params) return null;
-    const params = cloud.params;
-    // A Livox rosette has no Ntheta×Nphi grid or angular sweep — the grid-based
-    // Helios XML/ASCII export can't represent it, so skip it here (a prism-stack
-    // XML round-trip is a future extension). Excluded from the export bundle.
-    if (params.pattern === 'risley_prism') return null;
-    const entry: ScanExportEntry = {
-      origin: [params.origin.x, params.origin.y, params.origin.z],
-      scan_pattern: params.pattern,
-      beam_elevation_angles_deg:
-        params.pattern === 'spinning_multibeam' ? params.beamElevationAnglesDeg : undefined,
-      n_theta: params.zenithPoints,
-      n_phi: params.azimuthPoints,
-      theta_min: params.zenithMinDeg,
-      theta_max: params.zenithMaxDeg,
-      phi_min: params.azimuthMinDeg,
-      phi_max: params.azimuthMaxDeg,
-      beam_exit_diameter: params.beamExitDiameterM,
-      beam_divergence: params.beamDivergenceMrad,
-      // Round-trips into the XML: the backend writes a <scanAzimuthOffset> tag
-      // and the importer reads it back.
-      scan_azimuth_offset: params.azimuthOffsetDeg,
-      // Instrument identity (e.g. 'riegl_vz400i'). Round-trips via a <scannerModel>
-      // tag the backend injects and the importer reads back.
-      scanner_model: params.scannerModel,
-      // Precise return mode. Round-trips via <returnMode>/<returnSelection>/
-      // <maxReturns> tags the backend injects and the importer reads back, so a
-      // single-return scan re-imports as single (not mislabeled multi from optics).
-      return_mode: params.returnMode,
-      return_selection: params.returnSelection,
-      max_returns: params.maxReturns,
-    };
+  // Attach the point SOURCE (session → file → inline) and the viewer translation
+  // to a scan-export entry. Shared by the with-parameters and no-parameters
+  // branches of buildScanExportEntry below: none of it depends on scanner
+  // geometry, and two copies would drift the moment one gains a source kind.
+  const attachScanExportSource = useCallback((
+    entry: ScanExportEntry, cloud: PointCloudEntry,
+  ): ScanExportEntry | null => {
     const t = getEditState(cloud.id).translation;
     if (t.x !== 0 || t.y !== 0 || t.z !== 0) entry.translation = [t.x, t.y, t.z];
 
@@ -8028,11 +8008,98 @@ export default function PointCloudViewer({
       return null;  // no point data
     }
     return entry;
-  }, [clouds, getEditState]);
+  }, [getEditState]);
+
+  const buildScanExportEntry = useCallback((cloudId: string): ScanExportEntry | null => {
+    const cloud = clouds.find(c => c.id === cloudId);
+    if (!cloud) return null;
+    const params = cloud.params;
+    // Name the entry the way the Scans panel and the export list name it, so the
+    // progress pill reads "Writing plot A (2/4)" rather than a raw filename the
+    // user may have renamed away from.
+    const scan = scans.find(sc => sc.id === cloud.id);
+    const label = scan ? scanDisplayName(scan) : (cloud.data.fileName || cloud.id);
+    // A cloud with no scanner parameters is still exportable as DATA — only the
+    // Helios XML bundle and PTX need the scan geometry, and the modal blocks
+    // those rows for exactly that reason. Everything below this point (source
+    // precedence, translation, the is_miss column) is parameter-agnostic, so a
+    // minimal entry carrying just an origin is all the backend needs.
+    if (!params) {
+      const scanOrigin = cloud.data.octree?.scanOrigin;
+      const entry: ScanExportEntry = {
+        origin: scanOrigin ? [...scanOrigin] : [0, 0, 0],
+        scan_pattern: 'raster',
+        label,
+      };
+      return attachScanExportSource(entry, cloud);
+    }
+    const entry: ScanExportEntry = {
+      label,
+      origin: [params.origin.x, params.origin.y, params.origin.z],
+      scan_pattern: params.pattern,
+      beam_elevation_angles_deg:
+        params.pattern === 'spinning_multibeam' ? params.beamElevationAnglesDeg : undefined,
+      n_theta: params.zenithPoints,
+      n_phi: params.azimuthPoints,
+      theta_min: params.zenithMinDeg,
+      theta_max: params.zenithMaxDeg,
+      phi_min: params.azimuthMinDeg,
+      phi_max: params.azimuthMaxDeg,
+      beam_exit_diameter: params.beamExitDiameterM,
+      beam_divergence: params.beamDivergenceMrad,
+      // Round-trips into the XML: the backend writes a <scanAzimuthOffset> tag
+      // and the importer reads it back.
+      scan_azimuth_offset: params.azimuthOffsetDeg,
+      // Instrument identity (e.g. 'riegl_vz400i'). Round-trips via a <scannerModel>
+      // tag the backend injects and the importer reads back.
+      scanner_model: params.scannerModel,
+      // Precise return mode. Round-trips via <returnMode>/<returnSelection>/
+      // <maxReturns> tags the backend injects and the importer reads back, so a
+      // single-return scan re-imports as single (not mislabeled multi from optics).
+      return_mode: params.returnMode,
+      return_selection: params.returnSelection,
+      max_returns: params.maxReturns,
+    };
+    return attachScanExportSource(entry, cloud);
+  }, [clouds, scans, attachScanExportSource]);
 
   // Export one or more selected scans, either as a Helios XML + per-scan ASCII
   // bundle (writeXml=true) or as the per-scan ASCII data files only
   // (writeXml=false). `scanIds` are the user-chosen scans (from the panel's list).
+  // Available ASCII export columns, in default order, for the object the Export
+  // window's column picker is describing. `cloudId` is the sole checked cloud in
+  // single-cloud mode; `null` asks for a representative set for a multi-object
+  // export, which prefers a checked scan (the scans share a column set) and
+  // falls back to any scan in the scene.
+  const getExportColumns = useCallback((cloudId: string | null): ExportColumn[] => {
+    const c = cloudId
+      ? clouds.find(c => c.id === cloudId)
+      : clouds.find(c => selectedIds.has(c.id) && !!c.params)
+        ?? clouds.find(c => !!c.params)
+        ?? clouds.find(c => selectedIds.has(c.id));
+    if (!c) return [];
+    return defaultExportColumns(c.data, {
+      isLabel: (slug) => isCategoricalAttribute(slug),
+      // The labels map is keyed by the octree BUFFER name, but the columns here
+      // are keyed by the CANONICAL slug — `gps-time` becomes `timestamp` on the
+      // way in — so a direct lookup misses for exactly that column and the
+      // picker fell back to the bare slug. Try the buffer name too, via the same
+      // mapping, so the export list reads "Timestamp" like every other panel.
+      labelFor: (slug) => displayLabelFor(slug, c.data.octree?.attributeLabels),
+      // Octree/session clouds keep their points (and scalar columns) on disk, so
+      // recover the available columns from the ASCII_format hint.
+      asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,
+      // …and from the octree's own attribute list, which is the only source that
+      // covers a plain LAS/LAZ/E57/PLY import (no ASCII_format, no in-RAM
+      // scalarFields). Same input the colour-by and scalar-filter pickers use.
+      octreeAttributes: Object.keys(c.data.octree?.attributeRanges ?? {}),
+      // …and the ranges themselves, so the all-zero LAS schema dims
+      // PotreeConverter invents for a bare XYZ source (intensity, classification,
+      // gps-time…) don't show up as exportable fields.
+      octreeAttributeRanges: c.data.octree?.attributeRanges,
+    });
+  }, [clouds, selectedIds]);
+
   const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = []) => {
     const entries: ScanExportEntry[] = [];
     for (const id of scanIds) {
@@ -8093,7 +8160,15 @@ export default function PointCloudViewer({
     // data-only export — they share this backend round-trip, only write_xml differs.
     setShowExportPanel(false);
     setIsExportingScan(true);
+    setExportProgress({ fraction: null, label: 'Exporting…' });
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    exportRunIdRef.current = null;
     try {
+      // Yield a frame before the round-trip starts, so React actually paints the
+      // pill before the network + backend work begins (same reason the
+      // point-cloud export does it).
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const resp = await exportScanXml({
         scans: entries, base_name: chosenBase, include_misses: includeMisses,
         write_xml: writeXml, data_format: dataFormat,
@@ -8102,7 +8177,14 @@ export default function PointCloudViewer({
         // V8's string cap on a multi-scan export ("Unexpected end of JSON input").
         dest_dir: dir,
         ...(grids.length ? { grids } : {}),
-      });
+      }, controller.signal, (fraction, message) => {
+        setExportProgress({ fraction, label: message || 'Exporting…' });
+        // E2E seam, mirroring __triStages: the pill's rendered text is a single
+        // live value, so a spec can't prove the bar actually MOVED through the
+        // backend's stages without recording them as they arrive.
+        const w = window as unknown as { __exportStages?: string[] };
+        if (w.__exportStages && message) w.__exportStages.push(`${fraction ?? ''}|${message}`);
+      }, (runId) => { exportRunIdRef.current = runId; });
       if (!resp.success || !resp.files) {
         showToast({ title: 'Export Failed', type: 'error', message: resp.error || 'Unknown error' });
         return;
@@ -8121,10 +8203,19 @@ export default function PointCloudViewer({
       showToast({ title: 'Export Complete', type: 'success',
         message: `Wrote ${resp.files.length} file(s) (${resp.point_count?.toLocaleString() ?? '?'} points).` });
     } catch (error) {
-      showToast({ title: 'Export Failed', type: 'error',
-        message: error instanceof Error ? error.message : 'Unknown error' });
+      // A user cancel is not a failure — the pill's X aborts the signal, which
+      // surfaces as a reason-less AbortError (see describeBackendError).
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        showToast({ title: 'Export cancelled', type: 'info' });
+      } else {
+        showToast({ title: 'Export Failed', type: 'error',
+          message: error instanceof Error ? error.message : 'Unknown error' });
+      }
     } finally {
       setIsExportingScan(false);
+      setExportProgress(null);
+      exportAbortRef.current = null;
+      exportRunIdRef.current = null;
     }
   }, [clouds, buildScanExportEntry]);
 
@@ -19361,58 +19452,40 @@ export default function PointCloudViewer({
       {showExportPanel && (
         <ExportModal
           selectionType={selectionType}
-          singleCloudSelected={selectedIds.size === 1}
-          cloudIsScan={selectedIds.size === 1 && !!clouds.find(c => c.id === Array.from(selectedIds)[0])?.params}
-          cloudName={clouds.find(c => c.id === Array.from(selectedIds)[0])?.data.fileName || ''}
-          // Available ASCII export columns, in default order. For a single
-          // selected cloud, from that cloud; otherwise from a representative
-          // selected scan (so the column picker works for multi-scan export too).
-          cloudColumns={(() => {
-            const ids = Array.from(selectedIds);
-            const c = ids.length === 1
-              ? clouds.find(c => c.id === ids[0])
-              : clouds.find(c => selectedIds.has(c.id) && !!c.params)
-                ?? clouds.find(c => !!c.params);
-            if (!c) return [];
-            return defaultExportColumns(c.data, {
-              isLabel: (slug) => isCategoricalAttribute(slug),
-              // The labels map is keyed by the octree BUFFER name, but the
-              // columns here are keyed by the CANONICAL slug — `gps-time`
-              // becomes `timestamp` on the way in — so a direct lookup misses
-              // for exactly that column and the picker fell back to the bare
-              // slug. Try the buffer name too, via the same mapping, so the
-              // export list reads "Timestamp" like every other panel.
-              labelFor: (slug) => displayLabelFor(slug, c.data.octree?.attributeLabels),
-              // Octree/session clouds keep their points (and scalar columns) on
-              // disk, so recover the available columns from the ASCII_format hint.
-              asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,
-              // …and from the octree's own attribute list, which is the only
-              // source that covers a plain LAS/LAZ/E57/PLY import (no
-              // ASCII_format, no in-RAM scalarFields). Same input the colour-by
-              // and scalar-filter pickers use.
-              octreeAttributes: Object.keys(c.data.octree?.attributeRanges ?? {}),
-              // …and the ranges themselves, so the all-zero LAS schema dims
-              // PotreeConverter invents for a bare XYZ source (intensity,
-              // classification, gps-time…) don't show up as exportable fields.
-              octreeAttributeRanges: c.data.octree?.attributeRanges,
-            });
-          })()}
-          // Every scan that carries scanner parameters (so it can be written as a
-          // scan XML), with whether it currently holds misses and is selected. The
-          // modal renders these as a checkbox list, pre-checked to the selection.
-          scanExportList={clouds
-            .filter(c => !!c.params)
-            .map(c => {
-              // Show the scan's user-configurable label (falling back to filename),
-              // matching how the Scans panel names the row.
-              const scan = scans.find(s => s.id === c.id);
-              return {
-                id: c.id,
-                name: scan ? scanDisplayName(scan) : (c.data.fileName || c.id),
-                hasMisses: !!(c.data.octree?.hasMisses || c.data.scalarFields?.[MISS_ATTRIBUTE]),
-                selected: selectedIds.has(c.id),
-              };
-            })}
+          // Only seeds the initial check state: a mesh/skeleton selection must
+          // not arm a whole-scene export now that every cloud is listed.
+          sceneSelectionHasNonCloud={selectedIds.size === 0
+            && (selectedMeshIds.size > 0 || !!selectedSkeletonId)}
+          getExportColumns={getExportColumns}
+          // Every point cloud in the scene — not just the ones carrying scanner
+          // parameters, and not just the selected ones. The Scans-panel
+          // selection rides along as `selected` and decides only what starts
+          // checked; `xmlBlockedReason` / `ptxBlockedReason` say which rows the
+          // scan-shaped outputs cannot write.
+          exportObjects={clouds.map(c => {
+            // Show the scan's user-configurable label (falling back to filename),
+            // matching how the Scans panel names the row.
+            const scan = scans.find(s => s.id === c.id);
+            const pattern = c.params?.pattern;
+            return {
+              id: c.id,
+              name: scan ? scanDisplayName(scan) : (c.data.fileName || c.id),
+              pointCount: c.data.pointCount,
+              hasMisses: !!(c.data.octree?.hasMisses || c.data.scalarFields?.[MISS_ATTRIBUTE]),
+              selected: selectedIds.has(c.id),
+              isScan: !!c.params,
+              xmlBlockedReason: !c.params
+                ? 'No scanner parameters — a Helios scan XML needs a scanner origin and angular sweep. Use Data only to export this cloud.'
+                : pattern === 'risley_prism'
+                  ? "Livox rosette (Risley) scans have no Ntheta×Nphi grid, so they can't be written to a Helios scan XML."
+                  : undefined,
+              ptxBlockedReason: !c.params
+                ? 'PTX needs a complete scan grid — this cloud has no scanner parameters.'
+                : pattern !== 'raster'
+                  ? 'PTX needs a raster scan grid (Ntheta×Nphi); this scan pattern has none.'
+                  : undefined,
+            };
+          })}
           // Scene voxel-box grids the user can add to a scan XML export (id +
           // label; geometry is resolved in exportScanXmlBundle via the same list).
           gridOptions={heliosGridOptions.map(g => ({ id: g.id, label: g.label }))}

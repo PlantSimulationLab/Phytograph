@@ -18,6 +18,7 @@ import re
 import pytest
 
 import main
+from tests.binframe import decode_streamed_json
 
 
 def _decode(files, suffix):
@@ -585,9 +586,12 @@ class TestScanExportErrors:
 
     def test_endpoint_registered(self, client):
         # The route exists and accepts the request shape (empty scans → success:false).
+        # It streams PHP1 progress markers ahead of its JSON tail (see
+        # scan_export_xml), so the body needs the marker-aware decoder — a plain
+        # resp.json() chokes on the markers.
         resp = client.post("/api/scan/export-xml", json={"scans": [], "include_misses": True})
         assert resp.status_code == 200
-        assert resp.json()["success"] is False
+        assert decode_streamed_json(resp.content)["success"] is False
 
 
 class TestScanExportStaleSession:

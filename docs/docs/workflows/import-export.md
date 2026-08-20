@@ -399,13 +399,18 @@ Helios XML still takes precedence — its `<scan>` definitions win.) See
 
 ## Export
 
-Select an object in the Scene panel and choose **File → Export…**
-(<kbd>Shift</kbd>+<kbd>⌘/Ctrl</kbd>+<kbd>E</kbd>), or run *Export* from the
-command palette, to open the **Export** window. It is
-context-sensitive: a point cloud shows the format chooser + column picker, a
-mesh or skeleton shows its formats, and any scans in the scene show the scan
-export section. You pick the destination in a native file dialog after setting
-the options.
+Choose **File → Export…** (<kbd>Shift</kbd>+<kbd>⌘/Ctrl</kbd>+<kbd>E</kbd>), or
+run *Export* from the command palette, to open the **Export** window.
+
+It opens on an **object list** holding *every* point cloud in the scene, each
+with a checkbox. Whatever you had selected in the Scans panel starts checked —
+but that is only a starting point, and checking or unchecking a row here never
+changes the viewport selection. What you check then decides the rest of the
+window: a single plain cloud shows the format chooser + column picker for that
+one file, while several objects (or any scan) show the batch controls described
+under [Exporting several objects](#exporting-several-objects). A selected mesh
+or skeleton shows its own formats instead. You pick the destination in a native
+file dialog after setting the options.
 
 ### Point cloud formats
 
@@ -482,16 +487,30 @@ stages appear only for the fields the cloud actually has). Binary formats are
 several times faster than text for the same cloud, so their pill moves through
 those stages quickly.
 
-### Exporting scans
+### Exporting several objects
 
-Whenever the scene holds **scans** — clouds that carry scanner parameters
-(origin, field of view, beam optics) — the Export window shows a **Scan export**
-section. It lists every scan with a checkbox, so you can export one, several,
-or all of them at once. The checklist is pre-checked to match the scans
-currently selected in the Scans panel, but you can check or uncheck any scan
-without changing the viewport selection. The export always writes **one data
-file per scan** (named `<base>_<scanID>.<ext>`); you pick the destination
-folder in the file dialog after setting the options.
+Check more than one object in the list — or any single **scan** (a cloud
+carrying scanner parameters: origin, field of view, beam optics) — and the
+window switches to **Export objects**, which writes **one data file per checked
+object** (named `<base>_<n>.<ext>`) into a folder you pick in the file dialog.
+
+The list holds every cloud in the scene, scans and plain imports alike, with a
+**Select all** checkbox above it and a count of how many of them are checked.
+Plain clouds (a `.xyz` / `.las` / `.ply` import with no scanner metadata) can be
+written to any of the data formats, so exporting a whole folder's worth of
+clouds in one pass is a single check-all and click.
+
+Two outputs *do* need scan geometry, and the rows they can't write grey out with
+the reason on hover rather than vanishing:
+
+- the **XML + data** bundle needs a scanner origin and angular sweep, so it is
+  offered only when something checked is a scan;
+- **PTX** needs a complete raster grid, so it skips plain clouds and non-raster
+  patterns (a Livox rosette has no `Ntheta × Nphi` grid).
+
+**Select all** only ever checks the rows the current output can actually write,
+and switching between outputs is non-destructive — a cloud greyed out by XML
+mode is still checked when you switch back to **Data only**.
 
 **Output mode** — the two toggles at the top:
 
@@ -543,14 +562,19 @@ ticked and the saved XML carries the grid back out, ready to drive
 again. Leaving the box unticked (or checking it but adding no grids) writes no
 `<grid>` blocks.
 
-The per-scan file split is always kept (the XML metadata references each data
-file by scan). Edits (crop, translation, filtering) are baked into the exported
-coordinates — what you see is what gets written. If the scene holds no scans
-with parameters, the section does not appear.
+The per-object file split is always kept (in XML mode the metadata references
+each data file by scan). Edits (crop, translation, filtering) are baked into the
+exported coordinates — what you see is what gets written.
 
-After you choose a save location the export dialog closes and a small **progress
-pill** appears at the top of the viewer while the scans are written (a large
-bundle can take a few seconds). The pill clears and a toast confirms the file
+After you choose a save location the export dialog closes and a **progress pill**
+appears at the top of the viewer, showing a live percentage as each object is
+written — it names the object it is on (*Writing plot_A (2/5)*), and the objects
+are weighted by point count, so a batch holding one big cloud and three small
+ones doesn't jump to 75% and stall. The pill has a **cancel** button; stopping a
+batch removes the files it had already written, so you never find half a bundle
+in the destination folder. In **XML + data** mode the bar advances per scan while
+the scans are loaded, then parks on *Writing Helios scan bundle* for the single
+write that produces the files. The pill clears and a toast confirms the file
 count when the write finishes — there's no need to click Export twice.
 
 ### Mesh formats

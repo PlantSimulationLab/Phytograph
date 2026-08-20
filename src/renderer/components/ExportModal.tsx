@@ -9,6 +9,16 @@ import {
   usesFixedColumnOrder,
   type ExportColumn,
 } from '../lib/exportColumns';
+import {
+  blockedReason,
+  effectiveCheckedIds,
+  mergeCheckedIntent,
+  objectDetailLine,
+  seedCheckedIds,
+  selectableIds,
+  type ExportObjectItem,
+} from '../lib/exportObjects';
+import { ObjectPicker } from './ObjectPicker';
 
 export type ExportSelectionType =
   | 'cloud'
@@ -19,29 +29,28 @@ export type ExportSelectionType =
   | 'mixed'
   | 'none';
 
-// One scan that can be written to a Helios scan XML (it carries scanner params).
-export interface ScanExportListItem {
-  id: string;
-  name: string;
-  hasMisses: boolean;
-  selected: boolean;
-}
+// One row of the object list. Re-exported from the pure rules module so the
+// parent has one place to import the shape from.
+export type { ExportObjectItem } from '../lib/exportObjects';
 
-// The columns available for the (single) selected cloud's ASCII export. Built by
-// the parent from the cloud's data so the picker reflects real fields. Empty when
-// no single cloud is selected (the picker hides).
+// The Export window. It opens on the scene's full object list; what the user
+// CHECKS there decides which controls render — a single plain cloud gets the
+// per-cloud format list, anything else gets the batch writer — and the two are
+// mutually exclusive, so only ever one column picker is on screen.
 export interface ExportModalProps {
   selectionType: ExportSelectionType;
-  singleCloudSelected: boolean;
-  // True when the single selected cloud is a scan (carries scanner params). Scans
-  // are exported through the scan section, so the general point-cloud format
-  // section is suppressed for them to avoid two overlapping export paths.
-  cloudIsScan: boolean;
-  cloudName: string;
-  // Available export columns for the single selected cloud (geometry + colour +
-  // scalars/labels), in default order. Used by the column picker.
-  cloudColumns: ExportColumn[];
-  scanExportList: ScanExportListItem[];
+  // True when what's selected in the scene is a mesh/skeleton rather than any
+  // cloud. Only affects the INITIAL check state (see seedCheckedIds): the object
+  // list itself always shows every cloud in the scene.
+  sceneSelectionHasNonCloud: boolean;
+  // Available export columns for a given cloud id (geometry + colour + scalars/
+  // labels), in default order. `null` asks for the representative set used by the
+  // multi-object column picker. Called per render for the checked object, so the
+  // parent should keep it stable (useCallback).
+  getExportColumns: (cloudId: string | null) => ExportColumn[];
+  // EVERY point cloud in the scene, with whether the panel selection had it and
+  // why (if at all) the XML / PTX outputs can't write it.
+  exportObjects: ExportObjectItem[];
   // Voxel-box grids in the scene the user can add to a scan XML export so the
   // bundle round-trips (id + human label only; the parent resolves the geometry).
   gridOptions: { id: string; label: string }[];
@@ -62,8 +71,9 @@ export interface ExportModalProps {
   onExportCloud: (
     format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
     columns: string[] | null,
+    cloudId: string,
   ) => void;
-  // Scan export. `scanIds` checked scans, `includeMisses`, `writeXml` (bundle vs
+  // Batch export. `scanIds` the checked objects, `includeMisses`, `writeXml` (bundle vs
   // data-only), `columns` the ordered ASCII column slugs (always includes xyz),
   // `dataFormat` the per-scan file format when writeXml is false, and `gridIds`
   // the voxel-box grids to write as <grid> blocks (XML mode only; empty otherwise).
@@ -94,11 +104,9 @@ const CLOUD_FORMATS: { id: 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj'
 
 export function ExportModal({
   selectionType,
-  singleCloudSelected,
-  cloudIsScan,
-  cloudName,
-  cloudColumns,
-  scanExportList,
+  sceneSelectionHasNonCloud,
+  getExportColumns,
+  exportObjects,
   gridOptions,
   meshSelected,
   meshName,
@@ -133,26 +141,71 @@ export function ExportModal({
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  const scanListKey = useMemo(
-    () => scanExportList.map(s => `${s.id}:${s.selected}`).join(','),
-    [scanExportList]);
+  const objectListKey = useMemo(
+    () => exportObjects.map(o => `${o.id}:${o.selected}`).join(','),
+    [exportObjects]);
   useEffect(() => {
-    const seeded = scanExportList.filter(s => s.selected).map(s => s.id);
-    setCheckedScanIds(new Set(seeded.length ? seeded : scanExportList.map(s => s.id)));
+    setCheckedScanIds(seedCheckedIds(exportObjects, sceneSelectionHasNonCloud));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scanListKey]);
-  const checkedScans = scanExportList.filter(s => checkedScanIds.has(s.id));
+  }, [objectListKey, sceneSelectionHasNonCloud]);
+
+  // A Helios XML bundle is only meaningful when something checked is actually a
+  // scan, so the XML toggle stands down when it isn't — otherwise importing one
+  // plain cloud and hitting Export would land in a mode that can't write it and
+  // show a "blocked" note instead of the format list. `writeXml` stays the
+  // user's intent; `xmlMode` is what the UI and the submit actually use.
+  const anyCheckedIsScan = exportObjects.some(o => checkedScanIds.has(o.id) && o.isScan);
+  const xmlMode = writeXml && anyCheckedIsScan;
+
+  // `checkedScanIds` is the user's INTENT — it may include rows the current
+  // output can't write (a plain cloud while XML mode is on). `effectiveIds` is
+  // what actually gets exported, and what the controls below are sized to.
+  const mode = useMemo(
+    () => ({ writeXml: xmlMode, dataFormat: scanDataFormat }), [xmlMode, scanDataFormat]);
+  const selectable = useMemo(
+    () => selectableIds(exportObjects, mode), [exportObjects, mode]);
+  const effectiveIds = useMemo(
+    () => effectiveCheckedIds(exportObjects, checkedScanIds, mode),
+    [exportObjects, checkedScanIds, mode]);
+  const effectiveIdSet = useMemo(() => new Set(effectiveIds), [effectiveIds]);
+  const checkedScans = exportObjects.filter(o => effectiveIdSet.has(o.id));
   const anyCheckedHasMisses = checkedScans.some(s => s.hasMisses);
-  const toggleScan = (id: string) => setCheckedScanIds(prev => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
+  // Objects the user checked that this mode has to skip — worth saying out loud,
+  // because the alternative is an Export button that quietly writes fewer files
+  // than the list implies (or none at all).
+  const blockedCheckedCount = exportObjects.filter(
+    o => checkedScanIds.has(o.id) && !!blockedReason(o, mode)).length;
+
+  // The single-cloud section and the batch controls are mutually exclusive: one
+  // checked cloud with no scanner parameters goes through the richer per-cloud
+  // path (its own format list, its own destination filename); anything else —
+  // several objects, or a scan — goes through the batch writer.
+  const soleCheckedObject = effectiveIds.length === 1
+    ? exportObjects.find(o => o.id === effectiveIds[0]) ?? null
+    : null;
+  const singleCloudMode = !!soleCheckedObject && !soleCheckedObject.isScan;
+
+  const pickerItems = useMemo(
+    () => exportObjects.map(o => ({
+      id: o.id,
+      label: o.name,
+      detail: objectDetailLine(o),
+      disabledReason: blockedReason(o, mode),
+    })),
+    [exportObjects, mode]);
 
   // ---- Column picker (formats that take a column selection) ---------------
   // Editable copy of the cloud's columns. Re-seeded when the cloud changes.
+  // The columns on offer follow whichever object the picker is describing: the
+  // sole checked cloud in single-cloud mode, else the representative set the
+  // parent picks for a multi-object export (`null`).
+  const columnSourceId = singleCloudMode ? soleCheckedObject!.id : null;
+  const cloudColumns = useMemo(
+    () => getExportColumns(columnSourceId), [getExportColumns, columnSourceId]);
   const [columns, setColumns] = useState<ExportColumn[]>(cloudColumns);
-  const cloudColumnsKey = useMemo(() => cloudColumns.map(c => c.slug).join(','), [cloudColumns]);
+  const cloudColumnsKey = useMemo(
+    () => `${columnSourceId ?? ''}|${cloudColumns.map(c => c.slug).join(',')}`,
+    [columnSourceId, cloudColumns]);
   useEffect(() => {
     setColumns(cloudColumns);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -192,18 +245,18 @@ export function ExportModal({
   // scan writer supports except OBJ (geometry only) and E57 (its own fixed
   // schema). The scan backend already filters its scalar set by the requested
   // columns for every format, LAS/LAZ included.
-  const scanFormatTakesColumns = writeXml || supportsColumnSelection(scanDataFormat);
-  const scanFormatIsOrdered = writeXml || !usesFixedColumnOrder(scanDataFormat);
+  const scanFormatTakesColumns = xmlMode || supportsColumnSelection(scanDataFormat);
+  const scanFormatIsOrdered = xmlMode || !usesFixedColumnOrder(scanDataFormat);
   // PTX emits every cell of the scan raster, so "include misses" is inert for it
   // (an excluded miss is written as the same empty-cell sentinel).
-  const ptxSelected = !writeXml && scanDataFormat === 'ptx';
+  const ptxSelected = !xmlMode && scanDataFormat === 'ptx';
   const missesEnabled = anyCheckedHasMisses && !ptxSelected;
   // LAS/LAZ scan data: lock intensity as well as geometry (see lockFixedDimsForLas).
   const activeScanColumns = useMemo(
-    () => (!writeXml && usesFixedColumnOrder(scanDataFormat)
+    () => (!xmlMode && usesFixedColumnOrder(scanDataFormat)
       ? lockFixedDimsForLas(scanColumns)
       : scanColumns),
-    [writeXml, scanDataFormat, scanColumns]);
+    [xmlMode, scanDataFormat, scanColumns]);
 
   // A compact, reusable column-picker block. `orderable` is false for formats
   // that store columns by name rather than positionally (LAS/LAZ): the drag
@@ -266,10 +319,40 @@ export function ExportModal({
         </div>
 
         <div className="p-4 space-y-4 max-h-[75vh] overflow-y-auto custom-scrollbar">
-          {/* ---- Point cloud export (non-scan clouds only) ---- */}
-          {selectionType === 'cloud' && singleCloudSelected && !cloudIsScan && (
+          {/* ---- Object list ----
+              Every point cloud in the scene, whether or not it carries scanner
+              parameters and whether or not it is selected in the Scans panel —
+              the panel selection only decides what starts CHECKED. What's
+              checked then decides which controls appear below: a lone plain
+              cloud gets the per-cloud format list (its own destination
+              filename), anything else gets the batch writer. */}
+          {exportObjects.length > 0 && (
+            <div data-testid="export-object-list-section">
+              <ObjectPicker
+                data-testid="export-object-list"
+                rowTestId="export-scan-row"
+                selectAllControl="checkbox"
+                label="Objects"
+                items={pickerItems}
+                selectedIds={effectiveIdSet}
+                onChange={(next) => setCheckedScanIds(
+                  prev => mergeCheckedIntent(prev, next, selectable))}
+              />
+              {blockedCheckedCount > 0 && (
+                <div data-testid="export-scan-blocked-note" className="text-[10px] text-amber-300 mt-1">
+                  {blockedCheckedCount} checked object{blockedCheckedCount === 1 ? '' : 's'} can't be
+                  written as {xmlMode ? 'a Helios scan XML' : scanDataFormat.toUpperCase()} — switch
+                  output to{xmlMode ? ' Data only' : ' another format'} to include{' '}
+                  {blockedCheckedCount === 1 ? 'it' : 'them'}.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ---- Point cloud export (exactly one checked cloud, no scanner params) ---- */}
+          {singleCloudMode && (
             <div data-testid="export-cloud-section">
-              <div className="text-xs font-medium text-neutral-300 mb-2">{cloudName || 'Point cloud'}</div>
+              <div className="text-xs font-medium text-neutral-300 mb-2">{soleCheckedObject!.name || 'Point cloud'}</div>
               <div className="text-[10px] text-neutral-400 mb-1">Format</div>
               <div className="flex flex-wrap gap-1 mb-3">
                 {CLOUD_FORMATS.map(f => (
@@ -333,6 +416,7 @@ export function ExportModal({
                 onClick={() => onExportCloud(
                   cloudFormat,
                   cloudFormatTakesColumns ? selectedSlugs(activeCloudColumns) : null,
+                  soleCheckedObject!.id,
                 )}
                 className={`mt-3 w-full px-3 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${
                   cloudFormatTakesColumns && selectedSlugs(activeCloudColumns).length === 0
@@ -346,53 +430,50 @@ export function ExportModal({
             </div>
           )}
 
-          {/* ---- Scan export (any scans present) ---- */}
-          {scanExportList.length > 0 && (
+          {/* ---- Batch export (anything but a lone plain cloud) ----
+              One file per checked object, written into a folder you pick next.
+              Mutually exclusive with the single-cloud section above: exactly one
+              of the two renders, so there is never a second column picker or a
+              second Export button on screen. */}
+          {exportObjects.length > 0 && !singleCloudMode && (
             <div data-testid="export-scan-section">
               <div className="text-xs font-medium text-neutral-300 mb-1 flex items-center gap-1.5">
                 <FileCode className="w-3.5 h-3.5" />
-                Scan export (one data file per scan)
+                Export objects (one file per object)
               </div>
               <div className="text-[10px] text-neutral-500 mb-2">
-                Choose which scan(s) to export. You pick the destination folder next.
-              </div>
-              <div className="max-h-32 overflow-y-auto mb-2 rounded border border-neutral-700/60 divide-y divide-neutral-700/40">
-                {scanExportList.map(s => (
-                  <label
-                    key={s.id}
-                    data-testid="export-scan-row"
-                    data-scan-name={s.name}
-                    data-checked={checkedScanIds.has(s.id) ? 'true' : 'false'}
-                    className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-neutral-200 cursor-pointer hover:bg-neutral-700/40"
-                  >
-                    <input type="checkbox" checked={checkedScanIds.has(s.id)} onChange={() => toggleScan(s.id)} className="accent-green-600" />
-                    <span className="truncate flex-1" title={s.name}>{s.name}</span>
-                    {s.hasMisses && <span className="text-[9px] text-neutral-500" title="Carries sky/miss points">misses</span>}
-                  </label>
-                ))}
+                Writes one data file per checked object. You pick the destination folder next.
               </div>
 
               {/* Output mode: re-loadable Helios bundle (XML + per-scan .xyz) or
-                  plain per-scan data files in a format you choose. */}
+                  plain per-object data files in a format you choose. */}
               <div className="text-[10px] text-neutral-400 mb-1">Output</div>
               <div className="grid grid-cols-2 gap-1 mb-2" data-testid="export-scan-mode">
                 <button
-                  data-testid="export-scan-mode-xml" data-active={writeXml ? 'true' : 'false'}
+                  data-testid="export-scan-mode-xml" data-active={xmlMode ? 'true' : 'false'}
                   onClick={() => setWriteXml(true)}
-                  title="Helios XML metadata + one .xyz data file per scan — re-loadable as a scan."
-                  className={`px-2 py-1.5 rounded text-[11px] ${writeXml ? 'bg-green-600 text-white' : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'}`}
+                  disabled={!anyCheckedIsScan}
+                  title={anyCheckedIsScan
+                    ? 'Helios XML metadata + one .xyz data file per scan — re-loadable as a scan.'
+                    : 'A Helios scan XML needs scanner parameters — none of the checked objects have any.'}
+                  className={`px-2 py-1.5 rounded text-[11px] ${
+                    xmlMode
+                      ? 'bg-green-600 text-white'
+                      : anyCheckedIsScan
+                        ? 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'
+                        : 'bg-neutral-700/50 text-neutral-500 cursor-not-allowed'}`}
                 >XML + data</button>
                 <button
-                  data-testid="export-scan-mode-data" data-active={!writeXml ? 'true' : 'false'}
+                  data-testid="export-scan-mode-data" data-active={!xmlMode ? 'true' : 'false'}
                   onClick={() => setWriteXml(false)}
                   title="One data file per scan in the format you pick below (no XML)."
-                  className={`px-2 py-1.5 rounded text-[11px] ${!writeXml ? 'bg-green-600 text-white' : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'}`}
+                  className={`px-2 py-1.5 rounded text-[11px] ${!xmlMode ? 'bg-green-600 text-white' : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'}`}
                 >Data only</button>
               </div>
 
               {/* Data-only reveals the per-scan file format. XML mode always
                   writes Helios .xyz, so no format chooser there. */}
-              {!writeXml && (
+              {!xmlMode && (
                 <>
                   <div className="text-[10px] text-neutral-400 mb-1">Format</div>
                   <div className="flex flex-wrap gap-1 mb-2" data-testid="export-scan-format">
@@ -453,7 +534,7 @@ export function ExportModal({
               {/* Export grid — XML mode only. Lets the user add scene voxel-box
                   grids as <grid> blocks so a bundle like sphere.xml round-trips.
                   Hidden in Data-only mode and when the scene has no grids. */}
-              {writeXml && gridOptions.length > 0 && (
+              {xmlMode && gridOptions.length > 0 && (
                 <>
                   <label className="flex items-center gap-2 text-[11px] my-2 text-neutral-200 cursor-pointer">
                     <input
@@ -495,10 +576,10 @@ export function ExportModal({
               <button
                 data-testid="export-scan-xml"
                 onClick={() => onExportScanXml(
-                  [...checkedScanIds], includeMisses && anyCheckedHasMisses, writeXml,
+                  effectiveIds, includeMisses && anyCheckedHasMisses, xmlMode,
                   scanFormatTakesColumns ? selectedSlugs(activeScanColumns) : ['x', 'y', 'z'],
-                  writeXml ? 'xyz' : scanDataFormat,
-                  exportGrid && writeXml ? [...checkedGridIds] : [],
+                  xmlMode ? 'xyz' : scanDataFormat,
+                  exportGrid && xmlMode ? [...checkedGridIds] : [],
                 )}
                 disabled={checkedScans.length === 0}
                 className={`w-full px-2 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${
@@ -506,7 +587,7 @@ export function ExportModal({
                 }`}
               >
                 <FileCode className="w-3.5 h-3.5" />
-                {writeXml ? 'Export XML + data' : `Export ${scanDataFormat.toUpperCase()}`}{checkedScans.length > 1 ? ` (${checkedScans.length})` : ''}
+                {xmlMode ? 'Export XML + data' : `Export ${scanDataFormat.toUpperCase()}`}{checkedScans.length > 1 ? ` (${checkedScans.length})` : ''}
               </button>
             </div>
           )}
@@ -552,14 +633,16 @@ export function ExportModal({
             </div>
           )}
 
-          {/* ---- Nothing exportable ---- */}
-          {!(selectionType === 'cloud' && singleCloudSelected)
-            && selectionType !== 'mesh' && selectionType !== 'skeleton'
-            && scanExportList.length === 0 && (
+          {/* ---- Nothing exportable ----
+              The object list covers every cloud in the scene, so this now only
+              fires for a genuinely empty scene (or one holding only a mesh /
+              skeleton that isn't the current selection). */}
+          {exportObjects.length === 0
+            && selectionType !== 'mesh' && selectionType !== 'skeleton' && (
             <div className="text-[11px] text-neutral-500 text-center py-4">
               {selectionType === 'none'
-                ? 'Select an object to export.'
-                : 'Nothing in this selection can be exported here. Select a single cloud, mesh, or skeleton — or a scan with parameters.'}
+                ? 'Nothing to export yet — import a point cloud, or select a mesh or skeleton.'
+                : 'Nothing in this selection can be exported here. Select a cloud, mesh, or skeleton.'}
             </div>
           )}
         </div>
