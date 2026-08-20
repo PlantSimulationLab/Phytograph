@@ -11,8 +11,7 @@ On macOS use <kbd>⌘</kbd> where the table says <kbd>Ctrl</kbd>.
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Open Settings |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo |
 | <kbd>Ctrl</kbd>+<kbd>Y</kbd> or <kbd>Shift</kbd>+<kbd>Ctrl</kbd>+<kbd>Z</kbd> | Redo (the macOS menu advertises <kbd>Shift</kbd>+<kbd>⌘</kbd>+<kbd>Z</kbd>) |
-| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save |
-| <kbd>Shift</kbd>+<kbd>Ctrl</kbd>+<kbd>E</kbd> | Export… |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Export… |
 | <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select All |
 | <kbd>Shift</kbd>+<kbd>Ctrl</kbd>+<kbd>A</kbd> | Deselect All |
 | <kbd>Ctrl</kbd>+<kbd>0</kbd> | Reset camera (fit all) |

@@ -95,13 +95,8 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
         },
         { type: 'separator' },
         {
-          label: 'Save',
-          accelerator: 'CmdOrCtrl+S',
-          click: () => send({ kind: 'save' }),
-        },
-        {
           label: 'Export…',
-          accelerator: 'Shift+CmdOrCtrl+E',
+          accelerator: 'CmdOrCtrl+S',
           click: () => send({ kind: 'export' }),
         },
         // Settings + Quit live in the app menu on macOS (per platform convention),

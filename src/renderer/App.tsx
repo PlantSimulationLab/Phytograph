@@ -1886,7 +1886,6 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         case 'import-riegl':
           void handleImportRieglProject();
           break;
-        case 'save':
         case 'export':
           setSettingsOpen(false);
           (window as any).__openExportPanel?.();

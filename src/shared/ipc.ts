@@ -153,7 +153,6 @@ export type MenuCommandPayload =
   | { kind: 'import-scan-xml' }
   | { kind: 'import-qsm' }
   | { kind: 'import-riegl' }
-  | { kind: 'save' }
   | { kind: 'export' }
   | { kind: 'undo' }
   | { kind: 'redo' }

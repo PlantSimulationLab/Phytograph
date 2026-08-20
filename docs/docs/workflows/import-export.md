@@ -399,7 +399,7 @@ Helios XML still takes precedence — its `<scan>` definitions win.) See
 
 ## Export
 
-Choose **File → Export…** (<kbd>Shift</kbd>+<kbd>⌘/Ctrl</kbd>+<kbd>E</kbd>), or
+Choose **File → Export…** (<kbd>⌘/Ctrl</kbd>+<kbd>S</kbd>), or
 run *Export* from the command palette, to open the **Export** window.
 
 It opens on an **object list** holding *every* point cloud in the scene, each
