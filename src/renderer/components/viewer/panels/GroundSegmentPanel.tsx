@@ -1,4 +1,5 @@
-import { Layers, Loader2, X } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
+import { GroundSegmentIcon } from '../../icons/GroundSegmentIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 
@@ -50,7 +51,7 @@ export function GroundSegmentPanel({
     <div data-testid="ground-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-          <Layers className="w-3 h-3" />
+          <GroundSegmentIcon className="w-3 h-3" />
           Ground Segmentation
         </div>
         <button
@@ -234,7 +235,7 @@ export function GroundSegmentPanel({
           onClick={onSegment}
           className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
         >
-          <Layers className="w-3 h-3" />
+          <GroundSegmentIcon className="w-3 h-3" />
           Segment Ground
         </button>
       )}

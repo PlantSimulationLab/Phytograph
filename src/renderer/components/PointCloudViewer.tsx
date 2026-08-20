@@ -173,6 +173,7 @@ export { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 import { Skeleton3D } from './viewer/renderers/Skeleton3D';
 import { QSM3D, type QSMColorMode } from './viewer/renderers/QSM3D';
 import { QsmIcon } from './icons/QsmIcon';
+import { GroundSegmentIcon } from './icons/GroundSegmentIcon';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
 import { CameraController } from './viewer/scene/CameraController';
 import { DepthProbe } from './viewer/scene/DepthProbe';
@@ -6397,7 +6398,7 @@ export default function PointCloudViewer({
       // ── Segmentation ────────────────────────────────────────────────
       { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => setShowSectionPanel(v => !v), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
       { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
-      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Layers, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
+      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GitBranch, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 

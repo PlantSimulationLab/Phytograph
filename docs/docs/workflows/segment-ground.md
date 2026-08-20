@@ -10,8 +10,8 @@ labels the points the cloth settles onto as ground.
 ## Segment
 
 1. Select a single point cloud.
-2. Click **Segment Ground** (the layers icon in the tool column), or open
-   the command palette and choose **Segment Ground**.
+2. Click **Segment Ground** (the points-split-by-a-ground-plane icon in the
+   tool column), or open the command palette and choose **Segment Ground**.
 3. Adjust the parameters if needed (hover the **?** beside any parameter for
    a quick explanation). The parameters are seeded automatically from the
    cloud's size **and shape** each time you open the panel — a few centimetres
