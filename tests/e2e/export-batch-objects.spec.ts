@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
-import { stubSaveDialog } from './helpers/stubSaveDialog';
+import { stubExportFolder } from './helpers/exportFolder';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
@@ -83,18 +83,23 @@ test('exports several plain clouds in one batch, with select-all', async () => {
   await expect(rows.nth(0)).toHaveAttribute('data-checked', 'true');
   await expect(rows.nth(1)).toHaveAttribute('data-checked', 'true');
 
-  await stubSaveDialog(app, join(outDir, 'clouds.xyz'));
   await page.getByTestId('export-scan-format-xyz').click();
+  // A base name typed in the window + a folder chosen from the OS — the export
+  // writes one file per object, so there is no single Save-As path to give.
+  await stubExportFolder(app, page, outDir, 'clouds');
+  await expect(page.getByTestId('export-file-preview')).toHaveAttribute('data-file-count', '2');
   await page.getByTestId('export-scan-xml').click();
 
   await expect(page.getByTestId('toast-success').filter({ hasText: 'Export Complete' }))
     .toBeVisible({ timeout: 60_000 });
 
-  // One file per object, with the real point counts.
+  // One file per object, each named for the object it holds — and the mapping is
+  // the point of the naming: the file called after tiny.xyz has tiny's 60 points,
+  // not whichever cloud happened to be added first.
   const written = readdirSync(outDir).sort();
-  expect(written).toEqual(['clouds_0.xyz', 'clouds_1.xyz']);
-  const counts = written.map(n => dataRows(join(outDir, n)).length).sort((a, b) => a - b);
-  expect(counts).toEqual([30, 60]);
+  expect(written).toEqual(['clouds_sparse.xyz', 'clouds_tiny.xyz']);
+  expect(dataRows(join(outDir, 'clouds_tiny.xyz')).length).toBe(60);
+  expect(dataRows(join(outDir, 'clouds_sparse.xyz')).length).toBe(30);
 });
 
 test('lists plain clouds alongside scans and blocks them only where the format needs scan geometry', async () => {
@@ -150,7 +155,7 @@ test('lists plain clouds alongside scans and blocks them only where the format n
   await page.getByTestId('export-object-list-select-all').click();
   await expect(page.getByTestId('export-object-list')).toContainText('(5/5 selected)');
 
-  await stubSaveDialog(app, join(outDir, 'mixed.xyz'));
+  await stubExportFolder(app, page, outDir, 'mixed');
   await page.getByTestId('export-scan-xml').click();
   await expect(page.getByTestId('toast-success').filter({ hasText: 'Export Complete' }))
     .toBeVisible({ timeout: 120_000 });
@@ -159,6 +164,6 @@ test('lists plain clouds alongside scans and blocks them only where the format n
   // there (the batch writer took a cloud with no scan geometry at all).
   const written = readdirSync(outDir).sort();
   expect(written).toHaveLength(5);
-  const counts = written.map(n => dataRows(join(outDir, n)).length);
-  expect(counts).toContain(60);
+  expect(written).toContain('mixed_tiny.xyz');
+  expect(dataRows(join(outDir, 'mixed_tiny.xyz')).length).toBe(60);
 });

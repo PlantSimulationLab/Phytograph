@@ -77,8 +77,9 @@ class TestExportProgressStream:
         res = decode_streamed_json(resp.content)
         assert res["success"] is True, res.get("error")
         assert res["scan_count"] == 3
+        # One file per object, each named for the object it holds.
         assert sorted(p.name for p in tmp_path.iterdir()) == [
-            "batch_0.xyz", "batch_1.xyz", "batch_2.xyz"]
+            "batch_plot_A.xyz", "batch_plot_B.xyz", "batch_plot_C.xyz"]
 
     def test_progress_is_weighted_by_point_count(self, client, tmp_path):
         # A lopsided batch (one big object, one tiny) must not spend the bar
@@ -125,7 +126,7 @@ class TestExportProgressStream:
         res = decode_streamed_json(resp.content)
         assert res["success"] is True, res.get("error")
         names = sorted(p.name for p in tmp_path.iterdir())
-        assert names == ["bundle.xml", "bundle_0.xyz", "bundle_1.xyz"]
+        assert names == ["bundle.xml", "bundle_north.xyz", "bundle_south.xyz"]
 
 
 class TestParamlessObjects:
@@ -141,7 +142,8 @@ class TestParamlessObjects:
             dest_dir=str(tmp_path)))
         assert res["success"] is True, res.get("error")
         written = list(tmp_path.iterdir())
-        assert [p.name for p in written] == [f"plain_0{suffix}"]
+        # A lone object is written under exactly the name the save dialog took.
+        assert [p.name for p in written] == [f"plain{suffix}"]
         assert res["point_count"] == len(_PTS)
 
         if fmt in ("xyz", "csv"):
@@ -158,7 +160,8 @@ class TestParamlessObjects:
             base_name="mixed", write_xml=False, data_format="xyz",
             dest_dir=str(tmp_path)))
         assert res["success"] is True, res.get("error")
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["mixed_0.xyz", "mixed_1.xyz"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "mixed_plain_B.xyz", "mixed_scan_A.xyz"]
 
 
 class TestExportCancel:

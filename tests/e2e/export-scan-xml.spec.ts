@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { mkdtempSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
-import { stubOpenDialog } from './helpers/stubOpenDialog';
-import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
+import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
+import { stubExportFolder } from './helpers/exportFolder';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
@@ -37,7 +37,6 @@ test('exports a multi-scan XML bundle for the sphere fixture', async () => {
 
   const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
   await stubOpenDialog(app, xmlFixture);
-  await stubSaveDialog(app, xmlPath);
 
   // Import the four scans from XML.
   await page.getByTestId('tool-add-scan').click();
@@ -72,11 +71,13 @@ test('exports a multi-scan XML bundle for the sphere fixture', async () => {
   await expect(page.getByTestId('export-scan-mode-xml')).toHaveAttribute('data-active', 'true');
   await expect(page.getByTestId('export-scan-mode-data')).toHaveAttribute('data-active', 'false');
 
-  // Write the bundle. The save dialog is stubbed to xmlPath; real fs writes run.
+  // Write the bundle. The folder picker is stubbed to outDir and the base name
+  // is typed in the window; real fs writes run.
+  await stubExportFolder(app, page, outDir, 'sphere');
   await page.getByTestId('export-scan-xml').click();
 
-  // The save dialog must have actually fired (catches a silent no-op).
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+  // The folder picker must have actually fired (catches a silent no-op).
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 10_000 })
     .toBeGreaterThan(0);
 
   // UX: once the path is chosen the modal dismisses and a progress pill takes
@@ -85,16 +86,24 @@ test('exports a multi-scan XML bundle for the sphere fixture', async () => {
   // pill may come and go quickly; assert the modal is gone (the durable signal).
   await expect(page.getByTestId('export-modal')).not.toBeVisible({ timeout: 10_000 });
 
-  // Wait for the bundle to land on disk: sphere.xml + sphere_0..3.xyz.
+  // Wait for the bundle to land on disk: sphere.xml + one .xyz per scan.
   await expect.poll(
     () => (existsSync(xmlPath) ? readdirSync(outDir).filter(f => f.endsWith('.xyz')).length : 0),
     { timeout: 30_000, intervals: [200, 500, 1000] },
   ).toBe(4);
 
-  // The XML references each per-scan data file (not a single merged file).
+  // The XML references each per-scan data file (not a single merged file), and
+  // each file is named for the scan it carries — the Scans panel's own label,
+  // slugged — so the bundle maps back to the panel by name rather than by the
+  // order the scans were added.
   const xml = readFileSync(xmlPath, 'utf-8');
-  for (let i = 0; i < 4; i++) {
-    expect(xml).toContain(`sphere_${i}.xyz`);
+  const panelNames = await page.getByTestId('scans-panel')
+    .locator('[data-testid="scan-row-name"]').allTextContents();
+  expect(panelNames).toHaveLength(4);
+  for (const name of panelNames) {
+    const file = `sphere_${name.trim().replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[^A-Za-z0-9._-]+/g, '_')}.xyz`;
+    expect(xml).toContain(file);
+    expect(existsSync(join(outDir, file))).toBe(true);
   }
   // Each data file has a '#'-prefixed header and at least one data row.
   const dataFiles = readdirSync(outDir).filter(f => f.endsWith('.xyz'));
@@ -125,7 +134,6 @@ test('round-trips a <grid> block when Export grid is ticked', async () => {
   // size (1.5,2,2.5), Nx/Ny/Nz = 2/3/4, rotated 30° about z.
   const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere-with-grid.xml');
   await stubOpenDialog(app, xmlFixture);
-  await stubSaveDialog(app, xmlPath);
 
   await page.getByTestId('tool-add-scan').click();
   const popup = page.getByTestId('scan-parameters-popup');
@@ -154,8 +162,9 @@ test('round-trips a <grid> block when Export grid is ticked', async () => {
   await gridRows.first().getByRole('checkbox').check();
   await expect(gridRows.first()).toHaveAttribute('data-checked', 'true');
 
+  await stubExportFolder(app, page, outDir, 'sphere');
   await page.getByTestId('export-scan-xml').click();
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 10_000 })
     .toBeGreaterThan(0);
   await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
 
@@ -179,13 +188,9 @@ test('round-trips a <grid> block when Export grid is ticked', async () => {
 test('exports scan data only (no XML) when the Data only mode is chosen', async () => {
   const { app, page } = session;
   const outDir = mkdtempSync(join(tmpdir(), 'phytograph-dataonly-'));
-  // The save picker defaults to a .xyz name in data-only mode; the data files
-  // are still named <base>_<id>.xyz, so write into this folder.
-  const savePath = join(outDir, 'sphere.xyz');
 
   const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
   await stubOpenDialog(app, xmlFixture);
-  await stubSaveDialog(app, savePath);
 
   await page.getByTestId('tool-add-scan').click();
   await expect(page.getByTestId('scan-parameters-popup')).toBeVisible();
@@ -203,9 +208,10 @@ test('exports scan data only (no XML) when the Data only mode is chosen', async 
   await expect(page.getByTestId('export-scan-mode-data')).toHaveAttribute('data-active', 'true');
   await expect(page.getByTestId('export-scan-format')).toBeVisible();
   await expect(page.getByTestId('export-scan-format-xyz')).toHaveAttribute('data-active', 'true');
+  await stubExportFolder(app, page, outDir, 'sphere');
   await page.getByTestId('export-scan-xml').click();
 
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 10_000 })
     .toBeGreaterThan(0);
 
   // Four .xyz data files, and crucially NO .xml.
@@ -228,7 +234,6 @@ test('respects the chosen columns in the exported scan ASCII_format', async () =
 
   const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
   await stubOpenDialog(app, xmlFixture);
-  await stubSaveDialog(app, xmlPath);
 
   await page.getByTestId('tool-add-scan').click();
   await expect(page.getByTestId('scan-parameters-popup')).toBeVisible();
@@ -270,8 +275,9 @@ test('respects the chosen columns in the exported scan ASCII_format', async () =
   // Uncheck 'reflectance' so it is excluded; keep r/g/b. (x/y/z are locked on.)
   await picker.locator('[data-slug="reflectance"]').getByRole('checkbox').uncheck();
 
+  await stubExportFolder(app, page, outDir, 'one');
   await page.getByTestId('export-scan-xml').click();
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 10_000 })
     .toBeGreaterThan(0);
   await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
 
@@ -287,11 +293,9 @@ test('respects the chosen columns in the exported scan ASCII_format', async () =
 test('exports scans to per-scan E57 files in data-only mode', async () => {
   const { app, page } = session;
   const outDir = mkdtempSync(join(tmpdir(), 'phytograph-e57-'));
-  const savePath = join(outDir, 'sphere.e57');
 
   const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
   await stubOpenDialog(app, xmlFixture);
-  await stubSaveDialog(app, savePath);
 
   await page.getByTestId('tool-add-scan').click();
   await expect(page.getByTestId('scan-parameters-popup')).toBeVisible();
@@ -310,8 +314,9 @@ test('exports scans to per-scan E57 files in data-only mode', async () => {
   await expect(page.getByTestId('export-scan-format-e57')).toHaveAttribute('data-active', 'true');
   await expect(page.getByTestId('export-scan-section').getByTestId('export-column-picker')).toHaveCount(0);
 
+  await stubExportFolder(app, page, outDir, 'sphere');
   await page.getByTestId('export-scan-xml').click();
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 10_000 })
     .toBeGreaterThan(0);
 
   // Four .e57 files, no .xml, no .xyz.

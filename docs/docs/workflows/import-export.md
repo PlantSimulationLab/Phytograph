@@ -409,8 +409,10 @@ changes the viewport selection. What you check then decides the rest of the
 window: a single plain cloud shows the format chooser + column picker for that
 one file, while several objects (or any scan) show the batch controls described
 under [Exporting several objects](#exporting-several-objects). A selected mesh
-or skeleton shows its own formats instead. You pick the destination in a native
-file dialog after setting the options.
+or skeleton shows its own formats instead. Once the options are set you pick the
+destination in a native dialog: a **file** for the exports that write exactly one
+(a single plain cloud, a mesh, a skeleton), a **folder** for the batch export,
+which writes one file per object.
 
 ### Point cloud formats
 
@@ -492,7 +494,29 @@ those stages quickly.
 Check more than one object in the list — or any single **scan** (a cloud
 carrying scanner parameters: origin, field of view, beam optics) — and the
 window switches to **Export objects**, which writes **one data file per checked
-object** (named `<base>_<n>.<ext>`) into a folder you pick in the file dialog.
+object**.
+
+Because that is many files from one name, this export does not ask for a file
+name in a Save dialog. You type a **Base name** in the window and the button
+asks only for a destination **folder** — and above the button the window lists
+the files it is about to write, so nothing is a surprise:
+
+```
+Base name  [ myscan ]
+
+Will write 3 files:
+  myscan_ScanPos002.laz
+  myscan_ScanPos001.laz
+  myscan_ScanPos014.laz
+```
+
+Each file is named for the object it holds, so the exported set maps back to the
+Scans panel rather than to the order the scans were added. Characters a file
+system won't take (spaces, slashes, `:` and friends) become underscores, and two
+objects sharing a name get a `_2`, `_3` … suffix. Exporting a **single** object
+is the exception — it is written under the base name alone, with nothing
+appended. An **XML + data** bundle also writes `<base>.xml` next to its per-scan
+data files.
 
 The list holds every cloud in the scene, scans and plain imports alike, with a
 **Select all** checkbox above it and a count of how many of them are checked.

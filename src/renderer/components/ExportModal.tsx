@@ -12,8 +12,10 @@ import {
 import {
   blockedReason,
   effectiveCheckedIds,
+  exportBaseName,
   mergeCheckedIntent,
   objectDetailLine,
+  plannedFileNames,
   seedCheckedIds,
   selectableIds,
   type ExportObjectItem,
@@ -75,11 +77,14 @@ export interface ExportModalProps {
   ) => void;
   // Batch export. `scanIds` the checked objects, `includeMisses`, `writeXml` (bundle vs
   // data-only), `columns` the ordered ASCII column slugs (always includes xyz),
-  // `dataFormat` the per-scan file format when writeXml is false, and `gridIds`
-  // the voxel-box grids to write as <grid> blocks (XML mode only; empty otherwise).
+  // `dataFormat` the per-scan file format when writeXml is false, `gridIds`
+  // the voxel-box grids to write as <grid> blocks (XML mode only; empty otherwise),
+  // and `baseName` the name every written file is built from (the window owns it,
+  // because it is also what the file-name preview is computed from — the parent
+  // only asks for a destination FOLDER).
   onExportScanXml: (
     scanIds: string[], includeMisses: boolean, writeXml: boolean,
-    columns: string[], dataFormat: string, gridIds: string[],
+    columns: string[], dataFormat: string, gridIds: string[], baseName: string,
   ) => void;
   onExportMesh: (format: 'obj' | 'ply' | 'stl') => void;
   // DEM raster export (mesh.method === 'dem' only): ESRI ASCII grid or GeoTIFF.
@@ -132,6 +137,10 @@ export function ExportModal({
   // Data-only output format (revealed when writeXml is false).
   const [scanDataFormat, setScanDataFormat] = useState<ScanDataFormat>('xyz');
   const [checkedScanIds, setCheckedScanIds] = useState<Set<string>>(new Set());
+  // Base name for the written files. Seeded from the checked objects and left
+  // alone once the user types: the seed follows the selection, their text does
+  // not get overwritten by it.
+  const [baseNameDraft, setBaseNameDraft] = useState<string | null>(null);
   // Grid export (XML mode only): off by default; when on, reveals a checklist of
   // the scene's voxel-box grids. An empty selection writes no <grid> blocks.
   const [exportGrid, setExportGrid] = useState(false);
@@ -184,6 +193,20 @@ export function ExportModal({
     ? exportObjects.find(o => o.id === effectiveIds[0]) ?? null
     : null;
   const singleCloudMode = !!soleCheckedObject && !soleCheckedObject.isScan;
+
+  // The name every written file is built from, and the exact list of files it
+  // produces. The batch export writes MANY files from ONE typed name, so the
+  // window shows the resulting names before the user commits to a folder —
+  // otherwise "myscan" reads as a promise of a file called myscan.
+  const seededBaseName = checkedScans.length === 1
+    ? exportBaseName(checkedScans[0].name)
+    : 'scans';
+  const baseName = baseNameDraft ?? seededBaseName;
+  const scanExt = xmlMode ? 'xyz' : scanDataFormat;
+  const plannedNames = useMemo(
+    () => plannedFileNames(checkedScans.map(o => o.name), baseName, scanExt, xmlMode),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [checkedScans.map(o => o.name).join('\u0000'), baseName, scanExt, xmlMode]);
 
   const pickerItems = useMemo(
     () => exportObjects.map(o => ({
@@ -442,7 +465,7 @@ export function ExportModal({
                 Export objects (one file per object)
               </div>
               <div className="text-[10px] text-neutral-500 mb-2">
-                Writes one data file per checked object. You pick the destination folder next.
+                Writes one data file per checked object, into a folder you choose below.
               </div>
 
               {/* Output mode: re-loadable Helios bundle (XML + per-scan .xyz) or
@@ -573,6 +596,38 @@ export function ExportModal({
                 </>
               )}
 
+              {/* Base name + the exact files it produces. The old flow sent the
+                  user straight to a native Save panel, which names ONE file and
+                  so misrepresented every multi-object export: the file it
+                  offered to save was never the file that got written. The name
+                  is typed here, the preview says what will land on disk, and the
+                  button asks only for a folder. */}
+              <div className="text-[10px] text-neutral-400 mb-1">Base name</div>
+              <input
+                type="text"
+                data-testid="export-base-name"
+                value={baseName}
+                onChange={e => setBaseNameDraft(e.target.value)}
+                placeholder={seededBaseName}
+                spellCheck={false}
+                className="w-full px-2 py-1.5 mb-2 rounded text-[11px] bg-neutral-900 border border-neutral-700 text-neutral-100 focus:outline-none focus:border-green-600"
+              />
+              <div
+                className="text-[10px] text-neutral-500 mb-2"
+                data-testid="export-file-preview"
+                data-file-count={plannedNames.length}
+              >
+                <div className="text-neutral-400 mb-0.5">
+                  Will write {plannedNames.length} file{plannedNames.length === 1 ? '' : 's'}:
+                </div>
+                {plannedNames.slice(0, 3).map(n => (
+                  <div key={n} data-testid="export-file-preview-name" className="font-mono truncate" title={n}>{n}</div>
+                ))}
+                {plannedNames.length > 3 && (
+                  <div className="text-neutral-600">+{plannedNames.length - 3} more</div>
+                )}
+              </div>
+
               <button
                 data-testid="export-scan-xml"
                 onClick={() => onExportScanXml(
@@ -580,6 +635,7 @@ export function ExportModal({
                   scanFormatTakesColumns ? selectedSlugs(activeScanColumns) : ['x', 'y', 'z'],
                   xmlMode ? 'xyz' : scanDataFormat,
                   exportGrid && xmlMode ? [...checkedGridIds] : [],
+                  baseName,
                 )}
                 disabled={checkedScans.length === 0}
                 className={`w-full px-2 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${
@@ -587,7 +643,7 @@ export function ExportModal({
                 }`}
               >
                 <FileCode className="w-3.5 h-3.5" />
-                {xmlMode ? 'Export XML + data' : `Export ${scanDataFormat.toUpperCase()}`}{checkedScans.length > 1 ? ` (${checkedScans.length})` : ''}
+                {xmlMode ? 'Choose folder & export XML + data' : `Choose folder & export ${scanDataFormat.toUpperCase()}`}{checkedScans.length > 1 ? ` (${checkedScans.length})` : ''}
               </button>
             </div>
           )}

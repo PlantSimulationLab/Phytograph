@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { mkdtempSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
-import { stubOpenDialog } from './helpers/stubOpenDialog';
-import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
+import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
+import { stubExportFolder } from './helpers/exportFolder';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
@@ -34,11 +34,9 @@ test('exports scan data as LAZ with no premature success toast and a real comple
   const { app, page } = session;
 
   const outDir = mkdtempSync(join(tmpdir(), 'phytograph-lazexport-'));
-  const savePath = join(outDir, 'scan.laz');
 
   const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
   await stubOpenDialog(app, xmlFixture);
-  await stubSaveDialog(app, savePath);
 
   // Import the sphere scans (they carry scanner params, so they're exportable).
   await page.getByTestId('tool-add-scan').click();
@@ -67,12 +65,13 @@ test('exports scan data as LAZ with no premature success toast and a real comple
   }
   await expect(page.getByTestId('toast-title')).toHaveCount(0, { timeout: 15_000 });
 
+  await stubExportFolder(app, page, outDir, 'scan');
   await page.getByTestId('export-scan-xml').click();
 
   // (1) NOTHING may claim success before the user has even chosen a path. The
   // save dialog is stubbed to return instantly, so poll for the first toast and
   // the dialog together and require the dialog to have fired first.
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 15_000 })
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 15_000 })
     .toBeGreaterThan(0);
   const titlesBeforeWrite = await page.getByTestId('toast-title').allTextContents();
   expect(

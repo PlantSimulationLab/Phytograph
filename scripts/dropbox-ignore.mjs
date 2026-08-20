@@ -37,6 +37,7 @@ const GENERATED = [
   'docs/site',
   'pyhelios/pyhelios_build',
   'resources/phytograph_backend',
+  'resources/build',            // PyInstaller --workpath scratch
   'resources/potree_converter',
   'dist-main',
   'dist-preload',

@@ -85,8 +85,9 @@ export function seedCheckedIds(
 
 /**
  * The ids that will actually be exported: the user's checkmarks minus anything
- * the current mode can't write. Order follows `items`, so the per-object file
- * suffixes (`<base>_0`, `_1`, ...) match the order the list shows.
+ * the current mode can't write. Order follows `items`, so the backend's
+ * per-object file names (`<base>_<object name>`) follow the order the list
+ * shows.
  */
 export function effectiveCheckedIds(
   items: ExportObjectItem[], checked: Set<string>, mode: ExportMode,
@@ -117,4 +118,67 @@ export function mergeCheckedIntent(
 export function objectDetailLine(item: ExportObjectItem): string {
   const pts = `${item.pointCount.toLocaleString()} pts`;
   return item.hasMisses ? `${pts} · misses` : pts;
+}
+
+// ---------------------------------------------------------------------------
+// Output file names.
+//
+// The batch export writes MANY files from ONE name the user gives, so the window
+// has to show which files those are before anything is written. These functions
+// mirror `_scan_label_slug` / `_scan_export_stems` in backend-api/main.py, which
+// is what actually names the files — the shared case table lives in
+// exportObjects.test.ts and backend-api/tests/test_scan_export.py, so a drift in
+// either copy fails a test on both sides rather than quietly showing the user a
+// preview that doesn't match what lands on disk.
+// ---------------------------------------------------------------------------
+
+const LABEL_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
+const UNSAFE_RUN = /[^A-Za-z0-9._-]+/g;
+const EDGE_PUNCTUATION = /^[._]+|[._]+$/g;
+
+/** An object's name as a file-name fragment; the index when nothing survives. */
+export function objectFileSlug(label: string, index: number): string {
+  const raw = label.trim().replace(LABEL_EXTENSION, '');
+  const slug = raw.replace(UNSAFE_RUN, '_')
+    .replace(EDGE_PUNCTUATION, '')
+    .slice(0, 64)
+    .replace(EDGE_PUNCTUATION, '');
+  return slug || String(index);
+}
+
+/**
+ * The typed base name as the backend will read it: `os.path.basename` minus one
+ * extension, falling back to "scans". Users paste paths and type "myscan.laz"
+ * into the field, and neither should leak into the written names.
+ */
+export function exportBaseName(raw: string): string {
+  const tail = raw.trim().split(/[\\/]/).pop() ?? '';
+  return tail.replace(LABEL_EXTENSION, '').trim() || 'scans';
+}
+
+/**
+ * Every file the current settings will write, in write order.
+ *
+ * One object takes the base name alone — the export writes exactly what was
+ * typed. Several get `<base>_<object name>`, deduped case-insensitively because
+ * macOS and Windows would otherwise let two objects overwrite one file. An XML
+ * bundle additionally writes `<base>.xml` (listed first, as the backend does).
+ */
+export function plannedFileNames(
+  objectNames: string[], rawBase: string, ext: string, writeXml = false,
+): string[] {
+  const base = exportBaseName(rawBase);
+  const stems = objectNames.length === 1
+    ? [base]
+    : objectNames.reduce<string[]>((acc, name, i) => {
+      const stem = `${base}_${objectFileSlug(name, i)}`;
+      let candidate = stem;
+      for (let n = 2; acc.some(s => s.toLowerCase() === candidate.toLowerCase()); n++) {
+        candidate = `${stem}_${n}`;
+      }
+      acc.push(candidate);
+      return acc;
+    }, []);
+  const dataFiles = stems.map(s => `${s}.${ext}`);
+  return writeXml ? [`${base}.xml`, ...dataFiles] : dataFiles;
 }

@@ -2,8 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   blockedReason,
   effectiveCheckedIds,
+  exportBaseName,
   mergeCheckedIntent,
   objectDetailLine,
+  objectFileSlug,
+  plannedFileNames,
   seedCheckedIds,
   selectableIds,
   type ExportMode,
@@ -124,5 +127,80 @@ describe('objectDetailLine', () => {
   it('shows the point count, and flags sky/miss points when present', () => {
     expect(objectDetailLine(plain('a', { pointCount: 1234567 }))).toBe('1,234,567 pts');
     expect(objectDetailLine(plain('a', { pointCount: 10, hasMisses: true }))).toBe('10 pts · misses');
+  });
+});
+
+// These MUST agree with `_scan_label_slug` in backend-api/main.py, which is what
+// actually names the files — the same cases live in
+// backend-api/tests/test_scan_export.py::TestScanExportNaming, so a drift in
+// either copy shows up as a failing pair.
+describe('objectFileSlug', () => {
+  it('keeps a plain label as-is', () => {
+    expect(objectFileSlug('ScanPos001', 0)).toBe('ScanPos001');
+  });
+
+  it('collapses characters a file system will not take', () => {
+    expect(objectFileSlug('plot A/B: north', 0)).toBe('plot_A_B_north');
+    expect(objectFileSlug('east*plot?', 1)).toBe('east_plot');
+  });
+
+  it('drops a filename-ish extension so it is not doubled up', () => {
+    expect(objectFileSlug('ScanPos001.las', 0)).toBe('ScanPos001');
+    // Not an extension — a version-ish tail stays.
+    expect(objectFileSlug('plot.2024.10.03', 0)).toBe('plot.2024.10');
+  });
+
+  it('falls back to the index when nothing usable survives', () => {
+    expect(objectFileSlug('  ...  ', 3)).toBe('3');
+    expect(objectFileSlug('', 0)).toBe('0');
+  });
+
+  it('caps a runaway label', () => {
+    expect(objectFileSlug('x'.repeat(200), 0)).toHaveLength(64);
+  });
+});
+
+describe('exportBaseName', () => {
+  it('reads a typed name the way the backend does', () => {
+    expect(exportBaseName('myscan')).toBe('myscan');
+    expect(exportBaseName('  myscan.laz  ')).toBe('myscan');
+    expect(exportBaseName('/some/dir/myscan.las')).toBe('myscan');
+    expect(exportBaseName('C:\\out\\myscan.xyz')).toBe('myscan');
+  });
+
+  it('falls back to "scans" on an empty field', () => {
+    expect(exportBaseName('')).toBe('scans');
+    expect(exportBaseName('   ')).toBe('scans');
+  });
+});
+
+// The preview the Export window shows before the user picks a folder. It has to
+// be exactly what the backend writes — a preview that lies is worse than the
+// native Save panel it replaced.
+describe('plannedFileNames', () => {
+  it('gives a lone object the base name itself', () => {
+    expect(plannedFileNames(['ScanPos001'], 'myscan', 'laz')).toEqual(['myscan.laz']);
+  });
+
+  it('names several objects for themselves, in write order', () => {
+    expect(plannedFileNames(['ScanPos002', 'ScanPos001'], 'myscan', 'laz'))
+      .toEqual(['myscan_ScanPos002.laz', 'myscan_ScanPos001.laz']);
+  });
+
+  it('deduplicates case-insensitively, as the backend does', () => {
+    expect(plannedFileNames(['tree', 'tree', 'TREE'], 'out', 'xyz'))
+      .toEqual(['out_tree.xyz', 'out_tree_2.xyz', 'out_TREE_3.xyz']);
+  });
+
+  it('lists the XML alongside the per-scan data files in bundle mode', () => {
+    expect(plannedFileNames(['north', 'south'], 'bundle', 'xyz', true))
+      .toEqual(['bundle.xml', 'bundle_north.xyz', 'bundle_south.xyz']);
+  });
+
+  it('applies the backend reading of the base name', () => {
+    expect(plannedFileNames(['a', 'b'], 'myscan.laz', 'xyz'))
+      .toEqual(['myscan_a.xyz', 'myscan_b.xyz']);
+    expect(plannedFileNames(['a', 'b'], '', 'xyz'))
+      .toEqual(['scans_a.xyz', 'scans_b.xyz']);
   });
 });

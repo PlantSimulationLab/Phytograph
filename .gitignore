@@ -8,6 +8,7 @@ dist-renderer/
 # fall back to the repo-relative default.
 release/
 resources/phytograph_backend/
+resources/build/
 resources/phytograph_backend.exe
 resources/potree_converter/
 backend-api/venv/

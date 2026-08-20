@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.68.2"
+BACKEND_VERSION = "0.68.3"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -9310,7 +9310,7 @@ class ScanExportEntry(BaseModel):
 class ScanExportRequest(BaseModel):
     """Export one or more scans to a Helios XML + per-scan ASCII bundle."""
     scans: List[ScanExportEntry]
-    base_name: Optional[str] = None              # output base (→ <base>.xml, <base>_<id>.xyz)
+    base_name: Optional[str] = None              # output base (→ <base>.xml, <base>_<label>.xyz)
     include_misses: bool = True                  # write miss points (+ is_miss column)
     # When True (default), write the Helios scan XML alongside the per-scan data
     # files (re-loadable bundle, data always .xyz). When False, write ONLY the
@@ -10218,14 +10218,108 @@ def _scan_entry_label(scan_entry, index: int) -> str:
     return (getattr(scan_entry, "label", None) or f"object {index + 1}").strip()
 
 
+# Everything a scan label may contribute to a file name. Spaces, path separators
+# and the Windows-reserved set collapse to a single underscore each.
+_SCAN_STEM_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+# A filename-ish tail on the label ("ScanPos001.las"), dropped so the exported
+# file doesn't end up called "<base>_ScanPos001.las.laz".
+_SCAN_LABEL_EXT = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _scan_label_slug(scan_entry, index: int) -> str:
+    """The scan's viewer label as a file-name fragment, else its index.
+
+    Index is the fallback, not the norm: an entry with no label (or one that is
+    nothing but punctuation) still needs a name that can't collide with its
+    neighbours.
+    """
+    raw = _SCAN_LABEL_EXT.sub("", (getattr(scan_entry, "label", None) or "").strip())
+    slug = _SCAN_STEM_UNSAFE.sub("_", raw).strip("._")[:64].strip("._")
+    return slug or str(index)
+
+
+def _scan_export_stems(scans, base: str) -> "list[str]":
+    """Per-scan file stems (no extension) for one export.
+
+    The scan LABEL names the file, because the index never did: the Scans panel
+    is ordered by when each scan was added, so "ScanPos002, ScanPos001" exported
+    as `<base>_0`/`<base>_1` and the mapping back to the instrument's own names
+    was gone. Two rules:
+
+      * one scan  → exactly the base name the user typed in the save dialog. They
+        asked for `myscan.laz`; writing `myscan_0.laz` breaks that promise for no
+        gain, since there is nothing to disambiguate.
+      * many      → `<base>_<label>`, so the files sort and read as the panel does.
+
+    Labels are user text, so they are slugged and deduped (case-insensitively —
+    macOS and Windows would otherwise let two labels overwrite one file).
+    """
+    if len(scans) == 1:
+        return [base]
+    stems: "list[str]" = []
+    used: "set[str]" = set()
+    for i, scan_entry in enumerate(scans):
+        stem = f"{base}_{_scan_label_slug(scan_entry, i)}"
+        candidate, n = stem, 2
+        while candidate.lower() in used:
+            candidate = f"{stem}_{n}"
+            n += 1
+        used.add(candidate.lower())
+        stems.append(candidate)
+    return stems
+
+
+def _rename_scan_bundle_files(tmpdir: str, base: str, stems: "list[str]") -> None:
+    """Rename a PyHelios bundle's sidecars to the label-based stems, in place.
+
+    exportScans() names each data file `<base>_<i>.xyz` (plus `<base>_<i>_traj.csv`
+    for a moving scan) in C++ and writes those bare names into the XML's
+    <filename>/<trajectoryFile> tags, so the rename has to carry the references
+    with it or the bundle stops re-loading.
+
+    Done in two passes through temporary names: a label of "1" makes scan 0's new
+    name collide with scan 1's not-yet-renamed old one, and a single-pass rename
+    would silently eat the other scan's data.
+    """
+    pairs = []
+    for i, stem in enumerate(stems):
+        old = f"{base}_{i}"
+        if old == stem:
+            continue
+        for suffix in (".xyz", "_traj.csv"):
+            if os.path.exists(os.path.join(tmpdir, old + suffix)):
+                pairs.append((old + suffix, stem + suffix))
+    if not pairs:
+        return
+    for j, (old, _new) in enumerate(pairs):
+        os.rename(os.path.join(tmpdir, old), os.path.join(tmpdir, f".rename-{j}"))
+    for j, (_old, new) in enumerate(pairs):
+        os.rename(os.path.join(tmpdir, f".rename-{j}"), os.path.join(tmpdir, new))
+    xml_path = os.path.join(tmpdir, f"{base}.xml")
+    if not os.path.exists(xml_path):
+        return
+    with open(xml_path, "r") as fh:
+        text = fh.read()
+    # The tags carry the bare basename as their only content, so an exact
+    # ">name<" match cannot hit anything else in the document.
+    for old, new in pairs:
+        text = text.replace(f">{old}<", f">{new}<")
+    with open(xml_path, "w") as fh:
+        fh.write(text)
+
+
 def _do_scan_export(request: "ScanExportRequest", progress=None,
                     cancel_event=None) -> dict:
     """Export the request's scans, one data file per scan. Two modes:
 
-    * write_xml=True  → a Helios scan bundle: <base>.xml + <base>_<id>.xyz, via
-      PyHelios exportScans() (re-loadable as scans; data always Helios ASCII).
-    * write_xml=False → one <base>_<id>.<fmt> per scan in `data_format`
+    * write_xml=True  → a Helios scan bundle: <base>.xml + one data file per
+      scan, via PyHelios exportScans() (re-loadable as scans; data always
+      Helios ASCII).
+    * write_xml=False → one data file per scan in `data_format`
       (las/laz/ply/xyz/csv/txt/obj/e57), written directly — no XML, no PyHelios.
+
+    Per-scan files are named by `_scan_export_stems`: the typed base name alone
+    for a single scan, `<base>_<scan label>` for several.
 
     Returns {"success", "files": [{"name", "data", "is_xml", "bytes", "written"}],
     ...}. With `dest_dir` the backend writes each file itself and `data` is null;
@@ -10409,6 +10503,11 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
         _inject_return_modes_into_helios_xml(
             xml_path, [{'mode': s.return_mode, 'selection': s.return_selection,
                         'max_returns': s.max_returns} for s in request.scans])
+        # PyHelios named the sidecars <base>_<i>.xyz; give them the scan labels
+        # instead (and fix the XML's references), so a bundle maps back to the
+        # Scans panel by name rather than by add-order.
+        _rename_scan_bundle_files(
+            tmpdir, base, _scan_export_stems(request.scans, base))
         files = []
         names = sorted(os.listdir(tmpdir))
         written: "list[Path]" = []
@@ -10440,7 +10539,8 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
 
 def _do_scan_export_data(request: "ScanExportRequest", base: str,
                          dest: Optional[Path] = None, progress=None) -> dict:
-    """Data-only mode: one <base>_<id>.<fmt> per scan in `data_format`.
+    """Data-only mode: one `<stem>.<fmt>` per scan in `data_format`, where the
+    stem is the typed base name (single scan) or `<base>_<scan label>` (several).
 
     `dest` (when set) is the validated directory each file is written into
     instead of being base64'd back to the renderer.
@@ -10462,6 +10562,7 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
     total_points = 0
     n = len(request.scans)
     weights = _scan_export_weights(request.scans)
+    stems = _scan_export_stems(request.scans, base)
     # Files already on disk, so a cancel can take them back out again: a
     # half-written batch that LOOKS complete is worse than no batch at all.
     written: "list[Path]" = []
@@ -10491,13 +10592,13 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
             if is_ptx:
                 # Bypasses _write_scan_to_bytes' (name, bytes) contract so a large
                 # raster can stream straight to disk — see _emit_ptx_file.
-                entry = _emit_ptx_file(f"{base}_{i}.ptx", resolved, scan_entry, dest,
+                entry = _emit_ptx_file(f"{stems[i]}.ptx", resolved, scan_entry, dest,
                                        progress=sub)
                 files.append(entry)
                 if dest is not None:
                     written.append(dest / entry["name"])
                 continue
-            name, raw_bytes = _write_scan_to_bytes(resolved, fmt, f"{base}_{i}",
+            name, raw_bytes = _write_scan_to_bytes(resolved, fmt, stems[i],
                                                    progress=sub)
             files.append(_emit_scan_export_file(name, raw_bytes, False, dest))
             if dest is not None:

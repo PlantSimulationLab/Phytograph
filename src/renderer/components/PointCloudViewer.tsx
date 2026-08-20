@@ -8100,7 +8100,7 @@ export default function PointCloudViewer({
     });
   }, [clouds, selectedIds]);
 
-  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = []) => {
+  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = [], baseName: string = 'scans') => {
     const entries: ScanExportEntry[] = [];
     for (const id of scanIds) {
       const e = buildScanExportEntry(id);
@@ -8125,34 +8125,25 @@ export default function PointCloudViewer({
       .map(id => gridOpts.find(g => g.id === id)?.grid)
       .filter((g): g is HeliosGrid => !!g);
 
-    // Effective per-scan file extension: XML mode always writes Helios .xyz data;
-    // data-only writes the chosen format. The save picker fixes the folder + base
-    // name only — the actual per-scan files are named <base>_<id>.<ext> by the backend.
-    const ext = writeXml ? 'xml' : dataFormat;
-    // Default save name: the single scan's label (filesystem-sanitised), matching
-    // the Scans panel; a generic name for a multi-scan bundle.
-    const firstScan = scans.find(s => s.id === scanIds[0]);
-    const firstLabel = firstScan
-      ? scanDisplayName(firstScan).replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '_').trim()
-      : '';
-    const baseName = entries.length === 1
-      ? (firstLabel || 'scan')
-      : 'scans';
-    const savePath = await window.electronAPI?.dialog.save({
-      defaultPath: `${baseName}.${ext}`,
-      title: writeXml ? 'Export Scan (XML + per-scan data)' : `Export Scan Data (${dataFormat.toUpperCase()})`,
-      filters: writeXml
-        ? [{ name: 'Helios scan XML', extensions: ['xml'] }]
-        : [{ name: `Scan data (${dataFormat.toUpperCase()})`, extensions: [dataFormat] }],
+    // A FOLDER, not a file: this export writes one file per object, named
+    // <base>_<scan label>.<ext> by the backend (a lone object keeps the base name
+    // itself). A native Save panel names exactly one file, so it misdescribed
+    // every multi-object run — it offered to save "myscan.laz" and then wrote
+    // myscan_ScanPos002.laz and friends instead. The base name is typed in the
+    // Export window, which also previews the resulting names.
+    const dir = await window.electronAPI?.dialog.open({
+      directory: true,
+      title: writeXml
+        ? 'Choose a folder for the scan bundle'
+        : `Choose a folder for the exported ${dataFormat.toUpperCase()} files`,
     });
-    if (!savePath) { setShowExportPanel(false); return; }
+    if (!dir || typeof dir !== 'string') { setShowExportPanel(false); return; }
 
-    // Derive the chosen folder + base name so the backend names match the files we
-    // write. Strip ANY trailing extension the user may have typed — the per-scan
-    // files are named by the backend in the chosen format.
-    const sep = savePath.includes('\\') ? '\\' : '/';
-    const dir = savePath.slice(0, savePath.lastIndexOf(sep));
-    const chosenBase = savePath.slice(savePath.lastIndexOf(sep) + 1).replace(/\.[^.]+$/, '') || 'scan';
+    const sep = dir.includes('\\') ? '\\' : '/';
+    // Mirror the backend's own reading of the name (basename minus one
+    // extension), so a pasted path or a typed "myscan.laz" can't leak into it.
+    const chosenBase = (baseName.trim().split(/[\\/]/).pop() ?? '')
+      .replace(/\.[A-Za-z0-9]{1,8}$/, '').trim() || 'scans';
 
     // The path is chosen — the work now begins. Dismiss the modal and raise the
     // StatusPill so the (5-10 s, no-stream) serialize/encode/write isn't a silent

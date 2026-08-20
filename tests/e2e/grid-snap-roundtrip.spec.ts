@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
-import { stubOpenDialog } from './helpers/stubOpenDialog';
-import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
+import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
+import { stubExportFolder } from './helpers/exportFolder';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
@@ -70,7 +70,7 @@ test('round-trips a terrain-following voxel grid through XML export and re-impor
   const xmlPath = join(outDir, 'snapped.xml');
 
   // ── 1. Import the snapped-grid fixture; the grid must come back SNAPPED ──────
-  await stubSaveDialog(app, xmlPath);
+
   await importSnappedGrid(app, page, fixture);
 
   await expect(page.getByTestId('scans-panel').locator('[data-testid="scan-row"]'))
@@ -89,8 +89,9 @@ test('round-trips a terrain-following voxel grid through XML export and re-impor
   await gridRows.first().getByRole('checkbox').check();
   await expect(gridRows.first()).toHaveAttribute('data-checked', 'true');
 
+  await stubExportFolder(app, page, outDir, 'snapped');
   await page.getByTestId('export-scan-xml').click();
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 10_000 })
     .toBeGreaterThan(0);
   await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
 

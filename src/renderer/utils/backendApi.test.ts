@@ -859,8 +859,8 @@ describe('point cloud LAS/LAZ import/export', () => {
     const spy = mockFetchOk({
       success: true,
       files: [
-        { name: 'scans_0.laz', data: null, is_xml: false, bytes: 1024, written: true },
-        { name: 'scans_1.laz', data: null, is_xml: false, bytes: 2048, written: true },
+        { name: 'scans_ScanPos002.laz', data: null, is_xml: false, bytes: 1024, written: true },
+        { name: 'scans_ScanPos001.laz', data: null, is_xml: false, bytes: 2048, written: true },
       ],
       point_count: 200,
       scan_count: 2,

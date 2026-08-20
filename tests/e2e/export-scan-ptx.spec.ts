@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
-import { stubSaveDialog } from './helpers/stubSaveDialog';
+import { stubExportFolder } from './helpers/exportFolder';
 import { completeImportWizard } from './helpers/importWizard';
 
 // PTX export writes a COMPLETE raster: `Ntheta x Nphi` data lines, one per grid
@@ -22,7 +22,7 @@ test('exports a scan as PTX with a complete grid and the misses as empty cells',
 
   try {
     const outDir = mkdtempSync(join(tmpdir(), 'phytograph-ptxexport-'));
-    await stubSaveDialog(app, join(outDir, 'scan.ptx'));
+
 
     // Import the PTX so the scan carries a real grid (row/column indices) and a
     // scanner pose — exactly the state PTX export needs.
@@ -44,6 +44,7 @@ test('exports a scan as PTX with a complete grid and the misses as empty cells',
     // Fixed schema — no column picker, like E57.
     await expect(page.getByTestId('export-column-picker')).toHaveCount(0);
 
+    await stubExportFolder(app, page, outDir, 'scan');
     await page.getByTestId('export-scan-xml').click();
 
     await expect.poll(
