@@ -17507,7 +17507,12 @@ export default function PointCloudViewer({
               const trajText = isMovingScanRow
                 ? `${scan.params.trajectory!.poses.length} poses`
                 : null;
+              // Plain-text twin of `subtitle`, used as the row's tooltip: the
+              // subtitle shares its line with the action icons, so a long origin
+              // readout ellipsises — hovering still shows the whole thing.
+              const detailText = isMovingScanRow ? `moving · ${trajText}` : `origin ${originText}`;
               let subtitle: React.ReactNode;
+              let subtitleText: string;
               if (scanHasData && scanHasParams) {
                 subtitle = (<>
                   {effectivePointCount.toLocaleString()} pts
@@ -17517,11 +17522,13 @@ export default function PointCloudViewer({
                     ? <>{movingBadge} <span className="ml-1 font-mono">{trajText}</span></>
                     : <span className="font-mono">origin {originText}</span>}
                 </>);
+                subtitleText = `${effectivePointCount.toLocaleString()} pts${hasCloudEdits ? ' *' : ''} · ${detailText}`;
               } else if (scanHasData) {
                 subtitle = (<>
                   {effectivePointCount.toLocaleString()} pts
                   {hasCloudEdits && <span className="ml-1 text-amber-400">*</span>}
                 </>);
+                subtitleText = `${effectivePointCount.toLocaleString()} pts${hasCloudEdits ? ' *' : ''}`;
               } else {
                 subtitle = (<>
                   params <span className="mx-1">·</span>
@@ -17529,6 +17536,7 @@ export default function PointCloudViewer({
                     ? <>{movingBadge} <span className="ml-1 font-mono">{trajText}</span></>
                     : <span className="font-mono">origin {originText}</span>}
                 </>);
+                subtitleText = `params · ${detailText}`;
               }
 
               return (
@@ -17563,185 +17571,197 @@ export default function PointCloudViewer({
                       const allowDeselect = selectedMeshIds.size === 0 && selectedSkeletonIds.size === 0;
                       onToggleSelection(scan.id, e.ctrlKey || e.metaKey, e.shiftKey, allowDeselect);
                     }}
-                    className={`flex items-center gap-1.5 p-2 rounded cursor-pointer select-none transition-colors ${
+                    className={`flex flex-col gap-0.5 p-2 rounded cursor-pointer select-none transition-colors ${
                       isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
-                    {onUpdateScanColor ? (
-                      <button
-                        data-testid="scan-color-swatch"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (colorPopoverScanId === scan.id) {
-                            setColorPopoverScanId(null);
-                            return;
-                          }
-                          // Anchor the fixed popover just below the swatch.
-                          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setScanColorPopoverAnchor({ top: r.bottom + 4, left: r.left });
-                          setColorPopoverScanId(scan.id);
-                        }}
-                        className="w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-white/20 hover:ring-white/60 transition-shadow"
-                        style={{ backgroundColor: scan.color }}
-                        title="Set color"
-                      />
-                    ) : (
-                      <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-neutral-200 truncate" data-testid="scan-row-name" title={displayName}>{displayName}</div>
-                      <div className="text-[10px] text-neutral-500" data-testid="scan-row-subtitle">
-                        {subtitle}
-                      </div>
-                    </div>
-                    {/* Expand chevron — only useful when there's something to show. */}
-                    {scanHasParams && (
-                      <button
-                        data-testid={`scan-expand-${scan.id}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setExpandedScanIds(prev => {
-                            const next = new Set(prev);
-                            if (next.has(scan.id)) next.delete(scan.id); else next.add(scan.id);
-                            return next;
-                          });
-                        }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title={isExpanded ? 'Collapse' : 'Expand'}
-                      >
-                        {isExpanded ? (
-                          <ChevronDown className="w-3 h-3 text-neutral-400" />
-                        ) : (
-                          <ChevronRight className="w-3 h-3 text-neutral-400" />
-                        )}
-                      </button>
-                    )}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onToggleVisibility(scan.id); }}
-                      className="p-1 hover:bg-neutral-600 rounded"
-                      title={scan.visible ? 'Hide' : 'Show'}
-                    >
-                      {scan.visible ? (
-                        <Eye className="w-3 h-3 text-neutral-400" />
-                      ) : (
-                        <EyeOff className="w-3 h-3 text-neutral-600" />
-                      )}
-                    </button>
-                    {scan.data?.octree?.hasMisses && onToggleMisses && (() => {
-                      // The misses live in their own projected octree (built at
-                      // create/bake/backfill) — the projection is baked in, so the
-                      // toggle works whenever that octree exists, regardless of
-                      // whether a live scanner origin is still attached. The toggle
-                      // is disabled only when the misses are flagged but NO octree
-                      // was built (all unplaceable: zeroed coords, no recovered beam
-                      // direction — run Backfill Misses to recover them).
-                      const canShow = scan.data?.octree?.missOctreeCacheId != null;
-                      return (
+                    {/* Line 1 — colour swatch + the name, on a row of its own. The name used
+                        to share a line with the action icons, which in a 256px panel left it
+                        only a few characters before the ellipsis. */}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {onUpdateScanColor ? (
                         <button
-                          data-testid={`scan-toggle-misses-${scan.id}`}
+                          data-testid="scan-color-swatch"
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (!canShow) return;
-                            onToggleMisses(scan.id);
-                          }}
-                          disabled={!canShow}
-                          className={`p-1 rounded ${canShow ? 'hover:bg-neutral-600 cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
-                          title={canShow
-                            ? (scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points')
-                            : 'Sky/miss points are flagged but have no recovered beam direction yet. Run Backfill Misses to reconstruct them from the scan grid.'}
-                        >
-                          <CircleDot
-                            className={`w-3 h-3 ${scan.showMisses && canShow ? 'text-amber-500' : 'text-neutral-600'}`}
-                          />
-                        </button>
-                      );
-                    })()}
-                    {!scanHasData && (
-                      <button
-                        data-testid={`scan-attach-data-${scan.id}`}
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          const picked = await window.electronAPI.dialog.open({
-                            title: 'Attach point cloud data',
-                            filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
-                          });
-                          if (!picked) return;
-                          const path = Array.isArray(picked) ? picked[0] : picked;
-                          // Show the progress modal while the backend parses —
-                          // a large scan can take 15-30s and otherwise the UI
-                          // would sit idle until the points appear.
-                          setBulkImportProgress({
-                            current: 1,
-                            total: 1,
-                            label: `Loading ${path.split(/[\\/]/).pop()}`,
-                          });
-                          try {
-                            const data = await parsePointCloudFromPath(path);
-                            onUpdateScanData(scan.id, data);
-                            // A file carrying reconstructed scan params (e.g. a LAS
-                            // with per-pulse beam-origin ExtraBytes → a moving-platform
-                            // trajectory) auto-populates the scan's parameters, so it
-                            // becomes a moving scan with its path drawn rather than a
-                            // plain static cloud.
-                            const sp = data.octree?.scanParams;
-                            if (sp && !scan.params) {
-                              onUpdateScanParams(scan.id, scanParametersFromFile(sp));
+                            if (colorPopoverScanId === scan.id) {
+                              setColorPopoverScanId(null);
+                              return;
                             }
-                            showToast({ title: `Attached ${data.pointCount.toLocaleString()} points to ${scan.label}`, type: 'success' });
-                          } catch (err) {
-                            const msg = err instanceof Error ? err.message : 'Failed to read file';
-                            showToast({ title: `Could not attach point cloud: ${msg}`, type: 'error' });
-                          } finally {
-                            setBulkImportProgress(null);
-                          }
-                        }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title="Attach point cloud data…"
+                            // Anchor the fixed popover just below the swatch.
+                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setScanColorPopoverAnchor({ top: r.bottom + 4, left: r.left });
+                            setColorPopoverScanId(scan.id);
+                          }}
+                          className="w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-white/20 hover:ring-white/60 transition-shadow"
+                          style={{ backgroundColor: scan.color }}
+                          title="Set color"
+                        />
+                      ) : (
+                        <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
+                      )}
+                      <div
+                        className="flex-1 min-w-0 text-xs text-neutral-200 truncate"
+                        data-testid="scan-row-name"
+                        title={displayName}
                       >
-                        <FileUp className="w-3 h-3 text-neutral-400" />
-                      </button>
-                    )}
-                    {!scanHasParams && (
+                        {displayName}
+                      </div>
+                    </div>
+                    {/* Line 2 — subtitle + the per-row action icons. */}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <div className="flex-1 min-w-0 text-[10px] text-neutral-500 truncate" data-testid="scan-row-subtitle" title={subtitleText}>
+                        {subtitle}
+                      </div>
+                      {/* Expand chevron — only useful when there's something to show. */}
+                      {scanHasParams && (
+                        <button
+                          data-testid={`scan-expand-${scan.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedScanIds(prev => {
+                              const next = new Set(prev);
+                              if (next.has(scan.id)) next.delete(scan.id); else next.add(scan.id);
+                              return next;
+                            });
+                          }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title={isExpanded ? 'Collapse' : 'Expand'}
+                        >
+                          {isExpanded ? (
+                            <ChevronDown className="w-3 h-3 text-neutral-400" />
+                          ) : (
+                            <ChevronRight className="w-3 h-3 text-neutral-400" />
+                          )}
+                        </button>
+                      )}
                       <button
-                        data-testid={`scan-attach-params-${scan.id}`}
-                        onClick={(e) => { e.stopPropagation(); openAddParamsPopupFor(scan); }}
+                        onClick={(e) => { e.stopPropagation(); onToggleVisibility(scan.id); }}
                         className="p-1 hover:bg-neutral-600 rounded"
-                        title="Add scan parameters…"
+                        title={scan.visible ? 'Hide' : 'Show'}
                       >
-                        <Radio className="w-3 h-3 text-neutral-400" />
+                        {scan.visible ? (
+                          <Eye className="w-3 h-3 text-neutral-400" />
+                        ) : (
+                          <EyeOff className="w-3 h-3 text-neutral-600" />
+                        )}
                       </button>
-                    )}
-                    {scanHasParams && (
+                      {scan.data?.octree?.hasMisses && onToggleMisses && (() => {
+                        // The misses live in their own projected octree (built at
+                        // create/bake/backfill) — the projection is baked in, so the
+                        // toggle works whenever that octree exists, regardless of
+                        // whether a live scanner origin is still attached. The toggle
+                        // is disabled only when the misses are flagged but NO octree
+                        // was built (all unplaceable: zeroed coords, no recovered beam
+                        // direction — run Backfill Misses to recover them).
+                        const canShow = scan.data?.octree?.missOctreeCacheId != null;
+                        return (
+                          <button
+                            data-testid={`scan-toggle-misses-${scan.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!canShow) return;
+                              onToggleMisses(scan.id);
+                            }}
+                            disabled={!canShow}
+                            className={`p-1 rounded ${canShow ? 'hover:bg-neutral-600 cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+                            title={canShow
+                              ? (scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points')
+                              : 'Sky/miss points are flagged but have no recovered beam direction yet. Run Backfill Misses to reconstruct them from the scan grid.'}
+                          >
+                            <CircleDot
+                              className={`w-3 h-3 ${scan.showMisses && canShow ? 'text-amber-500' : 'text-neutral-600'}`}
+                            />
+                          </button>
+                        );
+                      })()}
+                      {!scanHasData && (
+                        <button
+                          data-testid={`scan-attach-data-${scan.id}`}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            const picked = await window.electronAPI.dialog.open({
+                              title: 'Attach point cloud data',
+                              filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
+                            });
+                            if (!picked) return;
+                            const path = Array.isArray(picked) ? picked[0] : picked;
+                            // Show the progress modal while the backend parses —
+                            // a large scan can take 15-30s and otherwise the UI
+                            // would sit idle until the points appear.
+                            setBulkImportProgress({
+                              current: 1,
+                              total: 1,
+                              label: `Loading ${path.split(/[\\/]/).pop()}`,
+                            });
+                            try {
+                              const data = await parsePointCloudFromPath(path);
+                              onUpdateScanData(scan.id, data);
+                              // A file carrying reconstructed scan params (e.g. a LAS
+                              // with per-pulse beam-origin ExtraBytes → a moving-platform
+                              // trajectory) auto-populates the scan's parameters, so it
+                              // becomes a moving scan with its path drawn rather than a
+                              // plain static cloud.
+                              const sp = data.octree?.scanParams;
+                              if (sp && !scan.params) {
+                                onUpdateScanParams(scan.id, scanParametersFromFile(sp));
+                              }
+                              showToast({ title: `Attached ${data.pointCount.toLocaleString()} points to ${scan.label}`, type: 'success' });
+                            } catch (err) {
+                              const msg = err instanceof Error ? err.message : 'Failed to read file';
+                              showToast({ title: `Could not attach point cloud: ${msg}`, type: 'error' });
+                            } finally {
+                              setBulkImportProgress(null);
+                            }
+                          }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Attach point cloud data…"
+                        >
+                          <FileUp className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
+                      {!scanHasParams && (
+                        <button
+                          data-testid={`scan-attach-params-${scan.id}`}
+                          onClick={(e) => { e.stopPropagation(); openAddParamsPopupFor(scan); }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Add scan parameters…"
+                        >
+                          <Radio className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
+                      {scanHasParams && (
+                        <button
+                          data-testid={`scan-edit-${scan.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setScanPopupState({ kind: 'edit', id: scan.id });
+                          }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Edit scan parameters"
+                        >
+                          <Pencil className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
+                      {onAddScan && (
+                        <button
+                          data-testid={`scan-duplicate-${scan.id}`}
+                          onClick={(e) => { e.stopPropagation(); handleDuplicateScan(scan.id); }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Duplicate scan"
+                        >
+                          <Copy className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
                       <button
-                        data-testid={`scan-edit-${scan.id}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setScanPopupState({ kind: 'edit', id: scan.id });
-                        }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title="Edit scan parameters"
+                        data-testid={`scan-delete-${scan.id}`}
+                        onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', ids: [scan.id], label: displayName }); }}
+                        className="p-1 hover:bg-red-600/30 rounded"
+                        title="Remove"
                       >
-                        <Pencil className="w-3 h-3 text-neutral-400" />
+                        <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
                       </button>
-                    )}
-                    {onAddScan && (
-                      <button
-                        data-testid={`scan-duplicate-${scan.id}`}
-                        onClick={(e) => { e.stopPropagation(); handleDuplicateScan(scan.id); }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title="Duplicate scan"
-                      >
-                        <Copy className="w-3 h-3 text-neutral-400" />
-                      </button>
-                    )}
-                    <button
-                      data-testid={`scan-delete-${scan.id}`}
-                      onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', ids: [scan.id], label: displayName }); }}
-                      className="p-1 hover:bg-red-600/30 rounded"
-                      title="Remove"
-                    >
-                      <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
-                    </button>
+                    </div>
                   </div>
                   {/* Expanded parameters block. */}
                   {isExpanded && scanHasParams && (
