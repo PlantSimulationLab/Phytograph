@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
@@ -23,7 +24,18 @@ import { resetToFreshScene } from './helpers/resetApp';
 // (draw counts per tile), not DOM state: "the tool didn't throw" would say
 // nothing about whether anything was actually hidden.
 
+// A real 35 MB ALS tile: this spec needs a cloud big enough to stream as a
+// multi-level octree (186 tiles / 1.7M resident points), which no committable
+// fixture reproduces — the mask has to survive real LOD streaming to be tested
+// at all. `example-datasets/` is gitignored (too large for git), so the file is
+// absent on a fresh checkout and on CI; every test here skips rather than
+// fails there, the same way zoom-large-cloud.spec.ts does.
+//
+// Without that guard these three tests failed on CI at ~31.5s each — the import
+// silently produced no scan row and the first locator timed out, which reads as
+// a crop-preview regression rather than a missing file.
 const LAZ = join(repoRoot, 'example-datasets', 'ALS-on_BR04_2019-07-05_140m.laz');
+const LAZ_MISSING = 'example-datasets/ALS-on_BR04_2019-07-05_140m.laz not present';
 
 let session: LaunchedApp;
 test.beforeAll(async () => {
@@ -123,6 +135,7 @@ async function cloudPixelBounds(
 }
 
 test('closing a polygon does not thin the rest of the cloud', async () => {
+  test.skip(!existsSync(LAZ), LAZ_MISSING);
   const { app, page } = session;
 
   // Regression: the preview used to inherit the CLIP-VOLUME preview's cost
@@ -191,6 +204,7 @@ test('closing a polygon does not thin the rest of the cloud', async () => {
 });
 
 test('the cloud draws only inside the polygon, in both Keep modes', async () => {
+  test.skip(!existsSync(LAZ), LAZ_MISSING);
   const { app, page } = session;
 
   // Asserts on the RENDERED IMAGE, not on point counts. Counts stay
@@ -265,6 +279,7 @@ test('the cloud draws only inside the polygon, in both Keep modes', async () => 
 });
 
 test('a closed polygon hides exactly the points it excludes, and cancel restores them', async () => {
+  test.skip(!existsSync(LAZ), LAZ_MISSING);
   const { app, page } = session;
 
   await importFiles(app, page, 'import-auto', LAZ);

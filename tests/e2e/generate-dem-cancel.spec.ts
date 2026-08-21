@@ -22,6 +22,9 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'ground_plants.xyz');
 // cancel button is present + wired and that the UI ends up idle (either path).
 
 test('DEM generation shows a Cancel button and recovers after cancel', async () => {
+  // Two full DEM runs (~20-30 s each on CI) plus an import and a cancel unwind.
+  // The 180 s default left no margin once the suite grew around it.
+  test.setTimeout(300_000);
   const { app, page, close } = await launchApp();
 
   try {
@@ -65,8 +68,15 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
 
     // Start a run. The run button flips to the disabled spinner state and the
     // Cancel button appears beside it.
+    //
+    // Timeouts here are sized for CI, not for this laptop. The same grid costs
+    // ~1.3 s locally and 20-30 s on the Linux runner (measured against the
+    // sibling generate-dem specs), so every budget below has to cover a cancel
+    // that lands mid-compute on a loaded, 2-worker runner. This test passed on
+    // CI at 48.3 s on 2026-08-03 and failed at ~72 s on 2026-08-21 with the
+    // suite grown around it — it was always the marginal one in the file.
     await runButton.click();
-    await expect(cancelButton).toBeVisible({ timeout: 5_000 });
+    await expect(cancelButton).toBeVisible({ timeout: 30_000 });
     await expect(runButton).toBeDisabled();
 
     // Cancel it. (Best-effort — on a fast machine the tiny grid may finish first;
@@ -76,7 +86,9 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // The op ends one of two clean ways: cancelled (panel stays open, idle) or it
     // beat the cancel and finished (panel auto-closes on success). Both are a valid
     // recovery — the invariant is that the spinner/Cancel is gone and nothing errored.
-    await expect(cancelButton).toBeHidden({ timeout: 10_000 });
+    // Either path (cancelled, or finished first) has to unwind the whole
+    // backend op, which on CI is the 20-30 s compute plus teardown.
+    await expect(cancelButton).toBeHidden({ timeout: 60_000 });
     await expect(panel.locator('.bg-red-900\\/30')).toHaveCount(0);
 
     // Reopen the panel if the run finished and closed it, so we can drive a fresh
@@ -85,7 +97,7 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
       await page.getByTestId('tool-dem').click();
       await expect(panel).toBeVisible();
     }
-    await expect(runButton).toBeEnabled({ timeout: 10_000 });
+    await expect(runButton).toBeEnabled({ timeout: 30_000 });
 
     // Prove a new op can start and complete after the cancel: run again and let it
     // finish, asserting a real DEM surface mesh appears (concrete output).

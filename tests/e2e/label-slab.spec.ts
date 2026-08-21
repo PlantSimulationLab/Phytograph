@@ -432,12 +432,52 @@ test('redrawing shows the whole cloud while you aim the new centreline', async (
 
   // Placing the new centreline re-applies clipping — the suspension lasts only
   // as long as the aiming does.
+  //
+  // Clear any toast first, then assert each point really lands on the canvas.
+  // These are raw coordinate clicks, and two things can eat them: the toast
+  // stack (full-height, pointer-events-auto cards) and the section panel in the
+  // right lane. Adding this guard immediately caught the latter — the old
+  // 0.6/0.7-width points resolved to `section-suspend`, the panel's own Suspend
+  // button, so the test was toggling the very state it then asserted on instead
+  // of aiming a centreline. It passed locally anyway and failed on CI, where
+  // the window has no title bar (innerHeight 800 vs 772) and the same fractions
+  // land on different pixels. A swallowed click leaves the centreline unplaced
+  // and the test dies on the `data-suspended` wait, which reads as a
+  // section-state bug rather than a missed click.
+  await page.evaluate(() => {
+    document.querySelectorAll<HTMLElement>('[data-testid="toast-close"]')
+      .forEach((btn) => btn.click());
+  });
   const canvas = page.locator('canvas').first();
   const b = (await canvas.boundingBox())!;
   const cy = b.y + b.height * 0.5;
-  await page.mouse.click(b.x + b.width * 0.3, cy);
-  await page.mouse.move(b.x + b.width * 0.6, cy);
-  await page.mouse.click(b.x + b.width * 0.7, cy);
+  // Keep every aim point in the LEFT half of the canvas. The cross-section
+  // panel occupies the right lane (`right-[280px]`, w-64) and its Suspend
+  // button sat under the old 0.6/0.7-width points — clicking it toggles the
+  // very suspension this test is asserting on. It passed locally by accident;
+  // the guard below now proves the points reach the canvas.
+  const aimPoints = [
+    { x: b.x + b.width * 0.18, y: cy },
+    { x: b.x + b.width * 0.30, y: cy },
+    { x: b.x + b.width * 0.38, y: cy },
+  ];
+  const blocked = await page.evaluate((pts) => pts
+    .map(({ x, y }) => {
+      const el = document.elementFromPoint(Math.round(x), Math.round(y)) as HTMLElement | null;
+      const tag = el?.tagName?.toLowerCase() ?? 'null';
+      return tag === 'canvas'
+        ? null
+        : `(${Math.round(x)},${Math.round(y)}) -> ${el?.dataset.testid || tag}`;
+    })
+    .filter(Boolean), aimPoints);
+  expect(
+    blocked,
+    `centreline clicks must reach the canvas; canvas=${JSON.stringify(b)} ` +
+    `viewport=${JSON.stringify(await page.evaluate(() => ({ w: innerWidth, h: innerHeight })))}`,
+  ).toEqual([]);
+  await page.mouse.click(aimPoints[0].x, aimPoints[0].y);
+  await page.mouse.move(aimPoints[1].x, aimPoints[1].y);
+  await page.mouse.click(aimPoints[2].x, aimPoints[2].y);
 
   await expect(page.getByTestId('cross-section-panel'))
     .toHaveAttribute('data-suspended', 'false', { timeout: 10_000 });
