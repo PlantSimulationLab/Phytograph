@@ -21,7 +21,7 @@ download links never change between releases):
 
 - **macOS**: `Phytograph-arm64.dmg`, `Phytograph-x64.dmg`
 - **Windows**: `Phytograph-Setup.exe`
-- **Linux**: `Phytograph.AppImage`, `Phytograph-amd64.deb`
+- **Linux**: `Phytograph-x86_64.AppImage` (AppImage only — no `.deb` target is configured)
 
 !!! note "Why not in the repo?"
 

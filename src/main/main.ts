@@ -227,15 +227,28 @@ function createWindow(): void {
     }
   }
 
-  // The left toolbar column (View / Snap / Create / Tools cards) needs ~772px
-  // of inner height to render uncropped: 49px top bar + 16px top pad + ~643px
-  // of cards + 64px bottom reserve — an 800px outer window on macOS. Below
-  // that the column scroll-crops its lower cards, which reads as broken.
+  // The left toolbar column (View / Snap / Create / Tools cards) must render
+  // uncropped at the minimum window height: below that it scroll-crops its
+  // lower cards, which reads as broken.
+  //
+  // The budget is: 49px top bar + 16px top pad + the column's own content +
+  // 64px bottom reserve, plus the macOS title bar (28px) on the OUTER height.
+  // The column's content tracks the tool count, so THIS NUMBER MOVES WHENEVER
+  // A TOOL IS ADDED — it was 800 for the 24 tools of the original fix, and
+  // adding Label Points and Cross-section (26 tools, ~703px of cards) pushed
+  // the requirement to 703+49+16+64+28 = 860. window-resize.spec.ts asserts
+  // the invariant, so it fails loudly rather than silently cropping.
+  //
   // Capped to the display's work area so small screens (e.g. 1366x768
   // laptops) still get a window that fits on screen; the column falls back to
-  // scrolling there. E2E's fixed 1200x800 window equals this minimum, so the
-  // suite's stable-size assumption is unaffected.
-  const minHeight = Math.min(800, screen.getPrimaryDisplay().workAreaSize.height);
+  // scrolling there.
+  //
+  // Note the E2E launch size above (1200x800) is now BELOW this minimum, and
+  // deliberately so: Electron honours an explicit initial size, so the suite
+  // still gets its stable 1200x800 and the pixel-coordinate specs are
+  // unaffected. Only an explicit resize clamps to minHeight — which is exactly
+  // what window-resize.spec.ts exercises.
+  const minHeight = Math.min(860, screen.getPrimaryDisplay().workAreaSize.height);
 
   mainWindow = new BrowserWindow({
     title: 'Phytograph',

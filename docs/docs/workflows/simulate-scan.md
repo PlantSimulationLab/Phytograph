@@ -21,8 +21,9 @@ You need geometry in the scene to scan: typically a generated
    The label appears on the scanner marker in the 3D view.
 
 3. **Scanner model** — pick the instrument the scan represents. Choosing
-   a specific model (RIEGL VZ-400i, Leica ScanStation P40, Leica BLK360
-   (G1), Leica BLK360 (G2), FARO Focus S350, Velodyne HDL-32E, RIEGL
+   a specific model (RIEGL VZ-400i, VZ-1000 or VZ-2000i, RIEGL VZ-series
+   for another V-Line scanner, Leica ScanStation P40, Leica BLK360 (G1),
+   Leica BLK360 (G2), FARO Focus S350, Velodyne HDL-32E, RIEGL
    miniVUX-3UAV, or a Livox rosette — **Mid-40**, **Mid-70**, **Avia**)
    does two things:
 
@@ -106,6 +107,15 @@ You need geometry in the scene to scan: typically a generated
    campaign places scanners 1.5–2 m above ground, 3–5 m from the
    plant.
 
+    !!! tip "Nudge a placed scanner without reopening this dialog"
+
+        Once the scan exists, select its marker in the 3D view (or its row
+        in the **Scans** panel) and press <kbd>T</kbd> to slide it, or
+        <kbd>R</kbd> to adjust its tilt — <kbd>X</kbd>/<kbd>Y</kbd>/<kbd>Z</kbd>
+        constrain the axis, and you can type an exact amount. The keys write
+        these very fields. See
+        [Transform gestures → Scan positions](../reference/shortcuts.md#scan-positions).
+
 6. **Scan size** and **angular sweep** — what you enter here depends on
    the pattern:
 
@@ -179,8 +189,9 @@ You need geometry in the scene to scan: typically a generated
         Models full-waveform / multi-echo instruments (RIEGL VZ-400i,
         miniVUX). Produces realistic returns from leaves.
 
-    Both types also expose **beam exit diameter** (mm) and **beam divergence**
-    (mrad) — the cone the sub-rays sample.
+    Both types also expose **Beam exit diameter (m)** — note the unit is
+    **metres**, default `0.01` (i.e. 1 cm) — and **beam divergence**
+    (mrad). Together they define the cone the sub-rays sample.
 
     !!! note "Behavior change since v0.34"
 
@@ -199,6 +210,8 @@ You need geometry in the scene to scan: typically a generated
     Leave both at `0` for a perfectly level scanner. Tilt is a property
     of the scan (it describes the instrument), so it's stored on the scan
     and editable later — useful even for documenting a real scan's pose.
+    <kbd>R</kbd> <kbd>X</kbd> and <kbd>R</kbd> <kbd>Y</kbd> on a selected
+    scan set roll and pitch directly in the 3D view.
 
 9. **Scanner heading** — the initial azimuth the scanner faces in the
    horizontal plane, in degrees (`0` is the default heading; counter-clockwise

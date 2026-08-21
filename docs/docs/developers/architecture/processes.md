@@ -6,12 +6,15 @@ Three processes, three boundaries:
 
 React + Vite, **no Node access**. Talks to:
 
-- Python over HTTP to `127.0.0.1:8008/api/*`
+- Python over HTTP to `127.0.0.1:<backend-port>/api/*`
 - The OS via `window.electronAPI` (exposed by the preload script)
 
-The renderer is hard-coded to `http://127.0.0.1:8008` via `getBackendUrl()`
-in `src/renderer/utils/backendApi.ts`. There is no dev/prod auto-switching —
-if you want to point at a different host or port, edit that function.
+The port is **dynamic per app instance** — the renderer does not hardcode it.
+`initBackendUrl()` in `src/renderer/utils/backendApi.ts` runs from
+`src/renderer/main.tsx` before the first render: it fetches the real port from
+the main process over the `backend.getInfo` IPC and caches it, so the
+synchronous `getBackendUrl()` callers get the right base URL. To point at a
+different backend, set `PHYTOGRAPH_BACKEND_PORT` rather than editing code.
 
 ## Main (`src/main/`)
 
@@ -27,7 +30,7 @@ Electron lifecycle, written as ESM. Responsibilities:
 
 ## Backend (`backend-api/main.py`)
 
-A **single ~5000-line FastAPI file** containing all endpoints:
+A **single ~23,000-line FastAPI file** containing all endpoints:
 `/api/fit`, `/api/triangulate`, `/api/plant/*`, `/api/c2m/*`,
 `/api/skeleton/extract`, and more.
 
@@ -131,6 +134,18 @@ Heavy data never crosses IPC as JSON:
   `fs.createReadStream` → a web `ReadableStream` rather than reading it into a
   Buffer — no main-process memory spike, no event-loop block. `metadata.json`
   stays a small buffered read (it needs an inf/nan→null rewrite).
+    - **One frame update for every octree.** potree's point budget and its node
+      LRU are both global to the shared `Potree` manager, so
+      `updatePointClouds` must be called **once per frame with the full array
+      of visible octrees** — never once per cloud. Cloud components
+      (`OctreePointCloud`, `MissOctree`) register with the frame registry in
+      `viewer/potreeManager.ts`; the single `PotreeFrameDriver` inside the
+      Canvas drives them together. Updating clouds individually makes each one
+      claim the entire budget (N× the intended resident points) and makes each
+      call's `lru.freeMemory()` evict whichever cloud was touched least
+      recently — so with several scans loaded the clouds visibly flicker in and
+      out every frame, worst during crop preview where the reduced budget puts
+      demand above the `2 × pointBudget` eviction threshold.
 - **Binary point-cloud frames.** Point-cloud import and compute responses use a
   packed binary layout (`PHX1` for import via `_pack_pointcloud_response`; `PHB1`
   for array responses) decoded straight into `Float32Array` views, bypassing
@@ -142,10 +157,44 @@ Heavy data never crosses IPC as JSON:
 ## Compute caps
 
 Several backend endpoints fail fast past a point cap instead of hanging on a
-pathological cloud — `_TREEISO_MAX_POINTS`, `_WOOD_SEGMENT_MAX_POINTS`, and
-`_SKELETON_MAX_POINTS` (`PHYTOGRAPH_SKELETON_MAX_POINTS`, default 3 M; the
-skeleton neighbour graph is built with a single batched KD-tree query rather
-than a per-point Python loop). All are environment-overridable.
+pathological cloud — `_WOOD_SEGMENT_MAX_POINTS` and `_SKELETON_MAX_POINTS`
+(`PHYTOGRAPH_SKELETON_MAX_POINTS`, default 3 M; the skeleton neighbour graph is
+built with a single batched KD-tree query rather than a per-point Python loop).
+All are environment-overridable.
+
+**Tree segmentation warns on voxels; it does not cap points.** TreeIso
+voxel-decimates *first*, then runs cut-pursuit and its O(nGroups²) merge over the
+decimated cloud only — so raw input size is the wrong cost proxy. A 13 M-point
+cloud that collapses to ~600 k voxels is well inside TreeIso's intended regime,
+while a 2.6 M-point ALS tile at the paper's 5 cm voxel decimates to 2.6 M nodes
+(a 99 % no-op) and runs for 15–20 min.
+
+The expensive case is a **confirmation prompt, not a refusal** — a user willing
+to wait must always be able to run it, and Cancel works mid-run:
+
+- `_treeiso_cost_warning` returns an advisory when the **exact** post-decimation
+  voxel count (`_count_treeiso_nodes`, at the same auto-scaled voxel size the
+  worker will use) exceeds `_TREEISO_MAX_NODES`
+  (`PHYTOGRAPH_TREEISO_MAX_NODES`, default 2 M). It is exact rather than
+  modelled: a `(res/spacing)³` density estimate ranged from 0.1× to 49× the true
+  count depending on cloud shape.
+- The inline endpoint returns `success: false` with a `cost_warning` (and **no**
+  `error`); the session endpoint raises **409** with
+  `{"cost_warning": …, "message": …}` — 409 so the renderer can distinguish
+  "needs confirmation" from a genuine bad request. `CostWarningError` in
+  `backendApi.ts` carries it to the panel, which shows an amber advisory and
+  turns the run button into **Segment Anyway**.
+- The retry sets `acknowledge_cost: true` and the run proceeds unconditionally.
+  Non-UI callers (scripts, the eval harness) can set it up-front.
+- `_TREEISO_MAX_POINTS` (`PHYTOGRAPH_TREEISO_MAX_POINTS`, default 50 M) is the
+  only hard stop left — a loose backstop for the full-N work preceding
+  decimation.
+
+`_auto_treeiso_decimation` picks that voxel size from measured median spacing,
+then *verifies* against the exact count and keeps coarsening until it is under
+its ~1 M node target — the cube-law guess alone under-shoots at scale (a 13.5 M
+plot landed on 4.3 M voxels), so most large clouds never trigger the advisory at
+all.
 
 ## Logging
 
@@ -187,14 +236,29 @@ user saves and drags into a bug report (`copySessionLogTo` in `logger.ts`).
 
 ## Port wiring
 
-Constants live in `src/shared/constants.ts`:
+**Ports are chosen at runtime, not fixed.** The constants in
+`src/shared/constants.ts` are only *fallback defaults* for a bare
+`electron .` or a standalone `backend_wrapper.py` launch:
 
-| Purpose | Port |
+| Constant | Fallback |
 |---|---|
-| Renderer dev server (Vite) | **1427** |
-| Backend (dev and prod) | **8008** |
-| `BACKEND_PORT_DEV` (defined but unused) | 8007 |
+| `RENDERER_DEV_PORT` (Vite dev server) | **1427** |
+| `BACKEND_PORT_PROD` (backend) | **8008** |
 
-The renderer **always** hits 8008 via `getBackendUrl()`. `main.ts` calls
-`startBackend()` in dev too, so the supervised PyInstaller binary on 8008
-is what serves requests by default.
+Whoever owns the instance picks the real port, so concurrent app instances,
+a `npm run dev` session, and parallel E2E runs never collide:
+
+- **`npm run dev`** — `scripts/dev.mjs` calls `findFreePort()` (bind `:0`) for
+  both the backend and Vite, passes the backend port to `uvicorn --port` and to
+  Electron via `PHYTOGRAPH_BACKEND_PORT`, and the renderer port via
+  `PHYTOGRAPH_RENDERER_PORT`. It also sets `PHYTOGRAPH_DEV_BACKEND=1`, which
+  makes the Electron supervisor stand down instead of spawning its own bundle —
+  so in dev, **uvicorn** serves requests, not the PyInstaller sidecar.
+- **Packaged app** — `resolvePort()` in `src/main/backend.ts` picks a free port
+  (or honors `PHYTOGRAPH_BACKEND_PORT` if pinned) and spawns the bundled backend
+  with it.
+- **E2E** — `tests/e2e/helpers/launchApp.ts` picks a free port per launch and
+  pins it via `PHYTOGRAPH_BACKEND_PORT`.
+
+The renderer learns the port over the `backend.getInfo` IPC (see above), which
+returns `getBackendPort()` from the main process.

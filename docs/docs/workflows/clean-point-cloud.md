@@ -77,14 +77,15 @@ Origin**) moves the pivot point, like CloudCompare's. It's a scene control
 rather than an analysis tool, so it sits with the view controls. The origin
 is the **rotation center** for both the Transform tool and the camera: a
 left-drag in the viewport turns the whole view about it, so panning no longer
-changes what you rotate around. It is also what the camera looks at by
-default, so zooming converges on it (until you pan, after which zoom follows
-your view). Moving the origin does **not** move the camera — the view stays
-exactly where it is, it just pivots somewhere else.
+changes what you rotate around. Zoom is *not* tied to it — the scroll wheel
+flies toward whatever is under your cursor — so the origin only decides what
+you circle. Moving the origin does **not** move the camera: the view stays
+exactly where it is, it just pivots somewhere else. Use **Zoom to origin** in
+the panel if you do want the camera to go there.
 
 With no placement of your own, the origin sits laterally at the center of the
 loaded scene but vertically at its **base** — on the ground rather than
-halfway up — which is usually the point you want to circle and zoom toward.
+halfway up — which is usually the point you want to circle.
 
 That ground level is measured robustly, so a handful of erroneous returns
 below the terrain (multipath, birds, scanner artefacts) will not drag it
@@ -95,24 +96,30 @@ A red-and-white ring marker (a 3D cursor) shows the origin in the scene, at
 a constant size no matter how far you zoom. **Click the ring** to select it:
 an X/Y/Z arrow gizmo appears, and dragging an arrow slides the origin along
 that axis. Click anywhere else in the viewport (or press <kbd>Esc</kbd>) to
-put the gizmo away. The marker only appears once something is loaded, so it
-never sits on top of the empty-viewport import prompt.
+put the gizmo away. (Opening the panel arms **Pick in viewport**, which takes
+over viewport clicks — click that button once to turn it off if you want to
+grab the marker instead.) The marker only appears once something is loaded,
+so it never sits on top of the empty-viewport import prompt.
 
 In the **Scene Origin** panel you can:
 
-- **Pick in viewport** — arm click-to-place, then click a point; it snaps
-  to the cloud surface where you click, or drops onto the ground plane if
-  you click past the cloud. (The view does not move when you pick.)
+- **Pick in viewport** — click-to-place. This is **already armed** when the
+  panel opens, so you can just click a point straight away; it snaps to the
+  cloud surface where you click, or drops onto the ground plane if you click
+  past the cloud. (The view does not move when you pick.) Placing a point
+  disarms it, and the button toggles it off and on again by hand.
 - Type exact **X / Y / Z** world coordinates.
 - **Center on selection** — snap the origin to the middle of the selected
   cloud(s).
-- **Show origin marker** — uncheck to hide the marker (and its gizmo). The
-  pivot itself is unchanged; it just stops drawing over your scene.
 - **Reset to scene center** — drop your placement and return the origin to
   its default: laterally the middle of the loaded scene, vertically its base.
 
 The origin returns to that default when you start a new scene
 (**File → New**).
+
+To hide the marker (and its gizmo) without moving the pivot, uncheck
+**Origin marker** in the **Display** panel in the lower-right corner, where it
+sits with the other viewport toggles.
 
 ## Crop
 
@@ -130,7 +137,8 @@ applies to every scan you have selected.
 3. Shape the region (see below).
 4. Click **Apply** at the bottom of the panel. A **Cropping…** indicator
    appears while the crop is processed, and the removed points stay
-   hidden the whole time. Click the **×** in the panel header to dismiss
+   hidden the whole time (in **Segment** mode nothing is hidden, since
+   both halves are kept). Click the **×** in the panel header to dismiss
    without applying.
 
 When more than one scan is selected, the panel shows "Applies to N scans"
@@ -172,7 +180,11 @@ to Box. Unlike the world-space box, it works from any camera angle.
    anchored to the view.
 2. **Click-drag** in the viewport from one corner to the opposite corner.
    A dashed preview rectangle follows the cursor; release to commit it.
-3. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
+   (The floating panels can't take the pointer — see the note under
+   [Polygon mode](#polygon-mode).)
+3. On release the cloud redraws with the cropped-away points hidden, the
+   same live preview described under [Polygon mode](#polygon-mode).
+4. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
    <kbd>Esc</kbd> cancels.
 
 Like the polygon, the rectangle lives in screen space, so the in/out test
@@ -192,13 +204,37 @@ want isn't a tidy box.
    anchored to the view.
 2. Click in the viewport to add vertices. Right-click or
    <kbd>Backspace</kbd> removes the last vertex.
-3. Press <kbd>Enter</kbd> to close the polygon. A filled preview shows
-   what will be kept (green) or removed (red).
+3. **Double-click** the last vertex, or press <kbd>Enter</kbd>, to close
+   the polygon. A filled preview shows
+   what will be kept (green) or removed (red), and the cloud itself
+   redraws with the cropped-away points hidden — so you see the actual
+   result before committing to it.
 4. Click **Apply** in the panel, or use **Redraw polygon** to start over.
 
 Because the polygon lives in screen space, the in/out test uses the
 camera as it was when you closed the polygon — orbiting afterwards is
-fine and doesn't change the result.
+fine and doesn't change the result. The preview stays pinned to the
+points the crop will remove, so orbiting to inspect it from another
+angle won't shift the selection.
+
+Unlike Box mode, the polygon and rectangle previews keep the cloud at full
+detail — only the points the crop removes disappear. If the rest of the
+cloud visibly thins out, that's a bug, not the crop.
+
+!!! note "Panels block the draw"
+    The floating panels (Crop, the scan/mesh stack on the right, Display,
+    and any toast) sit *over* the viewport, so they take the click before the
+    lasso or rectangle can. Vertices can't land on a panel, a drag can't start
+    on one, and the preview line stops at the panel's edge (turning amber, with
+    a ⊘ at the cursor) instead of following the pointer underneath it. Only the
+    panels themselves block — the empty space around them in the right-hand
+    column is ordinary viewport you can draw through.
+
+    The panels stay clickable while you draw — that's the trade. To reach
+    scene behind them, orbit or pan the view first, or collapse the panels
+    (the Display bubble collapses from its header; the crop panel's **×**
+    exits Crop). A rectangle drag released over a panel still commits, at the
+    clamped edge point.
 
 ### Segment mode (keep both halves)
 
@@ -209,10 +245,18 @@ new **"… (segment)"** cloud is added to the scene holding the cropped-out
 points. No points are lost. It works with all three shapes — **Box**,
 **Rect**, and **Polygon**.
 
-The new cloud is added in a distinct colour so it's easy to tell apart;
-recolour or rename it from the scan list like any other scan. It's handy
+The new cloud inherits the colour of the scan it came from, so the two halves
+read as one family in the scan list — tell them apart by the **"… (segment)"**
+name. Recolour or rename it from the scan list like any other scan. It's handy
 for separating a plant from its ground, or splitting one scan into named
 regions without re-importing.
+
+!!! note "The whole cloud stays visible in Segment mode"
+    **Keep Inside** and **Keep Outside** hide the points they are about to
+    discard, so the preview shows you what will survive. **Segment** discards
+    nothing — both halves become clouds — so it leaves the entire cloud on
+    screen and draws only the region outline to show where the split will
+    fall. Switching between the modes turns that culling on and off.
 
 ### Keep original cloud
 
@@ -223,8 +267,9 @@ will **not** bring them back.
 
 Tick **Keep original cloud** to crop non-destructively. The source scan stays
 in the scene untouched (just hidden, so the viewport looks the same as a
-normal crop) and the kept points are added as a new **"… (cropped)"** cloud in
-its own colour. Click the eye icon next to the original to show it again.
+normal crop) and the kept points are added as a new **"… (cropped)"** cloud,
+which inherits the source scan's colour. Click the eye icon next to the
+original to show it again.
 
 Because nothing is destroyed, a retained crop **is** undoable — one
 <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> removes the new cloud and leaves the original
@@ -369,11 +414,17 @@ Use **Resample Point Cloud** (scatter icon) when a cloud is too large
 to work with interactively or
 when you want a uniformly sparser version for export.
 
-1. Click **Resample**.
-2. The fraction slider goes from 0.1 (keep 10%) to 1.0 (keep all).
-3. Quick presets: **10%**, **25%**, **50%**, **75%**.
-4. Live preview shows the resampled cloud before you commit.
-5. Click **Apply** to replace, or **Cancel** to keep the original.
+1. Click **Resample Point Cloud**.
+2. Type a **Keep fraction** between `0.001` and `1.0` (it's a number field, not
+   a slider).
+3. Quick presets: **100%**, **50%**, **25%**, **10%**, **5%**, **1%**.
+4. Click **Preview** to see the resampled cloud. The preview isn't live —
+   changing the fraction clears it, so press **Refresh Preview** to update.
+   **Cancel Preview** discards it.
+5. Click **Permanently Resample Point Cloud** to commit.
+
+Both buttons are disabled at a fraction of `1.0`, since keeping everything is a
+no-op.
 
 Resampling is uniform-random, not voxel-based. For voxel downsampling,
 export to `.ply` and use a tool like CloudCompare.

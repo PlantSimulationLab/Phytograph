@@ -19,6 +19,7 @@
 import type {
   CloudEditState,
   CloudFilters,
+  LabelEditState,
   MeshColorMode,
   MeshEntry,
   QSMEntry,
@@ -114,6 +115,24 @@ export type SceneAction =
       before: CloudEditState;
       after: CloudEditState;
     }
+  // Pre-commit label stroke push/pop. Round-trips the cloud's LabelEditState —
+  // an ordered list of {region, fromClasses, toClass} strokes, NOT point data
+  // and NOT the per-point deltas (those live in the backend session, keyed by
+  // strokeId; see reset_label_edits). A stroke is ~200 bytes whether it hit 50
+  // points or 5,000,000, so undo memory is O(strokes) not O(points) — the same
+  // rule this file states at the top.
+  //
+  // Kept as its own action with its own state map rather than a field on
+  // CloudEditState: that state is deep-cloned on every transform drag, and the
+  // two have different boundary rules (bake clears both; committing labels
+  // clears neither).
+  | {
+      t: 'labelEdit';
+      id: string;
+      slug: string;
+      before: LabelEditState;
+      after: LabelEditState;
+    }
   // Plant-param op (morph / advance-age / add-leaves / adjust-angles) that
   // replaces a mesh or QSM entry wholesale. Mesh/QSM payloads are small relative
   // to point clouds; if a given op's mesh is large, the handler should emit a
@@ -145,6 +164,29 @@ export function cloneCloudEditState(state: CloudEditState): CloudEditState {
     ...state,
     erasedIndices: new Set(state.erasedIndices),
     pendingDeletes: state.pendingDeletes ? state.pendingDeletes.map((r) => ({ ...r })) : undefined,
+  };
+}
+
+/**
+ * Deep-clone a LabelEditState. The stroke list and every region inside it must
+ * be copied, not shared: a snapshot sharing the live array would mutate along
+ * with it and break undo, exactly as `cloneCloudEditState` guards against for
+ * its Set and pendingDeletes.
+ */
+export function cloneLabelEditState(state: LabelEditState): LabelEditState {
+  return {
+    ...state,
+    strokes: state.strokes.map((s) => ({
+      ...s,
+      // A region carries nested ARRAYS (box min/max, polygon points, the frozen
+      // camera matrices), so a spread is not enough — a shallow copy leaves them
+      // shared with the live stroke and a later mutation would silently rewrite
+      // the undo snapshot. structuredClone handles the whole union uniformly.
+      region: structuredClone(s.region),
+      fromClasses: s.fromClasses ? [...s.fromClasses] : undefined,
+    })),
+    visibleClasses: state.visibleClasses ? [...state.visibleClasses] : undefined,
+    lockedClasses: state.lockedClasses ? [...state.lockedClasses] : undefined,
   };
 }
 
@@ -200,6 +242,8 @@ export function invert(action: SceneAction): SceneAction {
     case 'property':
       return { ...action, before: action.after, after: action.before };
     case 'maskEdit':
+      return { ...action, before: action.after, after: action.before };
+    case 'labelEdit':
       return { ...action, before: action.after, after: action.before };
     case 'replaceObject':
       return { ...action, before: action.after, after: action.before };

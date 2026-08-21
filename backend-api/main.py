@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -17,6 +17,10 @@ import time
 import signal
 import atexit
 import subprocess
+import shutil
+import struct
+# Aliased: `warnings` is used as a local variable name in several converters.
+import warnings as warnings_module
 from pathlib import Path
 from pytexit import py2tex
 
@@ -236,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.61.0"
+BACKEND_VERSION = "0.71.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -268,6 +272,96 @@ app.add_middleware(
 )
 
 
+# ==================== SLOW-REQUEST / CONTENTION LOGGING ====================
+#
+# uvicorn's access log says a request happened; it does NOT say how long it took
+# or what else was running at the time. That gap made a real failure undiagnosable:
+# an LAZ export died on its 2-minute client deadline with nothing in any log to
+# say whether the backend had even started it — and the export itself measures at
+# ~1-2 s for a 7 M-point cloud, so the time went somewhere else.
+#
+# It had gone to CONTENTION: every route handler was `async def` doing its blocking
+# CPU work inline on the single event loop, so one long operation stalled every
+# other request behind it. Blocking handlers are now declared `def` and run in the
+# worker threadpool (see the worker-thread budget below), which removes that stall
+# — this logger stays as the instrument that proves it, and as the way to catch a
+# regression. `queued` is the number of requests already in flight when this one
+# arrived: it should now be uncorrelated with a request being slow.
+#
+# Written as raw ASGI, NOT `@app.middleware("http")`: Starlette's BaseHTTPMiddleware
+# wraps the response in its own task group and is known to swallow client-disconnect
+# propagation. `_run_killable` depends on that disconnect to SIGKILL its worker when
+# the user hits Cancel, so wrapping send/receive here is not an option. This passes
+# `receive`/`send` through untouched and only reads the clock.
+_SLOW_REQUEST_SECONDS = float(os.environ.get("PHYTOGRAPH_SLOW_REQUEST_SECONDS", "5"))
+
+
+class SlowRequestLogger:
+    """Log any request that takes longer than PHYTOGRAPH_SLOW_REQUEST_SECONDS."""
+
+    _in_flight = 0
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        queued = SlowRequestLogger._in_flight
+        SlowRequestLogger._in_flight += 1
+        started = time.perf_counter()
+        try:
+            return await self.app(scope, receive, send)
+        finally:
+            SlowRequestLogger._in_flight -= 1
+            elapsed = time.perf_counter() - started
+            if elapsed >= _SLOW_REQUEST_SECONDS:
+                contention = (
+                    f", {queued} other request(s) already in flight" if queued else ""
+                )
+                print(
+                    f"[slow] {scope.get('method', '?')} {scope.get('path', '?')} "
+                    f"took {elapsed:.1f}s{contention}",
+                    flush=True,
+                )
+
+
+app.add_middleware(SlowRequestLogger)
+
+
+# ==================== WORKER-THREAD BUDGET ====================
+#
+# Route handlers that do blocking CPU work are declared `def`, not `async def`,
+# so FastAPI runs them in anyio's worker threadpool and the event loop stays free
+# to accept and answer everything else. (See `SlowRequestLogger` above for what
+# the previous all-`async def` arrangement cost.) numpy / open3d / laspy / laszip
+# release the GIL for their heavy sections, so those genuinely run in parallel.
+#
+# Starlette's default limiter is 40 threads. Serialized execution used to cap peak
+# memory at one operation's working set; true parallelism removes that cap, and
+# these operations are hundreds of MB each — 40 concurrent bakes would OOM the
+# machine long before they'd finish faster. Bound it to something a desktop can
+# actually hold, while staying well above the handful of requests the renderer
+# has in flight at once, so nothing queues in practice.
+try:
+    _MAX_WORKER_THREADS = int(os.environ.get("PHYTOGRAPH_MAX_WORKER_THREADS", "0")) or None
+except (ValueError, TypeError):
+    _MAX_WORKER_THREADS = None
+if _MAX_WORKER_THREADS is None:
+    _MAX_WORKER_THREADS = max(8, min(16, (os.cpu_count() or 4)))
+
+
+@app.on_event("startup")
+async def _bound_worker_threadpool() -> None:
+    """Size the threadpool that every `def` handler runs in (needs a live loop)."""
+    try:
+        import anyio.to_thread
+
+        anyio.to_thread.current_default_thread_limiter().total_tokens = _MAX_WORKER_THREADS
+    except Exception as e:  # pragma: no cover - never fail startup over a knob
+        print(f"[startup] could not size the worker threadpool: {e}", flush=True)
+
+
 # Centralized error logging. The ~38 per-endpoint try/except blocks already call
 # traceback.print_exc() and raise HTTPException(500, str(e)); this handler is the
 # safety net for anything that DOESN'T (future endpoints, errors outside a try).
@@ -278,6 +372,7 @@ app.add_middleware(
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 from fastapi.exception_handlers import http_exception_handler
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
@@ -298,7 +393,7 @@ async def _log_unhandled_exception(request: Request, exc: Exception):
 
 
 @app.get("/")
-async def root():
+def root():
     return {"message": "Phytograph API is running", "version": BACKEND_VERSION}
 
 
@@ -316,11 +411,10 @@ def get_version():
 
 def _gpu_name() -> "str | None":
     """Best-effort human-readable GPU name via nvidia-smi (None if unavailable)."""
-    import subprocess
     try:
-        r = subprocess.run(
+        r = _spawn_run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5,
+            timeout=5,
         )
         if r.returncode == 0:
             first = r.stdout.strip().split("\n")[0].strip()
@@ -373,6 +467,1392 @@ def device_info():
     }
 
 
+class _SpawnResult:
+    """The three `subprocess.run` fields `_spawn_run`'s callers actually read."""
+
+    __slots__ = ("returncode", "stdout", "stderr")
+
+    def __init__(self, returncode: int, stdout: str, stderr: str):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
+    """`subprocess.run(capture_output=True)` without the fork().
+
+    Why this exists: the backend process has libhelios (GLFW via the
+    lidar->visualizer plugin), open3d and PROJ/libsqlite3 loaded, and
+    `subprocess.run` takes the fork()+exec() path -- CPython only reaches
+    `posix_spawn` when close_fds is False AND the executable is an absolute
+    path, and `capture_output=True` never satisfies the first. Forking that
+    loaded image crashes the child in the post-fork/pre-exec window while the
+    registered pthread_atfork handlers run: PROJ's handler tears down its
+    SQLite handle cache and segfaults (`SQLiteHandleCache::getHandle` ->
+    `sqlite3Close` -> `_os_log_preferences_refresh`).
+
+    The visible damage was NOT an error, because the caller's `except
+    Exception` sees a nonzero-exit child and reports the capability as absent:
+    Settings said "Docker is not running" on a machine where Docker was fine,
+    and macOS raised a "Python quit unexpectedly" dialog for every probe. Same
+    root cause as `_SegProc`, same cure -- posix_spawn never forks the loaded
+    image, so no atfork handler ever runs.
+
+    Output is collected through a temp FILE rather than a pipe: posix_spawn
+    file actions have no pipe-buffer draining, so a pipe could deadlock on a
+    chatty child. Returns a `_SpawnResult`; raises on a missing executable or a
+    blown timeout, exactly as `subprocess.run` would.
+    """
+    import tempfile
+
+    exe = shutil.which(argv[0]) if not os.path.dirname(argv[0]) else argv[0]
+    if not exe:
+        raise FileNotFoundError(argv[0])
+
+    with tempfile.TemporaryFile() as out:
+        fd = out.fileno()
+        pid = os.posix_spawn(
+            exe, [exe] + list(argv[1:]), os.environ,
+            file_actions=[
+                (os.POSIX_SPAWN_DUP2, fd, 1),
+                (os.POSIX_SPAWN_DUP2, fd, 2),
+            ],
+        )
+        deadline = time.monotonic() + timeout
+        while True:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            if time.monotonic() > deadline:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except OSError:
+                    pass
+                raise subprocess.TimeoutExpired(argv, timeout)
+            time.sleep(0.01)
+        out.seek(0)
+        data = out.read()
+
+    combined = data.decode("utf-8", "replace") if text else data
+    # stdout and stderr share one fd, so the capture is combined. Callers here
+    # only ever test the exit code or read stdout of a child that is silent on
+    # success, so handing the same text to both is faithful enough.
+    return _SpawnResult(os.waitstatus_to_exitcode(status), combined, combined)
+
+
+# ---------------------------------------------------------------------------
+# RIEGL .rxp capability (Docker + user-supplied RiVLib)
+# ---------------------------------------------------------------------------
+#
+# Reading RIEGL raw scanner data needs RIEGL's closed-source RiVLib, which ships
+# for Windows and Linux only. On macOS the only way to run it is inside a
+# linux/amd64 container, so the whole feature is gated on three things being
+# true at once: Docker is reachable, the user has supplied a RiVLib copy, and
+# the image has been built from it.
+#
+# RiVLib is NEVER redistributed — its licence forbids it ("You may NOT
+# distribute or modify the software for the use in commercial applications
+# without the written consent of RLMS"), so the user downloads it with their own
+# RIEGL account and points Phytograph at it. That is why this is a runtime probe
+# and not a build-time feature flag.
+#
+# v1 scope is macOS only. Windows and Linux keep the RiSCAN-export route for
+# now; a native (non-container) RiVLib path can be dropped in behind this same
+# probe later without the UI or the endpoints changing.
+
+RIEGL_IMAGE = "phytograph-riegl:latest"
+_RIEGL_DOCKER_TIMEOUT_S = 10
+
+
+def _riegl_rivlib_path(override: "str | None" = None) -> "str | None":
+    """The user-supplied RiVLib directory, or None when unset.
+
+    The renderer owns this setting (it comes from a directory picker and lives
+    in electron-store), so it travels PER REQUEST rather than in the backend's
+    environment: the sidecar is spawned once at launch, and an env var would go
+    stale the moment the user picked a different folder, forcing a restart to
+    take effect. PHYTOGRAPH_RIVLIB_PATH remains as a fallback for tests and for
+    driving the backend standalone.
+    """
+    if override:
+        return override
+    p = os.environ.get("PHYTOGRAPH_RIVLIB_PATH")
+    return p or None
+
+
+def _riegl_rivlib_valid(path: "str | None") -> bool:
+    """A RiVLib directory is usable when it carries the shared object we load."""
+    if not path:
+        return False
+    return (Path(path) / "lib" / "libscanifc.so").is_file()
+
+
+def _docker_present() -> bool:
+    """Best-effort probe for a reachable Docker daemon.
+
+    `docker version --format {{.Server.Version}}` (not `--version`) because it
+    round-trips to the daemon: the CLI alone can be installed while Docker
+    Desktop is stopped, which would otherwise read as available.
+    """
+    try:
+        r = _spawn_run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+def _riegl_image_built() -> bool:
+    """Whether the RIEGL reader image exists locally.
+
+    It can only ever be built locally (never pulled) because building it is what
+    binds the user's own RiVLib to the runtime.
+
+    Two probes, because `docker image inspect <name:tag>` is NOT reliable: with
+    Docker Desktop's containerd image store enabled, an image built locally can
+    resolve by ID while `inspect` on its name:tag answers "No such image" (the
+    tag is listed by `docker images` all the same). Trusting inspect alone made
+    a perfectly good image read as "not built", sending the user to rebuild
+    something they already had. `docker images -q <ref>` resolves the reference
+    correctly under both stores, so it is the primary probe and inspect is the
+    fallback for older CLIs.
+    """
+    try:
+        r = _spawn_run(
+            ["docker", "images", "-q", RIEGL_IMAGE],
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    except Exception:
+        pass
+    try:
+        r = _spawn_run(
+            ["docker", "image", "inspect", RIEGL_IMAGE],
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _riegl_status(rivlib_override: "str | None" = None) -> dict:
+    """Resolve whether RIEGL .rxp reading is available, and why not when it isn't.
+
+    Both a machine-readable verdict (`available`) and a human `reason` travel
+    together so the UI never has to reconstruct the explanation. Every probe is
+    guarded: a broken probe reports "unavailable", never a 500.
+    """
+    import platform as _platform
+    system = _platform.system().lower()
+
+    rivlib_path = _riegl_rivlib_path(rivlib_override)
+    rivlib_ok = _riegl_rivlib_valid(rivlib_path)
+
+    # Platform veto first, mirroring device_info's macOS check: on Windows and
+    # Linux the feature is simply not offered in v1, so don't shell out to
+    # docker at all.
+    if system != "darwin":
+        return {
+            "available": False,
+            "platform_supported": False,
+            "docker_present": False,
+            "image_built": False,
+            "rivlib_path": rivlib_path,
+            "rivlib_valid": rivlib_ok,
+            "image": RIEGL_IMAGE,
+            "reason": (
+                "RIEGL .rxp import is macOS-only in this release. On Windows and "
+                "Linux, export to LAS/E57 from RiSCAN PRO or RiPROCESS instead."
+            ),
+        }
+
+    # Guard the probe CALLS, not just their internals. Each helper already
+    # swallows its own subprocess errors, but an unexpected failure here (a
+    # missing PATH entry, a sandbox denial) must still degrade to "unavailable"
+    # rather than 500 — an optional capability failing to answer is a normal
+    # state, not a server error.
+    try:
+        docker_ok = _docker_present()
+    except Exception:
+        docker_ok = False
+    try:
+        image_ok = _riegl_image_built() if docker_ok else False
+    except Exception:
+        image_ok = False
+
+    if not docker_ok:
+        reason = (
+            "Docker is not running. RIEGL's RiVLib has no macOS build, so "
+            "Phytograph reads .rxp inside a Linux container. Start Docker "
+            "Desktop and try again."
+        )
+    elif not rivlib_path:
+        reason = (
+            "RiVLib has not been configured. It is proprietary and cannot be "
+            "distributed with Phytograph — download it from RIEGL's members "
+            "area and select the folder in Settings."
+        )
+    elif not rivlib_ok:
+        reason = (
+            f"No lib/libscanifc.so under {rivlib_path}. Select the top level of "
+            "the extracted RiVLib download (the folder containing bin/, "
+            "include/ and lib/)."
+        )
+    elif not image_ok:
+        reason = (
+            "The RIEGL reader image has not been built yet. Build it from your "
+            "RiVLib copy to enable .rxp import."
+        )
+    else:
+        reason = "RIEGL .rxp import is ready."
+
+    return {
+        "available": bool(docker_ok and image_ok and rivlib_ok),
+        "platform_supported": True,
+        "docker_present": docker_ok,
+        "image_built": image_ok,
+        "rivlib_path": rivlib_path,
+        "rivlib_valid": rivlib_ok,
+        "image": RIEGL_IMAGE,
+        "reason": reason,
+    }
+
+
+def _riegl_docker_context() -> Path:
+    """Locate the docker/riegl build context (Dockerfile + rxp_reader.py).
+
+    Resolution mirrors _resolve_potree_converter_path: an explicit override for
+    tests, then the packaged extraResources location, then the repo checkout.
+    Unlike PotreeConverter this is two small text files rather than a binary, so
+    it ships with every build regardless of platform.
+    """
+    override = os.environ.get("PHYTOGRAPH_RIEGL_DOCKER_CONTEXT")
+    if override:
+        p = Path(override)
+        if (p / "Dockerfile").is_file():
+            return p
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PHYTOGRAPH_RIEGL_DOCKER_CONTEXT has no Dockerfile: " + override
+            ),
+        )
+
+    candidates = []
+    resources_env = os.environ.get("PHYTOGRAPH_RESOURCES")
+    if resources_env:
+        candidates.append(Path(resources_env) / "docker" / "riegl")
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.append(repo_root / "docker" / "riegl")
+
+    for c in candidates:
+        if (c / "Dockerfile").is_file():
+            return c
+
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "RIEGL Docker build context not found. Looked in: "
+            f"{[str(c) for c in candidates]}."
+        ),
+    )
+
+
+class RieglImageBuildRequest(BaseModel):
+    # Not used by `docker build` itself — the image never contains RiVLib, which
+    # is bind-mounted at run time because its licence forbids redistribution.
+    # It is carried so the build can refuse to run before the user has a usable
+    # RiVLib, which is the only reason to build the image at all.
+    rivlib_path: Optional[str] = None
+
+
+@app.post("/api/riegl/image/build")
+def riegl_image_build(request: RieglImageBuildRequest, http_request: Request):
+    """Build the RIEGL reader image from the bundled Dockerfile.
+
+    This is the one setup step that cannot be done for the user ahead of time:
+    the image is always built locally and never pulled, because publishing it
+    would mean redistributing RiVLib. The build itself only installs numpy and
+    laspy onto a python:3.11-slim-bullseye base, so it carries no licensed bytes
+    and is safe to re-run.
+
+    Streams PHP1 progress and honours /api/cancel/{run_id} like every other long
+    operation. Declared `def` (not `async def`) per the event-loop rule — the
+    work is a blocking subprocess, so FastAPI runs it in the threadpool.
+    """
+    status = _riegl_status(request.rivlib_path)
+    if not status["platform_supported"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+    if not status["docker_present"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+    # Building without a usable RiVLib would "succeed" and still leave the
+    # feature unavailable, which reads as a broken build. Fail with the reason.
+    if not status["rivlib_valid"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+
+    context = _riegl_docker_context()
+    run_id, cancel_event = _new_cancel_token()
+
+    def build_frame(progress):
+        # An indeterminate (None) fraction: `docker build` reports layer-level
+        # progress that doesn't map to a percentage, and StatusPill renders a
+        # null fraction as a pulsing label rather than an empty bar.
+        progress(None, "Building RIEGL reader image…")
+        _run_docker_build(context, cancel_event=cancel_event)
+        progress(1.0, "Image built.")
+        return json.dumps({"ok": True, "image": RIEGL_IMAGE}).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        build_frame, request=http_request, cancel_event=cancel_event,
+        run_id=run_id,
+    )
+
+
+def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
+                      timeout_s: float = 1800.0) -> None:
+    """Run `docker build` for the reader image, cancellably.
+
+    Same shape as _run_riegl_container: env scrub, log file rather than a pipe,
+    Popen + poll so the child can actually be killed. `docker build` IS a normal
+    child process (unlike `docker run`, whose container the daemon owns), so
+    killing it is enough — but the daemon may keep building briefly afterwards,
+    which is harmless since a partial build simply leaves no tagged image.
+    """
+    import subprocess
+    import tempfile
+
+    env = os.environ.copy()
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    cmd = [
+        "docker", "build", "--platform", "linux/amd64",
+        "-t", RIEGL_IMAGE, str(context),
+    ]
+
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".riegl-build.log", delete=False
+    ) as logf:
+        log_path = logf.name
+
+    proc = None
+    try:
+        with open(log_path, "w") as log_handle:
+            proc = subprocess.Popen(
+                cmd, stdout=log_handle, stderr=subprocess.STDOUT, env=env,
+                text=True,
+            )
+            started = time.time()
+            while proc.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    proc.kill()
+                    proc.wait()
+                    raise ScanCancelled()
+                if time.time() - started > timeout_s:
+                    proc.kill()
+                    proc.wait()
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"Image build exceeded {timeout_s:.0f}s.",
+                    )
+                time.sleep(poll)
+
+        if proc.returncode != 0:
+            tail = ""
+            try:
+                with open(log_path) as fh:
+                    tail = fh.read()[-1500:]
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"docker build failed (exit {proc.returncode}). {tail}",
+            )
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            os.unlink(log_path)
+        except Exception:
+            pass
+
+
+# Coordinate frame for an imported RIEGL project. "local" keeps each position
+# in its own scanner frame (the only thing a .riproject can offer); "registered"
+# applies the position's SOP so a .PROJ's scans land pre-aligned.
+# Both RIEGL project layouts are directories. `.riproject` is the older
+# on-instrument format; `.PROJ` is what newer instruments (VZ-2000i and friends)
+# write. Matched case-insensitively because the newer one is conventionally
+# upper-case on disk.
+_RIEGL_PROJECT_SUFFIXES = ('.riproject', '.proj')
+_RIEGL_PROJECT_EXTS = tuple(s.lstrip('.') for s in _RIEGL_PROJECT_SUFFIXES)
+
+RIEGL_FRAME_LOCAL = "local"
+RIEGL_FRAME_REGISTERED = "registered"
+_RIEGL_FRAMES = (RIEGL_FRAME_LOCAL, RIEGL_FRAME_REGISTERED)
+
+# The reader's stream/header version this backend speaks. Bumped whenever the
+# reader's output contract changes, which is how a stale container image is
+# caught (see _read_riegl_header and _require_reader_version).
+_RIEGL_MIN_READER_VERSION = 3
+
+
+class RieglProjectInspectRequest(BaseModel):
+    project_path: str
+    rivlib_path: Optional[str] = None
+    frame: Optional[str] = None
+
+
+def _riegl_project_mounts(status: dict, project: Path) -> List[tuple]:
+    """Standard read-only mounts for a reader invocation.
+
+    The project is mounted READ-ONLY on purpose: this tool only ever reads
+    scanner data, and irreplaceable field captures must not be reachable by a
+    bug in the container.
+    """
+    return [
+        (status["rivlib_path"], "/rivlib", "ro"),
+        (str(project), "/project", "ro"),
+    ]
+
+
+def _validate_riegl_project(project_path: str) -> Path:
+    project = Path(project_path)
+    if not project.is_dir():
+        # Both layouts are a DIRECTORY of scan positions, not a file — the most
+        # likely mistake is picking one of the .rxp files inside one.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{project_path} is not a directory. Select the .riproject or "
+                ".PROJ folder itself, not a file inside it."
+            ),
+        )
+    return project
+
+
+def _validate_riegl_frame(frame: Optional[str]) -> str:
+    if frame is None:
+        return RIEGL_FRAME_LOCAL
+    if frame not in _RIEGL_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown RIEGL frame {frame!r}. Expected one of "
+                + ", ".join(_RIEGL_FRAMES)
+                + "."
+            ),
+        )
+    return frame
+
+
+def _require_reader_version(doc: dict) -> None:
+    """Reject a container image older than the contract this backend speaks.
+
+    The reader lives inside phytograph-riegl:latest, which the user builds and
+    which nothing rebuilds automatically. A stale image predating .PROJ support
+    would not error on a .PROJ — it would report it as having no scan positions,
+    which reads as "your data is broken" rather than "your image is old". The
+    version check turns that into the one message with a fix in it.
+
+    Checked on INSPECT because inspect runs first; _read_riegl_header makes the
+    same check on the extract stream.
+    """
+    version = doc.get("reader_version")
+    if isinstance(version, int) and version >= _RIEGL_MIN_READER_VERSION:
+        return
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "The RIEGL reader image is out of date (reports version "
+            f"{version if version is not None else 'none'}, needs "
+            f"{_RIEGL_MIN_READER_VERSION}). Rebuild it: Settings -> RIEGL "
+            "RiVLib folder -> Build reader image."
+        ),
+    )
+
+
+@app.post("/api/riegl/project/inspect")
+def riegl_project_inspect(request: RieglProjectInspectRequest):
+    """List a raw RIEGL project's scan positions without extracting points.
+
+    Drives the import selection UI: each entry carries the scan pattern (from
+    the position's .pat file), the instrument identity and the GNSS fix, plus a
+    centroid-anchored ENU offset so the caller can lay the positions out.
+
+    Cheap relative to extraction — the reader only pulls a bounded prefix of
+    each point stream, which it must do at all because RiVLib emits the
+    housekeeping records (where GNSS lives) as a side effect of reading points.
+    """
+    status = _resolve_riegl_runtime(request.rivlib_path)
+    project = _validate_riegl_project(request.project_path)
+    frame = _validate_riegl_frame(request.frame)
+
+    out = _run_riegl_container(
+        ["inspect", "/project", "--frame", frame],
+        _riegl_project_mounts(status, project),
+        # Bounded prefix reads only; a 6-position .riproject takes ~30 s. A
+        # .PROJ needs no point reads at all and returns effectively instantly.
+        timeout_s=600.0,
+    )
+    try:
+        doc = json.loads(out)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=500,
+            detail="RIEGL reader returned malformed JSON.",
+        )
+    _require_reader_version(doc)
+    return doc
+
+
+class RieglProjectExtractRequest(BaseModel):
+    project_path: str
+    # Scan position names (e.g. ["ScanPos001", "ScanPos003"]). None/empty = all.
+    scans: Optional[List[str]] = None
+    rivlib_path: Optional[str] = None
+    # Threaded through to each position's session so the user's far-field
+    # miss-detection setting applies here as it does to every other import.
+    miss_distance_threshold: Optional[float] = None
+    # Scalar columns the import wizard kept. None = keep everything the scanner
+    # recorded. `is_miss` is always retained regardless: it is a system flag
+    # driving the Hit/Miss scheme and the hits-only octree, not a user column.
+    keep_columns: Optional[List[str]] = None
+    # "registered" applies each position's SOP (a .PROJ only); "local" keeps
+    # scanner-local coordinates, which is all a .riproject can offer.
+    frame: Optional[str] = None
+
+
+def _riegl_arrays_to_las_result(
+    arrays: dict, origin: "Optional[List[float]]" = None,
+    keep_columns: "Optional[List[str]]" = None,
+    sop: "Optional[List[List[float]]]" = None,
+) -> "LasReadResult":
+    """Adapt streamed RIEGL arrays to the shape the session builder consumes.
+
+    This is what lets the import skip a LAS write AND the read back: the reader
+    container hands over raw arrays, and CloudSession's source of truth is
+    arrays, so the file in between was pure overhead (~10 s and ~1.6 GB per
+    position). Nothing is written here.
+
+    `origin` TRANSLATES the points into the project frame. RiVLib returns every
+    position in its OWN scanner-local frame (raw projects carry no registration),
+    so without this every cloud piles up at 0,0,0 while its scanner marker sits
+    correctly at the GNSS-derived offset — points and marker disagreeing by the
+    whole layout. The session's `origin` field does NOT do this: it only projects
+    sky/miss points onto the display shell, and `world_shift` is SUBTRACTED, so
+    neither can place a cloud. The arrays are the only place the shift can happen.
+
+    `sop` supersedes `origin` when given: a .PROJ carries real registration, so
+    the placement is a full rigid transform (rotate, then translate) rather than
+    a shift, and the two are mutually exclusive — passing both would apply the
+    GNSS prior on top of the surveyed pose. The rotation is applied to EVERY
+    point including the recovered misses, which is correct because a miss is a
+    real ray direction scaled out to the far-field shell: rotating the hits but
+    not the misses would fan the sky points away from the beams that cast them.
+    (The E57 importer does the same on its own pose, transforming points and
+    miss directions together.)
+
+    `intensity` is the display channel, derived from RIEGL reflectance the same
+    way the LAS writer did — dB relative to a white diffuse target, negative for
+    most natural surfaces, so it is rescaled over PDAL's -25..+5 dB window
+    rather than cast. Full-precision reflectance is kept in `extras`.
+    """
+    xyz = arrays["positions"]
+    # New array in both branches: the caller's buffer may still be referenced by
+    # the stream decoder, and mutating it in place would be a surprising side
+    # effect.
+    if sop is not None:
+        matrix = np.asarray(sop, dtype=np.float64)
+        if matrix.shape != (4, 4):
+            raise HTTPException(
+                status_code=500,
+                detail=f"RIEGL scan pose is not a 4x4 matrix (got {matrix.shape}).",
+            )
+        xyz = xyz @ matrix[:3, :3].T + matrix[:3, 3]
+    elif origin is not None and len(origin) == 3:
+        xyz = xyz + np.asarray(origin, dtype=np.float64)
+    n = int(xyz.shape[0])
+
+    reflectance = arrays["reflectance"]
+    refl_lo, refl_hi = -25.0, 5.0
+    norm = (reflectance - refl_lo) / (refl_hi - refl_lo)
+    intensity = (np.clip(norm, 0.0, 1.0) * 65535).astype(np.uint16)
+
+    # `is_miss` now arrives from the reader: an .rxp stores only returns, so the
+    # no-return shots are recovered separately through the C++ shim and streamed
+    # alongside the hits, already placed on the far-field shell.
+    # Only the columns this scanner actually produced — see the manifest note in
+    # _load_riegl_scan_arrays.
+    # Only the columns this scanner produced, further narrowed to the wizard's
+    # selection. `is_miss` is never dropped — the Hit/Miss colour scheme, the
+    # hits-only octree and LAD all key off it.
+    keep = set(keep_columns) if keep_columns is not None else None
+    extras: Dict[str, np.ndarray] = {
+        slug: arrays[slug]
+        for slug in _RIEGL_STREAM_ATTRS
+        if slug in arrays and (keep is None or slug in keep or slug == "is_miss")
+    }
+
+    extra_dims_meta = [
+        {"slug": slug,
+         "label": _RIEGL_LABELS.get(slug, slug.replace("_", " ").title())}
+        for slug in _RIEGL_STREAM_ATTRS if slug in extras
+    ]
+    # NOTE: `timestamp` is deliberately NOT added to extra_dims_meta. That list
+    # and `extras` must stay in lockstep — _session_to_las indexes extras by
+    # every declared slug — and the float64 timestamps live in their own field,
+    # out of the float32 extras, on purpose. The renderer therefore sees the
+    # column under PotreeConverter's own name, "gps-time".
+
+    return LasReadResult(
+        positions=xyz,
+        colors=None,
+        intensity=intensity,
+        extras=extras,
+        extra_dims_meta=extra_dims_meta,
+        # Kept as float64 out of `extras`: this is the LAD trajectory-join key,
+        # and it is also what Backfill Misses needs to reconstruct misses — so
+        # forwarding it gives an independent cross-check on the shim's recovery.
+        # Honours the wizard's selection like any other column, but is checked
+        # separately because it never rides in the float32 extras.
+        timestamps=(
+            arrays.get("timestamp")
+            if keep is None or "timestamp" in keep
+            else None
+        ),
+        gps_time_encoding=None,
+        beam_origins=None,
+    )
+
+
+def _riegl_extract_dir() -> Path:
+    """Where extracted LAS files land.
+
+    NOT under the octree cache root, and not a sibling of it either. That was
+    the first attempt and it lost files: the cache directory is swept by several
+    independent agents (the backend's own eviction, `launchApp`'s per-run
+    teardown, resetToFreshScene), and anything living beside it gets caught in
+    the same rmtree. A 759 MB extract vanished ~40s after being written, between
+    the extract call and the import that consumed it.
+
+    These files are also NOT temp files: the renderer imports them right after
+    extraction, and a session keeps reading its source until the cloud is
+    closed, so a /tmp cleaner deleting one mid-session would break the import.
+    They get their own directory with its own override, cleaned only by
+    _prune_riegl_extracts below.
+    """
+    override = os.environ.get("PHYTOGRAPH_RIEGL_EXTRACT_ROOT")
+    if override:
+        root = Path(override)
+    else:
+        # Same per-OS user-data base as the octree cache, one level up from
+        # `cache/` so no cache sweep can reach it.
+        if sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support" / "Phytograph"
+        elif sys.platform.startswith("win"):
+            base = Path(
+                os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+            ) / "Phytograph"
+        else:
+            base = Path(
+                os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+            ) / "Phytograph"
+        root = base / "riegl_extracts"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+# Extracts are large (a single VZ-1000 position is ~760 MB) and nothing else
+# will ever delete them, so trim old ones on each extraction. Age-based rather
+# than size-based: an extract's whole purpose is to be imported immediately, so
+# anything from a previous day is finished with.
+_RIEGL_EXTRACT_MAX_AGE_S = 24 * 3600
+
+
+def _prune_riegl_extracts(keep: "Optional[Path]" = None) -> None:
+    """Delete extract directories older than a day. Best-effort and never fatal:
+    losing disk space is a lesser failure than aborting an import."""
+    import shutil
+
+    root = _riegl_extract_dir()
+    now = time.time()
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        if keep is not None and child.resolve() == keep.resolve():
+            continue
+        try:
+            if now - child.stat().st_mtime > _RIEGL_EXTRACT_MAX_AGE_S:
+                shutil.rmtree(child, ignore_errors=True)
+        except OSError:
+            continue
+
+
+@app.post("/api/riegl/project/extract")
+def riegl_project_extract(
+    request: RieglProjectExtractRequest, http_request: Request
+):
+    """Extract selected scan positions to LAS, one file per position.
+
+    Each LAS is a normal Phytograph point cloud: the renderer imports it through
+    the existing `create_cloud_session` path with no RIEGL-specific handling.
+    That is deliberate — it keeps the container boundary dumb and means the
+    directory-shaped .riproject never has to be understood downstream.
+
+    WHICH FRAME THE POINTS ARRIVE IN depends on the request and the layout:
+
+      frame="local" (and every .riproject, which has no other option) — the
+        SCANNER'S OWN FRAME. Raw projects carry no registration (that is what
+        RiSCAN PRO produces), so every position sits at its own origin;
+        `origin_prior` is the GNSS-derived ENU offset for seeding ICP, not a
+        registration.
+      frame="registered" — each position's SOP is applied, so a .PROJ's scans
+        land pre-aligned in the project frame. Per-position `registration` says
+        how well: "registered" is the surveyed pose, "prior" is only the
+        inclinometer/GNSS estimate and still wants ICP, "none" is unplaced.
+
+    The response's `registered` flag reports what actually happened rather than
+    being hardcoded, so the caller can tell the user whether to run ICP.
+
+    Streams PHP1 progress and honours /api/cancel/{run_id}.
+    """
+    status = _resolve_riegl_runtime(request.rivlib_path)
+    project = _validate_riegl_project(request.project_path)
+
+    # No output directory: this import writes no intermediate files at all.
+    # Sweep any left by older versions so their gigabytes are reclaimed.
+    try:
+        _prune_riegl_extracts()
+    except Exception:
+        pass
+
+    # One writable mount: the transport directory. The container writes raw
+    # arrays there (~880 MB/s, against ~32 MB/s through a stdout pipe) and the
+    # host deletes each position's files the moment they are loaded, so peak
+    # disk is one position rather than the whole project. The PROJECT itself
+    # stays read-only — irreplaceable field data must not be reachable for
+    # writing.
+    out_dir = _riegl_extract_dir() / uuid.uuid4().hex[:12]
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Fail EARLY on a full disk. The transport writes one position's raw arrays
+    # (~1.6 GB for a 21 M-point VZ-1000 sweep); the container then waits for the
+    # host to load and delete them before writing the next, so that is the peak.
+    # Running out mid-write surfaces as an OSError from numpy deep in the
+    # reader traceback — accurate but unreadable, and it wastes however many
+    # minutes of decoding came first.
+    try:
+        free = shutil.disk_usage(out_dir).free
+        need = _RIEGL_TRANSPORT_BYTES_PER_POSITION
+        if free < need:
+            raise HTTPException(
+                status_code=507,
+                detail=(
+                    f"Not enough free disk space to import: about "
+                    f"{need / 1e9:.1f} GB is needed for the import's temporary "
+                    f"files but only {free / 1e9:.1f} GB is free. The files are "
+                    "deleted as each scan position is loaded, so this is peak "
+                    "usage, not the final size."
+                ),
+            )
+    except OSError:
+        pass  # can't stat the volume: let the write fail naturally
+
+    frame = _validate_riegl_frame(request.frame)
+    args = ["stream", "/project", "--out", "/out", "--frame", frame]
+    if request.scans:
+        args += ["--scans"] + list(request.scans)
+
+    mounts = _riegl_project_mounts(status, project)
+    mounts.append((str(out_dir), "/out", "rw"))
+
+    run_id, cancel_event = _new_cancel_token()
+
+    def build_frame(progress):
+        # Reclaim the transport directory on EVERY exit path. Cleanup used to
+        # sit at the end of the success path only, so a failed or cancelled
+        # import stranded ~1.6 GB per decoded position on disk — which then made
+        # the NEXT import more likely to fail for lack of space.
+        try:
+            return _build_riegl_frame(progress)
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    def _build_riegl_frame(progress):
+        # The reader's first pass reads a bounded prefix of EVERY selected
+        # position (that is how the GNSS housekeeping records are flushed) before
+        # a single point streams. Reported as its own phase because folding it
+        # into position 1 made the first scan look ~1.5s/position slower than the
+        # rest for no reason the user could see.
+        nsel = len(request.scans) if request.scans else 0
+        progress(
+            None,
+            f"Reading project metadata{f' ({nsel} positions)' if nsel else ''}…",
+        )
+        # Sessions are built INSIDE the stream callback, as each position
+        # finishes arriving. Two reasons:
+        #
+        #  * MEMORY. Accumulating every position first meant ~3.6 GB resident
+        #    for a six-position project; now it is one position's arrays.
+        #  * OVERLAP. The container keeps decoding position N+1 (emulated x86)
+        #    while the host builds position N's octree (native CPU + disk).
+        #    Different resources, so the two genuinely run at once — the pipe's
+        #    backpressure is what schedules it, with no threads to coordinate.
+        built: List[dict] = []
+        total = len(request.scans) if request.scans else 0
+
+        def on_scan(index: int, entry: dict, arrays) -> Optional[dict]:
+            name = entry.get("name", f"scan{index}")
+            info = dict(entry)
+            if arrays is None:
+                info.setdefault("error", "no points were streamed")
+                built.append(info)
+                return None
+
+            _cancel_checkpoint(progress)
+            npts = arrays["positions"].shape[0]
+            denom = max(1, total or (index + 1))
+            # The message carries "N/M" because the renderer drives its counter
+            # from these markers — it has no other view of how far the backend
+            # has got, since every position is decoded and built in here.
+            progress(
+                min(0.99, (index + 0.5) / denom),
+                f"[{index + 1}/{denom}] Building {name} ({npts:,} points)…",
+            )
+            # NO INTERMEDIATE LAS. The arrays are already in RAM and
+            # CloudSession's source of truth IS arrays, so writing them out just
+            # to read them back cost ~10 s and ~1.6 GB of disk per position.
+            # A registered import places points by the position's SOP; a local
+            # one shifts them by the GNSS prior. They are mutually exclusive —
+            # see _riegl_arrays_to_las_result — so pick exactly one here. The
+            # reader only emits `sop` for a layout that has one, so a .riproject
+            # falls through to the prior no matter what frame was asked for.
+            sop = info.get("sop") if frame == RIEGL_FRAME_REGISTERED else None
+            origin_prior = info.get("origin_prior")
+            sess_req = CloudSessionCreateRequest(
+                source_path=str(project),
+                miss_distance_threshold=request.miss_distance_threshold,
+                # The session's own `origin` is the scanner position: where the
+                # beams came FROM, which is what projects sky points onto the
+                # display shell. Under a SOP that is its translation.
+                origin=(
+                    [float(r[3]) for r in sop[:3]] if sop is not None
+                    else origin_prior
+                ),
+            )
+            try:
+                info["session"] = _do_create_cloud_session(
+                    sess_req, project, progress=None,
+                    cancel_event=cancel_event,
+                    preloaded=_riegl_arrays_to_las_result(
+                        arrays,
+                        origin=None if sop is not None else origin_prior,
+                        keep_columns=request.keep_columns,
+                        sop=sop,
+                    ),
+                )
+            except ScanCancelled:
+                raise
+            except HTTPException as exc:
+                info["error"] = str(exc.detail)
+            built.append(info)
+            progress(
+                min(0.99, (index + 1) / denom),
+                f"[{min(index + 1, denom)}/{denom}] Finished {name}",
+            )
+            return None
+
+        header, _per_scan, trailer = _stream_riegl_container(
+            args, mounts, out_dir, cancel_event=cancel_event,
+            timeout_s=3600.0, on_scan=on_scan,
+        )
+
+        # Fold the trailing per-scan summary (point counts, bboxes, multi-return
+        # warnings) into the entries built above — those values are only known
+        # after decoding, so they cannot ride in the header.
+        by_name = {t.get("name"): t for t in trailer}
+        scans_out: List[dict] = []
+        for info in built:
+            merged = dict(info)
+            merged.update({
+                k: v for k, v in by_name.get(info.get("name"), {}).items()
+                if k != "name"
+            })
+            scans_out.append(merged)
+
+        payload = dict(header)
+        payload["scans"] = scans_out
+        progress(1.0, "Extraction complete.")
+        return json.dumps(payload).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        build_frame, request=http_request, cancel_event=cancel_event,
+        run_id=run_id,
+    )
+
+
+@app.get("/api/riegl/status")
+def riegl_status(rivlib_path: Optional[str] = None):
+    """Report whether RIEGL .riproject import is available on this machine.
+
+    `rivlib_path` is the renderer's persisted setting, passed per request
+    because the backend sidecar is spawned once at launch and would otherwise
+    need a restart to notice the user changing it.
+    """
+    return _riegl_status(rivlib_path)
+
+
+def _resolve_riegl_runtime(rivlib_override: "str | None" = None) -> dict:
+    """Return the RIEGL runtime config, or raise 503 with the remediation.
+
+    503 is the established status for "optional capability not installed" here
+    (see _resolve_potree_converter_path), and the detail carries the same reason
+    string the status endpoint reports so the UI can surface one message.
+    """
+    status = _riegl_status(rivlib_override)
+    if not status["available"]:
+        raise HTTPException(status_code=503, detail=status["reason"])
+    return status
+
+
+def _run_riegl_container(
+    args: List[str],
+    mounts: List[tuple],
+    *,
+    cancel_event=None,
+    poll: float = 0.2,
+    timeout_s: float = 3600.0,
+) -> str:
+    """Run the RIEGL reader container and return its stdout (a JSON document).
+
+    `mounts` is a list of (host_path, container_path, mode) with mode "ro"/"rw".
+    `args` are the arguments passed to the image's entrypoint (rxp_reader.py).
+
+    THE CONTAINER IS NOT IN OUR PROCESS TREE. `docker run` is a thin client that
+    asks the daemon to start a container elsewhere, so the process-group kill
+    used for PotreeConverter and the segmentation workers does nothing here —
+    killing the CLI would orphan a running container. Cancellation therefore
+    goes through a deterministic `--name` plus `docker kill`, and `--rm` makes
+    the daemon reap the container either way.
+
+    Everything else mirrors _run_potree_converter, for the same reasons it does:
+
+      * Scrub DYLD_/LD_LIBRARY_PATH — a PyInstaller-bundled Python injects
+        these and they break any child expecting system libs.
+      * stderr goes to a LOG FILE, not a pipe. The reader streams per-scan
+        progress there, and a poll loop with PIPE and no reader deadlocks once
+        the child fills the ~64 KB buffer. stdout IS a pipe, but it only
+        receives one JSON document at the very end, so it cannot fill.
+      * Popen + poll rather than subprocess.run, because run() retains no
+        handle and its child could never be cancelled.
+    """
+    import subprocess
+    import tempfile
+    import uuid as _uuid
+
+    # Unique per run so a cancel can only ever target this container, even with
+    # several imports in flight (the backend is genuinely concurrent).
+    container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
+
+    env = os.environ.copy()
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    cmd = ["docker", "run", "--rm", "--name", container_name,
+           "--platform", "linux/amd64"]
+    for host, container, mode in mounts:
+        cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
+                else f"{host}:{container}"]
+    cmd += [RIEGL_IMAGE] + list(args)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".riegl.log", delete=False
+    ) as logf:
+        log_path = logf.name
+
+    proc = None
+    try:
+        with open(log_path, "w") as log_handle:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=log_handle,
+                env=env, text=True,
+            )
+
+            started = time.time()
+            while proc.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    _kill_riegl_container(container_name, proc)
+                    raise ScanCancelled()
+                if time.time() - started > timeout_s:
+                    _kill_riegl_container(container_name, proc)
+                    raise HTTPException(
+                        status_code=504,
+                        detail=(
+                            f"RIEGL extraction exceeded {timeout_s:.0f}s and was "
+                            "stopped."
+                        ),
+                    )
+                time.sleep(poll)
+
+            stdout, _ = proc.communicate()
+
+        if proc.returncode != 0:
+            tail = ""
+            try:
+                with open(log_path) as fh:
+                    tail = fh.read()[-1500:]
+            except Exception:
+                pass
+            # The reader reports its own failures as {"error": ...} on stdout
+            # before exiting non-zero, so prefer that over the log tail.
+            detail = None
+            try:
+                parsed = json.loads(stdout)
+                detail = parsed.get("error")
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=detail or (
+                    f"RIEGL reader failed (exit {proc.returncode}). {tail}"
+                ),
+            )
+        return stdout
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_riegl_container(container_name, proc)
+        try:
+            os.unlink(log_path)
+        except Exception:
+            pass
+
+
+def _stream_riegl_container(
+    args: List[str],
+    mounts: List[tuple],
+    out_dir: Path,
+    *,
+    cancel_event=None,
+    timeout_s: float = 3600.0,
+    on_scan=None,
+) -> tuple:
+    """Run the reader, consuming each position's arrays as it finishes.
+
+    TRANSPORT: raw arrays through a bind-mounted directory, NOT stdout. Measured
+    on this machine moving 1 GB container->host with no RIEGL code involved, a
+    Docker stdout pipe runs at ~32 MB/s against ~880 MB/s for a bind mount — at
+    576 MB per position the pipe alone was ~20 s of a ~40 s import.
+
+    stdout now carries only the JSON header. stderr carries per-scan progress,
+    a `{"ready": name}` line as each position's arrays land, and a trailing
+    summary; it goes to a log FILE because a poll loop with a second unread pipe
+    deadlocks once the child fills it.
+
+    `on_scan(index, entry, arrays)` runs as each position becomes ready, so the
+    host builds position N's session while the container decodes N+1 — different
+    resources (native CPU vs emulated), genuinely concurrent.
+    """
+    import subprocess
+    import tempfile
+    import uuid as _uuid
+
+    container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
+
+    env = os.environ.copy()
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    cmd = ["docker", "run", "--rm", "--name", container_name,
+           "--platform", "linux/amd64"]
+    for host, container, mode in mounts:
+        cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
+                else f"{host}:{container}"]
+    cmd += [RIEGL_IMAGE] + list(args)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".riegl-stream.log", delete=False
+    ) as logf:
+        log_path = logf.name
+
+    proc = None
+    started = time.time()
+    header: dict = {}
+    results: List[Any] = []
+    trailer: List[dict] = []
+    try:
+        with open(log_path, "w") as log_handle:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=log_handle, env=env,
+                bufsize=1024 * 1024,
+            )
+            header = _read_riegl_header(proc.stdout)
+            entries = header.get("scans", [])
+            by_name = {e.get("name"): (i, e) for i, e in enumerate(entries)}
+            handled: set = set()
+
+            def drain(final: bool = False) -> None:
+                """Dispatch every position whose arrays have landed."""
+                for line in _tail_json_lines(log_path):
+                    if "trailer" in line:
+                        trailer[:] = line["trailer"]
+                    elif "error" in line and not final:
+                        raise HTTPException(status_code=500, detail=line["error"])
+                    name = line.get("ready")
+                    if not name or name in handled or name not in by_name:
+                        continue
+                    idx, entry = by_name[name]
+                    arrays = _load_riegl_scan_arrays(out_dir / name)
+                    handled.add(name)
+                    if on_scan is not None:
+                        results.append(on_scan(idx, entry, arrays))
+                    else:
+                        results.append(arrays)
+
+            while proc.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    _kill_riegl_container(container_name, proc)
+                    raise ScanCancelled()
+                if time.time() - started > timeout_s:
+                    _kill_riegl_container(container_name, proc)
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"RIEGL extraction exceeded {timeout_s:.0f}s.",
+                    )
+                drain()
+                time.sleep(0.25)
+
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            drain(final=True)
+
+        if proc.returncode != 0:
+            tail = ""
+            try:
+                with open(log_path) as fh:
+                    tail = fh.read()[-1500:]
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"RIEGL reader failed (exit {proc.returncode}). {tail}",
+            )
+
+        # A position that never reported ready still needs an entry, so the
+        # caller sees it failed rather than silently missing.
+        for name, (idx, entry) in by_name.items():
+            if name not in handled and on_scan is not None:
+                results.append(on_scan(idx, entry, None))
+
+        return header, results, trailer
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_riegl_container(container_name, proc)
+        try:
+            os.unlink(log_path)
+        except Exception:
+            pass
+
+
+def _tail_json_lines(log_path: str) -> List[dict]:
+    """Parse every JSON object currently in the reader's stderr log.
+
+    Re-reads from the start each poll: the file is a few KB of progress lines,
+    so this is far cheaper than tracking offsets, and callers dedupe by name.
+    """
+    out: List[dict] = []
+    try:
+        with open(log_path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+# Peak transport bytes on disk, which is ONE scan position: the container
+# blocks until the host has loaded and deleted each position before writing the
+# next (see _wait_for_consumption in the reader). A 21 M-point VZ-1000 sweep
+# writes float64 xyz + ~11 float32 scalars + a float64 timestamp ~= 1.6 GB;
+# rounded up so the pre-flight check is conservative rather than optimistic.
+_RIEGL_TRANSPORT_BYTES_PER_POSITION = 2_000_000_000
+
+_RIEGL_STREAM_MAGIC = b"PHRX"
+# Same number the inspect path checks — one contract, one constant, so the
+# two can never drift into accepting an image the other rejects.
+_RIEGL_STREAM_VERSION = _RIEGL_MIN_READER_VERSION
+
+# Column order and dtypes, matching rxp_reader._ARRAY_SPEC exactly. A mismatch
+# here would silently transpose or misread attributes rather than error.
+# The float32 scalar columns, in wire order. `timestamp` is deliberately NOT
+# here: it is float64 and rides in LasReadResult.timestamps, out of the float32
+# extras, because it is the moving-platform LAD join key (see CloudSession).
+_RIEGL_STREAM_ATTRS = (
+    "reflectance", "amplitude", "deviation", "target_index", "target_count",
+    "is_miss", "background_radiation", "echo_type", "waveform_available",
+    "pseudo_echo", "sw_calculated", "pps_locked", "facet",
+)
+
+# Human labels for the scalar picker and the import wizard. `is_miss` keeps the
+# canonical "Miss" label every other importer uses, so the Hit/Miss colour
+# scheme applies to a RIEGL scan exactly as it does to an E57 one.
+_RIEGL_LABELS = {
+    "is_miss": "Miss",
+    "background_radiation": "Background Radiation",
+    "echo_type": "Echo Type",
+    "waveform_available": "Waveform Available",
+    "pseudo_echo": "Pseudo Echo",
+    "sw_calculated": "SW Calculated Target",
+    "pps_locked": "PPS Locked",
+    "facet": "Mirror Facet",
+}
+_RIEGL_ARRAY_SPEC = (
+    ("positions.f64", "<f8", 3),
+    ("reflectance.f32", "<f4", 1),
+    ("amplitude.f32", "<f4", 1),
+    ("deviation.f32", "<f4", 1),
+    ("target_index.f32", "<f4", 1),
+    ("target_count.f32", "<f4", 1),
+    ("is_miss.f32", "<f4", 1),
+    ("background_radiation.f32", "<f4", 1),
+    ("echo_type.f32", "<f4", 1),
+    ("waveform_available.f32", "<f4", 1),
+    ("pseudo_echo.f32", "<f4", 1),
+    ("sw_calculated.f32", "<f4", 1),
+    ("pps_locked.f32", "<f4", 1),
+    ("facet.f32", "<f4", 1),
+    ("timestamp.f64", "<f8", 1),
+)
+
+
+def _read_exactly(stream, n: int) -> bytes:
+    """Read exactly n bytes or raise. A pipe read can return short."""
+    parts = []
+    remaining = n
+    while remaining > 0:
+        block = stream.read(remaining)
+        if not block:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "RIEGL reader stream ended early — expected "
+                    f"{n} bytes, got {n - remaining}."
+                ),
+            )
+        parts.append(block)
+        remaining -= len(block)
+    return b"".join(parts)
+
+
+def _read_riegl_header(stream) -> dict:
+    """Read the JSON header the reader emits on stdout before any arrays."""
+    magic = _read_exactly(stream, 4)
+    if magic != _RIEGL_STREAM_MAGIC:
+        raise HTTPException(
+            status_code=500,
+            detail=f"RIEGL reader stream has bad magic {magic!r}.",
+        )
+    version, hdr_len = struct.unpack("<II", _read_exactly(stream, 8))
+    if version != _RIEGL_STREAM_VERSION:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"RIEGL reader stream version {version} is not supported "
+                f"(expected {_RIEGL_STREAM_VERSION}). Rebuild the reader image "
+                "(Settings -> RIEGL RiVLib folder -> Build reader image)."
+            ),
+        )
+    return json.loads(_read_exactly(stream, hdr_len).decode("utf-8"))
+
+
+def _load_riegl_scan_arrays(scan_dir: Path) -> "Optional[dict]":
+    """Load one position's columns from the bind-mounted directory.
+
+    Returns None when `done.json` is absent — the marker is written last, so its
+    absence means the position is incomplete (failed, or still being written)
+    and must not be read.
+
+    The files are DELETED once loaded: at ~576 MB per position, keeping them
+    would put gigabytes on disk for data that is already in RAM and never read
+    again.
+    """
+    marker = scan_dir / "done.json"
+    if not marker.is_file():
+        return None
+    try:
+        n = int(json.loads(marker.read_text())["point_count"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+    # The reader names the columns it wrote: the set varies by scanner, so a
+    # fixed spec here would demand files that were never produced.
+    try:
+        wanted = set(json.loads(marker.read_text()).get("columns") or [])
+    except (OSError, ValueError):
+        wanted = set()
+
+    arrays: Dict[str, np.ndarray] = {}
+    try:
+        for name, dtype, cols in _RIEGL_ARRAY_SPEC:
+            if wanted and name not in wanted:
+                continue
+            path = scan_dir / name
+            data = np.fromfile(str(path), dtype=dtype)
+            expected = n * cols
+            if data.size != expected:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"RIEGL array {name} has {data.size} values, expected "
+                        f"{expected} — the reader output is truncated."
+                    ),
+                )
+            arrays[name.split(".")[0]] = (
+                data.reshape(n, cols) if cols > 1 else data
+            )
+    finally:
+        # Reclaim immediately, whether or not every column loaded.
+        shutil.rmtree(scan_dir, ignore_errors=True)
+    return arrays
+
+
+def _kill_riegl_container(container_name: str, proc=None) -> None:
+    """Stop a running reader container and its client process.
+
+    `docker kill` targets the container by name because that is the only handle
+    that reaches it — the daemon owns it, not us. The local CLI process is then
+    terminated too so the poll loop's `communicate()` cannot block on a pipe
+    that will never close.
+    """
+    try:
+        _spawn_run(
+            ["docker", "kill", container_name],
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+    except Exception:
+        pass
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 # Model mapping
 def get_model(category: str, model_type: str):
     """Get the appropriate phytorch model based on category and type"""
@@ -420,42 +1900,45 @@ async def fit_model(
         # Read the uploaded file
         contents = await file.read()
 
-        # Parse CSV
-        if file.filename.endswith('.csv') or file.filename.endswith('.txt'):
-            df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
-        elif file.filename.endswith('.xlsx'):
-            df = pd.read_excel(io.BytesIO(contents))
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
+        # Everything past the upload — parse, model lookup, fit — is blocking CPU
+        # work, so it runs in the threadpool instead of on the event loop.
+        def _parse_and_fit():
+            # Parse CSV
+            if file.filename.endswith('.csv') or file.filename.endswith('.txt'):
+                df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+            elif file.filename.endswith('.xlsx'):
+                df = pd.read_excel(io.BytesIO(contents))
+            else:
+                raise HTTPException(status_code=400, detail="Unsupported file format")
 
-        # Convert to dict of numpy arrays
-        data = {col: df[col].values for col in df.columns}
+            # Convert to dict of numpy arrays
+            data = {col: df[col].values for col in df.columns}
 
-        # Get the model
-        model = get_model(model_category, model_type)
+            # Get the model
+            model = get_model(model_category, model_type)
 
-        # Fit options
-        options = {
-            "method": method if method else "auto",
-            "max_iterations": max_iterations,
-            "verbose": False
-        }
+            # Fit options
+            options = {
+                "method": method if method else "auto",
+                "max_iterations": max_iterations,
+                "verbose": False
+            }
 
-        # Import and run fit
-        from phytorch import fit
-        result = fit(model, data, options)
+            # Import and run fit
+            from phytorch import fit
+            result = fit(model, data, options)
 
-        # Format response
-        response = {
-            "success": True,
-            "parameters": {k: float(v) if isinstance(v, (np.floating, float)) else v
-                         for k, v in result.parameters.items()},
-            "r_squared": float(result.r_squared) if hasattr(result, 'r_squared') else None,
-            "loss": float(result.loss) if hasattr(result, 'loss') else None,
-            "converged": bool(result.converged) if hasattr(result, 'converged') else True,
-        }
+            # Format response
+            return {
+                "success": True,
+                "parameters": {k: float(v) if isinstance(v, (np.floating, float)) else v
+                             for k, v in result.parameters.items()},
+                "r_squared": float(result.r_squared) if hasattr(result, 'r_squared') else None,
+                "loss": float(result.loss) if hasattr(result, 'loss') else None,
+                "converged": bool(result.converged) if hasattr(result, 'converged') else True,
+            }
 
-        return response
+        return await run_in_threadpool(_parse_and_fit)
 
     except Exception as e:
         import traceback
@@ -654,7 +2137,7 @@ def create_model_function(equation: str, param_names: List[str], input_symbols: 
 
 
 @app.post("/api/fit/custom")
-async def fit_custom_model(request: FitRequest):
+def fit_custom_model(request: FitRequest):
     """
     Fit a custom or built-in model to data.
     """
@@ -1022,7 +2505,7 @@ def python_to_latex(equation: str, output_symbol: str = "y", equation_type: str 
 
 
 @app.post("/api/latex")
-async def convert_to_latex(request: LatexRequest):
+def convert_to_latex(request: LatexRequest):
     """
     Convert a Python equation to LaTeX format.
     """
@@ -1038,7 +2521,7 @@ async def convert_to_latex(request: LatexRequest):
 
 
 @app.get("/api/latex")
-async def convert_to_latex_get(equation: str, output_symbol: str = "y", equation_type: str = "explicit"):
+def convert_to_latex_get(equation: str, output_symbol: str = "y", equation_type: str = "explicit"):
     """
     Convert a Python equation to LaTeX format (GET version for easy testing).
     """
@@ -1079,7 +2562,7 @@ class ExportRequest(BaseModel):
 
 
 @app.post("/api/export")
-async def export_fit_results(request: ExportRequest):
+def export_fit_results(request: ExportRequest):
     """
     Export fit results to an Excel file with Parameters, Data, and Metadata sheets.
     """
@@ -1527,7 +3010,7 @@ def fit_prospect_d(
 
 
 @app.post("/api/fit/prospect")
-async def fit_prospect_model(request: ProspectFitRequest):
+def fit_prospect_model(request: ProspectFitRequest):
     """
     Fit PROSPECT-D radiative transfer model to spectral reflectance data.
 
@@ -1571,8 +3054,15 @@ async def fit_prospect_model(request: ProspectFitRequest):
 
 class PointSource(BaseModel):
     """Tell a downstream endpoint to read points from a live cloud SESSION
-    (in-RAM, source of truth) or — only as a fallback — a file on disk, instead
-    of an inline `points` array.
+    (in-RAM, the source of truth) instead of an inline `points` array.
+
+    **Compute and export require `session_id`.** A cloud's file is read exactly
+    once, at import; every edit after that (deletions, translation, filtering,
+    segmentation labels) lives only in the session arrays. Reading the file again
+    would compute on pre-edit data and return a silently wrong answer, so
+    `_read_points_from_source` rejects a file-only source unless the caller sets
+    `allow_file_source` — the deliberate opt-in for files that are not live
+    clouds (unit tests driving the loaders, external files).
 
     Octree-backed clouds keep no positions in the renderer (the geometry lives
     only in the on-disk Potree octree, streamed to the GPU), so skeleton /
@@ -1596,6 +3086,17 @@ class PointSource(BaseModel):
     # (`positions[i*3] + tx`) and the in-RAM `_region_mask` translation path.
     translation: Optional[List[float]] = None
     want_colors: bool = False
+    # Surface the session's scalar extra-dimension columns (`extras`) alongside
+    # positions. OFF by default because the compute consumers want geometry only
+    # and copying every scalar column for a 25 M-point cloud is pure waste.
+    #
+    # Export is the caller that sets it: a cloud's scalars (reflectance,
+    # ground_class, target_index, is_miss, any wizard-imported column) are part of
+    # the data the user imported, and an export that silently drops them is
+    # lossy. Before this flag existed `_read_points_from_source` returned a
+    # 3-tuple by signature, so there was no way for ANY caller to get them —
+    # which is why both the text and LAS export paths wrote x/y/z(+rgb) only.
+    want_extras: bool = False
     # Sky/miss points (`is_miss != 0`) are dropped by default: a miss is a ray
     # that hit nothing, projected ~1 km out, so the surface-reconstruction
     # consumers (triangulate, skeleton, segment, QSM) must never see it — exactly
@@ -1616,6 +3117,13 @@ class PointSource(BaseModel):
     # positions and leaves colours/intensity as None (the session DOES hold them;
     # they're simply not surfaced here).
     session_id: Optional[str] = None
+    # Opt-in escape hatch for reading points from `source_path` with no session.
+    # OFF by default and never set by the app: computing from a file means
+    # computing on pre-edit data (see the rejection in _read_points_from_source),
+    # which is silently wrong rather than an error. Set it only when the file is
+    # genuinely not a live cloud — unit tests driving the loaders directly, and
+    # any future read of an external file.
+    allow_file_source: bool = False
 
 
 class TriangulationGrid(BaseModel):
@@ -2249,7 +3757,7 @@ def _pack_mesh_frame(result: dict, *, index_key: str = "triangles") -> bytes:
 
 
 @app.post("/api/triangulate")
-async def triangulate_point_cloud(request: TriangulationRequest, http_request: Request):
+def triangulate_point_cloud(request: TriangulationRequest, http_request: Request):
     """Triangulate a point cloud (Open3D). Returns a PHB1 binary frame."""
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
@@ -2281,7 +3789,8 @@ class CrownFitRequest(BaseModel):
 def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
     """Read the session's world-frame points + labels, fit one crown per tree,
     return {success, crowns:[{tree_instance_id, shape, vertices, triangles,
-    normals, metrics}], warnings}. Runs off-thread under the streaming wrapper."""
+    normals, metrics, params}], warnings}. Runs off-thread under the streaming
+    wrapper."""
     import crown_fit as cf
 
     def _report(frac, msg):
@@ -2394,6 +3903,9 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
             "triangles": res["triangles"].reshape(-1).tolist(),
             "normals": res["normals"].reshape(-1).tolist(),
             "metrics": res["metrics"],
+            # The parameters that DEFINE this shape (semi-axes / base radius +
+            # height / alpha radius). Shape-dependent keys — see crown_fit.py.
+            "params": res["params"],
         })
 
     _report(1.0, "Finalizing")
@@ -2404,7 +3916,7 @@ def _do_crown_fit(request: CrownFitRequest, progress=None) -> dict:
 
 
 @app.post("/api/fit/crown")
-async def fit_crown_endpoint(request: CrownFitRequest, http_request: Request):
+def fit_crown_endpoint(request: CrownFitRequest, http_request: Request):
     """Fit crown shapes + metrics. Streams progress then a JSON tail (one entry
     per fitted crown), cancelable via the run-id token."""
     run_id, cancel_event = _new_cancel_token()
@@ -2477,7 +3989,7 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
     panel's Cancel button can SIGKILL it mid-run; on client disconnect a cancelled
     response is returned at once."""
     try:
-        points = _resolve_segmentation_points(request)
+        points = await run_in_threadpool(_resolve_segmentation_points, request)
 
         if len(points) < 10:
             return GroundSegmentationResponse(
@@ -3368,7 +4880,7 @@ def _do_dem(request: "DemRequest", progress=None) -> dict:
 
 
 @app.post("/api/dem")
-async def generate_dem(request: DemRequest, http_request: Request):
+def generate_dem(request: DemRequest, http_request: Request):
     """Generate a DEM from a flat cloud (inline points / source). Returns a PHB1
     binary frame (heightmap mesh + regular grid)."""
     run_id, cancel_event = _new_cancel_token()
@@ -3441,7 +4953,7 @@ def _dem_geotiff_bytes(grid: np.ndarray, minx: float, miny: float, cell: float,
 
 
 @app.post("/api/dem/export-raster")
-async def export_dem_raster(request: DemRasterExportRequest):
+def export_dem_raster(request: DemRasterExportRequest):
     """Write a DEM grid to ESRI ASCII (.asc) or GeoTIFF (.tif); returns base64."""
     import base64
     if request.nx <= 0 or request.ny <= 0 or len(request.grid_z) != request.nx * request.ny:
@@ -3582,7 +5094,7 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
             refl_parts: List[Optional[np.ndarray]] = []
             for s in request.sources:
                 full = s.model_copy(update={"max_points": None})  # full resolution
-                pts, _, inten = _read_points_from_source(full)
+                pts, _, inten = await run_in_threadpool(_read_points_from_source, full)
                 parts.append(np.asarray(pts, dtype=np.float64))
                 refl_parts.append(
                     np.asarray(inten, dtype=np.float64) if inten is not None else None
@@ -3595,7 +5107,7 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
                 reflectance = np.concatenate(refl_parts, axis=0)
         elif request.source is not None:
             src = request.source.model_copy(update={"max_points": None})
-            points, _, inten = _read_points_from_source(src)
+            points, _, inten = await run_in_threadpool(_read_points_from_source, src)
             points = np.asarray(points, dtype=np.float64)
             reflectance = np.asarray(inten, dtype=np.float64) if inten is not None else None
         elif request.points is not None:
@@ -3655,14 +5167,33 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
 TREE_INSTANCE_SLUG = "tree_instance"
 TREE_INSTANCE_LABEL = "Tree instance"
 
-# TreeIso is CPU-only and O(n log n)+ with heavy constants; beyond a few million
-# points it crawls. Cap so the endpoints fail fast with an actionable message
-# instead of appearing to hang (the dense TLS benchmark plots are ~30M points).
-# Override via env for power users with patience / a big machine.
+# TreeIso is CPU-only and O(n log n)+ with heavy constants, BUT only the voxel
+# decimation itself runs at full N (a linear np.unique) — every expensive stage
+# (cut-pursuit k-NN graph + graph cut, the O(nGroups²) stage-3 merge) runs over
+# the DECIMATED node count. So raw input size is the wrong thing to gate on: a
+# 13 M-point cloud that decimates to ~1 M nodes is comfortably in TreeIso's
+# intended regime, while a 2.6 M-point ALS tile at the paper's 5 cm voxel
+# decimates to 2.6 M nodes (a 99.2% no-op) and hangs for 15-20 min.
+#
+# The real gate is therefore `_TREEISO_MAX_NODES`, checked against the exact
+# post-decimation node count (see `_count_treeiso_nodes`), AFTER
+# `_auto_treeiso_decimation` has resolved the voxel sizes from measured spacing.
+# `_TREEISO_MAX_POINTS` remains as a much looser backstop on raw input, because
+# the full-N steps that precede decimation (a cKDTree over every point, the
+# voxel np.unique) still cost real time and RAM.
 try:
-    _TREEISO_MAX_POINTS = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_POINTS", "5000000"))
+    _TREEISO_MAX_POINTS = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_POINTS", "50000000"))
 except (ValueError, TypeError):
-    _TREEISO_MAX_POINTS = 5_000_000
+    _TREEISO_MAX_POINTS = 50_000_000
+
+# Post-decimation node ceiling. `_auto_treeiso_decimation` already targets
+# ~1 M nodes (TARGET_DECIMATED_NODES); this allows 2× headroom before refusing,
+# so a cloud the auto-scaler handled always passes and only a genuinely
+# pathological one (user-pinned fine voxel on a huge tile) is rejected.
+try:
+    _TREEISO_MAX_NODES = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_NODES", "2000000"))
+except (ValueError, TypeError):
+    _TREEISO_MAX_NODES = 2_000_000
 
 # BFS skeleton extraction builds an in-RAM neighbour graph and runs BFS/cluster
 # passes over it; beyond a few million points the graph + Python passes get
@@ -3693,6 +5224,13 @@ class TreeSegmentationRequest(BaseModel):
     # TreeIso and returned as tree id 0. Ignored on the session endpoint, which
     # reads the persisted `ground_class` column directly.
     ground_class: Optional[List[float]] = None
+    # Set by the UI's "Segment Anyway" confirmation. When the estimated workload
+    # is above the cost guideline, the endpoint returns a `cost_warning` and does
+    # NOT run; the caller re-sends with this true to proceed. It is purely a
+    # confirmation step — there is no workload TreeIso will refuse outright, so a
+    # user willing to wait can always run (and Cancel mid-run). Non-UI callers
+    # (scripts, the eval harness) can set it up-front to never be interrupted.
+    acknowledge_cost: bool = False
     reg_strength1: float = 1.0
     min_nn1: int = 5
     decimate_res1: float = 0.05
@@ -3715,6 +5253,12 @@ class TreeSegmentationResponse(BaseModel):
     num_trees: int = 0
     num_points: int = 0
     ground_warning: bool = False
+    # Present (with success=False and no error) when the workload is above the
+    # cost guideline and the caller hasn't set `acknowledge_cost`. Carries
+    # `message` plus the raw numbers so the UI can compose its own copy. This is
+    # a confirmation prompt, not a refusal — re-send with `acknowledge_cost` to
+    # run it.
+    cost_warning: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
 
@@ -3744,6 +5288,151 @@ def _treeiso_params(request: "TreeSegmentationRequest"):
     )
 
 
+def _treeiso_spacing_probe(points: np.ndarray) -> Optional[Tuple[float, int]]:
+    """Median nearest-neighbour spacing of `points`, or None for a cloud too
+    small / degenerate to probe.
+
+    Returns `(spacing_m, n_finite)`. Shared by `_auto_treeiso_decimation` (which
+    sizes the voxels from it), so the spacing measurement lives in one place.
+
+    Clouds under 50k points early-out with None: they decimate fine at the paper
+    defaults and finish fast, so neither caller needs a measurement."""
+    from scipy.spatial import cKDTree
+
+    if len(points) < 50_000:
+        return None
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    if len(pts) < 50_000:
+        return None
+    # Median NN spacing on a sample (cKDTree k=2: [0] is the point itself,
+    # [1] its nearest neighbor). Sampling keeps the probe O(sample) on big tiles.
+    sample = pts
+    if len(pts) > 200_000:
+        idx = np.random.default_rng(0).choice(len(pts), 200_000, replace=False)
+        sample = pts[idx]
+    dist, _ = cKDTree(pts).query(sample, k=2, workers=-1)
+    nn = dist[:, 1]
+    nn = nn[np.isfinite(nn) & (nn > 0)]
+    if nn.size == 0:
+        return None
+    return float(np.median(nn)), int(len(pts))
+
+
+def _count_treeiso_nodes(points: np.ndarray, p) -> Optional[int]:
+    """Count the stage-1 nodes TreeIso will actually work on — i.e. how many
+    voxels survive `decimate_pcd(pcd, p.decimate_res1)` — or None when the voxel
+    size is unusable (non-finite / non-positive).
+
+    This is the number that drives TreeIso's cost: `_process_point_cloud`
+    decimates FIRST, then runs cut-pursuit and the O(nGroups²) merge over the
+    decimated cloud only. Gating on it rather than on raw input size is what lets
+    a 13 M-point cloud that collapses to ~1 M voxels through, while still
+    catching a fine-voxel-on-a-huge-tile request that would decimate to nothing.
+
+    EXACT, not modelled. A density model (points-per-voxel ~ (res/spacing)³) was
+    tried first and is not safe: it assumes uniform voxel occupancy, but real
+    clouds cluster, so it under-counted canopy-like data ~9× — the dangerous
+    direction for a guard. Measured against the real `decimate_pcd` it ranged
+    from 0.1× to 49× depending on cloud shape and voxel size.
+
+    Counting exactly costs one full-N pass. We fold the three floored int coords
+    into a single int64 key so it's `np.unique` over a 1-D array rather than
+    `axis=0` over an (N,3) — measured ~5 s on 13.5 M points vs ~14 s, which is
+    cheap against the 15-20 min hang this prevents. Falls back to the (N,3)
+    unique if the index space would overflow int64."""
+    res = float(getattr(p, "decimate_res1", 0.0) or 0.0)
+    if not np.isfinite(res) or res <= 0:
+        return None
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    if len(pts) == 0:
+        return 0
+    # Match `_process_point_cloud`, which mean-centres before `decimate_pcd` —
+    # the offset shifts where voxel boundaries fall, so skipping it mis-counts by
+    # a few percent.
+    pts = pts - np.mean(pts, axis=0)
+    q = np.floor(pts / res).astype(np.int64)
+    q -= q.min(axis=0)
+    dims = q.max(axis=0) + 1
+    # Only use the packed key when the product fits comfortably in int64.
+    if float(dims[0]) * float(dims[1]) * float(dims[2]) < 9.0e18:
+        key = (q[:, 0] * dims[1] + q[:, 1]) * dims[2] + q[:, 2]
+        return int(len(np.unique(key)))
+    return int(len(np.unique(q, axis=0)))
+
+
+def _treeiso_size_error(points: np.ndarray, param_dict: dict) -> Optional[str]:
+    """Return an actionable error string if TreeIso would be too expensive on
+    `points`, else None. `param_dict` is the request's tuning fields (the same
+    dict handed to the worker); it is NOT mutated.
+
+    Two gates, in cost order:
+
+    1. Raw input vs `_TREEISO_MAX_POINTS` — a loose backstop for the full-N work
+       that happens before decimation (cKDTree probe, voxel np.unique).
+    2. Post-decimation node count vs `_TREEISO_MAX_NODES` — the real gate,
+       evaluated against the SAME auto-scaled voxel size the worker will use, so
+       a cloud the auto-scaler rescues is never rejected for its raw size.
+
+    Resolving the params here duplicates the worker's `_auto_treeiso_decimation`
+    call, but on a copy: the worker re-derives them in-process from the identical
+    inputs (same deterministic seeded probe), so the two agree, and the endpoint
+    keeps sending unresolved params across the process boundary exactly as
+    before."""
+    n = len(points)
+    if n > _TREEISO_MAX_POINTS:
+        return (f"{n:,} points exceeds the {_TREEISO_MAX_POINTS:,}-point limit for "
+                "tree segmentation. Downsample or crop first.")
+    return None
+
+
+def _treeiso_cost_warning(points: np.ndarray, param_dict: dict) -> Optional[dict]:
+    """Return an ADVISORY dict when TreeIso's workload looks expensive, else None.
+
+    This is a warning, NOT a blocker: a user who is willing to wait must always
+    be able to run the tool (they can Cancel mid-run). The endpoints surface this
+    and refuse only until the caller sets `acknowledge_cost`, which the panel
+    sends on a second, explicit "Segment Anyway" click. Nothing here caps what
+    TreeIso can ultimately process.
+
+    `param_dict` is the request's tuning fields; it is NOT mutated.
+
+    The cost signal is the post-decimation node count, not raw input size —
+    TreeIso voxel-decimates before every expensive stage, so a 13 M-point cloud
+    that collapses to ~600 k voxels is unremarkable, while a fine voxel on a big
+    tile leaves millions of nodes and runs for 15-20 min. Returns the numbers as
+    fields so the UI can compose its own copy.
+
+    Resolving the params here duplicates the worker's `_auto_treeiso_decimation`
+    call, but on a copy: the worker re-derives them in-process from the identical
+    inputs (same deterministic seeded probe), so the two agree, and the endpoint
+    keeps sending unresolved params across the process boundary exactly as
+    before."""
+    try:
+        resolved = _treeiso_params_from_dict(dict(param_dict))
+    except Exception:
+        # TreeIso deps missing (no C-extension): let the worker raise the real,
+        # more specific import error rather than masking it with a cost probe.
+        return None
+    _auto_treeiso_decimation(points, resolved)
+    nodes = _count_treeiso_nodes(points, resolved)
+    if nodes is None or nodes <= _TREEISO_MAX_NODES:
+        return None
+    return {
+        "nodes": int(nodes),
+        "node_guideline": int(_TREEISO_MAX_NODES),
+        "points": int(len(points)),
+        "decimate_res1": float(resolved.decimate_res1),
+        "message": (
+            f"This cloud will run tree segmentation on {nodes:,} voxels after "
+            f"decimation, above the {_TREEISO_MAX_NODES:,} guideline "
+            f"({len(points):,} points at a {resolved.decimate_res1:g} m voxel "
+            "size). It may take 15 minutes or more. You can cancel while it runs."
+        ),
+    }
+
+
 def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
     """Raise TreeIso's stage-1/2 voxel sizes in place when they're finer than the
     cloud's actual point spacing — otherwise voxel decimation is a no-op and
@@ -3762,30 +5451,10 @@ def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
     seeded by the UI for a big tile, or chosen by a power user) is left alone, so
     this is idempotent with the frontend seed. Small clouds early-out and keep the
     paper defaults bit-for-bit."""
-    from scipy.spatial import cKDTree
-
-    n = len(points)
-    if n < 50_000:
-        # Small clouds decimate fine and finish fast; never probe, never bump.
+    probe = _treeiso_spacing_probe(points)
+    if probe is None:
         return
-    pts = np.asarray(points, dtype=np.float64)[:, :3]
-    finite = np.isfinite(pts).all(axis=1)
-    pts = pts[finite]
-    if len(pts) < 50_000:
-        return
-    # Median NN spacing on a sample (cKDTree k=2: [0] is the point itself,
-    # [1] its nearest neighbor). Sampling keeps the probe O(sample) on big tiles.
-    sample = pts
-    if len(pts) > 200_000:
-        idx = np.random.default_rng(0).choice(len(pts), 200_000, replace=False)
-        sample = pts[idx]
-    tree = cKDTree(pts)
-    dist, _ = tree.query(sample, k=2, workers=-1)
-    nn = dist[:, 1]
-    nn = nn[np.isfinite(nn) & (nn > 0)]
-    if nn.size == 0:
-        return
-    spacing = float(np.median(nn))
+    spacing, n_finite = probe
 
     # Aim for ~3× spacing so each stage-1 voxel pools a handful of points.
     target1 = 3.0 * spacing
@@ -3794,13 +5463,28 @@ def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
     # bounded (~≤1 M nodes). Voxel count scales ~ (spacing / res)³ at constant
     # density, so res ∝ spacing · (n / target_nodes)^(1/3).
     TARGET_DECIMATED_NODES = 1_000_000
-    if len(pts) > TARGET_DECIMATED_NODES:
-        target1 = max(target1, spacing * (len(pts) / TARGET_DECIMATED_NODES) ** (1.0 / 3.0))
+    if n_finite > TARGET_DECIMATED_NODES:
+        target1 = max(target1, spacing * (n_finite / TARGET_DECIMATED_NODES) ** (1.0 / 3.0))
 
     # Only raise, and only when riding the paper default (gate a hair above 0.05 /
     # 0.1 for float tolerance — a UI-coarsened value is > 0.051 and no-ops here).
     if p.decimate_res1 <= 0.051 and target1 > p.decimate_res1:
         p.decimate_res1 = round(target1, 3)
+
+        # The (spacing/res)³ law above assumes a volume-filling cloud. Canopy is
+        # closer to a set of surfaces, so real voxel occupancy is far lower and
+        # the cube law under-shoots badly: a 13.5 M-point plot landed on
+        # res1 = 0.307 m and still produced 4.3 M voxels, 4× the intended target.
+        # So verify against the EXACT count and keep coarsening until we're
+        # actually under it. Each step is a cheap int64 np.unique; the ×1.26
+        # factor is 2^(1/3), i.e. one halving of node count per step under the
+        # cube law, so this converges in a handful of iterations.
+        for _ in range(12):
+            nodes = _count_treeiso_nodes(points, p)
+            if nodes is None or nodes <= TARGET_DECIMATED_NODES:
+                break
+            p.decimate_res1 = round(p.decimate_res1 * 1.26, 3)
+
     target2 = 2.0 * p.decimate_res1
     if p.decimate_res2 <= 0.101 and target2 > p.decimate_res2:
         p.decimate_res2 = round(target2, 3)
@@ -3891,8 +5575,9 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
     harness (`scripts/eval_tree_segmentation.py`) reads GT straight from the
     file. There is no GT consumer on this endpoint."""
     try:
-        points = _resolve_segmentation_points(
-            GroundSegmentationRequest(points=request.points, source=request.source)
+        points = await run_in_threadpool(
+            _resolve_segmentation_points,
+            GroundSegmentationRequest(points=request.points, source=request.source),
         )
         n_full = len(points)
 
@@ -3922,12 +5607,21 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
                 error=f"Fewer than 10 points remain after dropping {reason} points.",
             )
 
-        if len(pts) > _TREEISO_MAX_POINTS:
+        ti_params_for_cost = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
+        size_error = _treeiso_size_error(pts, ti_params_for_cost)
+        if size_error:
             return TreeSegmentationResponse(
-                success=False, num_points=n_full,
-                error=(f"{len(pts):,} points exceeds the {_TREEISO_MAX_POINTS:,}-point "
-                       "limit for tree segmentation. Downsample or crop first."),
+                success=False, num_points=n_full, error=size_error,
             )
+        # Advisory cost check on the post-decimation node count (what actually
+        # drives TreeIso's runtime). Returns a confirmation prompt rather than an
+        # error — the caller re-sends with `acknowledge_cost` to run it anyway.
+        if not request.acknowledge_cost:
+            warning = _treeiso_cost_warning(pts, ti_params_for_cost)
+            if warning:
+                return TreeSegmentationResponse(
+                    success=False, num_points=n_full, cost_warning=warning,
+                )
 
         # Skip the advisory ground heuristic when the caller already handed us
         # ground labels to exclude — the ground is gone from `pts`.
@@ -4069,6 +5763,23 @@ class HeliosScanEntry(BaseModel):
     # (Gtheta) leaf-area inversion, which needs no triangulation. Static scans
     # leave this None and behave exactly as before. Ignored by triangulation.
     trajectory: Optional[PoseStream] = None
+    # Opt-in escape hatch for reading points from `file_path` when the entry ALSO
+    # names a `session_id`. OFF by default and never set by the app.
+    #
+    # A cloud's file is read exactly once, at import; every edit after that
+    # (deletions, translation, filtering, segmentation labels, wizard column
+    # choices, role assignments, global shift) lives only in the session arrays.
+    # Re-reading the file to "recover" from a missing session does not recover
+    # anything — it computes on pre-edit, differently-parsed data and returns a
+    # silently wrong answer, which is strictly worse than an error. It is also
+    # not always a point-cloud file at all: a `.riproject` "source path" is a
+    # DIRECTORY of proprietary scans kept purely as provenance.
+    #
+    # So a stale `session_id` is a hard error, never a fallback. Set this only
+    # when the file is genuinely not a live cloud — unit tests driving the
+    # loaders directly, and any future read of an external file. Mirrors
+    # `PointSource.allow_file_source`.
+    allow_file_source: bool = False
 
 class HeliosGrid(BaseModel):
     """An explicit triangulation grid, derived from a voxel box in the UI.
@@ -4097,6 +5808,42 @@ class HeliosGrid(BaseModel):
     # excluded from the result. None => all columns kept.
     column_offsets: Optional[List[float]] = None
     kept_columns: Optional[List[bool]] = None
+
+def _resolve_scan_session(scan_entry, what: str):
+    """Fail loudly when a scan entry names a `session_id` the backend no longer has.
+
+    THE RULE: once a file is imported it is treated as if it does not exist. The
+    session arrays are the complete source of truth — they carry every edit
+    (deletions, translation, filtering, segmentation labels) AND every import-time
+    choice (wizard column roles, dropped columns, ASCII layout, global shift) that
+    the file on disk knows nothing about. Re-reading the file therefore does not
+    "recover" the cloud; it substitutes a different cloud and reports success. A
+    `.riproject` source path isn't even a readable point-cloud file — it is a
+    DIRECTORY kept only as provenance, which is how this surfaced: a hot-reload
+    dropped the session and the export fell through to the project directory,
+    reporting "Scan file not found" for a file that was never the data.
+
+    So: no fallback. `file_path` is for scans that never had a session at all;
+    a stale session is an error telling the user to re-import.
+
+    Returns the live CloudSession, or None when the entry names no session at all
+    (a genuinely file-backed or inline scan). Raises when the session is stale.
+    """
+    if not scan_entry.session_id:
+        return None
+    with _cloud_session_lock:
+        sess = _cloud_sessions.get(scan_entry.session_id)
+    if sess is not None:
+        return sess
+    if getattr(scan_entry, 'allow_file_source', False):
+        return None
+    raise ValueError(
+        f"Cloud session not found: {scan_entry.session_id}. The backend restarted "
+        f"since this cloud was imported, so its edited points are gone. {what} was "
+        "stopped rather than falling back to the original file, which would have "
+        "used pre-edit data (and none of the import options you chose). Re-import "
+        "the cloud and try again.")
+
 
 class HeliosTriangulationRequest(BaseModel):
     """Request model for Helios triangulation"""
@@ -4394,8 +6141,49 @@ class LADComputeResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _is_binary_scan_file(file_path: str) -> bool:
+    """True when `file_path` is a BINARY point-cloud container (LAS/LAZ/PLY/PCD)
+    rather than an ASCII column file.
+
+    Decided by extension, not by sniffing bytes: the extension is what
+    `_load_pointcloud_arrays` itself dispatches on, so this stays consistent with
+    how the file will actually be read. (A `.ply` may be ascii-encoded, but its
+    header is still not the bare column layout the ASCII readers expect, so it
+    belongs on the binary side of this split either way.)
+    """
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    return ext in (_OPEN3D_EXTENSIONS | _LAS_EXTENSIONS)
+
+
+def _require_ascii_scan_file(file_path: str, what: str) -> None:
+    """Raise a legible error when an ASCII-only reader is handed a binary file.
+
+    The ASCII readers below (`_detect_ascii_format`, `_file_xyz_bounds`,
+    `_file_to_lad_arrays`, `_read_scan_columns_from_file`) all open the file in
+    TEXT mode and split lines on whitespace. Handed a LAS/LAZ/PLY/PCD they died
+    with a raw `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xd5 in
+    position 90` (byte 90 is inside the LAS public header block) — a decoder
+    message that named neither the file nor the real problem, and which reached
+    users verbatim as "Helios triangulation failed: 'utf-8' codec can't decode…".
+
+    This is the last-resort guard: callers that CAN handle a binary file should
+    route it to `_load_pointcloud_arrays` instead of reaching here.
+    """
+    if _is_binary_scan_file(file_path):
+        ext = os.path.splitext(file_path)[1].lower().lstrip('.') or '?'
+        raise ValueError(
+            f"{what} needs an ASCII point file, but '{os.path.basename(file_path)}' "
+            f"is a binary .{ext} file. Re-import the scan so it is backed by a live "
+            f"cloud session, or export it to an ASCII format (.xyz/.txt/.csv) first."
+        )
+
+
 def _detect_ascii_format(file_path: str) -> str:
-    """Auto-detect the ASCII column format of a scan file."""
+    """Auto-detect the ASCII column format of a scan file.
+
+    Binary containers are rejected up front — see `_require_ascii_scan_file`.
+    """
+    _require_ascii_scan_file(file_path, "ASCII column-format detection")
     with open(file_path) as f:
         for line in f:
             line = line.strip()
@@ -4450,6 +6238,7 @@ def _file_xyz_bounds(file_path: str, ascii_format: Optional[str] = None):
     (count, None, None) if no coordinates were found.
     """
     import math
+    _require_ascii_scan_file(file_path, "Scan bounds scanning")
     xi, yi, zi = _xyz_column_indices(ascii_format)
     need = max(xi, yi, zi) + 1
     n = 0
@@ -5082,10 +6871,12 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
             theta_min, theta_max, phi_min, phi_max = _angles(scan_entry)
 
             session_id = scan_entry.session_id
-            session_present = False
-            if session_id is not None:
-                with _cloud_session_lock:
-                    session_present = session_id in _cloud_sessions
+            # Raises on a STALE session (id set, session gone) rather than letting
+            # control fall through to the `file_path` branch below, which would
+            # silently triangulate the pre-edit file. Returns None only when the
+            # entry names no session at all.
+            session_present = _resolve_scan_session(
+                scan_entry, "The triangulation") is not None
 
             if session_id is not None and session_present:
                 # Session source of truth: hits only, misses excluded.
@@ -5130,23 +6921,49 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                     scan_entry, xyz.shape[0], theta_max - theta_min, phi_max - phi_min)
                 fp = pts_path
             elif scan_entry.file_path:
-                # File-path mode: pyhelios reads the scan file directly from disk.
+                # File-path mode. Helios itself can only read ASCII scan files,
+                # so a BINARY container (.las/.laz/.ply/.pcd) can't be handed to
+                # it directly — it has to be decoded to a temp x-y-z file first,
+                # exactly as the session branch above does.
+                #
+                # This branch is the restart fallback: it runs when a scan's
+                # session is gone (backend restarted since import) but the entry
+                # still carries a sourcePath. Since the app imports LAS/LAZ as a
+                # first-class format, that path is routinely binary — and before
+                # this, every reader below assumed text and blew up on the LAS
+                # header with a raw UnicodeDecodeError (see
+                # _require_ascii_scan_file).
                 fp = scan_entry.file_path
                 if not fp or not os.path.isfile(fp):
                     raise ValueError(f"Scan file not found: {fp}")
-                fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
-                n_points, lo, hi = _file_xyz_bounds(fp, fmt)
-                if lo is not None:
-                    bb_lo = np.minimum(bb_lo, lo)
-                    bb_hi = np.maximum(bb_hi, hi)
+                if _is_binary_scan_file(fp):
+                    # Decode via the shared loader, which dispatches by extension
+                    # and drops sky/miss points (is_miss != 0) — mandatory before
+                    # any triangulation, since a miss is projected ~1 km out and
+                    # inflates the extent ~1000x, which HANGS the reconstruction
+                    # rather than erroring.
+                    src = PointSource(source_path=fp, ascii_format=scan_entry.ascii_format)
+                    xyz, _colors, _intensity = _read_points_from_source(src)
+                    if xyz.shape[0] == 0:
+                        raise ValueError(
+                            f"'{os.path.basename(fp)}' has no hit points to "
+                            "triangulate (empty file, or only sky/miss returns).")
+                    bb_lo = np.minimum(bb_lo, xyz.min(axis=0))
+                    bb_hi = np.maximum(bb_hi, xyz.max(axis=0))
+                    pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
+                    # %.8g for the same precision reason as the session branch.
+                    np.savetxt(pts_path, xyz, fmt="%.8g", delimiter=" ")
+                    fmt = "x y z"
+                    n_points = xyz.shape[0]
+                    fp = pts_path
+                else:
+                    fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
+                    n_points, lo, hi = _file_xyz_bounds(fp, fmt)
+                    if lo is not None:
+                        bb_lo = np.minimum(bb_lo, lo)
+                        bb_hi = np.maximum(bb_hi, hi)
                 n_theta, n_phi = _resolution(
                     scan_entry, n_points, theta_max - theta_min, phi_max - phi_min)
-            elif scan_entry.session_id is not None:
-                # session_id given but the session is gone and no file fallback.
-                raise ValueError(
-                    f"Cloud session not found: {scan_entry.session_id}. The "
-                    "backend may have restarted since import. Re-import the scan "
-                    "and try again.")
             else:
                 # Points mode (fallback): write inline points to a temp file.
                 points = scan_entry.points
@@ -5556,7 +7373,7 @@ def _pack_helios_triangulation(result: dict) -> bytes:
 
 
 @app.post("/api/triangulate/helios")
-async def helios_triangulate(request: HeliosTriangulationRequest, http_request: Request):
+def helios_triangulate(request: HeliosTriangulationRequest, http_request: Request):
     """Triangulate point cloud data using PyHelios spherical Delaunay triangulation.
 
     Returns a PHB1 binary frame (see _bin_frame_bytes) so multi-million-triangle
@@ -5576,28 +7393,17 @@ async def helios_triangulate(request: HeliosTriangulationRequest, http_request: 
 _SPACING_BRIDGE_RATIO = 3.0
 
 
-def _resolve_scan_positions(scan_entry, warnings: list) -> "np.ndarray":
+def _resolve_scan_positions(scan_entry) -> "np.ndarray":
     """Surviving (N,3) positions for one scan, by the same source priority as the
     triangulation/LAD paths: live session (honoring unbaked deletions, never
     re-reading the source) -> inline points -> source file. Positions only — the
-    spacing check needs no ray directions or multi-return columns."""
+    spacing check needs no ray directions or multi-return columns.
+
+    A `file_path` source is only for scans that never had a session; a stale
+    session raises (see _resolve_scan_session)."""
     import numpy as np
 
-    sess = None
-    if scan_entry.session_id:
-        with _cloud_session_lock:
-            sess = _cloud_sessions.get(scan_entry.session_id)
-        if sess is None and scan_entry.file_path:
-            warnings.append(
-                "The edited point-cloud session was no longer available (the "
-                "backend likely restarted), so the spacing check used the source "
-                "file on disk. Unbaked deletions were not applied."
-            )
-        elif sess is None:
-            raise ValueError(
-                f"Cloud session not found: {scan_entry.session_id}. The backend "
-                "may have restarted since import. Re-import the scan and try again."
-            )
+    sess = _resolve_scan_session(scan_entry, "The spacing check")
 
     if sess is not None:
         with _cloud_session_lock:
@@ -5670,7 +7476,7 @@ def _do_spacing_check(request: HeliosTriangulationRequest) -> dict:
 
     pooled = []
     for scan_entry in request.scans:
-        xyz = _resolve_scan_positions(scan_entry, warnings)
+        xyz = _resolve_scan_positions(scan_entry)
         if xyz.size == 0:
             continue
         if grid_center is not None:
@@ -6053,13 +7859,65 @@ def _inline_to_lad_arrays(points: list, scalar_columns: Optional[dict], origin):
     return xyz, dirs, labels, vals, flags
 
 
+def _las_to_lad_arrays(file_path: str, origin):
+    """LAD arrays from a BINARY LAS/LAZ scan file.
+
+    The ASCII sibling below locates the per-pulse columns by tokenizing the
+    format string; a LAS file instead names its dimensions, so the multi-return
+    and miss columns are read straight off the point record (this app writes
+    `is_miss` as a first-class LAS extra dim — see `_session_to_las`). Without
+    this, a session-less LAS scan reached the text reader and died on the LAS
+    header with a UnicodeDecodeError.
+
+    Note LAD is the ONE tool that must KEEP sky/miss points — they are the
+    Beer's-law transmission denominator — so this deliberately does not filter
+    them, matching the ASCII path.
+    """
+    import numpy as np
+    import laspy
+
+    las = laspy.read(file_path)
+    xyz = np.column_stack([las.x, las.y, las.z]).astype(np.float64, copy=False)
+    dims = set(las.point_format.dimension_names)
+
+    # Map LAD's slugs onto the LAS dimensions that carry them. LAS spells the
+    # per-return fields differently from our ASCII tokens, so resolve every
+    # dimension through the canonical table (`_CANONICAL_NAME_ALIASES`) rather
+    # than a local list — that local list is how `gps_time` could be understood
+    # here and not by the miss/backfill path.
+    wanted = ('timestamp', 'target_index', 'target_count', _MISS_SLUG)
+    aliases = {slug: _dims_for_slug(dims, slug) for slug in wanted}
+    cache: dict = {}
+    for slug, names in aliases.items():
+        for name in names:
+            if name in dims:
+                try:
+                    cache[slug] = np.asarray(las[name]).astype(np.float64)
+                except Exception:  # noqa: BLE001 - a missing/odd dim is just "absent"
+                    continue
+                break
+
+    dirs = _directions_from_origin(xyz, origin)
+    labels, vals, flags = _lad_labels_vals(lambda slug: cache.get(slug), xyz.shape[0])
+    return xyz, dirs, labels, vals, flags
+
+
 def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
-    """Legacy fallback: read an ASCII scan file once into LAD arrays (used only
+    """Legacy fallback: read a scan file once into LAD arrays (used only
     when a scan has neither a live session nor inline points — e.g. a stale
     session id that fell back to the source file). Locates x/y/z plus any
     timestamp/target/miss columns via the format string; never re-read after this.
+
+    A binary LAS/LAZ source is delegated to `_las_to_lad_arrays`; other binary
+    containers (PLY/PCD) carry no per-pulse columns and are rejected with a
+    legible error rather than a decoder crash.
     """
     import numpy as np
+
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    if ext in _LAS_EXTENSIONS:
+        return _las_to_lad_arrays(file_path, origin)
+    _require_ascii_scan_file(file_path, "Leaf-area-density's file fallback")
 
     fmt = ascii_format or _detect_ascii_format(file_path)
     tokens = fmt.split()
@@ -6577,26 +8435,11 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # Resolve the live session if one was requested. A session is an
             # in-memory object that does NOT survive a backend restart, so the
             # renderer's session id can be stale (e.g. after a dev reload or a
-            # respawn). When that happens, fall back to the source file the
-            # renderer also sent — losing only unbaked deletions, which we warn
-            # about — instead of failing the whole computation.
-            sess = None
-            if scan_entry.session_id:
-                with _cloud_session_lock:
-                    sess = _cloud_sessions.get(scan_entry.session_id)
-                if sess is None and scan_entry.file_path:
-                    warnings.append(
-                        "The edited point-cloud session was no longer available "
-                        "(the backend likely restarted), so LAD used the source "
-                        "file on disk. Any unbaked deletions were not applied — "
-                        "re-apply them and recompute if needed."
-                    )
-                elif sess is None:
-                    raise ValueError(
-                        f"Cloud session not found: {scan_entry.session_id}. The "
-                        "backend may have restarted since import. Re-import the "
-                        "scan and try again."
-                    )
+            # respawn). That is a HARD ERROR, not a fall-back to the source file:
+            # the file predates every edit and every import-wizard choice, so
+            # inverting it would report a confident LAD for data the user never
+            # saw. See _resolve_scan_session.
+            sess = _resolve_scan_session(scan_entry, "The LAD computation")
 
             if sess is not None:
                 with _cloud_session_lock:
@@ -7425,7 +9268,7 @@ class SnapGridResponse(BaseModel):
 
 
 @app.post("/api/lad/snap-grid", response_model=SnapGridResponse)
-async def lad_snap_grid(request: SnapGridRequest):
+def lad_snap_grid(request: SnapGridRequest):
     """Sample a DEM under each voxel column so the grid can be displaced to follow
     the ground. Returns the authoritative per-column offsets the UI both renders
     and feeds to the LAD inversion (HeliosGrid.column_offsets)."""
@@ -7455,7 +9298,7 @@ class TrajectoryParseRequest(BaseModel):
 
 
 @app.post("/api/trajectory/parse")
-async def trajectory_parse(request: TrajectoryParseRequest):
+def trajectory_parse(request: TrajectoryParseRequest):
     """Parse a binary trajectory (currently SBET .sbet/.out) into the canonical
     PoseStream wire dict the renderer's poseStreamFromWire consumes. Text trajectories
     (.csv/.txt/.tsv/.traj) are parsed client-side and never hit this endpoint.
@@ -7521,9 +9364,18 @@ class ScanExportGrid(BaseModel):
 
 
 class ScanExportEntry(BaseModel):
-    """One scan to export. Point source is one of session_id / points / file_path
-    (resolved in that precedence, mirroring the LAD path). Scanner geometry is
-    written into the XML; translation is applied to the points on export."""
+    """One scan to export. Point source is EXACTLY one of session_id / points /
+    file_path (resolved in that precedence, mirroring the LAD path). A live cloud
+    sends `session_id` alone — never `session_id` plus `file_path`, because a
+    missing session must fail loudly rather than export the pre-edit file.
+    Scanner geometry is written into the XML; translation is applied on export.
+
+    Only `origin` and a point source are required: the Export window lists every
+    cloud in the scene, so an entry may carry no scan geometry at all. The data
+    formats need none of it — only the Helios XML bundle and PTX do, and the UI
+    blocks those rows rather than sending them."""
+    # Display name, used only for progress messages ("Writing plot A (2/5)").
+    label: Optional[str] = None
     origin: List[float]                          # [x, y, z] scanner position
     # "raster" (default) or "spinning_multibeam". Multibeam scans export via
     # beam_elevation_angles_deg; n_theta/theta_* are ignored for them.
@@ -7561,8 +9413,13 @@ class ScanExportEntry(BaseModel):
     session_id: Optional[str] = None             # live edited session (honors deletions)
     points: Optional[List[List[float]]] = None   # inline flat cloud
     scalar_columns: Optional[Dict[str, List[float]]] = None  # aligned per-point columns
-    file_path: Optional[str] = None              # source file fallback
+    file_path: Optional[str] = None              # file-backed scan with NO session
     ascii_format: Optional[str] = None
+    # See `HeliosScanEntry.allow_file_source`. A stale `session_id` is a hard
+    # error, never a silent fall-through to `file_path`: the file predates every
+    # edit and import-wizard choice, so exporting it writes data the user never
+    # saw. Off by default and never set by the app.
+    allow_file_source: bool = False
     # World-space offset applied to the points (viewer translation), or null.
     translation: Optional[List[float]] = None
     # Ordered ASCII column slugs chosen in the export modal (includes x y z plus
@@ -7574,7 +9431,7 @@ class ScanExportEntry(BaseModel):
 class ScanExportRequest(BaseModel):
     """Export one or more scans to a Helios XML + per-scan ASCII bundle."""
     scans: List[ScanExportEntry]
-    base_name: Optional[str] = None              # output base (→ <base>.xml, <base>_<id>.xyz)
+    base_name: Optional[str] = None              # output base (→ <base>.xml, <base>_<label>.xyz)
     include_misses: bool = True                  # write miss points (+ is_miss column)
     # When True (default), write the Helios scan XML alongside the per-scan data
     # files (re-loadable bundle, data always .xyz). When False, write ONLY the
@@ -7586,6 +9443,14 @@ class ScanExportRequest(BaseModel):
     # Voxel-box grids to inject as <grid> blocks (write_xml=True only). None/empty
     # → no grid blocks written. Lets a scan bundle round-trip its grid(s).
     grids: Optional[List["ScanExportGrid"]] = None
+    # Absolute directory the backend writes the bundle into. Always set this when
+    # the destination is known (the renderer resolves it from the save dialog
+    # before calling): the base64-in-JSON alternative inflates each file ~1.33x and
+    # holds EVERY scan's bytes in one response, so a multi-scan LAZ export blows
+    # V8's ~512 MB string cap in response.json() and surfaces as "Unexpected end of
+    # JSON input". With dest_dir the response carries names + sizes only, `data` is
+    # null, and the renderer writes nothing.
+    dest_dir: Optional[str] = None
 
 
 # Standard scalar columns we try to preserve on export, in a stable order. Any of
@@ -7612,14 +9477,7 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
 
     # Build a slug -> (N,) getter for whichever source backs this scan, matching
     # the LAD path: session (honors deletions) → inline columns → source file.
-    sess = None
-    if scan_entry.session_id:
-        with _cloud_session_lock:
-            sess = _cloud_sessions.get(scan_entry.session_id)
-        if sess is None and not (scan_entry.points or scan_entry.file_path):
-            raise ValueError(
-                f"Cloud session not found: {scan_entry.session_id}. The backend "
-                "may have restarted since import. Re-import the scan and try again.")
+    sess = _resolve_scan_session(scan_entry, "The export")
 
     if sess is not None:
         with _cloud_session_lock:
@@ -7633,9 +9491,19 @@ def _resolve_scan_export_arrays(scan_entry, include_misses: bool):
                     if sess.timestamps is not None
                     and sess.timestamps.shape[0] == sess.positions.shape[0]
                     else None)
+            # Same story as `timestamp`: intensity has its own session field and is
+            # kept OUT of `extras` by `_LAS_STD_DIMS_SKIP`, so without this the
+            # `intensity` entry of `_SCAN_EXPORT_SCALAR_COLUMNS` never resolved for
+            # a session-backed cloud and the XML bundle exported without it.
+            inten64 = (np.asarray(sess.intensity, dtype=np.float64)[keep]
+                       if getattr(sess, 'intensity', None) is not None
+                       and sess.intensity.shape[0] == sess.positions.shape[0]
+                       else None)
         def _get(slug):
             if slug == 'timestamp' and ts64 is not None:
                 return ts64
+            if slug == 'intensity' and inten64 is not None:
+                return inten64
             return np.asarray(extras[slug]) if slug in extras else None
     elif scan_entry.points:
         xyz = np.ascontiguousarray(
@@ -7712,14 +9580,23 @@ _DATA_GEOMETRY_SLUGS = ('x', 'y', 'z')
 _DATA_COLOR_SLUGS = ('r', 'g', 'b')
 
 
-def _resolve_scan_for_format(scan_entry, include_misses: bool):
+def _resolve_scan_for_format(scan_entry, include_misses: bool, force_slugs: tuple = ()):
     """Resolve a scan entry to the channels a per-format writer needs:
     {positions (N,3), colors (N,3 0-1)|None, intensity (N,)|None,
-     scalars: {slug: (N,)}, ordered: [slugs]}. Translation applied, edits honored,
-     miss rows optionally dropped (applied uniformly to every channel).
+     scalars: {slug: (N,)}, ordered: [slugs], world_shift: (3,)|None}.
+    Translation applied, edits honored, miss rows optionally dropped (applied
+    uniformly to every channel).
 
     `ordered` is the export column order (from the modal's `columns`, minus x/y/z),
     used by the ASCII writer; binary writers ignore it and use their fixed schema.
+
+    `force_slugs` names columns that must be resolved regardless of the modal's
+    column picker — PTX passes the raster indices, which it places every point by.
+
+    `world_shift` is the session's import-time global shift, or None for an inline
+    or file-backed entry. It is NOT applied to `positions` (every scan export
+    writes the session's display frame); it is surfaced so a format that declares
+    an absolute pose can put true world coordinates in its header.
     """
     import numpy as np
 
@@ -7727,24 +9604,36 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
     if len(origin) != 3:
         raise ValueError(f"Origin must have 3 elements, got {len(origin)}")
 
-    sess = None
-    if scan_entry.session_id:
-        with _cloud_session_lock:
-            sess = _cloud_sessions.get(scan_entry.session_id)
-        if sess is None and not (scan_entry.points or scan_entry.file_path):
-            raise ValueError(
-                f"Cloud session not found: {scan_entry.session_id}. The backend "
-                "may have restarted since import. Re-import the scan and try again.")
+    sess = _resolve_scan_session(scan_entry, "The export")
 
     colors = None
     intensity = None
+    world_shift = None
     if sess is not None:
         with _cloud_session_lock:
             keep = ~sess.deleted
             xyz = np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
             extras = {k: np.asarray(v[keep]) for k, v in sess.extras.items()}
+            if getattr(sess, 'world_shift', None) is not None:
+                world_shift = np.asarray(sess.world_shift, np.float64).copy()
             if getattr(sess, 'colors', None) is not None:
-                colors = np.ascontiguousarray(sess.colors[keep], dtype=np.float64)
+                # `sess.colors` is uint16 in the LAS 0-65535 scale, but this
+                # function's contract — and every writer below — is 0-1, matching
+                # what the file_path branch's `_load_las_arrays` returns. Without
+                # the divide, `np.clip(colors, 0, 1)` sent every coloured point
+                # out as pure white.
+                colors = np.ascontiguousarray(
+                    sess.colors[keep], dtype=np.float64) / 65535.0
+            # Intensity lives in its OWN session field, not in `extras`:
+            # `_read_las_into_arrays` routes it to `CloudSession.intensity` and
+            # `_LAS_STD_DIMS_SKIP` deliberately keeps it out of extras. So the
+            # `_get('intensity')` fallback below never finds it for a
+            # session-backed cloud, and every scan data-only export of an
+            # imported cloud silently shipped with no intensity at all. Kept in
+            # the raw 0-65535 scale to match the file_path branch.
+            if (getattr(sess, 'intensity', None) is not None
+                    and sess.intensity.shape[0] == sess.positions.shape[0]):
+                intensity = np.asarray(sess.intensity, dtype=np.float64)[keep]
             # Prefer the float64 timestamps field (see _resolve_scan_export_arrays).
             ts64 = (np.asarray(sess.timestamps, dtype=np.float64)[keep]
                     if sess.timestamps is not None
@@ -7806,6 +9695,12 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
     # _resolve_scan_export_arrays).
     if include_misses and _MISS_SLUG not in wanted:
         wanted = [_MISS_SLUG] + wanted
+    # Structured formats need their columns regardless of the picker, exactly as
+    # `is_miss` rides along above. PTX places every point by (row, column), and
+    # without these it falls back to angular binning.
+    for slug in force_slugs:
+        if slug not in wanted:
+            wanted = wanted + [slug]
     scalars: dict = {}
     ordered: list = []
     for slug in wanted:
@@ -7828,14 +9723,21 @@ def _resolve_scan_for_format(scan_entry, include_misses: bool):
             ordered = [s for s in ordered if s != 'is_miss']
 
     return {"positions": xyz, "colors": colors, "intensity": intensity,
-            "scalars": scalars, "ordered": ordered}
+            "scalars": scalars, "ordered": ordered, "world_shift": world_shift}
 
 
-def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
+def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> tuple:
     """Write one resolved scan (from _resolve_scan_for_format) to the requested
     format. Returns (filename, raw_bytes). ASCII formats honor the chosen column
     order; binary/structured formats use their fixed schema (xyz + colour +
     intensity + scalars where the format supports them).
+
+    `progress(fraction, message)` — optional; the text formats build their rows
+    in a per-point Python loop that runs for minutes on a multi-million-point
+    cloud, so they report every ~65 k rows. It doubles as the cancel poll (the
+    reporter raises), which is why the callback is checked rather than the row
+    count alone. The binary/structured writers hand off to laspy/open3d and are
+    opaque, so they report nothing.
     """
     import numpy as np
     import tempfile
@@ -7847,6 +9749,15 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
     ordered = resolved["ordered"]        # ordered scalar slugs
     n = xyz.shape[0]
     fmt = fmt.lower()
+
+    # ---- PTX (structured raster) ----
+    # Needs the scan's grid + pose, which this signature doesn't carry, so the
+    # export path calls `_emit_ptx_file` directly. Kept here so this function
+    # stays the single answer to "what does format X look like".
+    if fmt == "ptx":
+        raise ValueError(
+            "PTX is written by _emit_ptx_file, which also needs the scan entry "
+            "(origin, grid resolution and sweep) — not just the resolved channels.")
 
     # ---- ASCII text (xyz / txt / csv) — full column control ----
     if fmt in ("xyz", "txt", "csv"):
@@ -7871,6 +9782,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
             for s in ordered:
                 row.append(str(scalars[s][i]))
             lines.append(delim.join(row))
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.{fmt}", ("\n".join(lines)).encode("utf-8")
 
     # ---- OBJ (vertices only) ----
@@ -7878,6 +9791,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
         lines = [f"# Scan exported from Phytograph", f"# {n} points"]
         for i in range(n):
             lines.append(f"v {xyz[i,0]:.6f} {xyz[i,1]:.6f} {xyz[i,2]:.6f}")
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.obj", ("\n".join(lines)).encode("utf-8")
 
     # ---- PLY (ascii; preserves colour + scalar fields) ----
@@ -7903,6 +9818,8 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
             for s in ordered:
                 row += f" {float(scalars[s][i]):.6f}"
             lines.append(row)
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.ply", ("\n".join(lines)).encode("utf-8")
 
     # ---- LAS / LAZ (laspy) ----
@@ -7910,8 +9827,19 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
         import laspy
         point_format = 3 if (colors is not None) else 1  # 1/3 carry intensity; 3 adds RGB
         header = laspy.LasHeader(point_format=point_format, version="1.4")
-        # Extra dimensions for any scalar columns (incl is_miss) so nothing is lost.
+        # `timestamp` rides the STANDARD gps_time field, not a float32 extra dim.
+        #
+        # Point formats 1 and 3 both carry a float64 gps_time, and that is where
+        # every other LAS reader (ours included) looks for a per-point time. As a
+        # float32 extra dim the values lose precision — ~15 us here, but 62 ms at
+        # full GPS week-seconds, enough to destroy multi-return pulse grouping —
+        # AND the standard field stays all-zero, so a re-import saw two columns:
+        # the extra dim holding the data, and the canonical channel reading zeros.
+        _ts_col = next((s for s in ordered
+                        if _canonical_slug_for_name(s) == 'timestamp'), None)
         for s in ordered:
+            if s == _ts_col:
+                continue
             header.add_extra_dim(laspy.ExtraBytesParams(name=s, type=np.float32))
         las = laspy.LasData(header)
         las.header.offsets = np.floor(xyz.min(axis=0)) if n else [0, 0, 0]
@@ -7928,6 +9856,10 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
             las.green = (c[:, 1] * 65535).astype(np.uint16)
             las.blue = (c[:, 2] * 65535).astype(np.uint16)
         for s in ordered:
+            if s == _ts_col:
+                # float64, into the standard field — see the header note above.
+                las.gps_time = np.asarray(scalars[s], dtype=np.float64)
+                continue
             las[s] = np.asarray(scalars[s], dtype=np.float32)
         ext = ".laz" if fmt == "laz" else ".las"
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
@@ -7968,12 +9900,61 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str) -> tuple:
     raise ValueError(f"Unsupported scan export format: {fmt}")
 
 
+def _read_las_columns(file_path: str) -> dict:
+    """Extra (non-geometry, non-colour) columns from a LAS/LAZ, as
+    slug -> (N,) float64, for the export column picker.
+
+    Reads the standard export scalars off the point record, accepting either the
+    app's own slug (round-tripped exports write `is_miss`/`target_index` as extra
+    dims) or the LAS-standard spelling. Any read problem for one dimension just
+    omits that column — an export must not fail over a missing scalar.
+    """
+    import numpy as np
+
+    try:
+        import laspy
+        las = laspy.read(file_path)
+    except Exception:  # noqa: BLE001 - unreadable LAS => no extra columns
+        return {}
+
+    dims = set(las.point_format.dimension_names)
+    # Resolved through the canonical table, not a local copy — see the note in
+    # `_las_to_lad_arrays`.
+    wanted = ('is_miss', 'timestamp', 'target_index', 'target_count', 'intensity')
+    aliases = {slug: _dims_for_slug(dims, slug) for slug in wanted}
+    out: dict = {}
+    for slug, names in aliases.items():
+        for name in names:
+            if name in dims:
+                try:
+                    out[slug] = np.asarray(las[name]).astype(np.float64)
+                except Exception:  # noqa: BLE001
+                    continue
+                break
+    return out
+
+
 def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) -> dict:
     """Read every NON-geometry column the ASCII_format declares into a
     slug -> (N,) float array dict. The export column picker may request any
     column the file carries (reflectance, row, column, r/g/b, …), so we read all
-    of them — not just the LAD subset — keyed by their format token."""
+    of them — not just the LAD subset — keyed by their format token.
+
+    Binary sources are handled separately: a LAS/LAZ names its dimensions rather
+    than declaring a column order, so its extra dims are read directly; other
+    binary containers simply carry no such columns and yield {}. Both callers
+    already load the GEOMETRY via `_load_pointcloud_arrays` (which reads binary
+    fine) and use this only for the extra scalars, so returning {} degrades the
+    export to geometry+colour rather than failing it — which is what happened
+    before, when a LAS path reached the text reader and raised UnicodeDecodeError.
+    """
     import numpy as np
+
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    if ext in _LAS_EXTENSIONS:
+        return _read_las_columns(file_path)
+    if _is_binary_scan_file(file_path):
+        return {}
 
     fmt = ascii_format or _detect_ascii_format(file_path)
     tokens = fmt.split()
@@ -8005,38 +9986,502 @@ def _read_scan_columns_from_file(file_path: str, ascii_format: Optional[str]) ->
     return {c: np.asarray(v, dtype=np.float64) for c, v in rows.items()}
 
 
-def _do_scan_export(request: "ScanExportRequest") -> dict:
+def _resolve_export_dest_dir(dest_dir: str) -> Path:
+    """Validate the directory a scan bundle is written into.
+
+    Same contract as _resolve_export_dest, one level up: the path comes from the
+    user's own native Save-As, but it still arrives in a request body, so require
+    an absolute path, resolve it (collapsing `..`), and require the directory to
+    already exist. We never create it — the save dialog always yields an existing
+    folder, so a missing one means the path isn't what we think it is.
+    """
+    p = Path(dest_dir).expanduser()
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail=f"Export path must be absolute: {dest_dir}")
+    p = p.resolve()
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Export directory does not exist: {p}")
+    return p
+
+
+# Cells formatted per write in the PTX writer. Bounds the transient text buffer
+# to ~20 MB regardless of grid size.
+_PTX_EXPORT_CHUNK_CELLS = 250_000
+# Refuse a raster beyond this (~4 GB of ASCII). The guard exists so a corrupt
+# row_index column can't ask for a terabyte-scale file.
+_PTX_MAX_CELLS = 60_000_000
+# Without a `dest_dir` the file must survive base64 + a JSON string, so a
+# full-resolution raster can't go that way (see ScanExportRequest.dest_dir).
+_PTX_MAX_INLINE_CELLS = 2_000_000
+
+
+def _ptx_export_cells(resolved: dict, scan_entry) -> "tuple[np.ndarray, int, int, str]":
+    """Assign each point to a PTX grid cell. Returns (cell, n_rows, n_cols, source).
+
+    `cell` is the column-major flat index `col * n_rows + row`, or -1 for a point
+    that has no place in the raster. That index IS the PTX write order, so the
+    writer becomes one ascending walk with no transpose and no full-raster
+    allocation.
+
+    Two sources, in order of authority:
+      * `row_index`/`column_index` — instrument ground truth, exact;
+      * angular binning against the scan's Ntheta/Nphi sweep — used when the
+        cloud carries no raster (a synthetic Helios scan, or an ASCII import).
+        Note this is not an approximation for a raster scan: every hit lies on a
+        known beam. And a mis-binned point still carries its own exact local xyz,
+        so a wrong bin reorders the raster without corrupting any geometry.
+    """
+    xyz = resolved["positions"]
+    scalars = resolved["scalars"]
+    n_rows = int(scan_entry.n_theta or 0)
+    n_cols = int(scan_entry.n_phi or 0)
+
+    row = scalars.get("row_index")
+    col = scalars.get("column_index")
+    if row is not None and col is not None and len(row) == xyz.shape[0]:
+        r = np.rint(np.asarray(row, np.float64)).astype(np.int64)
+        c = np.rint(np.asarray(col, np.float64)).astype(np.int64)
+        valid = (r >= 0) & (c >= 0)          # -1 sentinels (see _e57_to_las)
+        if r.size and valid.sum() >= 0.5 * r.size:
+            rmin, rmax = int(r[valid].min()), int(r[valid].max())
+            cmin, cmax = int(c[valid].min()), int(c[valid].max())
+            # Rebase ONLY when the raw indices overflow the declared grid (the
+            # E57 rowMinimum case). A cropped scan whose surviving rows start at
+            # 40 of 2000 still fits, and rebasing it would slide the whole cloud
+            # up the raster.
+            if n_rows and rmax >= n_rows and (rmax - rmin) < n_rows:
+                r = r - rmin
+                rmax -= rmin
+            if n_cols and cmax >= n_cols and (cmax - cmin) < n_cols:
+                c = c - cmin
+                cmax -= cmin
+            # Declared dims vs observed indices: the RASTER wins. Growing keeps
+            # every point; clamping would stack points into the edge cells.
+            n_rows, n_cols = max(n_rows, rmax + 1), max(n_cols, cmax + 1)
+            return np.where(valid, c * n_rows + r, -1), n_rows, n_cols, "index"
+
+    if n_rows <= 0 or n_cols <= 0:
+        raise ValueError(
+            "PTX needs a complete scan grid: this cloud carries no row/column "
+            "indices and its scan parameters have no Ntheta x Nphi resolution. "
+            "Set the scan resolution, or export from a structured source.")
+    pattern = getattr(scan_entry, "scan_pattern", None) or "raster"
+    if pattern != "raster":
+        raise ValueError(
+            f"PTX stores one sample per grid cell, so it can't represent a "
+            f"'{pattern}' scan. Export this scan as E57 or LAS instead.")
+
+    origin = np.asarray(scan_entry.origin, np.float64).reshape(3)
+    t = getattr(scan_entry, "translation", None)
+    if t is not None:
+        origin = origin + np.asarray(t, np.float64).reshape(3)
+    local = xyz - origin
+    rad = np.linalg.norm(local, axis=1)
+    ok = rad > 1e-9
+    rs = np.where(ok, rad, 1.0)
+    theta = np.degrees(np.arccos(np.clip(local[:, 2] / rs, -1.0, 1.0)))   # zenith from +Z
+    phi = np.degrees(np.arctan2(local[:, 0], local[:, 1]))                # CW from +Y
+    phi = (phi + float(getattr(scan_entry, "scan_azimuth_offset", 0.0) or 0.0)) % 360.0
+
+    t0 = float(scan_entry.theta_min if scan_entry.theta_min is not None else 0.0)
+    t1 = float(scan_entry.theta_max if scan_entry.theta_max is not None else 180.0)
+    p0 = float(scan_entry.phi_min if scan_entry.phi_min is not None else 0.0)
+    p1 = float(scan_entry.phi_max if scan_entry.phi_max is not None else 360.0)
+    tspan = t1 - t0
+    pspan = ((p1 - p0) % 360.0) or 360.0     # a 0..360 sweep reads as 0 under the mod
+
+    rr = np.floor((theta - t0) / (tspan if abs(tspan) > 1e-12 else 1e-12) * n_rows)
+    rr = np.where(rr == n_rows, n_rows - 1, rr).astype(np.int64)
+    cc = np.floor(((phi - p0) % 360.0) / pspan * n_cols)
+    cc = np.where(cc == n_cols, n_cols - 1, cc).astype(np.int64)
+    good = ok & (rr >= 0) & (rr < n_rows) & (cc >= 0) & (cc < n_cols)
+    return np.where(good, cc * n_rows + rr, -1), n_rows, n_cols, "angles"
+
+
+def _ptx_first_per_cell(cell: "np.ndarray", rank: "np.ndarray"):
+    """Pick one point per cell — lowest `rank` wins. Returns (point indices,
+    their cells, collapsed count).
+
+    PTX stores exactly one sample per cell, so a multi-return scan must collapse.
+    Doing it with an explicit sort rather than a duplicate-index scatter makes
+    the winner DETERMINISTIC (numpy leaves scatter order to the implementation)
+    and leaves the writer's targets unique by construction.
+    """
+    idx = np.flatnonzero(cell >= 0)
+    if idx.size == 0:
+        return idx, cell[idx], 0
+    order = idx[np.lexsort((rank[idx], cell[idx]))]
+    cs = cell[order]
+    first = np.empty(cs.size, bool)
+    first[:1] = True
+    first[1:] = cs[1:] != cs[:-1]
+    return order[first], cs[first], int(cs.size - int(first.sum()))
+
+
+def _ptx_write_stream(fh, resolved: dict, scan_entry,
+                      max_cells: int = _PTX_MAX_CELLS, progress=None) -> dict:
+    """Format one scan as PTX into the binary stream `fh`. Returns grid stats.
+
+    Points are written SCANNER-LOCAL (`world - origin`) under an identity
+    rotation, with the scanner position as the transform's translation. Three
+    reasons, all load-bearing:
+
+      * ScanParameters carries no registration rotation — only azimuth offset and
+        tilt, which are beam-frame knobs. Synthesising a rotation from them would
+        mean rotating every point by its inverse just to keep world coordinates
+        unchanged, with a convention error silently yawing the whole cloud.
+      * The local frame is what makes the empty-cell literal unambiguous: `0 0 0`
+        in local coordinates IS the scanner, a physically impossible return. In
+        world coordinates it is a real place.
+      * `%.6f` on a ~10 m local coordinate is six real decimals; on a UTM
+        coordinate it is barely three significant decimals of range.
+
+    The round trip is exact in floating point — the reader computes `local @ I + o`
+    and the only operation is adding back the constant that was subtracted.
+    """
+    cell, n_rows, n_cols, source = _ptx_export_cells(resolved, scan_entry)
+    n_cells = n_rows * n_cols
+    if n_cells > max_cells:
+        raise ValueError(
+            f"PTX raster would be {n_rows} x {n_cols} = {n_cells:,} cells, past "
+            f"the {max_cells:,} limit for this export path."
+            + ("" if max_cells != _PTX_MAX_INLINE_CELLS else
+               " Choose a destination folder so the file can be streamed to disk."))
+
+    xyz = resolved["positions"]
+    colors = resolved["colors"]
+    intensity = resolved["intensity"]
+    has_color = colors is not None
+
+    origin = np.asarray(scan_entry.origin, np.float64).reshape(3)
+    t = getattr(scan_entry, "translation", None)
+    if t is not None:
+        # The viewer translation moves the points, so it must move the scanner
+        # with them — otherwise `local` is off by it and the origin is no longer
+        # at local zero. (The XML path leaves `origin` alone, which is harmless
+        # for a flat format and fatal here.)
+        origin = origin + np.asarray(t, np.float64).reshape(3)
+    local = xyz - origin
+    # The header translation is the scanner's REGISTERED WORLD position, so the
+    # import-time global shift is added back for it alone. The point block is
+    # shift-invariant — local = (world - shift) - (origin - shift) — so this
+    # changes lines 3 and 10 and not one data line. PTX is the only scan-export
+    # format that does this, because it is the only one that declares an
+    # absolute pose (cf. the DEM raster export, which re-adds it for the same
+    # georeferencing reason).
+    ws = resolved.get("world_shift")
+    origin_world = origin if ws is None else origin + np.asarray(ws, np.float64)
+
+    # Rank for the multi-return collapse: the first return is what a Leica writes.
+    ti = resolved["scalars"].get("target_index")
+    rank = (np.asarray(ti, np.float64) if ti is not None and len(ti) == xyz.shape[0]
+            else np.linalg.norm(local, axis=1))
+    pidx, pcell, collapsed = _ptx_first_per_cell(cell, rank)
+    unplaced = int((cell < 0).sum())
+
+    iv = None
+    if intensity is not None:
+        v = np.asarray(intensity, np.float64)
+        finite = np.isfinite(v)
+        if finite.any():
+            lo, hi = float(v[finite].min()), float(v[finite].max())
+            # PTX intensity is 0..1; sources range from 0..1 floats through
+            # 0..65535 LAS. Normalise by the observed range, matching how the
+            # importer reads it back.
+            iv = ((v - lo) / (hi - lo)) if hi > lo else np.clip(v, 0.0, 1.0)
+    rgb = (np.clip(np.rint(np.asarray(colors, np.float64) * 255.0), 0, 255)
+           if has_color else None)
+
+    ox, oy, oz = (float(v) for v in origin_world)
+    fh.write((
+        f"{n_cols}\n{n_rows}\n"
+        f"{ox:.6f} {oy:.6f} {oz:.6f}\n"
+        "1.000000 0.000000 0.000000\n"
+        "0.000000 1.000000 0.000000\n"
+        "0.000000 0.000000 1.000000\n"
+        "1.000000 0.000000 0.000000 0.000000\n"
+        "0.000000 1.000000 0.000000 0.000000\n"
+        "0.000000 0.000000 1.000000 0.000000\n"
+        f"{ox:.6f} {oy:.6f} {oz:.6f} 1.000000\n"
+    ).encode("ascii"))
+
+    ntok = 7 if has_color else 4
+    row_fmt = ("%.6f %.6f %.6f %.6f %d %d %d\n" if has_color
+               else "%.6f %.6f %.6f %.6f\n")
+    order = np.argsort(pcell, kind="stable")
+    pcell, pidx = pcell[order], pidx[order]
+    for c0 in range(0, n_cells, _PTX_EXPORT_CHUNK_CELLS):
+        c1 = min(c0 + _PTX_EXPORT_CHUNK_CELLS, n_cells)
+        m = c1 - c0
+        # Every cell starts EMPTY, so a cell with no return costs no branch —
+        # it is simply a buffer row that nothing overwrote.
+        buf = np.zeros((m, ntok), np.float64)
+        buf[:, 3] = _PTX_EMPTY_INTENSITY
+        blo = int(np.searchsorted(pcell, c0, "left"))
+        bhi = int(np.searchsorted(pcell, c1, "left"))
+        if bhi > blo:
+            sl = pidx[blo:bhi]
+            tgt = pcell[blo:bhi] - c0            # unique by construction
+            buf[tgt, 0:3] = local[sl]
+            if iv is not None:
+                buf[tgt, 3] = iv[sl]
+            if rgb is not None:
+                buf[tgt, 4:7] = rgb[sl]
+        fh.write((row_fmt * m % tuple(buf.ravel())).encode("ascii"))
+        # The raster is the whole cost of a PTX, and it is already chunked — so
+        # a live percentage here is free (and also the cancel poll: this loop is
+        # minutes long for a 10 M-cell scan).
+        if progress is not None:
+            progress(c1 / n_cells, f"writing raster {c1:,} / {n_cells:,} cells")
+
+    return {"rows": n_rows, "cols": n_cols, "cells": n_cells,
+            "filled": int(pcell.size), "collapsed": collapsed,
+            "unplaced": unplaced, "source": source}
+
+
+def _emit_ptx_file(name: str, resolved: dict, scan_entry,
+                   dest: Optional[Path], progress=None) -> dict:
+    """One `files` entry for a PTX scan.
+
+    With `dest` the raster is formatted STRAIGHT INTO THE FILE and never
+    materialised as bytes — a 10 M-cell colour PTX is ~700 MB, which is exactly
+    the V8 string-cap failure `dest_dir` exists to avoid once base64 inflates it.
+    Without a destination the caller still gets base64, but capped.
+    """
+    if dest is not None:
+        target = dest / name
+        tmp = target.with_name(target.name + ".part")
+        try:
+            with open(tmp, "wb") as fh:
+                stats = _ptx_write_stream(fh, resolved, scan_entry, progress=progress)
+            os.replace(tmp, target)
+        except BaseException:
+            # Never leave a truncated .ptx behind — a partial raster is a valid-
+            # looking file with silently missing cells.
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return {"name": name, "data": None, "is_xml": False,
+                "bytes": target.stat().st_size, "written": True, "grid": stats}
+    buf = io.BytesIO()
+    stats = _ptx_write_stream(buf, resolved, scan_entry,
+                              max_cells=_PTX_MAX_INLINE_CELLS, progress=progress)
+    entry = _emit_scan_export_file(name, buf.getvalue(), False, None)
+    entry["grid"] = stats
+    return entry
+
+
+def _emit_scan_export_file(name: str, raw_bytes: bytes, is_xml: bool,
+                           dest: Optional[Path]) -> dict:
+    """Return one entry for the export response's `files` list.
+
+    With `dest` the bytes go straight to disk and the entry carries only metadata
+    (`data` null); without it the caller gets the legacy base64 payload. Keeping
+    both shapes in one helper is what stops the two export modes from drifting.
+    """
+    if dest is not None:
+        (dest / name).write_bytes(raw_bytes)
+        return {"name": name, "data": None, "is_xml": is_xml,
+                "bytes": len(raw_bytes), "written": True}
+    import base64
+    return {"name": name, "data": base64.b64encode(raw_bytes).decode("ascii"),
+            "is_xml": is_xml, "bytes": len(raw_bytes), "written": False}
+
+
+def _scan_entry_points_estimate(scan_entry) -> float:
+    """Rough point count for one export entry, used to WEIGHT the progress bar.
+
+    A batch is routinely lopsided — one 25 M-point cloud next to three 10 k
+    scans — so an equal slice per object would jump to 75% in a blink and then
+    sit still for the rest of the export. Everything here is O(1): a session
+    knows its array length, an inline entry its list length, and a file its size
+    (~32 bytes/point is close enough for a progress bar; it never has to be
+    right, only proportional). Returns 0.0 when nothing is knowable, which the
+    caller reads as "fall back to equal weights".
+    """
+    if scan_entry.session_id:
+        with _cloud_session_lock:
+            sess = _cloud_sessions.get(scan_entry.session_id)
+        if sess is not None:
+            # Deliberately NOT (~sess.deleted).sum(): this is a bar weight, and
+            # the full length is O(1) where the mask is O(N) per entry.
+            return float(sess.positions.shape[0])
+    if scan_entry.points:
+        return float(len(scan_entry.points))
+    if scan_entry.file_path:
+        try:
+            return float(os.path.getsize(scan_entry.file_path)) / 32.0
+        except OSError:
+            return 0.0
+    return 0.0
+
+
+def _scan_export_weights(scans) -> "list[tuple[float, float]]":
+    """Per-entry [lo, hi) slices of a 0..1 bar, weighted by point count."""
+    est = [_scan_entry_points_estimate(s) for s in scans]
+    total = sum(est)
+    if total <= 0:
+        n = max(len(scans), 1)
+        return [(i / n, (i + 1) / n) for i in range(len(scans))]
+    bounds = []
+    acc = 0.0
+    for e in est:
+        lo = acc / total
+        acc += e
+        bounds.append((lo, acc / total))
+    return bounds
+
+
+def _scan_entry_label(scan_entry, index: int) -> str:
+    """Name for progress messages: the viewer's label, else a 1-based ordinal."""
+    return (getattr(scan_entry, "label", None) or f"object {index + 1}").strip()
+
+
+# Everything a scan label may contribute to a file name. Spaces, path separators
+# and the Windows-reserved set collapse to a single underscore each.
+_SCAN_STEM_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+# A filename-ish tail on the label ("ScanPos001.las"), dropped so the exported
+# file doesn't end up called "<base>_ScanPos001.las.laz".
+_SCAN_LABEL_EXT = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _scan_label_slug(scan_entry, index: int) -> str:
+    """The scan's viewer label as a file-name fragment, else its index.
+
+    Index is the fallback, not the norm: an entry with no label (or one that is
+    nothing but punctuation) still needs a name that can't collide with its
+    neighbours.
+    """
+    raw = _SCAN_LABEL_EXT.sub("", (getattr(scan_entry, "label", None) or "").strip())
+    slug = _SCAN_STEM_UNSAFE.sub("_", raw).strip("._")[:64].strip("._")
+    return slug or str(index)
+
+
+def _scan_export_stems(scans, base: str) -> "list[str]":
+    """Per-scan file stems (no extension) for one export.
+
+    The scan LABEL names the file, because the index never did: the Scans panel
+    is ordered by when each scan was added, so "ScanPos002, ScanPos001" exported
+    as `<base>_0`/`<base>_1` and the mapping back to the instrument's own names
+    was gone. Two rules:
+
+      * one scan  → exactly the base name the user typed in the save dialog. They
+        asked for `myscan.laz`; writing `myscan_0.laz` breaks that promise for no
+        gain, since there is nothing to disambiguate.
+      * many      → `<base>_<label>`, so the files sort and read as the panel does.
+
+    Labels are user text, so they are slugged and deduped (case-insensitively —
+    macOS and Windows would otherwise let two labels overwrite one file).
+    """
+    if len(scans) == 1:
+        return [base]
+    stems: "list[str]" = []
+    used: "set[str]" = set()
+    for i, scan_entry in enumerate(scans):
+        stem = f"{base}_{_scan_label_slug(scan_entry, i)}"
+        candidate, n = stem, 2
+        while candidate.lower() in used:
+            candidate = f"{stem}_{n}"
+            n += 1
+        used.add(candidate.lower())
+        stems.append(candidate)
+    return stems
+
+
+def _rename_scan_bundle_files(tmpdir: str, base: str, stems: "list[str]") -> None:
+    """Rename a PyHelios bundle's sidecars to the label-based stems, in place.
+
+    exportScans() names each data file `<base>_<i>.xyz` (plus `<base>_<i>_traj.csv`
+    for a moving scan) in C++ and writes those bare names into the XML's
+    <filename>/<trajectoryFile> tags, so the rename has to carry the references
+    with it or the bundle stops re-loading.
+
+    Done in two passes through temporary names: a label of "1" makes scan 0's new
+    name collide with scan 1's not-yet-renamed old one, and a single-pass rename
+    would silently eat the other scan's data.
+    """
+    pairs = []
+    for i, stem in enumerate(stems):
+        old = f"{base}_{i}"
+        if old == stem:
+            continue
+        for suffix in (".xyz", "_traj.csv"):
+            if os.path.exists(os.path.join(tmpdir, old + suffix)):
+                pairs.append((old + suffix, stem + suffix))
+    if not pairs:
+        return
+    for j, (old, _new) in enumerate(pairs):
+        os.rename(os.path.join(tmpdir, old), os.path.join(tmpdir, f".rename-{j}"))
+    for j, (_old, new) in enumerate(pairs):
+        os.rename(os.path.join(tmpdir, f".rename-{j}"), os.path.join(tmpdir, new))
+    xml_path = os.path.join(tmpdir, f"{base}.xml")
+    if not os.path.exists(xml_path):
+        return
+    with open(xml_path, "r") as fh:
+        text = fh.read()
+    # The tags carry the bare basename as their only content, so an exact
+    # ">name<" match cannot hit anything else in the document.
+    for old, new in pairs:
+        text = text.replace(f">{old}<", f">{new}<")
+    with open(xml_path, "w") as fh:
+        fh.write(text)
+
+
+def _do_scan_export(request: "ScanExportRequest", progress=None,
+                    cancel_event=None) -> dict:
     """Export the request's scans, one data file per scan. Two modes:
 
-    * write_xml=True  → a Helios scan bundle: <base>.xml + <base>_<id>.xyz, via
-      PyHelios exportScans() (re-loadable as scans; data always Helios ASCII).
-    * write_xml=False → one <base>_<id>.<fmt> per scan in `data_format`
+    * write_xml=True  → a Helios scan bundle: <base>.xml + one data file per
+      scan, via PyHelios exportScans() (re-loadable as scans; data always
+      Helios ASCII).
+    * write_xml=False → one data file per scan in `data_format`
       (las/laz/ply/xyz/csv/txt/obj/e57), written directly — no XML, no PyHelios.
 
-    Returns {"success", "files": [{"name", "data"(base64), "is_xml"}], ...}. The
-    renderer writes every returned file into the user-chosen folder.
-    """
-    import base64
+    Per-scan files are named by `_scan_export_stems`: the typed base name alone
+    for a single scan, `<base>_<scan label>` for several.
 
+    Returns {"success", "files": [{"name", "data", "is_xml", "bytes", "written"}],
+    ...}. With `dest_dir` the backend writes each file itself and `data` is null;
+    without it `data` is base64 and the renderer writes the files (see dest_dir on
+    the request — the base64 path cannot carry a multi-scan bundle).
+    """
     if not request.scans:
         return {"success": False, "error": "No scans to export"}
 
     raw = request.base_name or "scans"
     base = os.path.splitext(os.path.basename(raw))[0] or "scans"
 
+    # Validate before doing any work, so a bad destination fails in milliseconds
+    # rather than after serializing several million points. Its HTTPException must
+    # propagate as a 400 rather than be flattened into a generic error below.
+    dest = _resolve_export_dest_dir(request.dest_dir) if request.dest_dir else None
+
     try:
         if request.write_xml:
-            return _do_scan_export_xml(request, base)
-        return _do_scan_export_data(request, base)
+            return _do_scan_export_xml(request, base, dest, progress=progress)
+        return _do_scan_export_data(request, base, dest, progress=progress)
+    except HTTPException:
+        raise
+    except ScanCancelled:
+        # MUST precede the blanket handler below: ScanCancelled is an Exception,
+        # so flattening it into {"success": False} would send the renderer a
+        # normal frame and toast "Export Failed" for what the user asked for.
+        raise
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()
         return {"success": False, "error": f"Scan export failed: {e}"}
 
 
-def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
-    """XML+data mode: Helios scan bundle via PyHelios exportScans()."""
-    import base64
+def _do_scan_export_xml(request: "ScanExportRequest", base: str,
+                        dest: Optional[Path] = None, progress=None) -> dict:
+    """XML+data mode: Helios scan bundle via PyHelios exportScans().
+
+    `dest` (when set) is the validated directory the files are written into
+    instead of being base64'd back to the renderer.
+    """
     import tempfile
     import math as _math
 
@@ -8048,7 +10493,18 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
     cloud = LiDARCloud()
     cloud.disableMessages()
     total_points = 0
-    for scan_entry in request.scans:
+    n = len(request.scans)
+    weights = _scan_export_weights(request.scans)
+    # The bar's shape here is dictated by PyHelios: this loop only LOADS scans
+    # into the cloud (resolve + a copy into C++), and the actual write is one
+    # opaque exportScans() call. So the loop gets a weighted 0..0.70 head and the
+    # write parks at 0.72 with a label that says what it's doing, rather than a
+    # synthetic creep that would claim progress nobody is making.
+    for i, scan_entry in enumerate(request.scans):
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(weights[i][0] * 0.70,
+                     f"Loading {_scan_entry_label(scan_entry, i)} ({i + 1}/{n})")
         # A Livox rosette (Risley) has no Ntheta x Nphi grid or angular sweep, so
         # the grid-based Helios XML/ASCII export can't represent it. The renderer
         # already excludes such scans from the bundle; guard here too so a stray
@@ -8142,15 +10598,25 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         xml_path = os.path.join(tmpdir, f"{base}.xml")
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            # A cancel requested from here on can only land when exportScans()
+            # returns: it is a single C++ call with no poll point inside it, the
+            # same contract every other monolithic Helios call in this file has.
+            progress(0.72, "Writing Helios scan bundle")
         cloud.exportScans(xml_path)
         # PyHelios exportScans() writes only <scan> blocks. To round-trip the
         # scene's grids (e.g. sphere.xml's voxel box), inject the requested
         # <grid> blocks just before the closing </helios>.
         if request.grids:
+            if progress is not None:
+                progress(0.90, "Writing grid definitions")
             _inject_grids_into_helios_xml(xml_path, request.grids)
         # PyHelios has no scanner-model concept, so inject a <scannerModel> tag into
         # each <scan> block (in order) for non-generic instruments, so the renderer
         # re-imports the same instrument identity.
+        if progress is not None:
+            progress(0.93, "Writing scanner metadata")
         _inject_scanner_models_into_helios_xml(
             xml_path, [s.scanner_model for s in request.scans])
         # Inject the precise return mode (single+selection / multi+maxReturns) so
@@ -8158,47 +10624,152 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str) -> dict:
         _inject_return_modes_into_helios_xml(
             xml_path, [{'mode': s.return_mode, 'selection': s.return_selection,
                         'max_returns': s.max_returns} for s in request.scans])
+        # PyHelios named the sidecars <base>_<i>.xyz; give them the scan labels
+        # instead (and fix the XML's references), so a bundle maps back to the
+        # Scans panel by name rather than by add-order.
+        _rename_scan_bundle_files(
+            tmpdir, base, _scan_export_stems(request.scans, base))
         files = []
-        for name in sorted(os.listdir(tmpdir)):
-            with open(os.path.join(tmpdir, name), "rb") as fh:
-                files.append({
-                    "name": name,
-                    "data": base64.b64encode(fh.read()).decode("ascii"),
-                    "is_xml": name.lower().endswith(".xml"),
-                })
+        names = sorted(os.listdir(tmpdir))
+        written: "list[Path]" = []
+        try:
+            for j, name in enumerate(names):
+                _cancel_checkpoint(progress)
+                if progress is not None:
+                    progress(0.95 + 0.05 * (j / max(len(names), 1)), f"Saving {name}")
+                with open(os.path.join(tmpdir, name), "rb") as fh:
+                    files.append(_emit_scan_export_file(
+                        name, fh.read(), name.lower().endswith(".xml"), dest))
+                if dest is not None:
+                    written.append(dest / name)
+        except ScanCancelled:
+            # Same rule as the data path: a cancelled bundle must not leave a
+            # partial set of files that looks like a complete one.
+            for path in written:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            raise
 
+    if progress is not None:
+        progress(1.0, f"Wrote {len(files)} file(s)")
     return {"success": True, "files": files, "point_count": total_points,
             "scan_count": len(request.scans)}
 
 
-def _do_scan_export_data(request: "ScanExportRequest", base: str) -> dict:
-    """Data-only mode: one <base>_<id>.<fmt> per scan in `data_format`."""
-    import base64
+def _do_scan_export_data(request: "ScanExportRequest", base: str,
+                         dest: Optional[Path] = None, progress=None) -> dict:
+    """Data-only mode: one `<stem>.<fmt>` per scan in `data_format`, where the
+    stem is the typed base name (single scan) or `<base>_<scan label>` (several).
 
+    `dest` (when set) is the validated directory each file is written into
+    instead of being base64'd back to the renderer.
+    """
     fmt = (request.data_format or "xyz").lower()
-    if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj", "e57"):
+    if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj", "e57", "ptx"):
         return {"success": False, "error": f"Unsupported data format: {fmt}"}
+
+    is_ptx = fmt == "ptx"
+    # PTX writes EVERY cell, so an excluded miss simply becomes an empty cell —
+    # byte-identical output either way. Excluding is also the correct reading: a
+    # Helios/E57 miss is a real row parked 20 km out, which would otherwise
+    # occupy its cell with a bogus point where the format wants the empty
+    # sentinel. And on a sky-heavy scan it halves the rows before the sort.
+    want_misses = False if is_ptx else request.include_misses
+    force = _GRID_INDEX_SLUGS if is_ptx else ()
 
     files = []
     total_points = 0
-    for i, scan_entry in enumerate(request.scans):
-        resolved = _resolve_scan_for_format(scan_entry, request.include_misses)
-        total_points += int(resolved["positions"].shape[0])
-        name, raw_bytes = _write_scan_to_bytes(resolved, fmt, f"{base}_{i}")
-        files.append({
-            "name": name,
-            "data": base64.b64encode(raw_bytes).decode("ascii"),
-            "is_xml": False,
-        })
+    n = len(request.scans)
+    weights = _scan_export_weights(request.scans)
+    stems = _scan_export_stems(request.scans, base)
+    # Files already on disk, so a cancel can take them back out again: a
+    # half-written batch that LOOKS complete is worse than no batch at all.
+    written: "list[Path]" = []
+    try:
+        for i, scan_entry in enumerate(request.scans):
+            lo, hi = weights[i]
+            label = _scan_entry_label(scan_entry, i)
+            _cancel_checkpoint(progress)
+            if progress is not None:
+                progress(lo, f"Reading {label} ({i + 1}/{n})")
+            resolved = _resolve_scan_for_format(scan_entry, want_misses, force_slugs=force)
+            total_points += int(resolved["positions"].shape[0])
+            # Writers report their own inner chunk loops through this: it maps a
+            # 0..1 within-object fraction onto the object's slice of the bar, and
+            # doubles as the cancel poll for a long single-object export.
+            span = hi - lo
+            head = lo + 0.15 * span
 
+            def sub(frac, message, _head=head, _span=span, _label=label):
+                _cancel_checkpoint(progress)
+                if progress is not None:
+                    progress(_head + max(0.0, min(1.0, frac)) * (_span * 0.85),
+                             f"{_label}: {message}")
+
+            if progress is not None:
+                progress(head, f"Writing {label} ({i + 1}/{n})")
+            if is_ptx:
+                # Bypasses _write_scan_to_bytes' (name, bytes) contract so a large
+                # raster can stream straight to disk — see _emit_ptx_file.
+                entry = _emit_ptx_file(f"{stems[i]}.ptx", resolved, scan_entry, dest,
+                                       progress=sub)
+                files.append(entry)
+                if dest is not None:
+                    written.append(dest / entry["name"])
+                continue
+            name, raw_bytes = _write_scan_to_bytes(resolved, fmt, stems[i],
+                                                   progress=sub)
+            files.append(_emit_scan_export_file(name, raw_bytes, False, dest))
+            if dest is not None:
+                written.append(dest / name)
+            # Drop the reference before resolving the next scan: with dest set the
+            # bytes are already on disk, so holding them would rebuild the very
+            # all-scans-in-memory peak dest_dir exists to avoid.
+            del raw_bytes
+    except ScanCancelled:
+        for path in written:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+
+    if progress is not None:
+        progress(1.0, f"Wrote {len(files)} file(s)")
     return {"success": True, "files": files, "point_count": total_points,
             "scan_count": len(request.scans)}
 
 
 @app.post("/api/scan/export-xml")
-async def scan_export_xml(request: "ScanExportRequest"):
-    """Export scans to a Helios XML + per-scan ASCII bundle (base64 files)."""
-    return _do_scan_export(request)
+def scan_export_xml(request: "ScanExportRequest", http_request: Request):
+    """Export objects to a Helios XML bundle or per-object data files.
+
+    Streams PHP1 progress markers ahead of its JSON tail (same transport as
+    /api/pointcloud/export). A batch export is one blocking round-trip covering
+    every checked object, so without this the UI could only show an
+    indeterminate spinner for what is routinely tens of seconds of formatting —
+    and had no way to stop it. The markers also make the run CANCELLABLE via
+    /api/cancel/{run_id}; a cancel unwinds through ScanCancelled and takes the
+    already-written files back out with it.
+
+    The JSON tail is the same ScanExportResponse shape as before; only the
+    transport changed.
+    """
+    # Validate the destination BEFORE the stream opens: once the 200 + first
+    # chunk is out, an HTTPException can only reach the client as a truncated
+    # body, so a bad path would surface as a decode error instead of its own
+    # message. Resolving here also means the worker's later call is a no-op.
+    if request.dest_dir:
+        _resolve_export_dest_dir(request.dest_dir)
+
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_scan_export(request, progress=progress, cancel_event=cancel_event)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 # ==================== SYNTHETIC LIDAR SCANNING ====================
@@ -8464,6 +11035,69 @@ def _derive_moving_scan_grid(n_theta: int, n_phi_per_rev: int, pulse_rate_hz: fl
     }
 
 
+def _texture_has_alpha(texture_path: Optional[str]) -> bool:
+    """Whether a texture file actually carries transparency.
+
+    Drives alpha-test cutout rendering in the viewer, so it must reflect the real
+    image: Helios plant assets mix transparent PNG leaves with opaque JPG bark,
+    and assuming transparency makes the renderer cut out a solid texture.
+
+    PNG encodes transparency two ways and BOTH must be detected. The IHDR
+    color-type byte covers only the first (4 = grey+alpha, 6 = RGBA); indexed
+    (color type 3) and plain grey/truecolour images instead carry a ``tRNS``
+    chunk holding per-palette-entry alpha or a single transparent colour key.
+    Roughly a quarter of the plantarchitecture leaf textures are palette PNGs
+    with tRNS — BeanLeaf_tip, TomatoLeaf_centered, RedbudLeaf, OliveLeaf_* and
+    friends — so testing the color type alone silently renders those leaves as
+    opaque rectangles while their RGBA siblings on the same plant cut out fine.
+
+    Every JPEG has no transparency. Falls back to the extension if the file
+    can't be read, since callers only hold a path at that point.
+    """
+    if not texture_path:
+        return False
+    try:
+        with open(texture_path, "rb") as fh:
+            head = fh.read(26)
+            if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
+                return False
+            # IHDR color type is byte 25; bit 2 (value 4) marks an alpha channel.
+            if head[25] & 4:
+                return True
+            # Otherwise scan the chunk stream for tRNS. It must precede the first
+            # IDAT, so stop there rather than reading a multi-megabyte image.
+            fh.seek(8)
+            while True:
+                header = fh.read(8)
+                if len(header) < 8:
+                    return False
+                length = int.from_bytes(header[:4], "big")
+                ctype = header[4:8]
+                if ctype == b"tRNS":
+                    return True
+                if ctype in (b"IDAT", b"IEND"):
+                    return False
+                # Skip the chunk payload plus its 4-byte CRC.
+                fh.seek(length + 4, 1)
+    except Exception:
+        return texture_path.lower().endswith(".png")
+
+
+def _image_ext_from_bytes(data: bytes) -> Optional[str]:
+    """Return the file extension matching an image buffer's magic number.
+
+    Helios selects its image decoder from the file suffix, so a texture written
+    under the wrong extension is a hard error, not a fallback. Returns ``None``
+    for anything that isn't a format Helios can read, so the caller can skip the
+    material instead of handing Helios a file it will reject.
+    """
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    return None
+
+
 def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
     """Load one scan mesh into the Helios ``ctx``, honoring textured materials.
 
@@ -8515,9 +11149,17 @@ def _load_scan_mesh(ctx, mesh: "LidarScanMesh", tmpdir: str) -> None:
                 img_bytes = base64.b64decode(mat.texture_data)
             except Exception:
                 continue
-            # Decode to a real file; keep the original extension so Helios reads
-            # the alpha channel correctly (PNG carries alpha; JPG does not).
-            ext = ".png" if mat.has_alpha else ".jpg"
+            # Decode to a real file; the extension must match the *actual* bytes,
+            # because Helios picks its decoder from the suffix and its PNG reader
+            # hard-errors ("PNGHasAlpha: not a valid PNG file") on JPEG content.
+            # Sniff the magic number rather than trusting `has_alpha` or the
+            # source filename: the plant-generation path marks every textured
+            # material has_alpha=True, but woody species carry .jpg bark
+            # (AlmondBark.jpg, AppleBark.jpg, GrapeBark.jpg, OliveBark.jpg, …),
+            # which previously got written to a .png path and killed the scan.
+            ext = _image_ext_from_bytes(img_bytes)
+            if ext is None:
+                continue
             slot = len(texture_files)
             tex_path = os.path.join(tmpdir, f"scan_tex_{id(mesh) & 0xffffff}_{slot}{ext}")
             try:
@@ -9323,7 +11965,7 @@ def _pack_lidar_scan(result: dict) -> bytes:
 
 
 @app.post("/api/lidar/scan")
-async def lidar_scan(request: LidarScanRequest, http_request: Request):
+def lidar_scan(request: LidarScanRequest, http_request: Request):
     """Ray-traced synthetic LiDAR scan. Returns a PHB1 binary frame (points +
     scalars per scanner can be millions of values)."""
     run_id, cancel_event = _new_cancel_token()
@@ -9333,7 +11975,7 @@ async def lidar_scan(request: LidarScanRequest, http_request: Request):
 
 
 @app.post("/api/cancel/{run_id}")
-async def cancel_run(run_id: str):
+def cancel_run(run_id: str):
     """Cancel an in-flight streaming op (synthetic scan / triangulation / LAD).
 
     The streaming endpoints emit their run_id as the first PHP1 marker; the
@@ -9440,6 +12082,73 @@ GROUND_CLASS_GROUND = 1
 GROUND_CLASS_PLANT = 2
 
 
+# A snagged cloth node sits this many robust deviations above its local
+# neighbourhood, or this far above it in absolute terms — whichever is larger.
+# The absolute floor matters because on a very flat, densely-sampled scene the
+# residual's spread is near zero, so a purely relative test flags harmless
+# millimetre ripples as snags.
+_SNAG_MAD_FACTOR = 4.0
+_SNAG_MIN_RISE = 0.03
+# Neighbourhood width (in nodes) for the local median. Wide enough to span a
+# trunk's footprint on the cloth grid so the median stays on true ground.
+_SNAG_MEDIAN_WIDTH = 15
+
+
+def _desnag_cloth(cloth_nodes: np.ndarray) -> "tuple[np.ndarray, int]":
+    """Pull cloth nodes that snagged on vegetation back down to their local
+    terrain level. Returns (nodes, n_fixed) — the input unchanged when the grid
+    is degenerate or nothing is snagged.
+
+    WHY. CSF's cloth is supposed to settle onto the ground, but a node can hang
+    up on a trunk and stay there. On the `tree_1` reference this is dramatic and
+    extremely localised: 19 of 29,920 nodes (0.06%) ride up to 1.19 m while the
+    rest sit at -0.08 m. Because `_height_above_cloth` interpolates BILINEARLY,
+    each bad node corrupts its whole cell neighbourhood, so those 19 nodes are
+    what put ~125k trunk points into the ground class as one contiguous column
+    ~1.7 m tall — a glaring visual defect that barely moves aggregate accuracy
+    (99.56%), which is why it survived so long.
+
+    Note this is NOT the classic "no ground returns beneath the canopy" case:
+    the ground under that trunk is sampled at 192k pts/m2, near the scene mean.
+    The cloth simply caught and never fell through.
+
+    HOW. A snag is a node standing well ABOVE its neighbourhood, so compare each
+    node to a local median and pull down the outliers. The test is one-sided by
+    construction: a node sitting LOW is either true terrain or a harmless
+    over-drape, and flattening those would erase real relief (which is exactly
+    what would break the sloped-terrain datasets). Robust scale via MAD, so a
+    handful of snagged nodes cannot inflate the threshold that catches them."""
+    from scipy.ndimage import median_filter
+
+    nodes = np.asarray(cloth_nodes, dtype=np.float64)
+    if nodes.ndim != 2 or nodes.shape[1] < 3:
+        return cloth_nodes, 0
+    xs = np.unique(nodes[:, 0])
+    ys = np.unique(nodes[:, 1])
+    if len(xs) < 3 or len(ys) < 3 or len(xs) * len(ys) != len(nodes):
+        return cloth_nodes, 0
+
+    grid = np.full((len(xs), len(ys)), np.nan, dtype=np.float64)
+    grid[np.searchsorted(xs, nodes[:, 0]), np.searchsorted(ys, nodes[:, 1])] = nodes[:, 2]
+    if not np.isfinite(grid).all():
+        return cloth_nodes, 0
+
+    width = min(_SNAG_MEDIAN_WIDTH, (min(len(xs), len(ys)) // 2) * 2 - 1)
+    if width < 3:
+        return cloth_nodes, 0
+    local = median_filter(grid, size=width, mode="nearest")
+    resid = grid - local
+    mad = float(np.median(np.abs(resid - np.median(resid))) * 1.4826)
+    snag = resid > max(_SNAG_MAD_FACTOR * mad, _SNAG_MIN_RISE)
+    n_fixed = int(snag.sum())
+    if not n_fixed:
+        return cloth_nodes, 0
+
+    fixed = np.where(snag, local, grid)
+    out = np.column_stack([np.repeat(xs, len(ys)), np.tile(ys, len(xs)), fixed.ravel()])
+    return out, n_fixed
+
+
 def _height_above_cloth(points: np.ndarray, cloth_nodes: np.ndarray) -> np.ndarray:
     """Signed height of every point above CSF's settled cloth, by bilinear
     interpolation of the cloth grid.
@@ -9474,6 +12183,46 @@ def _height_above_cloth(points: np.ndarray, cloth_nodes: np.ndarray) -> np.ndarr
     z = (grid[i, j] * (1 - tx) * (1 - ty) + grid[i + 1, j] * tx * (1 - ty)
          + grid[i, j + 1] * (1 - tx) * ty + grid[i + 1, j + 1] * tx * ty)
     return points[:, 2] - z
+
+
+# A local minimum in the height histogram counts as the knee only if the density
+# climbs out of it and stays out: it must not dip back below the valley within
+# _KNEE_PERSIST_SPANS spans, and must reach _KNEE_RISE_FACTOR x the valley. This
+# is what separates the real knee from a shallow ripple in the sparse tail —
+# see the comment at the search itself.
+_KNEE_PERSIST_SPANS = 3
+_KNEE_RISE_FACTOR = 1.25
+
+# A knee must sit at a density that is still a MEANINGFUL FRACTION of the ground
+# mode. On a CLEANLY SEPARATED scene (sharp ground band, empty air above it,
+# canopy far overhead) the histogram decays monotonically with no valley below
+# the canopy, so the walk runs on until canopy mass finally turns it upward and
+# reports a "knee" sitting in near-empty air — 0.76 m on the tree_1 reference
+# against an oracle 0.225 m, which swept ~100k trunk points into the ground
+# class. Below this floor the density is tail, not structure, and `tail` (which
+# already handles the monotonic shape) should decide instead.
+#
+# Calibrated on the real fixtures: the bean scan's TRUE knee sits at 3.9% of
+# peak, while tree_1's spurious canopy knee sits at 0.025% — a 160x gap, so 0.5%
+# separates them with two orders of magnitude of margin on both sides. Note this
+# is a FLOOR on where a knee may be accepted, not the valley-DEPTH test the
+# docstring rejects: depth is still never required, so BR04's shallow
+# never-empties valley is unaffected (it resolves via `tail` regardless).
+_KNEE_MIN_PEAK_FRACTION = 0.005
+
+# Band floor: keeps the cut from landing INSIDE a sharp ground mode. Calibrated
+# on the three reference datasets (see the comment at the use site).
+#   - SHARP_HWHM: a mode narrower than this many cloth resolutions is "sharp".
+#     tree_1 sits at 0.2 (hwhm 0.010 / cloth 0.05); Mission1 at 0.30 and BR04 at
+#     0.40 are broad and must not be touched, so 0.25 separates them.
+#   - PEAK_FRACTION: density level marking the end of the band's skirt. 0.001
+#     puts tree_1's floor at 0.117 m, comfortably clear of a band reaching
+#     0.084 m (99.5th pct) and below the 0.20 m oracle optimum.
+#   - MAX_HWHM: hard cap in units of the mode's own width, so a long sparse tail
+#     cannot drag the floor far from the band.
+_BAND_FLOOR_SHARP_HWHM = 0.25
+_BAND_FLOOR_PEAK_FRACTION = 0.001
+_BAND_FLOOR_MAX_HWHM = 20.0
 
 
 def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
@@ -9551,7 +12300,39 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     for k in range(peak + span, len(smooth) - span):
         if smooth[k] > 0.5 * smooth[peak]:
             continue                      # still on the mode's own shoulder
-        if smooth[k] <= smooth[k - span] and smooth[k] < smooth[k + span]:
+        # A knee is a valley the curve CLIMBS OUT OF AND STAYS OUT OF — not any
+        # bin that happens to sit below its neighbours. Testing a single step
+        # (`smooth[k] < smooth[k + span]`) cannot tell the true knee from a
+        # shallow ripple in the sparse tail, because on this fixture the ripple
+        # at 0.021 and the real knee at 0.051 differ only in how far the curve
+        # rises afterwards, and the one-step rise at the ripple is pure noise:
+        # it swings roughly +0.02..+0.10 between cloth settles, so ANY constant
+        # margin gets straddled (0.10 was tried and still failed 2 runs in 8),
+        # and a margin high enough to reject it also rejects the real knee,
+        # whose own rise is only ~+0.29 on a bad settle.
+        #
+        # So require persistence instead: the curve must not dip back below the
+        # valley over the next few spans, and must end materially above it.
+        # That is a property of the histogram's shape rather than of any single
+        # comparison, and it is what makes the estimate reproducible — under
+        # simulated cloth-settle noise the one-step form lands in the
+        # hand-tuned band 33 times in 60 (spread 0.035), this form 60 in 60
+        # (spread 0.007). The bimodality is NOT platform-specific: it
+        # reproduces on macOS at the same rate. CI merely rolled the dice
+        # differently and caught it.
+        if smooth[k] > smooth[k - span]:
+            continue                      # not a local minimum at all
+        # ...and it must sit where there is still real density. On a cleanly
+        # separated scene the curve decays monotonically and the only turning
+        # point is up in the canopy, so without this the walk reports a knee in
+        # near-empty air (see _KNEE_MIN_PEAK_FRACTION). Falling through to
+        # `tail` is the right answer for that shape.
+        if smooth[k] < _KNEE_MIN_PEAK_FRACTION * smooth[peak]:
+            break                         # into the tail — let the tail rule decide
+        fwd = smooth[k + 1:min(k + _KNEE_PERSIST_SPANS * span + 1, len(smooth))]
+        if len(fwd) < 2 * span:
+            continue                      # too close to the end to judge
+        if fwd.min() >= smooth[k] and fwd.max() > smooth[k] * _KNEE_RISE_FACTOR:
             knee = float(centres[k])
             meta["method"] = "knee"
             break
@@ -9566,11 +12347,55 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
         return float(fallback), meta
 
     # Never cut inside the ground mode itself, and stay inside the panel's range.
-    threshold = float(np.clip(max(knee, centres[peak] + hwhm), 0.02, 5.0))
+    #
+    # The `centres[peak] + hwhm` floor is not enough on its own for a SHARP mode.
+    # On tree_1 the ground band has HWHM 0.010 m but a real spread reaching
+    # 0.084 m (99.5th percentile) — sensor noise and soil roughness put a thin
+    # skirt well outside the half-maximum width. The `tail` rule keys off where
+    # density hits 1% of peak, which for a mode that tall arrives at 0.032 m,
+    # inside the band: that discards 260k genuine ground points (1.7% of the
+    # ground) in coherent patches — the same "ground labelled non-ground for no
+    # visible reason" this estimator exists to prevent, just from the other side.
+    #
+    # So floor the cut where the ground mode's density has genuinely decayed,
+    # rather than where it hits a fixed fraction of a peak whose height depends
+    # on how sharp the mode is. Walk up from the mode until the density stops
+    # falling steeply — the end of the band's skirt. Measured against the
+    # mirrored below-cloth side would be wrong here: the cloth is a lower
+    # ENVELOPE, so that sample is censored (it reads 0.017 on tree_1 where the
+    # true band reaches 0.050) — the same reason the docstring rejects mirroring
+    # for the estimate itself.
+    #
+    # This only ever RAISES a cut off the band; it never lowers one that the
+    # knee/tail rule already placed higher, so a scene with dense low vegetation
+    # (where the band and the vegetation genuinely merge) is unaffected.
+    # Applies ONLY to a sharp mode. That is the case the tail rule mishandles:
+    # when the mode is tall and narrow, "1% of peak" is reached while still
+    # inside the band. A broad mode (Mission1 hwhm 0.15 m, BR04 0.37 m) already
+    # has its tail cut in the right place, and raising it there would sweep low
+    # canopy into the ground — measured, it moves BR04's ground fraction from
+    # 14.6% to 19.0%, outside its calibrated 10-18% range. Sharpness is measured
+    # against the cloth's own resolution so the test is scale-free.
+    # Only rescues the `tail` case. When `knee` fired, a real turning point was
+    # found between ground and vegetation and that is better evidence than any
+    # density heuristic — on the bean fixture (low plants continuous with the
+    # soil) the skirt being measured here IS vegetation, and the floor would
+    # override a correct 0.051 knee with 0.100.
+    band_floor = 0.0
+    if meta["method"] == "tail" and hwhm < _BAND_FLOOR_SHARP_HWHM * cloth_resolution:
+        tail_lvl = _BAND_FLOOR_PEAK_FRACTION * smooth[peak]
+        reached = np.flatnonzero((centres > centres[peak]) & (smooth < tail_lvl))
+        if reached.size:
+            # Cap relative to the mode's own width: on a cloud with a long
+            # sparse tail the density fraction alone can run far away from the
+            # band (51 m on BR04) before it is reached.
+            band_floor = min(float(centres[reached[0]]), _BAND_FLOOR_MAX_HWHM * hwhm)
+    threshold = float(np.clip(max(knee, centres[peak] + hwhm, band_floor), 0.02, 5.0))
     meta.update({
         "class_threshold": threshold,
         "mode": float(centres[peak]),
         "mode_hwhm": float(hwhm),
+        "band_floor": band_floor,
         "bin_width": binw,
         "smooth_bins": nsm,
     })
@@ -9651,9 +12476,15 @@ def segment_ground(
 
     if auto_class_threshold and cloth_nodes is not None and cloth_nodes.ndim == 2:
         try:
+            # Pull nodes that hung up on vegetation back to local terrain first:
+            # the threshold is read off this cloth, so a snagged node biases both
+            # the estimate and the classification. Auto path only — the manual
+            # path must keep reproducing CSF's own labels bit-for-bit.
+            cloth_nodes, n_desnagged = _desnag_cloth(cloth_nodes)
             height = _height_above_cloth(points[:, :3].astype(np.float64), cloth_nodes)
             threshold, est = _estimate_class_threshold(
                 height, float(cloth_resolution), float(class_threshold))
+            est["desnagged_nodes"] = n_desnagged
             labels = np.where(np.abs(height) < threshold,
                               GROUND_CLASS_GROUND, GROUND_CLASS_PLANT).astype(np.int32)
             if meta is not None:
@@ -9685,6 +12516,67 @@ WOOD_CLASS_LEAF = 2
 
 WOOD_CLASS_SLUG = "wood_class"
 WOOD_CLASS_LABEL = "Wood Class"
+
+# ── Manual point labelling ────────────────────────────────────────────────────
+#
+# The column the labelling tool paints into. One per cloud by default; the
+# request carries `slug` so a second pass ("my_qc_pass") is a config change
+# rather than a refactor, but the CLASSES are what users define, not the column.
+MANUAL_CLASS_SLUG = "manual_class"
+MANUAL_CLASS_LABEL = "Manual Class"
+
+# Class 0 is reserved as "Unclassified" in every palette, and this is
+# load-bearing rather than cosmetic: `merge` zero-fills a slug that is missing
+# from one of its input sessions, so points from a never-labelled cloud arrive
+# as 0. That is only correct if 0 means "unclassified" everywhere. Matches ASPRS
+# class 0 (Created, never classified) and the renderer's existing
+# "class 0 → unassigned grey" convention in classification.ts.
+MANUAL_CLASS_UNLABELED = 0
+
+# Class values are a single byte, matching the LAS classification range. The
+# renderer keeps user-defined classes in 64-255 (the ASPRS user-definable band)
+# so a future writer to the real LAS classification byte is pure serialisation
+# with no renumbering of data users already painted.
+MANUAL_CLASS_MIN = 0
+MANUAL_CLASS_MAX = 255
+
+# Slugs must be a safe extra-dim name. The hard rule is the reserved-name one:
+# `_session_to_las` re-adds every extra-dim slug via `add_extra_dim`, and a slug
+# colliding with a standard LAS dimension name — `classification` above all —
+# makes laspy try to bit-pack a float column into the classification-flags byte
+# and HARD-CRASH the process. Everything else here is ordinary hygiene.
+_LABEL_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
+
+# Standard LAS dimension names an extra-dim slug must never take.
+# `classification` is the one that crashes the process; the rest are listed
+# because colliding with them would silently shadow real LAS data on export.
+_LAS_RESERVED_SLUGS = frozenset({
+    "x", "y", "z", "intensity", "classification", "classification_flags",
+    "raw_classification", "return_number", "number_of_returns", "scan_direction_flag",
+    "edge_of_flight_line", "scan_angle", "scan_angle_rank", "user_data",
+    "point_source_id", "gps_time", "red", "green", "blue", "nir",
+    "scanner_channel", "synthetic", "key_point", "withheld", "overlap",
+})
+
+
+def _validate_label_slug(slug: str) -> str:
+    """Validate a label-column slug, or raise 400. See _LABEL_SLUG_RE."""
+    if not isinstance(slug, str) or not _LABEL_SLUG_RE.match(slug):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"label slug must match {_LABEL_SLUG_RE.pattern!r}; "
+                    f"got {slug!r}"),
+        )
+    # Case-insensitive: laspy resolves standard dimension names case-blind, so
+    # 'Classification' is just as fatal as 'classification'.
+    if slug.lower() in _LAS_RESERVED_SLUGS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"label slug {slug!r} collides with a reserved LAS "
+                    "dimension name; pick another (the LAS writer would "
+                    "bit-pack it into the classification-flags byte and crash)"),
+        )
+    return slug
 
 # Above this many points, segment_wood auto-downsamples (voxel) the geometry
 # step and propagates labels back to full resolution — the per-point k-NN
@@ -11884,7 +14776,7 @@ async def extract_stem_skeleton(request: SkeletonRequest, http_request: Request)
     try:
         if request.source is not None:
             # Octree-backed cloud: read (and downsample) from the source file.
-            points, _, _ = _read_points_from_source(request.source)
+            points, _, _ = await run_in_threadpool(_read_points_from_source, request.source)
         else:
             points = np.array(request.points or [], dtype=np.float64)
         points_original_count = len(points)
@@ -12042,7 +14934,7 @@ class PlantGenerationResponse(BaseModel):
 
 import uuid
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 # Global storage for active plant sessions
@@ -12214,6 +15106,57 @@ class QSMBuildResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _qsm_to_response(qsm, m, points_used: int = 0) -> QSMBuildResponse:
+    """Map the qsm.model dataclasses + metrics onto the wire response.
+
+    Shared by /api/qsm/build and /api/qsm/import so a built QSM and a re-imported
+    one are serialized identically -- the round trip is only lossless if both ends
+    agree on this mapping, so there is exactly one copy of it.
+    """
+    return QSMBuildResponse(
+        success=True,
+        points_used=points_used,
+        n_cylinders=len(qsm.cylinders),
+        n_shoots=len(qsm.shoots),
+        cylinders=[
+            QSMCylinder(
+                cyl_id=c.cyl_id, start=c.start.tolist(), end=c.end.tolist(),
+                radius=c.radius, parent_id=c.parent_id, shoot_id=c.shoot_id,
+                rank=c.rank, surf_cov=c.surf_cov, mad=c.mad,
+            )
+            for c in qsm.cylinders
+        ],
+        shoots=[
+            QSMShoot(
+                shoot_id=s.shoot_id, rank=s.rank, cylinder_ids=s.cylinder_ids,
+                parent_shoot_id=s.parent_shoot_id, parent_cyl_id=s.parent_cyl_id,
+                child_shoot_ids=s.child_shoot_ids,
+            )
+            for s in qsm.shoots
+        ],
+        metrics=QSMMetricsResponse(
+            tcsa_m2=m.tcsa_m2, trunk_diameter_mm=m.trunk_diameter_mm,
+            tree_height_m=m.tree_height_m, n_scaffolds=m.n_scaffolds,
+            n_shoots_total=m.n_shoots_total, max_rank=m.max_rank,
+            total_woody_volume_m3=m.total_woody_volume_m3,
+            stem_volume_m3=m.stem_volume_m3, branch_volume_m3=m.branch_volume_m3,
+            total_length_m=m.total_length_m, canopy_width_m=m.canopy_width_m,
+            canopy_height_m=m.canopy_height_m,
+            per_rank=[
+                QSMRankMetrics(
+                    rank=pr.rank, n_shoots=pr.n_shoots,
+                    total_length_m=pr.total_length_m,
+                    mean_shoot_length_m=pr.mean_shoot_length_m,
+                    woody_volume_m3=pr.woody_volume_m3,
+                    mean_diameter_mm=pr.mean_diameter_mm,
+                    mean_branch_angle_deg=pr.mean_branch_angle_deg,
+                )
+                for pr in m.per_rank
+            ],
+        ),
+    )
+
+
 def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
     """Build a true QSM from a dormant-tree point cloud, returning the dict form
     of QSMBuildResponse. `progress(fraction, message)` (optional) is called as the
@@ -12291,48 +15234,7 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
         m = compute_metrics(qsm)
 
         _report(1.0, "Done")
-        return QSMBuildResponse(
-            success=True,
-            points_used=len(points),
-            n_cylinders=len(qsm.cylinders),
-            n_shoots=len(qsm.shoots),
-            cylinders=[
-                QSMCylinder(
-                    cyl_id=c.cyl_id, start=c.start.tolist(), end=c.end.tolist(),
-                    radius=c.radius, parent_id=c.parent_id, shoot_id=c.shoot_id,
-                    rank=c.rank, surf_cov=c.surf_cov, mad=c.mad,
-                )
-                for c in qsm.cylinders
-            ],
-            shoots=[
-                QSMShoot(
-                    shoot_id=s.shoot_id, rank=s.rank, cylinder_ids=s.cylinder_ids,
-                    parent_shoot_id=s.parent_shoot_id, parent_cyl_id=s.parent_cyl_id,
-                    child_shoot_ids=s.child_shoot_ids,
-                )
-                for s in qsm.shoots
-            ],
-            metrics=QSMMetricsResponse(
-                tcsa_m2=m.tcsa_m2, trunk_diameter_mm=m.trunk_diameter_mm,
-                tree_height_m=m.tree_height_m, n_scaffolds=m.n_scaffolds,
-                n_shoots_total=m.n_shoots_total, max_rank=m.max_rank,
-                total_woody_volume_m3=m.total_woody_volume_m3,
-                stem_volume_m3=m.stem_volume_m3, branch_volume_m3=m.branch_volume_m3,
-                total_length_m=m.total_length_m, canopy_width_m=m.canopy_width_m,
-                canopy_height_m=m.canopy_height_m,
-                per_rank=[
-                    QSMRankMetrics(
-                        rank=pr.rank, n_shoots=pr.n_shoots,
-                        total_length_m=pr.total_length_m,
-                        mean_shoot_length_m=pr.mean_shoot_length_m,
-                        woody_volume_m3=pr.woody_volume_m3,
-                        mean_diameter_mm=pr.mean_diameter_mm,
-                        mean_branch_angle_deg=pr.mean_branch_angle_deg,
-                    )
-                    for pr in m.per_rank
-                ],
-            ),
-        ).dict()
+        return _qsm_to_response(qsm, m, points_used=len(points)).dict()
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -12340,7 +15242,7 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
 
 
 @app.post("/api/qsm/build")
-async def build_qsm(request: QSMBuildRequest):
+def build_qsm(request: QSMBuildRequest):
     """Build a true QSM, streaming per-stage progress as PHP1 markers ahead of the
     JSON result (mirrors triangulation / backfill). The renderer's
     fetchJsonWithProgress drains the markers and parses the trailing JSON, which is
@@ -12348,6 +15250,41 @@ async def build_qsm(request: QSMBuildRequest):
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(_do_qsm_build(request, progress)).encode("utf-8")
     )
+
+
+class QSMImportRequest(BaseModel):
+    """Request to import a QSM from a per-cylinder CSV on disk."""
+    path: str  # Absolute path to the .csv file
+
+
+@app.post("/api/qsm/import", response_model=QSMBuildResponse)
+def import_qsm_csv(request: QSMImportRequest):
+    """Read a QSM back from a cylinder CSV (the inverse of the renderer's export).
+
+    Returns the same QSMBuildResponse shape /api/qsm/build does, so the renderer
+    needs no separate data path for an imported QSM. Metrics aren't in the file --
+    compute_metrics is a pure function of the model, so they're recomputed here and
+    come back identical to the pre-export values.
+    """
+    from qsm.csv_io import QSMCsvError, read_qsm_csv
+    from qsm.metrics import compute_metrics
+
+    csv_path = Path(request.path)
+    if not csv_path.is_file():
+        raise HTTPException(status_code=404, detail=f"QSM file not found: {request.path}")
+    if csv_path.suffix.lower() != '.csv':
+        raise HTTPException(status_code=400, detail="Only .csv files are supported for QSM import")
+
+    try:
+        qsm = read_qsm_csv(csv_path)
+    except QSMCsvError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"QSM import failed: {e}")
+
+    return _qsm_to_response(qsm, compute_metrics(qsm))
 
 
 # ==================== QSM LEAF RECONSTRUCTION (Phase 1) ====================
@@ -12430,7 +15367,7 @@ def _qsm_from_request(cylinders: List[QSMCylinder], shoots: List[QSMShoot]):
 
 
 @app.post("/api/qsm/phyllotaxis", response_model=QSMPhyllotaxisResponse)
-async def detect_qsm_phyllotaxis(request: QSMPhyllotaxisRequest):
+def detect_qsm_phyllotaxis(request: QSMPhyllotaxisRequest):
     """Auto-detect the phyllotactic angle from the QSM's branching geometry.
 
     Branches follow the phyllotaxis of leaves (modulo unbroken buds), so the
@@ -12508,7 +15445,7 @@ def _build_leaf_geometry(placements, obj_template, texture_name, texture_b64):
 
 
 @app.post("/api/qsm/leaves", response_model=QSMLeavesResponse)
-async def add_qsm_leaves(request: QSMLeavesRequest):
+def add_qsm_leaves(request: QSMLeavesRequest):
     """Place leaves on the terminal shoots of a QSM and return a textured mesh."""
     from qsm.leaves import LeafPlacementOptions, place_leaves
 
@@ -12543,11 +15480,71 @@ async def add_qsm_leaves(request: QSMLeavesRequest):
 
 
 @app.get("/api/qsm/leaf-textures")
-async def get_qsm_leaf_textures():
+def get_qsm_leaf_textures():
     """List the curated built-in leaf textures available for QSM leaf placement."""
     from qsm.leaves import CURATED_LEAF_TEXTURES
 
     return {"textures": CURATED_LEAF_TEXTURES}
+
+
+# ==================== QSM BARK TEXTURES ====================
+# Bark images for the QSM viewer's "Color by > Texture" mode. The renderer can't
+# read the PyInstaller bundle (or the Helios source tree) directly, so — exactly as
+# with plant/leaf textures — the backend resolves the file and hands back base64.
+
+
+@app.get("/api/qsm/bark-textures")
+def get_qsm_bark_textures():
+    """List the curated built-in bark textures available for QSM texturing."""
+    from qsm.leaves import CURATED_BARK_TEXTURES
+
+    return {"textures": CURATED_BARK_TEXTURES}
+
+
+class QSMBarkTextureRequest(BaseModel):
+    """Fetch one bark image: a curated builtin name OR an uploaded file path."""
+
+    builtin_name: Optional[str] = None
+    texture_path: Optional[str] = None
+
+
+class QSMBarkTextureResponse(BaseModel):
+    success: bool
+    name: Optional[str] = None
+    data_base64: Optional[str] = None
+    mime: Optional[str] = None
+    error: Optional[str] = None
+
+
+@app.post("/api/qsm/bark-texture", response_model=QSMBarkTextureResponse)
+def get_qsm_bark_texture(request: QSMBarkTextureRequest):
+    """Return one bark image as base64, from the builtin library or an upload.
+
+    A plain ``def`` (not ``async def``): this reads a file off disk, and a blocking
+    handler belongs in the threadpool rather than on the event loop.
+    """
+    from qsm.leaves import resolve_builtin_bark, read_bark_texture_file
+
+    try:
+        # An explicit upload path wins over a builtin name, matching the precedence
+        # _resolve_leaf_texture uses for leaves.
+        if request.texture_path:
+            name, b64, mime = read_bark_texture_file(Path(request.texture_path))
+        elif request.builtin_name:
+            name, b64, mime = resolve_builtin_bark(request.builtin_name)
+        else:
+            return QSMBarkTextureResponse(
+                success=False, error="No bark texture specified"
+            )
+        return QSMBarkTextureResponse(
+            success=True, name=name, data_base64=b64, mime=mime
+        )
+    except ValueError as e:
+        return QSMBarkTextureResponse(success=False, error=str(e))
+    except Exception as e:
+        return QSMBarkTextureResponse(
+            success=False, error=f"Failed to read bark texture: {e}"
+        )
 
 
 # ==================== QSM LEAF-ANGLE ADJUSTMENT (Phase 2) ====================
@@ -12606,7 +15603,7 @@ class QSMAdjustLeafAnglesRequest(QSMLeavesRequest):
 
 
 @app.post("/api/qsm/adjust-leaf-angles", response_model=QSMLeavesResponse)
-async def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
+def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
     """Adjust a QSM's leaf angles to match a measured per-cell distribution."""
     import numpy as np
     from qsm.leaves import LeafPlacementOptions, place_leaves
@@ -12689,7 +15686,7 @@ async def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
 
 
 @app.get("/api/plant/models")
-async def get_available_plant_models():
+def get_available_plant_models():
     """Get list of available plant models from pyhelios library"""
     try:
         from pyhelios import Context, PlantArchitecture
@@ -12810,7 +15807,9 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
                 materials_dict[mat_label] = PlantMaterial(
                     name=mat_label,
                     texture_name=texture_name,
-                    has_alpha=True,
+                    # From the file itself — leaves are alpha PNGs but bark is
+                    # opaque JPG. See _texture_has_alpha.
+                    has_alpha=_texture_has_alpha(texture_path),
                 )
                 material_groups_dict[mat_label] = []
                 texture_files[texture_name] = texture_path
@@ -12902,7 +15901,7 @@ def _extract_session_geometry(session: PlantSession) -> tuple:
 
 
 @app.post("/api/plant/session/create", response_model=PlantSessionCreateResponse)
-async def create_plant_session(request: PlantSessionCreateRequest):
+def create_plant_session(request: PlantSessionCreateRequest):
     """
     Create a new plant session for incremental growth simulation.
     The session keeps the pyhelios context alive for efficient time stepping.
@@ -13009,7 +16008,7 @@ async def create_plant_session(request: PlantSessionCreateRequest):
 
 
 @app.post("/api/plant/session/{session_id}/advance", response_model=PlantSessionAdvanceResponse)
-async def advance_plant_session(session_id: str, request: PlantSessionAdvanceRequest):
+def advance_plant_session(session_id: str, request: PlantSessionAdvanceRequest):
     """
     Advance time for a plant session and return updated geometry.
     """
@@ -13077,7 +16076,7 @@ async def advance_plant_session(session_id: str, request: PlantSessionAdvanceReq
 
 
 @app.get("/api/plant/session/{session_id}", response_model=PlantSessionStatusResponse)
-async def get_plant_session_status(session_id: str):
+def get_plant_session_status(session_id: str):
     """Get the current status of a plant session."""
     try:
         with _session_lock:
@@ -13111,7 +16110,7 @@ async def get_plant_session_status(session_id: str):
 
 
 @app.delete("/api/plant/session/{session_id}")
-async def delete_plant_session(session_id: str):
+def delete_plant_session(session_id: str):
     """Delete a plant session and free resources."""
     try:
         with _session_lock:
@@ -13139,7 +16138,7 @@ async def delete_plant_session(session_id: str):
 
 
 @app.get("/api/plant/sessions")
-async def list_plant_sessions():
+def list_plant_sessions():
     """List all active plant sessions."""
     with _session_lock:
         sessions = []
@@ -13374,7 +16373,7 @@ class PlantMorphResponse(BaseModel):
 
 
 @app.post("/api/plant/morph/parse", response_model=PlantMorphParseResponse)
-async def parse_plant_morph_parameters(request: PlantMorphParseRequest):
+def parse_plant_morph_parameters(request: PlantMorphParseRequest):
     """Parse a plant structure XML string into editable parameters."""
     try:
         parsed = _parse_plant_xml(request.helios_xml)
@@ -13405,7 +16404,7 @@ async def parse_plant_morph_parameters(request: PlantMorphParseRequest):
 
 
 @app.post("/api/plant/morph", response_model=PlantMorphResponse)
-async def morph_plant(request: PlantMorphRequest):
+def morph_plant(request: PlantMorphRequest):
     """Rebuild a plant from modified structure XML."""
     import time
     import tempfile
@@ -13525,7 +16524,7 @@ async def morph_plant(request: PlantMorphRequest):
 
 
 @app.post("/api/plant/generate", response_model=PlantGenerationResponse)
-async def generate_plant_model(request: PlantGenerationRequest):
+def generate_plant_model(request: PlantGenerationRequest):
     """
     Generate a procedural plant model using pyhelios PlantArchitecture.
 
@@ -13676,7 +16675,9 @@ async def generate_plant_model(request: PlantGenerationRequest):
                             materials_dict[mat_label] = PlantMaterial(
                                 name=mat_label,
                                 texture_name=texture_name,
-                                has_alpha=True  # Leaf textures use alpha
+                                # From the file itself — leaves are alpha PNGs but
+                                # bark is opaque JPG. See _texture_has_alpha.
+                                has_alpha=_texture_has_alpha(texture_path),
                             )
                             material_groups_dict[mat_label] = []
                             texture_files[texture_name] = texture_path
@@ -13896,7 +16897,9 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
                 materials_dict[mat_label] = PlantMaterial(
                     name=mat_label,
                     texture_name=texture_name,
-                    has_alpha=True,
+                    # From the file itself — leaves are alpha PNGs but bark is
+                    # opaque JPG. See _texture_has_alpha.
+                    has_alpha=_texture_has_alpha(texture_path),
                 )
                 material_groups_dict[mat_label] = []
                 texture_files[texture_name] = texture_path
@@ -13982,7 +16985,7 @@ def _extract_context_plant_geometry(context, is_woody: bool, progress_cb=None) -
 
 
 @app.post("/api/plant/canopy/generate", response_model=PlantGenerationResponse)
-async def generate_plant_canopy(request: PlantCanopyRequest):
+def generate_plant_canopy(request: PlantCanopyRequest):
     """
     Generate a canopy of regularly spaced plants using pyhelios PlantArchitecture.
 
@@ -14393,45 +17396,39 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
     )
 
 
-# ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
-# Parses an OBJ (with its sibling MTL and texture images) from a disk path and
-# returns geometry + real per-vertex UVs + base64 textures, in the same shape
-# the renderer already consumes for plant models (so the same textured renderer
-# handles both). Triangles are emitted non-indexed (3 vertices each), matching
-# the plant path's expanded-geometry convention.
+# ============ MESH IMPORT (OBJ + MTL, and PLY polygon meshes) ============
+# Parses an OBJ (with its sibling MTL and texture images) or a PLY polygon mesh
+# from a disk path and returns geometry + real per-vertex UVs + base64 textures,
+# in the same shape the renderer already consumes for plant models (so the same
+# textured renderer handles both). OBJ triangles are emitted non-indexed (3
+# vertices each), matching the plant path's expanded-geometry convention; PLY
+# keeps open3d's indexed geometry.
 
 class MeshImportRequest(BaseModel):
-    """Request to import a textured mesh from a file on disk."""
-    path: str  # Absolute path to the .obj file
+    """Request to import a mesh from a file on disk."""
+    path: str  # Absolute path to the .obj / .ply file
 
 
-class MeshImportResponse(BaseModel):
-    """Imported mesh geometry + textures (mirrors PlantGenerationResponse)."""
-    success: bool
-    vertices: List[List[float]] = []          # [[x, y, z], ...]
-    indices: List[List[int]] = []             # [[v0, v1, v2], ...]
-    normals: Optional[List[List[float]]] = None
-    colors: Optional[List[List[float]]] = None        # per-vertex (from Kd)
-    uv_coordinates: Optional[List[List[float]]] = None  # [[u, v], ...] V-flipped
-    materials: Optional[List[PlantMaterial]] = None
-    material_groups: Optional[List[PlantMaterialGroup]] = None
-    textures: Optional[Dict[str, str]] = None         # {basename: base64 png/jpg}
-    vertex_count: int = 0
-    triangle_count: int = 0
-    filename: Optional[str] = None
-    has_textures: bool = False
-    error: Optional[str] = None
+# The response is a PHB1 binary frame, not a Pydantic model — see the
+# `/api/mesh/import` handler for why JSON can't carry a scanner-grade mesh.
+# Geometry rides in the frame's buffers (`vertices`, `indices`, and optional
+# `normals`/`colors`/`uv_coordinates`); scalars, materials, material_groups and
+# base64 textures ride in its JSON meta.
 
 
-def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
-    """Read a polygon-mesh PLY (ASCII or binary) into MeshImportResponse geometry.
+def _import_ply_mesh(ply_path: Path) -> dict:
+    """Read a polygon-mesh PLY (ASCII or binary) into a mesh result dict.
 
     PLY is an ambiguous container — it may hold a point cloud (vertices only) or a
     polygon mesh (vertices + faces). The caller has already decided this is a mesh
     (the frontend sniffs the header for `element face`); here we require triangles
     and reject a vertices-only PLY. open3d's read_triangle_mesh transparently
     handles ascii / binary_little_endian / binary_big_endian. PLY meshes carry no
-    MTL or textures, so the textured fields stay empty."""
+    MTL or textures, so the textured fields stay empty.
+
+    Returns the dict shape `_pack_mesh_frame` expects — arrays stay as numpy so
+    they're packed straight into the binary frame without a .tolist() round-trip
+    (a 3 M-vertex mesh is ~700 MB as JSON, over V8's 512 MB string cap)."""
     import open3d as o3d
 
     try:
@@ -14453,29 +17450,44 @@ def _import_ply_mesh(ply_path: Path) -> MeshImportResponse:
     normals = np.asarray(mesh.vertex_normals, dtype=float)
     colors_arr = np.asarray(mesh.vertex_colors, dtype=float)  # 0-1, per vertex
 
-    out_colors = colors_arr.tolist() if colors_arr.shape[0] == vertices.shape[0] else None
-    out_normals = normals.tolist() if normals.shape[0] == vertices.shape[0] else None
+    out_colors = colors_arr if colors_arr.shape[0] == vertices.shape[0] else None
+    out_normals = normals if normals.shape[0] == vertices.shape[0] else None
 
-    return MeshImportResponse(
-        success=True,
-        vertices=vertices.tolist(),
-        indices=triangles.tolist(),
-        normals=out_normals,
-        colors=out_colors,
-        uv_coordinates=None,
-        materials=None,
-        material_groups=None,
-        textures=None,
-        vertex_count=int(vertices.shape[0]),
-        triangle_count=int(triangles.shape[0]),
-        filename=ply_path.name,
-        has_textures=False,
+    return {
+        "success": True,
+        "vertices": vertices,
+        "indices": triangles,
+        "normals": out_normals,
+        "colors": out_colors,
+        "uv_coordinates": None,
+        "materials": None,
+        "material_groups": None,
+        "textures": None,
+        "vertex_count": int(vertices.shape[0]),
+        "triangle_count": int(triangles.shape[0]),
+        "filename": ply_path.name,
+        "has_textures": False,
+    }
+
+
+@app.post("/api/mesh/import")
+def import_textured_mesh(request: MeshImportRequest):
+    """Parse an OBJ (+ MTL + texture images) or PLY from disk into textured geometry.
+
+    Returns a PHB1 binary frame, not JSON. A scanner-grade mesh is easily
+    millions of triangles, and as JSON that body exceeds V8's ~512 MB
+    string-length cap — `response.json()` then throws ERR_STRING_TOO_LONG in the
+    renderer no matter how long it waits. The binary frame is ~6x smaller and
+    decodes as zero-copy typed arrays. Materials/textures ride in the frame's
+    JSON meta, which stays small (base64 images only)."""
+    return Response(
+        content=_pack_mesh_frame(_do_mesh_import(request), index_key="indices"),
+        media_type="application/octet-stream",
     )
 
 
-@app.post("/api/mesh/import", response_model=MeshImportResponse)
-async def import_textured_mesh(request: MeshImportRequest):
-    """Parse an OBJ (+ MTL + texture images) from disk into textured geometry."""
+def _do_mesh_import(request: MeshImportRequest) -> dict:
+    """Load an OBJ/PLY mesh from disk into the `_pack_mesh_frame` dict shape."""
     from qsm.obj_loader import load_obj_template
 
     obj_path = Path(request.path)
@@ -14539,25 +17551,51 @@ async def import_textured_mesh(request: MeshImportRequest):
 
     has_textures = bool(textures_data) and bool(material_groups_list)
 
-    return MeshImportResponse(
-        success=True,
-        vertices=out_vertices,
-        indices=out_faces,
-        normals=out_normals if has_any_normals else None,
-        colors=out_colors,
-        uv_coordinates=out_uvs if has_textures else None,
-        materials=materials_list or None,
-        material_groups=material_groups_list or None,
-        textures=textures_data or None,
-        vertex_count=len(out_vertices),
-        triangle_count=len(out_faces),
-        filename=obj_path.name,
-        has_textures=has_textures,
-    )
+    return {
+        "success": True,
+        "vertices": out_vertices,
+        "indices": out_faces,
+        "normals": out_normals if has_any_normals else None,
+        "colors": out_colors,
+        "uv_coordinates": out_uvs if has_textures else None,
+        # Pydantic models don't survive the frame's JSON meta — send plain dicts.
+        "materials": [m.model_dump() for m in materials_list] or None,
+        "material_groups": [g.model_dump() for g in material_groups_list] or None,
+        "textures": textures_data or None,
+        "vertex_count": len(out_vertices),
+        "triangle_count": len(out_faces),
+        "filename": obj_path.name,
+        "has_textures": has_textures,
+    }
 
 
 # ==================== POINT CLOUD LAS/LAZ IMPORT/EXPORT ====================
 # Uses laspy for reading and writing LAS/LAZ files with compression support
+
+
+def _resolve_export_dest(dest_path: str) -> Path:
+    """Validate an export destination the renderer picked via its save dialog.
+
+    The backend binds to 127.0.0.1 only, and the path always originates from the
+    user's own native Save-As — but this endpoint still takes a filesystem path
+    from a request body, so validate rather than trust: require an absolute path
+    (no cwd-relative surprises), resolve it (collapsing any `..`), and require
+    the parent directory to already exist. We deliberately do NOT create parent
+    directories: the save dialog always yields an existing folder, so a missing
+    one means the path isn't what we think it is.
+    """
+    p = Path(dest_path).expanduser()
+    if not p.is_absolute():
+        raise HTTPException(status_code=400, detail=f"Export path must be absolute: {dest_path}")
+    p = p.resolve()
+    if not p.parent.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Export directory does not exist: {p.parent}",
+        )
+    if p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Export path is a directory: {p}")
+    return p
 
 class PointCloudExportRequest(BaseModel):
     """Request for exporting a point cloud.
@@ -14565,14 +17603,45 @@ class PointCloudExportRequest(BaseModel):
     Flat clouds send inline `points` (+ optional `colors`) and `format` in
     {"las","laz"}. Octree-backed clouds send `source` instead — and may request
     any of {"las","laz","xyz","txt","csv","ply"} since the renderer has no
-    positions to format text from. The backend reads the source file, applies
-    pending translation, and returns base64-encoded output in all cases.
+    positions to format text from. The backend reads the source file and applies
+    pending translation in all cases.
+
+    Output goes one of two ways:
+
+    * `dest_path` set — the backend writes the file itself and returns only
+      metadata. This is the path the app uses, and the only one that works at
+      scale: a base64-in-JSON body is ~1.8x the file size, and a 25 M-point XYZ
+      export lands near 1 GB, well past V8's ~512 MB string cap. The renderer
+      then fails in `response.json()` with "Unexpected end of JSON input" no
+      matter how long it waits. Writing server-side avoids the base64 inflation,
+      the giant JSON body, and holding another full copy in renderer memory.
+    * `dest_path` omitted — legacy base64-in-`data` response, kept for callers
+      with no filesystem destination (tests, a browser context). Only safe for
+      small clouds, for the reason above.
     """
     points: Optional[List[List[float]]] = None  # [[x, y, z], ...]
     colors: Optional[List[List[float]]] = None  # [[r, g, b], ...] in 0-1 range
     source: Optional[PointSource] = None         # octree-backed clouds read from disk
     format: str = "laz"  # las | laz | xyz | txt | csv | ply
     filename: Optional[str] = None  # Optional filename for the export
+    # Absolute path the backend writes to. When set, `data` comes back null.
+    dest_path: Optional[str] = None
+    # Ordered column slugs from the export modal's field picker, e.g.
+    # ["x","y","z","reflectance","ground_class"]. A slug the cloud doesn't carry
+    # is dropped rather than written as zeros. None/omitted = the format's
+    # historical full layout, so older callers and the flat-cloud path are
+    # unaffected and a default export stays lossless.
+    #
+    # Honored by every format except OBJ (a `v` line takes exactly x/y/z):
+    #   * xyz/txt/csv — the file's columns, in this order.
+    #   * ply         — the declared `property` list, in this order.
+    #   * las/laz     — WHICH dimensions are written; order is ignored, because
+    #                   LAS identifies dimensions by name. Each scalar is a
+    #                   declared extra dimension and so is freely omittable;
+    #                   dropping r/g/b selects point format 1 (no RGB). x/y/z and
+    #                   intensity live in the core point record of every format
+    #                   and cannot be removed — the UI locks them on.
+    columns: Optional[List[str]] = None
 
 
 class PointCloudExportResponse(BaseModel):
@@ -14597,87 +17666,317 @@ class PointCloudImportResponse(BaseModel):
     error: Optional[str] = None
 
 
+# Rows formatted per np.savetxt call. Formatting dominates a text export (~97%
+# of wall time; the disk write is ~3%), and np.savetxt is one opaque call with no
+# interior progress hook — so it is chunked to make progress reportable. Measured
+# on 8 M points: monolithic 9.2 s vs chunked 9.4 s (+2%) for byte-identical
+# output, with a progress tick every ~0.6 s. Smaller chunks would tick more often
+# but add per-call overhead; larger ones make the bar jumpy.
+_TEXT_EXPORT_CHUNK_ROWS = 500_000
+
+
 def _format_points_as_text(
     fmt: str,
     points: np.ndarray,
     colors: Optional[np.ndarray],
     intensity: Optional[np.ndarray],
+    progress=None,
+    extras=None,
+    columns=None,
 ) -> str:
-    """Format an (N,3) point array (+ optional 0-1 colors, intensity) as XYZ /
-    TXT / CSV / PLY / OBJ text. Column conventions match the renderer's flat
-    text export exactly: 6-decimal positions, colors as 0-255 ints, intensity
-    4-decimal.
+    """Format an (N,3) point array (+ optional 0-1 colors, intensity, scalar
+    `extras`) as XYZ / TXT / CSV / PLY / OBJ text. Column conventions match the
+    renderer's flat text export exactly: 6-decimal positions, colors as 0-255
+    ints, intensity 4-decimal.
+
+    `columns` is the user's ordered slug selection from the export modal; None
+    keeps the historical fixed layout. Both the column set and the header/format
+    per column come from `_text_export_layout`, shared with the streaming writer
+    (`_write_points_as_text`) so the two cannot drift.
 
     Vectorised with `np.savetxt` rather than a per-point Python f-string loop —
     on a multi-million-point octree cloud the old loop dominated export time and
     held the whole formatted string list in RAM. Output is byte-identical to the
     previous loop (same precision, separators, headers, and no trailing newline).
-    """
-    import io
 
+    `progress(fraction, message)` is called between chunks so the UI can show a
+    real percentage instead of an indeterminate spinner. Chunking is what makes
+    that possible at all — see `_TEXT_EXPORT_CHUNK_ROWS`.
+    """
+    def _savetxt(cols: list, fmts: list, sep: str) -> str:
+        """Format the column-stacked `cols` with per-column `fmts`, joined by
+        `sep`, returning the body WITHOUT a trailing newline.
+
+        Deliberately NOT np.savetxt: that loops row-by-row in Python (profiling a
+        1 M-row export showed ~4 M interpreter calls — `write_normal` + `asunicode`
+        + `write` per row), so its cost is per-row dispatch, not the formatting.
+        Applying ONE `%` over a whole chunk's flattened values does all the
+        conversion inside CPython's C formatter with a single dispatch, which
+        measured 2.0x faster on 8 M points (8.84 s -> 4.42 s) for byte-identical
+        output. Vectorised alternatives were tried and are SLOWER than savetxt:
+        np.char.mod + join (0.57x) and pandas.to_csv (0.45x).
+
+        Chunking serves two purposes: it lets `progress` report a real
+        percentage, and it bounds the transient. `row_fmt * n % tuple(flat)`
+        materialises a Python tuple of every value, which peaks around 5x the
+        output size — chunking held peak RSS to 133 MB vs savetxt's 751 MB on the
+        same 8 M-point export. Joining chunks is byte-identical to one pass: each
+        row carries its own newline and only the final one is stripped.
+        """
+        stacked = np.column_stack(cols)
+        total = len(stacked)
+        row_fmt = sep.join(fmts) + "\n"
+
+        parts: list = []
+        for start in range(0, total, _TEXT_EXPORT_CHUNK_ROWS):
+            chunk = stacked[start:start + _TEXT_EXPORT_CHUNK_ROWS]
+            flat = chunk.ravel()
+            # `.item()`-free: tuple() on a 1-D array yields numpy scalars, which
+            # %-format identically to their Python counterparts.
+            parts.append(row_fmt * len(chunk) % tuple(flat))
+            if progress is not None:
+                done = min(start + _TEXT_EXPORT_CHUNK_ROWS, total)
+                progress(done / total, f"Formatting {done:,} / {total:,} points")
+        return "".join(parts).rstrip("\n")
+
+    header, cols, fmts, sep = _text_export_layout(
+        fmt, points, colors, intensity, extras=extras, columns=columns)
+    body = _savetxt(cols, fmts, sep) if len(points) else ""
+    # Join header to body with exactly one newline, and emit no trailing newline
+    # in any case — matches the streaming writer, which suppresses the separating
+    # newline the same way (header-only when empty; body-only for headerless xyz).
+    return "\n".join([part for part in ("\n".join(header), body) if part])
+
+
+# Display headers for the fixed geometry/colour slugs in a text export. Any slug
+# not listed here is a scalar column and gets its own slug as the header.
+_TEXT_EXPORT_SLUG_HEADERS = {
+    "x": "X", "y": "Y", "z": "Z", "r": "R", "g": "G", "b": "B",
+    "intensity": "Intensity",
+}
+
+# PLY property declarations for the fixed slugs. Scalars are declared `float`.
+_PLY_PROPERTY_TYPES = {
+    "x": "float x", "y": "float y", "z": "float z",
+    "r": "uchar red", "g": "uchar green", "b": "uchar blue",
+}
+
+
+def _resolve_export_columns(
+    columns, points, colors, intensity, extras, default_slugs=None,
+) -> list[tuple[str, np.ndarray, str]]:
+    """Resolve a requested slug list into ordered (slug, values, printf-format)
+    triples, dropping any slug whose data this cloud doesn't actually carry.
+
+    `columns` is the ordered list the export modal's column picker produced.
+    None/empty falls back to `default_slugs` — which each format supplies, because
+    the historical fixed layouts differ per format: txt/csv carried colour AND
+    intensity, ply carried colour only, and xyz/obj were geometry-only. Getting
+    that wrong is not cosmetic; `test_text_export_is_byte_identical_to_reference`
+    pins every one of those combinations.
+
+    Dropping absent slugs (rather than emitting a zero column) matters because
+    the picker is built from octree attribute metadata, which can name a scalar
+    the session no longer holds after a bake/split. A silent zero column reads as
+    real data; an omitted one is visibly absent in the header.
+    """
     n = len(points)
     has_colors = colors is not None and len(colors) == n
     has_int = intensity is not None and len(intensity) == n
     rgb = np.clip(np.rint(colors * 255.0), 0, 255).astype(int) if has_colors else None
 
-    def _savetxt(cols: list, fmts: list, sep: str) -> str:
-        """np.savetxt the column-stacked `cols` with per-column `fmts`, joined by
-        `sep`, returning the body WITHOUT the trailing newline savetxt appends."""
-        buf = io.StringIO()
-        np.savetxt(buf, np.column_stack(cols), fmt=sep.join(fmts), delimiter=sep)
-        return buf.getvalue().rstrip("\n")
+    available: dict[str, tuple[np.ndarray, str]] = {
+        "x": (points[:, 0], "%.6f"),
+        "y": (points[:, 1], "%.6f"),
+        "z": (points[:, 2], "%.6f"),
+    }
+    if has_colors:
+        available["r"] = (rgb[:, 0], "%d")
+        available["g"] = (rgb[:, 1], "%d")
+        available["b"] = (rgb[:, 2], "%d")
+    if has_int:
+        available["intensity"] = (np.asarray(intensity, dtype=np.float64), "%.4f")
+    for slug, col in (extras or {}).items():
+        arr = np.asarray(col)
+        if arr.shape != (n,):
+            # A desynced column would silently mislabel points; skip it.
+            continue
+        # The dedicated arrays win: a session that holds a real intensity/colour
+        # array has already registered those slugs above, so an extras column of
+        # the same name (LAS promotes intensity to its standard dimension) must
+        # not shadow it.
+        if slug in available:
+            continue
+        # Integer-valued scalars (class labels, target_index, is_miss) print as
+        # ints so a `ground_class` column reads `2`, not `2.000000`.
+        is_int = np.issubdtype(arr.dtype, np.integer) or (
+            arr.size > 0 and np.all(np.isfinite(arr)) and np.all(arr == np.rint(arr))
+        )
+        available[slug] = (
+            (arr.astype(np.int64), "%d") if is_int else (arr.astype(np.float64), "%.6f")
+        )
 
-    pos_fmt = ["%.6f", "%.6f", "%.6f"]
+    requested = columns if columns else (default_slugs or ["x", "y", "z"])
+    slugs = [s for s in requested if s in available]
+    return [(s, available[s][0], available[s][1]) for s in slugs]
+
+
+def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=None):
+    """Resolve one text format into (header_lines, columns, per-column formats,
+    separator) — the single description both the string and streaming writers
+    build from, so they cannot drift.
+
+    `extras` are the cloud's scalar columns and `columns` the user's ordered slug
+    selection from the export modal's column picker. With both omitted the layout
+    is exactly the historical fixed one (see `_resolve_export_columns`).
+    """
+    n = len(points)
+    has_colors = colors is not None and len(colors) == n
+    has_int = intensity is not None and len(intensity) == n
+
+    # Each format's HISTORICAL fixed layout, used when the caller sends no
+    # explicit column selection. These differ per format and must be preserved
+    # exactly — see `_resolve_export_columns`.
+    geom = ["x", "y", "z"]
+    rgb_slugs = ["r", "g", "b"] if has_colors else []
+    if fmt in ("txt", "csv"):
+        default_slugs = geom + rgb_slugs + (["intensity"] if has_int else [])
+    elif fmt == "ply":
+        default_slugs = geom + rgb_slugs      # never carried intensity
+    else:
+        default_slugs = geom                  # xyz / obj: geometry only
+
+    resolved = _resolve_export_columns(
+        columns, points, colors, intensity, extras, default_slugs=default_slugs)
+    slugs = [s for s, _, _ in resolved]
+    cols = [v for _, v, _ in resolved]
+    fmts = [f for _, _, f in resolved]
 
     if fmt == "xyz":
-        return _savetxt([points[:, 0], points[:, 1], points[:, 2]], pos_fmt, " ")
+        # Bare XYZ carries no header line, so a selection beyond x/y/z is written
+        # as extra whitespace-separated columns — the same convention the
+        # importer's ASCII_format reads back.
+        return [], cols, fmts, " "
 
     if fmt in ("txt", "csv"):
         sep = "," if fmt == "csv" else " "
-        head = ["X", "Y", "Z"]
-        cols = [points[:, 0], points[:, 1], points[:, 2]]
-        fmts = list(pos_fmt)
-        if has_colors:
-            head += ["R", "G", "B"]
-            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
-            fmts += ["%d", "%d", "%d"]
-        if has_int:
-            head += ["Intensity"]
-            cols += [np.asarray(intensity, dtype=np.float64)]
-            fmts += ["%.4f"]
-        body = _savetxt(cols, fmts, sep)
-        # Match the old loop exactly: header only (no trailing newline) when empty.
-        return sep.join(head) + ("\n" + body if body else "")
+        head = [_TEXT_EXPORT_SLUG_HEADERS.get(s, s) for s in slugs]
+        return [sep.join(head)], cols, fmts, sep
 
     if fmt == "ply":
-        header = ["ply", "format ascii 1.0", f"element vertex {n}",
-                  "property float x", "property float y", "property float z"]
-        cols = [points[:, 0], points[:, 1], points[:, 2]]
-        fmts = list(pos_fmt)
-        if has_colors:
-            header += ["property uchar red", "property uchar green", "property uchar blue"]
-            cols += [rgb[:, 0], rgb[:, 1], rgb[:, 2]]
-            fmts += ["%d", "%d", "%d"]
+        header = ["ply", "format ascii 1.0", f"element vertex {n}"]
+        header += [
+            f"property {_PLY_PROPERTY_TYPES[s]}" if s in _PLY_PROPERTY_TYPES
+            else f"property float {s}"
+            for s in slugs
+        ]
         header.append("end_header")
-        body = _savetxt(cols, fmts, " ")
-        return "\n".join(header) + ("\n" + body if body else "")
+        return header, cols, fmts, " "
 
     if fmt == "obj":
+        # OBJ vertices are geometry only — a `v` line takes exactly x/y/z, so the
+        # column selection cannot apply here.
         header = ["# Point cloud exported from Phytograph", f"# {n} points"]
         # The 'v ' prefix is the first format field (a literal column).
-        body = _savetxt(
-            [points[:, 0], points[:, 1], points[:, 2]],
-            ["v %.6f", "%.6f", "%.6f"], " ",
-        )
-        return "\n".join(header) + ("\n" + body if body else "")
+        return header, [points[:, 0], points[:, 1], points[:, 2]], ["v %.6f", "%.6f", "%.6f"], " "
 
     raise HTTPException(status_code=400, detail=f"Unsupported text export format: {fmt}")
 
 
-@app.post("/api/pointcloud/export", response_model=PointCloudExportResponse)
-async def export_point_cloud_las(request: PointCloudExportRequest):
+def _write_points_as_text(
+    dest: Path,
+    fmt: str,
+    points: np.ndarray,
+    colors: Optional[np.ndarray],
+    intensity: Optional[np.ndarray],
+    progress=None,
+    extras=None,
+    columns=None,
+) -> None:
+    """Format and write a point cloud to `dest` WITHOUT building the whole file
+    in memory first.
+
+    `_format_points_as_text` returns one string — for a 25 M-point export that is
+    a 780 MB object, and joining the per-chunk pieces transiently holds both the
+    pieces and the joined copy (measured +849 MB -> +1538 MB peak RSS). Writing
+    each chunk straight through keeps the transient at roughly one chunk.
+
+    Output is byte-identical to `_format_points_as_text`: both build from
+    `_text_export_layout`, and the trailing newline is suppressed the same way
+    (the string version strips the joined result; here the final chunk is
+    written without its last newline).
     """
-    Export a point cloud.
+    header, cols, fmts, sep = _text_export_layout(
+        fmt, points, colors, intensity, extras=extras, columns=columns)
+    stacked = np.column_stack(cols) if len(points) else None
+    total = len(points)
+    row_fmt = sep.join(fmts) + "\n"
+
+    # Write to a sibling temp file and rename only on success. Streaming means
+    # bytes hit the disk before the export is complete, so a cancel (or a crash)
+    # would otherwise leave a TRUNCATED file at the user's chosen path that looks
+    # like a finished export. The rename is atomic within a filesystem, and the
+    # temp file is a sibling so it lands on the same one.
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+            if header:
+                fh.write("\n".join(header))
+            if total:
+                if header:
+                    fh.write("\n")
+                for start in range(0, total, _TEXT_EXPORT_CHUNK_ROWS):
+                    chunk = stacked[start:start + _TEXT_EXPORT_CHUNK_ROWS]
+                    piece = row_fmt * len(chunk) % tuple(chunk.ravel())
+                    is_last = start + _TEXT_EXPORT_CHUNK_ROWS >= total
+                    fh.write(piece[:-1] if is_last else piece)
+                    if progress is not None:
+                        done = min(start + _TEXT_EXPORT_CHUNK_ROWS, total)
+                        progress(done / total, f"Formatting {done:,} / {total:,} points")
+        os.replace(tmp, dest)
+    except BaseException:
+        # Cancel, error, or interrupt: leave nothing behind at the real path.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+@app.post("/api/pointcloud/export")
+def export_point_cloud_las(request: PointCloudExportRequest, http_request: Request):
+    """Export a point cloud, streaming PHP1 progress ahead of a JSON tail.
+
+    Formatting a multi-million-point text export is ~97% of its wall time and was
+    previously one opaque blocking call, so the UI could only show an
+    indeterminate spinner. `_do_point_cloud_export` reports per-chunk progress
+    through the same streaming wrapper the triangulate/DEM/crown-fit endpoints
+    use, which also makes the export CANCELLABLE via /api/cancel/{run_id} — a
+    25 M-point export is a ~30 s operation the user needs a way out of.
+
+    The JSON tail is the same PointCloudExportResponse shape as before; only the
+    transport changed (progress markers now precede it).
+    """
+    # Validate the destination BEFORE the stream opens: once the 200 + first
+    # chunk is out, an HTTPException can only reach the client as a truncated
+    # body, so a bad path would surface as a decode error instead of its own
+    # message. Resolving here also means the worker's later call is a no-op.
+    if request.dest_path:
+        _resolve_export_dest(request.dest_path)
+
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_point_cloud_export(request, progress=progress, cancel_event=cancel_event)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+def _do_point_cloud_export(
+    request: PointCloudExportRequest, progress=None, cancel_event=None
+) -> dict:
+    """
+    Export a point cloud. Returns the PointCloudExportResponse dict.
 
     Flat clouds export LAS/LAZ via laspy. Octree-backed clouds send a `source`
     descriptor and may export any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ — the backend
@@ -14694,20 +17993,60 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
     # renderer can't iterate an empty positions buffer.
     src_colors = None
     src_intensity = None
+    src_extras: Dict[str, np.ndarray] = {}
     if request.source is not None:
         src = request.source
         src.want_colors = True
+        # An export must round-trip the cloud, so it takes the scalar columns too
+        # (reflectance, class labels, target_index, is_miss, anything the wizard
+        # imported). Without this the text formats wrote x/y/z(+rgb/intensity) and
+        # LAS wrote x/y/z(+rgb) — every other imported field was silently lost.
+        src.want_extras = True
         # Export preserves whatever the user imported, sky/misses included — the
         # compute consumers drop them, but an export should round-trip the cloud.
         src.include_misses = True
-        points, src_colors, src_intensity = _read_points_from_source(src)
+        if progress is not None:
+            progress(0.02, "Reading points")
+        _cancel_checkpoint(progress)
+        points, src_colors, src_intensity, src_extras = _read_points_and_extras(src)
         if fmt in ("xyz", "txt", "csv", "ply", "obj"):
             try:
-                text = _format_points_as_text(fmt, points, src_colors, src_intensity)
-            except HTTPException:
+                # Formatting is ~97% of a text export's wall time; report it as
+                # the bulk of the bar, leaving a small head for the read above
+                # and a small tail for the disk write below.
+                # Also the cancellation checkpoint: the reporter's __call__ only
+                # QUEUES a marker, it never raises, so without this poll a cancel
+                # would not land until formatting finished — which for a 25 M-point
+                # export is the entire operation. Raising here unwinds before the
+                # file is written, so a cancelled export leaves nothing behind.
+                def _fmt_progress(frac, msg):
+                    if progress is not None:
+                        progress(0.05 + 0.90 * frac, msg)
+                        _cancel_checkpoint(progress)
+                _cancel_checkpoint(progress)
+                # Stream straight to the destination when we have one: the
+                # string form of a 25 M-point export is 780 MB, and joining its
+                # chunks transiently doubles that. Only the legacy base64 path
+                # (no dest_path) needs the whole thing in memory.
+                dest = _resolve_export_dest(request.dest_path) if request.dest_path else None
+                if dest is not None:
+                    _write_points_as_text(
+                        dest, fmt, points, src_colors, src_intensity,
+                        progress=_fmt_progress, extras=src_extras,
+                        columns=request.columns)
+                    text = None
+                else:
+                    text = _format_points_as_text(
+                        fmt, points, src_colors, src_intensity, progress=_fmt_progress,
+                        extras=src_extras, columns=request.columns)
+            except (HTTPException, ScanCancelled):
+                # ScanCancelled is a plain Exception, so the broad handler below
+                # would swallow it and report a user cancel as "Export failed".
+                # It must reach the streaming wrapper, which turns it into the
+                # terminal `cancelled` marker the renderer expects.
                 raise
             except Exception as e:
-                return PointCloudExportResponse(
+                return dict(
                     success=False, data=None, filename="", point_count=0,
                     has_colors=False, format=request.format,
                     error=f"Export failed: {e}",
@@ -14716,7 +18055,18 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
             filename = request.filename or f"pointcloud{ext}"
             if not filename.endswith(ext):
                 filename = filename.rsplit(".", 1)[0] + ext
-            return PointCloudExportResponse(
+            # Preferred path: write the file here. Base64-in-JSON inflates the
+            # body ~1.8x and a large cloud then blows the renderer's string cap.
+            if dest is not None:
+                # Already written above, chunk by chunk.
+                if progress is not None:
+                    progress(1.0, "Done")
+                return dict(
+                    success=True, data=None, filename=dest.name,
+                    point_count=int(len(points)),
+                    has_colors=src_colors is not None, format=request.format,
+                )
+            return dict(
                 success=True,
                 data=base64.b64encode(text.encode("utf-8")).decode("utf-8"),
                 filename=filename,
@@ -14729,7 +18079,7 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
     try:
         import laspy
     except ImportError:
-        return PointCloudExportResponse(
+        return dict(
             success=False,
             data=None,
             filename="",
@@ -14750,7 +18100,7 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
             colors_arr = np.array(request.colors) if has_colors else None
 
         if len(points) == 0:
-            return PointCloudExportResponse(
+            return dict(
                 success=False,
                 data=None,
                 filename="",
@@ -14760,38 +18110,171 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
                 error="No points provided"
             )
 
-        # Choose point format: 0 = XYZ only, 2 = XYZ + RGB
-        point_format = 2 if has_colors else 0
+        # Intensity + the scalar extra columns, for the source-backed path. The
+        # flat inline path has neither (it sends `points`/`colors` only).
+        has_intensity = (
+            request.source is not None
+            and src_intensity is not None
+            and len(src_intensity) == len(points)
+        )
+        # Only columns that align with the (already miss/deletion-filtered) point
+        # array can be written; a desynced one would mislabel every row.
+        export_extras = {
+            slug: np.asarray(col)
+            for slug, col in (src_extras or {}).items()
+            if np.asarray(col).shape == (len(points),)
+        }
 
-        # Create LAS header
-        header = laspy.LasHeader(point_format=point_format, version="1.2")
+        # Honor the column selection here too. LAS extra dimensions are an
+        # explicit declared list, so writing a SUBSET is exactly as valid as
+        # writing all of them — there is no structural reason to force the full
+        # set. (This endpoint used to ignore `columns` for LAS/LAZ on the premise
+        # that a "fixed schema" left nothing to choose. That is true only of the
+        # STANDARD dimensions; every scalar rides as an extra dim and is freely
+        # omittable.) Omitting `columns` still writes everything, so the default
+        # export stays lossless.
+        if request.columns:
+            wanted = set(request.columns)
+            export_extras = {k: v for k, v in export_extras.items() if k in wanted}
 
-        # Calculate offsets and scales for precision
+        # Point format: 3 = XYZ + intensity + RGB + GPS time, 1 = the same minus
+        # RGB — the pairing `_xyz_to_las` uses on import, so an export re-imports
+        # through our own loader unchanged. Dropping r/g/b from the selection
+        # picks format 1, which is how RGB is genuinely omitted (the point format
+        # is a fixed menu, so RGB can only be dropped as a bundle with GPS time).
+        #
+        # Two standard dimensions can NOT be honored à la carte, and the UI says
+        # so rather than pretending otherwise:
+        #   * `intensity` is in the core point record of ALL formats, so it always
+        #     exists as a field; deselecting it can only zero it, not remove it.
+        #   * GPS time is coupled to RGB by the format menu (0/1/2/3).
+        #
+        # Note it is NOT the point format that was losing scalars: laspy accepts
+        # extra dimensions on any format. The old `2 if has_colors else 0` narrowed
+        # nothing by itself — the loss came from never READING the scalars
+        # (`want_extras`), never declaring them, and never assigning intensity.
+        want_color = has_colors and (not request.columns or bool(
+            {"r", "g", "b"} & set(request.columns)))
+        point_format = 3 if want_color else 1
+
+        # Assembling the LAS is NOT free, despite each step being vectorised: at
+        # 25 M points the stages below total ~5 s (bounds ~0.5 s, the quantising
+        # x/y/z assignment ~1.5 s, colour clip+scale ~0.6 s, laspy.write ~1 s).
+        # They used to run between the "Reading points" and "Writing file"
+        # markers, so the pill sat at 2% for the whole time and then jumped to
+        # 90% — reading as a hang. Report each stage instead. The fractions are
+        # rough shares of that measured breakdown, not a uniform split.
+        def _stage(frac, msg):
+            if progress is not None:
+                progress(frac, msg)
+                _cancel_checkpoint(progress)
+
+        # Each marker is emitted BEFORE the work it names, so the label the user
+        # sees always describes the step currently running.
+        _stage(0.10, "Computing bounds")
+        # Version 1.4 (was 1.2) because extra dimensions need the 1.4 header —
+        # same pairing the importer uses. Point format 3 is valid in both.
+        header = laspy.LasHeader(point_format=point_format, version="1.4")
         min_coords = points.min(axis=0)
-        max_coords = points.max(axis=0)
-
-        header.offsets = min_coords
+        # floor() the offset: a raw min on a projected/UTM cloud can leave the
+        # scaled int32 one quantum past its range. See the LAS UTM offset fix.
+        header.offsets = np.floor(min_coords)
         header.scales = [0.001, 0.001, 0.001]  # 1mm precision
-
-        # Create LAS data
+        # Declare every scalar as a float32 extra dimension, named by slug —
+        # identical to `_xyz_to_las`, so our own importer reads them back as the
+        # same named scalars (and PotreeConverter carries them into the octree).
+        for slug in export_extras:
+            header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
         las = laspy.LasData(header)
+
+        # Each assignment quantises to the header scale (the 1 mm grid), which is
+        # where the bulk of the per-axis cost is. X carries the one-off setup, so
+        # it is consistently the slowest of the three.
+        _stage(0.20, "Packing coordinates")
         las.x = points[:, 0]
         las.y = points[:, 1]
+        _stage(0.55, "Packing coordinates")
         las.z = points[:, 2]
 
-        # Add colors if available (convert from 0-1 to 16-bit)
-        if has_colors:
-            # Ensure colors are in 0-1 range and convert to 16-bit
+        # Add colors if available (convert from 0-1 to 16-bit). Gated on
+        # `want_color`, not `has_colors`: deselecting r/g/b chose format 1, which
+        # has no red/green/blue dimension to assign to.
+        if want_color:
+            _stage(0.65, "Packing colours")
             colors = np.clip(np.asarray(colors_arr, dtype=np.float64), 0, 1)
             las.red = (colors[:, 0] * 65535).astype(np.uint16)
             las.green = (colors[:, 1] * 65535).astype(np.uint16)
             las.blue = (colors[:, 2] * 65535).astype(np.uint16)
+
+        # Intensity rides the standard LAS dimension (uint16). `_read_points_from_source`
+        # hands it back as 0-1 floats, matching the /65535 it applied on the way out,
+        # so scale it back to the LAS range here.
+        #
+        # Deselecting intensity leaves the dimension at its zero default rather
+        # than removing it — every LAS point format carries `intensity` in the core
+        # record, so it cannot be omitted. The UI states this instead of offering a
+        # checkbox that would silently mean "write zeros".
+        if has_intensity and (not request.columns or "intensity" in request.columns):
+            _stage(0.72, "Packing intensity")
+            inten = np.clip(np.asarray(src_intensity, dtype=np.float64), 0, 1)
+            las.intensity = (inten * 65535).astype(np.uint16)
+
+        # Scalars into their declared extra dimensions, by slug.
+        if export_extras:
+            _stage(0.78, f"Packing {len(export_extras)} scalar field(s)")
+            for slug, col in export_extras.items():
+                las[slug] = col.astype(np.float32)
+
+        # ALSO write a class column into the standard LAS `classification` byte.
+        #
+        # Without this, exporting a classified cloud produced a file whose
+        # classification byte was all zeros, with the real classes hidden in an
+        # ExtraBytes dimension only Phytograph knows to look for. Re-importing it
+        # then showed "everything unclassified" under the ASPRS class set — and
+        # every other LiDAR tool saw an unclassified file too.
+        #
+        # The byte is the interoperable home for this, so populate it from the
+        # first class column present in priority order. Extra dims are written
+        # too (above), so nothing is lost and Phytograph still round-trips its
+        # own richer vocabulary.
+        #
+        # laspy's `classification` is an integer field; values are rounded and
+        # clipped to the 0-255 the LAS 1.4 byte allows. Writing a FLOAT column
+        # straight to a reserved standard name is what crashes laspy (it tries to
+        # bit-pack into the flags byte), hence the explicit cast.
+        class_source = next(
+            (sl for sl in (MANUAL_CLASS_SLUG, "las_classification",
+                           GROUND_CLASS_SLUG, WOOD_CLASS_SLUG)
+             if sl in export_extras),
+            None,
+        )
+        if class_source is not None:
+            vals = np.rint(np.asarray(export_extras[class_source], dtype=np.float64))
+            las.classification = np.clip(vals, 0, 255).astype(np.uint8)
 
         # Determine file extension
         ext = ".laz" if request.format.lower() == "laz" else ".las"
         filename = request.filename or f"pointcloud{ext}"
         if not filename.endswith(ext):
             filename = filename.rsplit('.', 1)[0] + ext
+
+        # Preferred path: laspy writes straight to the user's chosen file. No
+        # temp copy, no base64 (which inflates the body ~1.8x), no giant JSON.
+        if request.dest_path:
+            # laspy.write() is one opaque call with no interior hook, so this
+            # last stage is necessarily a single step — but it is only ~1 s of
+            # the ~5 s assembly (and LAZ compression is most of that), so the bar
+            # no longer sits still for the bulk of the export.
+            _stage(0.85, "Compressing and writing" if ext == ".laz" else "Writing file")
+            dest = _resolve_export_dest(request.dest_path)
+            las.write(str(dest))
+            if progress is not None:
+                progress(1.0, "Done")
+            return dict(
+                success=True, data=None, filename=dest.name,
+                point_count=len(points), has_colors=want_color,
+                format=request.format,
+            )
 
         # Write to temporary file
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
@@ -14804,12 +18287,12 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
             with open(tmp_path, 'rb') as f:
                 file_data = base64.b64encode(f.read()).decode('utf-8')
 
-            return PointCloudExportResponse(
+            return dict(
                 success=True,
                 data=file_data,
                 filename=filename,
                 point_count=len(points),
-                has_colors=has_colors,
+                has_colors=want_color,
                 format=request.format
             )
         finally:
@@ -14817,10 +18300,14 @@ async def export_point_cloud_las(request: PointCloudExportRequest):
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
+    except (HTTPException, ScanCancelled):
+        # Same reason as the text branch: a cancel is not a failure, and a bad
+        # dest_path must keep its own 400 rather than become a generic error.
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return PointCloudExportResponse(
+        return dict(
             success=False,
             data=None,
             filename="",
@@ -14862,8 +18349,14 @@ async def import_point_cloud_las(file: UploadFile = File(...)):
         tmp.write(content)
         tmp_path = tmp.name
     try:
-        positions, colors, intensity = _load_las_arrays(tmp_path)
-        return _pack_pointcloud_response(positions, colors, intensity)
+        # laspy decode + the binary pack are the whole cost here and they are
+        # pure CPU, so they run in the threadpool rather than on the event loop —
+        # a multi-hundred-MB LAZ would otherwise stall every other request.
+        def _decode():
+            positions, colors, intensity = _load_las_arrays(tmp_path)
+            return _pack_pointcloud_response(positions, colors, intensity)
+
+        return await run_in_threadpool(_decode)
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -14963,9 +18456,13 @@ _MISS_ALIASES_NORMALISED = {re.sub(r'[^a-z0-9]+', '', a) for a in _MISS_ALIASES}
 
 def _normalise_miss_alias(name: str) -> Optional[str]:
     """Return `_MISS_SLUG` when `name` is any miss-flag spelling (is_miss / miss
-    / sky, case- and punctuation-insensitive), else None."""
-    base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
-    return _MISS_SLUG if base in _MISS_ALIASES_NORMALISED else None
+    / sky, case- and punctuation-insensitive), else None.
+
+    Thin wrapper over the canonical table so the miss spellings live in exactly
+    one place; kept as a named function because callers read better for it.
+    """
+    slug = _canonical_slug_for_name(name)
+    return _MISS_SLUG if slug == _MISS_SLUG else None
 
 
 # Per-pulse beam-origin triple. When all three are present these are GROUND-TRUTH
@@ -15006,9 +18503,281 @@ def _normalise_origin_alias(name: str) -> Optional[str]:
     """Return the canonical origin slug ('origin_x'/'origin_y'/'origin_z') when
     `name` is any beam-origin spelling (ox/oy/oz, xorigin/yorigin/zorigin,
     beamoriginx/y/z — case- and punctuation-insensitive), else None. Mirrors
-    `_normalise_miss_alias`, but maps to one of three axis-specific slugs."""
-    base = re.sub(r'[^a-z0-9]+', '', name.strip().lower())
-    return _ORIGIN_ALIAS_TO_SLUG.get(base)
+    `_normalise_miss_alias`, but maps to one of three axis-specific slugs.
+
+    Thin wrapper over the canonical table (see `_normalise_miss_alias`)."""
+    slug = _canonical_slug_for_name(name)
+    return slug if slug in _ORIGIN_SLUGS else None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE canonical name→slug table.
+#
+# A scalar column is only useful to Phytograph's tools once it lands under a
+# CANONICAL SLUG: Backfill Misses looks for `timestamp`, LAD's multi-return path
+# for `timestamp`/`target_index`/`target_count`, the miss filter for `is_miss`.
+# Source files spell these however their vendor pleased — RIEGL writes
+# `Reflectance`, LAS standardises `gps_time`, a Helios export writes
+# `Timestamp[s]`, and a user's own file might just say `time`.
+#
+# This table is the ONE place that knowledge lives. It previously existed in six
+# copies that did not share a source (two `aliases` dicts in the LAD readers,
+# `_normalise_miss_alias`, `_normalise_origin_alias`, `_role_from_header_name`,
+# and `role_for` in `_preview_las`), which is exactly why a `gps-time` column
+# could be recognised by the colour-by picker and simultaneously invisible to
+# Backfill Misses: each site had its own opinion and fixing one left the others
+# stale. Add a spelling HERE and every consumer gets it.
+#
+# Matching is on the NORMALISED form (see `_normalise_column_name`): unit
+# suffixes stripped (`Timestamp[s]` → `timestamp`), lower-cased, non-alphanumerics
+# removed (`gps_time`/`gps-time`/`GPS Time` → `gpstime`). So entries below are
+# written pre-normalised — no underscores, no punctuation, no capitals.
+#
+# NOTE the colour convention: this table maps colour to the '255-scale' roles
+# (`r255`/`g255`/`b255`) that the ASCII/LAS pipeline uses. The import WIZARD's
+# dropdown exposes plain `r`/`g`/`b` and handles the scale with a separate
+# per-scan toggle. The two vocabularies are deliberately distinct; do not
+# collapse them (see `ROLE_OPTIONS` in PointCloudImportWizard.tsx).
+_CANONICAL_NAME_ALIASES: "dict[str, tuple[str, ...]]" = {
+    'x': ('x', 'easting'),
+    'y': ('y', 'northing'),
+    'z': ('z', 'height', 'elevation'),
+    'r255': ('r', 'red', 'r255', 'red255'),
+    'g255': ('g', 'green', 'g255', 'green255'),
+    'b255': ('b', 'blue', 'b255', 'blue255'),
+    'intensity': ('intensity',),
+    'reflectance': ('reflectance', 'reflectivity'),
+    # Per-pulse multi-return columns. `time` is accepted because it is the
+    # obvious thing a user names the column and there is no competing meaning.
+    'timestamp': ('timestamp', 'gpstime', 'time'),
+    'target_index': ('targetindex', 'returnnumber'),
+    'target_count': ('targetcount', 'numberofreturns', 'numreturns'),
+    # Structured-scan raster indices.
+    'row_index': ('rowindex', 'row', 'scanrow', 'scanrowindex', 'rasterrow'),
+    'column_index': ('columnindex', 'column', 'col', 'scancolumn', 'scancol',
+                     'scancolumnindex', 'rastercolumn'),
+}
+# The miss flag and the beam-origin triple keep their own constants (they are
+# referenced directly elsewhere), but fold into the same table so there is still
+# exactly one lookup.
+_CANONICAL_NAME_ALIASES[_MISS_SLUG] = tuple(sorted(_MISS_ALIASES_NORMALISED))
+for _axis, _slug in enumerate(_ORIGIN_SLUGS):
+    _CANONICAL_NAME_ALIASES[_slug] = tuple(
+        a for triple in _BEAM_ORIGIN_ALIAS_SETS
+        for i_, a in enumerate(triple) if i_ == _axis
+    )
+
+# Reverse index: normalised spelling → canonical slug. Built once.
+#
+# A spelling must not map to two slugs; that would make resolution depend on
+# dict order. Asserted at import so a bad edit fails loudly at startup rather
+# than silently mis-assigning a column months later.
+_CANONICAL_ALIAS_TO_SLUG: "dict[str, str]" = {}
+for _slug, _names in _CANONICAL_NAME_ALIASES.items():
+    for _name in _names:
+        _prior = _CANONICAL_ALIAS_TO_SLUG.get(_name)
+        if _prior is not None and _prior != _slug:
+            raise RuntimeError(
+                f"ambiguous column alias {_name!r}: claimed by both "
+                f"{_prior!r} and {_slug!r} in _CANONICAL_NAME_ALIASES"
+            )
+        _CANONICAL_ALIAS_TO_SLUG[_name] = _slug
+
+
+def _normalise_column_name(name: str) -> str:
+    """Fold a source column name to its comparison form.
+
+    Strips a bracketed unit suffix (`Timestamp[s]`, `Reflectance[dB]`), lowers
+    case, and drops every non-alphanumeric character — so `gps_time`, `gps-time`,
+    `GPS Time` and `GpsTime` all collapse to `gpstime`.
+    """
+    base = re.sub(r'\[.*?\]', '', name)
+    return re.sub(r'[^a-z0-9]+', '', base.strip().lower())
+
+
+def _canonical_slug_for_name(name: str) -> Optional[str]:
+    """Canonical Phytograph slug for a source column name, or None if unknown.
+
+    None means "carry it as a plain scalar under its own name" — never a reason
+    to drop a column.
+    """
+    return _CANONICAL_ALIAS_TO_SLUG.get(_normalise_column_name(name))
+
+def _dims_for_slug(dims, slug: str) -> "tuple[str, ...]":
+    """Source dimension names that resolve to `slug`, best candidate FIRST.
+
+    A file can legitimately carry two spellings of the same quantity: Phytograph
+    exported real times in a float32 `timestamp` extra dim while leaving the LAS
+    standard `gps_time` field at zero, so both resolve to `timestamp`. `dims` is
+    a set, so without an explicit order the reader could pick the all-zero one
+    and silently import zeros.
+
+    Order: the canonical slug's own spelling first, then the remaining aliases in
+    the table's declared order. The explicit column is the more specific signal,
+    matching `role_for` in `_preview_las`.
+    """
+    present = {d for d in dims if _canonical_slug_for_name(d) == slug}
+    ordered = []
+    for cand in (slug,) + _CANONICAL_NAME_ALIASES.get(slug, ()):
+        for d in present:
+            if d not in ordered and _normalise_column_name(d) == _normalise_column_name(cand):
+                ordered.append(d)
+    ordered.extend(sorted(d for d in present if d not in ordered))
+    return tuple(ordered)
+
+
+
+
+def _canonical_drop_slugs(drop_slugs: "Optional[List[str]]") -> "tuple[str, ...]":
+    """Normalise a wizard drop list to a sorted, de-duplicated, lower-cased tuple.
+
+    Used both to filter the session's extras and to key the octree cache, so the
+    two can never disagree about what "the same drop list" means (['A','b'] and
+    ['b','a','A'] must hash alike). Empty/None collapses to () so an import that
+    drops nothing keeps the cache identity it had before this field existed.
+    """
+    if not drop_slugs:
+        return ()
+    return tuple(sorted({s.strip().lower() for s in drop_slugs if s and s.strip()}))
+
+
+def _drops_channel(drop_slugs: "Optional[List[str]]", channel: str) -> bool:
+    """True when the wizard unticked a NON-extra-dim channel.
+
+    `intensity` and the r/g/b colour triple are first-class session fields, not
+    entries in `extras`, so `_apply_drop_slugs` can't reach them — yet the
+    wizard offers them an Import checkbox like any other column. Colour is
+    dropped only when the WHOLE triple is unticked: a cloud with two of three
+    channels has no meaningful colour, and the renderer has no way to show one.
+    """
+    drop = set(_canonical_drop_slugs(drop_slugs))
+    if not drop:
+        return False
+    if channel == "intensity":
+        return "intensity" in drop
+    if channel == "colors":
+        return {"r", "g", "b"}.issubset(drop) or {"red", "green", "blue"}.issubset(drop)
+    return False
+
+
+def _apply_drop_slugs(extras: "Optional[Dict[str, np.ndarray]]",
+                      extra_dims_meta: "Optional[List[dict]]",
+                      drop_slugs: "Optional[List[str]]"):
+    """Remove the user-deselected scalar fields from a session's extras.
+
+    This is the IN-FILE counterpart to the ASCII path's positional role='skip'.
+    LAS/LAZ/PLY/PCD/E57/PTX define their own layout, so there is no column
+    position to skip — the choice arrives as slugs and is applied here, at the
+    single point where every format's arrays have been read but the session has
+    not yet been built. The octree is rebuilt from these arrays
+    (`_session_to_las` -> PotreeConverter), NOT from the source file, so
+    dropping here removes the field from the octree, the renderer's colour-by
+    menu and every export, for all formats at once.
+
+    Returns the filtered (extras, extra_dims_meta). Both may be None (formats
+    that carry no scalars); the drop list is matched case-insensitively.
+    """
+    drop = set(_canonical_drop_slugs(drop_slugs))
+    if not drop:
+        return extras, extra_dims_meta
+    if extras is not None:
+        extras = {k: v for k, v in extras.items() if k.lower() not in drop}
+    if extra_dims_meta is not None:
+        extra_dims_meta = [ed for ed in extra_dims_meta
+                           if str(ed.get("slug", "")).lower() not in drop]
+    return extras, extra_dims_meta
+
+
+def _apply_role_overrides(extras: "Optional[Dict[str, np.ndarray]]",
+                          extra_dims_meta: "Optional[List[dict]]",
+                          role_overrides: "Optional[Dict[str, str]]",
+                          timestamps: "Optional[np.ndarray]" = None):
+    """Rename in-file scalar columns onto the canonical slugs the user chose.
+
+    The IN-FILE counterpart to the ASCII path's per-column role dropdown. Those
+    formats define their own layout, so there is no column position to reassign —
+    the choice arrives as `{source_slug: role}` and is applied here, at the same
+    convergence point as `_apply_drop_slugs`, before the session is built and the
+    octree rebuilt from these arrays.
+
+    Two roles are not float32 extras and are handled by the caller instead:
+    `timestamp` (float64, its own session field — precision matters for the
+    trajectory join) and the beam-origin triple. This function reports a
+    requested timestamp column back rather than moving it itself.
+
+    Returns `(extras, extra_dims_meta, timestamp_source)` where `timestamp_source`
+    is the source slug the user assigned to `timestamp`, or None.
+
+    Invariants preserved:
+      - `extras` and `extra_dims_meta` stay in LOCKSTEP — `_session_to_las`
+        indexes extras by every declared slug and KeyErrors otherwise.
+      - An exclusive role is claimed at most once; a second claim is ignored
+        (first wins), matching the wizard's own `dedupeExclusiveRoles`.
+      - A rename never silently destroys a column: if the target slug is already
+        taken by a column the user did NOT reassign, the rename is skipped.
+    """
+    if not role_overrides:
+        return extras, extra_dims_meta, None
+
+    # Normalise: source slugs are matched case-insensitively, like drop_slugs.
+    wanted = {str(k).strip().lower(): str(v).strip().lower()
+              for k, v in role_overrides.items() if k and v}
+    if not wanted:
+        return extras, extra_dims_meta, None
+
+    timestamp_source = None
+    claimed: set = set()
+    renames: "Dict[str, str]" = {}
+    for src, role in wanted.items():
+        if role in ('extra', 'label', 'skip'):
+            continue  # not a canonical role; the column keeps its own name
+        if role == 'timestamp':
+            if timestamp_source is None:
+                timestamp_source = src
+            continue
+        excl = _canonicalise_exclusive_role(role)
+        if excl is not None:
+            if excl in claimed:
+                continue  # first claim wins
+            claimed.add(excl)
+        renames[src] = role
+
+    if extras is None:
+        return extras, extra_dims_meta, timestamp_source
+
+    # Case-insensitive lookup of what the file actually gave us.
+    by_lower = {k.lower(): k for k in extras.keys()}
+    targets = {r for r in renames.values()}
+    for src, role in list(renames.items()):
+        actual = by_lower.get(src)
+        if actual is None:
+            del renames[src]          # the user named a column this file lacks
+            continue
+        # Refuse to clobber a column that is staying put under that name.
+        if role in extras and role != actual and role not in \
+                {by_lower.get(k) for k in renames}:
+            del renames[src]
+
+    if not renames:
+        return extras, extra_dims_meta, timestamp_source
+
+    lower_to_role = {k: v for k, v in renames.items()}
+    new_extras: "Dict[str, np.ndarray]" = {}
+    for k, v in extras.items():
+        new_extras[lower_to_role.get(k.lower(), k)] = v
+    new_meta = None
+    if extra_dims_meta is not None:
+        new_meta = []
+        for ed in extra_dims_meta:
+            slug = str(ed.get("slug", ""))
+            role = lower_to_role.get(slug.lower())
+            if role is None:
+                new_meta.append(ed)
+            else:
+                # Keep the file's own spelling as the label so the UI still
+                # shows the user what their file called the column.
+                new_meta.append({**ed, "slug": role,
+                                 "label": ed.get("label") or slug})
+    return new_extras, new_meta, timestamp_source
 
 
 # Singleton roles: a cloud carries exactly one column of each, so a wizard column
@@ -15039,6 +18808,49 @@ def _canonicalise_exclusive_role(role: str) -> Optional[str]:
 # Distance (metres) at which a miss point is placed from the scanner origin along
 # its pulse direction. Matches Helios's gap_distance (LiDAR.cpp gapfillMisses).
 _MISS_GAP_DISTANCE = 20000.0
+
+# ---------------------------------------------------------------------------
+# PTX (Leica/RiSCAN/FARO structured scan) tuning constants. See `_ptx_to_las`.
+# ---------------------------------------------------------------------------
+# Header lines preceding each block's data: cols, rows, position, 3 axis rows,
+# 4 transform rows.
+_PTX_HEADER_LINES = 10
+# Squared local range below which a cell is the "0 0 0" no-return sentinel.
+# Expressed as a range test rather than three == 0 comparisons so a writer
+# emitting -0.0 or 0.000000 is caught identically. A real return at exactly the
+# scanner's optical centre is physically impossible, so this cannot false-fire.
+_PTX_MISS_RANGE2 = 1e-18
+# A cell this close to +/-Z has an arbitrary azimuth, so it must not pollute its
+# column's azimuth statistic (it still feeds the zenith one).
+_PTX_POLE_SIN = 1e-3
+# Valid cells needed before a row/column's angle is taken as measured.
+_PTX_MIN_CELLS_PER_INDEX = 3
+# Separability residual above which the grid is not the raster we assumed —
+# either the reshape is wrong or the file isn't a single coherent scan.
+_PTX_MAX_ANGULAR_RESIDUAL = math.radians(0.5)
+# How far past the populated index range an angle LUT may be extrapolated before
+# the result stops being trusted, as a fraction of the axis length. Interior gaps
+# are always trusted (they're bracketed by measurements); only the ends guess.
+_PTX_MAX_EXTRAP_FRACTION = 0.10
+# Cells parsed per chunk. Rounded DOWN to a whole number of columns so every
+# chunk reshapes to (row, column) cleanly — see `_ptx_iter_chunks`.
+#
+# Sized from measurement, not intuition. On the 19.9 M-cell reference block the
+# decode's transient working memory scales almost linearly with this while the
+# wall clock does NOT move at all:
+#     2,000,000 -> 1.71 GB transient, 14.0 s
+#     1,000,000 -> 0.95 GB,           14.0 s
+#       500,000 -> 0.58 GB,           13.7 s
+#       250,000 -> 0.47 GB,           13.8 s
+# So a big chunk buys nothing but memory. 500 k sits just past the knee (halving
+# again saves only 0.11 GB) and still gives 150 whole columns per chunk on a
+# 3333-row grid, keeping the pandas read comfortably vectorised.
+_PTX_CHUNK_CELLS = 500_000
+# Cells sampled per block when scoring the columns-vs-rows header hypotheses.
+_PTX_HYPOTHESIS_SAMPLE_CELLS = 4_000_000
+# Intensity written into an empty cell on EXPORT. The spec's value; the importer
+# keys misses off zero xyz alone, so it also accepts the 0 that RiSCAN PRO writes.
+_PTX_EMPTY_INTENSITY = 0.5
 
 # Helios assigns this sentinel target_index to a sky/miss return (LiDAR.cpp:5609,
 # "Special value to exclude from triangulation"). A miss-recording synthetic scan
@@ -15100,6 +18912,63 @@ def _robust_ground_z(positions: "np.ndarray") -> "Optional[float]":
         return None
 
     return float(np.percentile(z, _GROUND_PERCENTILE))
+
+
+# Central span used for the robust extent: the 1st-99th percentile per axis, so
+# up to 1% of points at each end of every axis can be arbitrarily far out without
+# moving the answer.
+_EXTENT_LOW_PERCENTILE = 1.0
+_EXTENT_HIGH_PERCENTILE = 99.0
+
+
+def _robust_aabb(positions: "np.ndarray") -> "Optional[Dict[str, List[float]]]":
+    """Outlier-resistant bounding box {"min": [...], "max": [...]}, or None.
+
+    The percentile box the extent is measured across. The renderer needs the box
+    and not just the span: with far outliers the RAW box centre sits out in empty
+    space among the strays, so a camera that converges on it stalls hundreds of
+    metres short of the data. This gives the centre of the actual content.
+    """
+    if positions is None or len(positions) == 0 or positions.shape[1] < 3:
+        return None
+    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
+    if finite.shape[0] == 0:
+        return None
+    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
+    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
+    return {
+        "min": [float(lo[i]) for i in range(3)],
+        # A degenerate axis (all points identical) must not produce max < min.
+        "max": [float(max(hi[i], lo[i])) for i in range(3)],
+    }
+
+
+def _robust_extent(positions: "np.ndarray") -> "Optional[List[float]]":
+    """Outlier-resistant per-axis extent [dx, dy, dz], or None if unknown.
+
+    The raw bounding box is set by its most extreme point on each axis, so a
+    handful of stray returns — multipath, birds, a mis-registered scan, a sky
+    point projected a kilometre out — inflate it by orders of magnitude. The
+    renderer scales the camera's zoom limits from the scene size, and limits
+    derived from an inflated box are wrong for the content the user is actually
+    looking at: you cannot get close enough to inspect anything, and the far
+    limit sits out where the real data is a dot.
+
+    A per-axis percentile span fixes it where the AABB cannot. Note this is NOT
+    something the renderer can derive from min/max alone — discarding the tail
+    requires the points, which only exist here at import. Same cost profile as
+    `_robust_ground_z`: one `np.percentile` over an array already in RAM.
+
+    Returns None for an empty/degenerate cloud so callers keep their own fallback.
+    """
+    if positions is None or len(positions) == 0 or positions.shape[1] < 3:
+        return None
+    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
+    if finite.shape[0] == 0:
+        return None
+    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
+    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
+    return [float(max(0.0, hi[i] - lo[i])) for i in range(3)]
 
 
 def _autodetect_misses(
@@ -15246,6 +19115,9 @@ class ImportPointCloudByPathRequest(BaseModel):
     file_path: str
     ascii_format: Optional[str] = None
     column_plan: Optional[ColumnPlan] = None
+    # Scalar slugs to leave out (wizard Import checkboxes) for in-file formats,
+    # whose layout the file fixes so `column_plan` can't express the choice.
+    drop_slugs: Optional[List[str]] = None
     # CloudCompare-style global shift [x, y, z] SUBTRACTED from every point at
     # import (mirrors the cloud-session path). For the flat (non-octree) small-
     # cloud path the renderer keeps the resulting small coordinates as its in-RAM
@@ -15283,6 +19155,20 @@ class PreviewColumn(BaseModel):
     suggested_slug: str
     type_hint: str
     remappable: bool
+    # Whether this column's ROLE can be reassigned even though the format's
+    # layout is fixed. Distinct from `remappable`, which means "the column's
+    # POSITION can be remapped" and is an ASCII-only concept.
+    #
+    # An ExtraBytes / E57 / .riproject scalar name is an arbitrary vendor string,
+    # so auto-detection cannot cover every spelling — a column called `t` or
+    # `shot_time` is the timestamp and only the user knows it. Without this the
+    # role dropdown was disabled for exactly the formats where names vary most,
+    # and Backfill Misses / LAD would then refuse the scan citing an internal
+    # slug the user never chose and could not set.
+    #
+    # False for geometry and the fixed standard dims: those genuinely ARE a
+    # defined layout, and reassigning them would break the reader.
+    role_assignable: bool = False
 
 
 class PointCloudPreviewResponse(BaseModel):
@@ -15368,61 +19254,17 @@ def _role_from_header_name(name: str) -> Optional[str]:
     'XYZ[0][m]'/'X' → x, 'Reflectance[dB]' → reflectance, 'Intensity' → intensity,
     'Red'/'R' → r255, etc. An unrecognised name returns None so the caller can
     carry it as an extra-dimension scalar (e.g. 'Deviation[]', 'Timestamp[s]').
+
+    Delegates to `_canonical_slug_for_name` — this function's only remaining job
+    is the indexed-position form, which is positional syntax rather than a name.
     """
     # Indexed position headers: 'XYZ[0][m]' → x, 'XYZ[1]' → y, 'XYZ[2]' → z.
+    # Not an alias (the same token means a different axis by index), so it stays
+    # here rather than in the table.
     m = re.match(r'\s*xyz\s*\[\s*([0-2])\s*\]', name.strip(), re.IGNORECASE)
     if m:
         return ('x', 'y', 'z')[int(m.group(1))]
-    base = re.sub(r'\[.*?\]', '', name).strip().lower()
-    base = re.sub(r'[^a-z0-9]+', '', base)
-    if base in ('x', 'easting'):
-        return 'x'
-    if base in ('y', 'northing'):
-        return 'y'
-    if base in ('z', 'height', 'elevation'):
-        return 'z'
-    if base in ('r', 'red', 'r255', 'red255'):
-        return 'r255'
-    if base in ('g', 'green', 'g255', 'green255'):
-        return 'g255'
-    if base in ('b', 'blue', 'b255', 'blue255'):
-        return 'b255'
-    if base in ('intensity',):
-        return 'intensity'
-    if base in ('reflectance', 'reflectivity'):
-        return 'reflectance'
-    # Per-pulse multi-return columns Helios's LAD path needs. Recognise the
-    # canonical names plus the common LAS aliases so a header-only ASCII export
-    # round-trips them under the canonical slug (see `_MULTI_RETURN_SLUGS`).
-    if base in ('timestamp', 'gpstime', 'time'):
-        return 'timestamp'
-    if base in ('targetindex', 'returnnumber'):
-        return 'target_index'
-    if base in ('targetcount', 'numberofreturns', 'numreturns'):
-        return 'target_count'
-    # Structured-scan raster indices (see `_GRID_INDEX_SLUGS`). Recognise the
-    # canonical slugs plus the common row/col header spellings so a scan export
-    # carrying its grid position round-trips into the recovery path.
-    if base in ('rowindex', 'row', 'scanrow', 'scanrowindex', 'rasterrow'):
-        return 'row_index'
-    if base in ('columnindex', 'column', 'col', 'scancolumn', 'scancol',
-                'scancolumnindex', 'rastercolumn'):
-        return 'column_index'
-    # Sky/miss flag (see `_MISS_ALIASES`). Pinned to the canonical `is_miss`
-    # slug so a header-carrying ASCII export round-trips the column the LAD path
-    # reads, matching the E57/structured-PLY recovery convention.
-    if base in _MISS_ALIASES_NORMALISED:
-        return _MISS_SLUG
-    # Per-pulse beam-origin triple (ox/oy/oz and aliases, see
-    # `_BEAM_ORIGIN_ALIAS_SETS`). A headered ASCII file with `ox oy oz` columns
-    # auto-maps to the canonical origin_x/y/z roles so LAD uses them directly,
-    # bypassing the trajectory join — exactly like the LAS ExtraBytes path. These
-    # are world/UTM coordinates, captured at full float64 precision (NOT as float32
-    # extras); the column-plan/streaming path keys off the canonical slug.
-    origin_slug = _normalise_origin_alias(name)
-    if origin_slug is not None:
-        return origin_slug
-    return None
+    return _canonical_slug_for_name(name)
 
 
 def _autodetect_xyz_columns(file_path: str) -> List[str]:
@@ -16120,18 +19962,32 @@ def _bin_frame_bytes(meta: dict, buffers: "list[tuple]") -> bytes:
 _PROGRESS_MARKER_MAGIC = b"PHP1"
 
 
-def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=False) -> bytes:
+def _pack_progress_marker(progress, message: str, *, run_id=None, cancelled=False,
+                          error=None) -> bytes:
     """Pack one PHP1 progress marker. `progress` is a 0..1 fraction or None.
 
     `run_id` (when set) rides the first marker so the renderer learns the
     cancellation token before any heavy work starts; `cancelled` rides the
-    terminal marker emitted in place of a frame when a run is cancelled."""
+    terminal marker emitted in place of a frame when a run is cancelled;
+    `error` rides the terminal marker when the worker RAISED.
+
+    Why `error` exists: these endpoints are StreamingResponses, so `200 OK` and
+    the headers are already on the wire before the off-thread worker has done
+    any work. An exception raised after that point CANNOT change the status code
+    — Starlette has nothing left to set it on — so the client saw a 200 with a
+    truncated body and had to guess. (A user-reported Helios triangulation crash
+    was logged server-side as a full traceback while the access log cheerfully
+    recorded `POST /api/triangulate/helios 200`.) Carrying the failure in-band,
+    exactly as `cancelled` already does, is the only way to report it on a
+    stream that has already committed its status line."""
     import struct
     obj = {"progress": progress, "message": message}
     if run_id is not None:
         obj["run_id"] = run_id
     if cancelled:
         obj["cancelled"] = True
+    if error is not None:
+        obj["error"] = error
     payload = json.dumps(obj).encode("utf-8")
     payload += b" " * ((-len(payload)) % 4)  # keep total marker a 4-byte multiple
     return _PROGRESS_MARKER_MAGIC + struct.pack("<I", len(payload)) + payload
@@ -16455,14 +20311,20 @@ async def _run_killable(
 
     loop = asyncio.get_event_loop()
     with tempfile.TemporaryDirectory(prefix="phyto_seg_") as workdir:
-        # Stage inputs.
-        np.save(os.path.join(workdir, "input.npy"), np.ascontiguousarray(points))
-        if reflectance is not None:
-            np.save(os.path.join(workdir, "reflectance.npy"), np.asarray(reflectance))
-        if seeds is not None and len(seeds) > 0:
-            np.save(os.path.join(workdir, "seeds.npy"), np.asarray(seeds))
-        with open(os.path.join(workdir, "request.json"), "w") as f:
-            json.dump({"tool": tool, "params": params}, f)
+        # Stage inputs OFF the event loop. `points` is the full cloud — writing
+        # 7 M points is ~170 MB of np.save, seconds of blocking that would stall
+        # every other request in the process (see SlowRequestLogger). The awaits
+        # further down already yield; this is the part that did not.
+        def _stage() -> None:
+            np.save(os.path.join(workdir, "input.npy"), np.ascontiguousarray(points))
+            if reflectance is not None:
+                np.save(os.path.join(workdir, "reflectance.npy"), np.asarray(reflectance))
+            if seeds is not None and len(seeds) > 0:
+                np.save(os.path.join(workdir, "seeds.npy"), np.asarray(seeds))
+            with open(os.path.join(workdir, "request.json"), "w") as f:
+                json.dump({"tool": tool, "params": params}, f)
+
+        await run_in_threadpool(_stage)
 
         # Scrub the bundle's lib-path vars (mirrors _run_potree_converter) so the
         # child resolves libs the same way the parent did at its own launch.
@@ -16501,24 +20363,30 @@ async def _run_killable(
                 err = f"worker exited {proc.returncode}"
             raise RuntimeError(err)
 
-        # Collect results.
-        out_path = os.path.join(workdir, "output.npy")
-        res_path = os.path.join(workdir, "result.json")
-        result_dict = None
-        if os.path.exists(res_path):
-            with open(res_path, "r") as f:
-                result_dict = json.load(f)
+        # Collect results off the event loop, for the same reason as staging:
+        # `output.npy` is one label per point.
+        def _collect() -> "tuple[Optional[dict], Optional[np.ndarray]]":
+            res_path = os.path.join(workdir, "result.json")
+            rd = None
+            if os.path.exists(res_path):
+                with open(res_path, "r") as f:
+                    rd = json.load(f)
+            if tool == "skeleton":
+                return rd, None
+            return rd, np.load(os.path.join(workdir, "output.npy"))
+
+        result_dict, labels = await run_in_threadpool(_collect)
 
         if tool == "skeleton":
             return result_dict if result_dict is not None else {}
         if tool == "anchors":
             # Landmark extraction returns two arrays (positions + per-plant
             # features), not the per-point label vector the other tools produce.
+            # `_collect` above already loaded output.npy into `labels`, which
+            # for this tool holds the anchor POSITIONS.
             feats_path = os.path.join(workdir, "features.npy")
-            xyz = np.load(out_path)
             feats = np.load(feats_path) if os.path.exists(feats_path) else np.empty((0, 2))
-            return xyz, feats
-        labels = np.load(out_path)
+            return labels, feats
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
         if tool == "ground":
@@ -16666,6 +20534,18 @@ def _bin_frame_streaming_response(
                 # Cooperative cancel landed: the worker unwound its Context/
                 # LiDARCloud (memory freed). Tell the client instead of a frame.
                 yield _pack_progress_marker(None, "Cancelled", cancelled=True)
+            except Exception as e:  # noqa: BLE001
+                # The worker raised. We are mid-body: the 200 status line and
+                # headers went out before the executor was even scheduled, so
+                # the status CANNOT be changed to a 5xx here. Report the failure
+                # in-band as a terminal marker (the same mechanism `cancelled`
+                # uses) so the client raises a real error instead of trying to
+                # decode a truncated frame and reporting something misleading.
+                # Still log the traceback: the server-side record is what makes
+                # a user's attached log actionable.
+                import traceback
+                traceback.print_exc()
+                yield _pack_progress_marker(None, "", error=str(e) or e.__class__.__name__)
         finally:
             if run_id is not None:
                 _clear_run(run_id)
@@ -16952,6 +20832,30 @@ def _read_points_from_source(
     """Resolve a PointSource to (positions[N,3] float64, colors[N,3] float32 in
     0-1 | None, intensity[N] float32 | None).
 
+    The 3-tuple facade over `_read_points_and_extras`, kept because every compute
+    consumer (triangulate, skeleton, c2m, icp, …) wants exactly these three and
+    unpacks them positionally. Callers that also need the scalar extra-dimension
+    columns — export — call `_read_points_and_extras` directly.
+    """
+    positions, colors, intensity, _extras = _read_points_and_extras(src)
+    return positions, colors, intensity
+
+
+def _read_points_and_extras(
+    src: PointSource,
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, np.ndarray]]:
+    """Resolve a PointSource to (positions[N,3] float64, colors[N,3] float32 in
+    0-1 | None, intensity[N] float32 | None, extras{slug -> (N,) array}).
+
+    `extras` is the cloud's scalar extra-dimension columns (reflectance,
+    ground_class, target_index, is_miss, any wizard-imported scalar), filtered in
+    LOCKSTEP with positions through every step below — the deletion mask, the
+    miss filter, and the stride-downsample. That lockstep is the whole point: a
+    scalar column that keeps its original length after positions were filtered is
+    not merely useless, it silently mislabels every point past the first dropped
+    row. Empty unless `src.want_extras` is set, and always empty for a file
+    source (the loaders return positions/colors/intensity only).
+
     Reuses `_load_pointcloud_arrays` (which dispatches XYZ via pandas and
     PLY/PCD via open3d, and 404s on a missing file), then applies the optional
     stride-downsample and translation. Positions come back as float64 because
@@ -16981,6 +20885,7 @@ def _read_points_from_source(
     miss column (`_file_miss_mask`). The misses-overlay endpoint reads
     `sess.extras` directly, not through this function, so it still sees them.
     """
+    extras: Dict[str, np.ndarray] = {}
     if src.session_id is not None:
         sess = _get_cloud_session(src.session_id)
         with _cloud_session_lock:
@@ -16989,6 +20894,32 @@ def _read_points_from_source(
                 keep = keep & (sess.extras[_MISS_SLUG] == 0)
             positions = sess.positions[keep].copy()
             session_world_shift = sess.world_shift
+            # Extras ride the SAME `keep` mask as positions, inside the same lock
+            # hold, so a concurrent delete can't land between the two and desync
+            # their lengths. Order follows `extra_dims_meta` (the session's own
+            # column order) rather than dict order, so an export's column layout
+            # is stable across runs; any extra not in the meta list is appended.
+            if src.want_extras:
+                ordered = [m.get("slug") for m in (sess.extra_dims_meta or [])]
+                for slug in ordered + [s for s in sess.extras if s not in ordered]:
+                    col = sess.extras.get(slug) if slug else None
+                    if col is None:
+                        continue
+                    extras[slug] = np.asarray(col[keep])
+                # `timestamp` lives on its own float64 field, OUTSIDE `extras`
+                # (a float32 cast has a 62 ms step at full GPS week-seconds and
+                # would destroy multi-return pulse grouping), so the loop above
+                # cannot see it. Surface it here under the canonical slug or an
+                # export silently drops the column: `_resolve_export_columns`
+                # builds its `available` map from `extras` alone and quietly
+                # discards any requested slug it can't find.
+                #
+                # Rides the SAME `keep` mask as positions, inside the same lock
+                # hold, for the reason given above.
+                if (sess.timestamps is not None
+                        and 'timestamp' not in extras
+                        and sess.timestamps.shape[0] == sess.positions.shape[0]):
+                    extras['timestamp'] = np.asarray(sess.timestamps[keep])
             # Surface colours/intensity only when asked (export does; the compute
             # consumers don't need them and skip the copy). The session stores
             # both at LAS uint16 scale, but every consumer of this function's
@@ -17014,8 +20945,30 @@ def _read_points_from_source(
             raise HTTPException(
                 status_code=400,
                 detail=("Point source has neither a session_id nor a source_path. "
-                        "A session-backed cloud must send its session_id; a "
-                        "file-backed cloud must send source_path."),
+                        "A session-backed cloud must send its session_id."),
+            )
+        # A cloud's file is read ONCE, at import (/api/cloud/session/create); from
+        # then on the session's in-RAM arrays are the source of truth. They carry
+        # every edit — deletions, translation, filtering, segmentation labels —
+        # that the file on disk does not. So computing from a file path means
+        # computing on PRE-EDIT data, silently producing a wrong answer rather
+        # than an error. Reject it here, at the one chokepoint every compute and
+        # export path reads through, so the rule holds for every caller rather
+        # than depending on each one guarding itself.
+        #
+        # `allow_file_source` is the deliberate opt-in for the cases that
+        # genuinely have no session: unit tests exercising the loaders directly,
+        # and any future read of a file that is not a live cloud.
+        if not src.allow_file_source:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Refusing to compute from the file {src.source_path!r}: a cloud is "
+                    "read from disk only at import, and its in-RAM session is the source "
+                    "of truth thereafter. The file does not reflect edits (deletions, "
+                    "translation, filtering, labels), so this would compute on stale data. "
+                    "Send session_id instead."
+                ),
             )
         positions, colors, intensity = _load_pointcloud_arrays(
             src.source_path, src.ascii_format
@@ -17033,12 +20986,14 @@ def _read_points_from_source(
                 positions = positions[keep]
                 colors = colors[keep] if colors is not None else None
                 intensity = intensity[keep] if intensity is not None else None
+                extras = {k: v[keep] for k, v in extras.items()}
 
     if src.max_points is not None and src.max_points > 0 and len(positions) > src.max_points:
         stride = int(math.ceil(len(positions) / src.max_points))
         positions = positions[::stride]
         colors = colors[::stride] if colors is not None else None
         intensity = intensity[::stride] if intensity is not None else None
+        extras = {k: v[::stride] for k, v in extras.items()}
 
     positions = positions.astype(np.float64, copy=False)
     if src.translation is not None:
@@ -17053,11 +21008,11 @@ def _read_points_from_source(
     if not src.want_colors:
         colors = None
 
-    return positions, colors, intensity
+    return positions, colors, intensity, extras
 
 
 @app.post("/api/pointcloud/import_by_path")
-async def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
+def import_pointcloud_by_path(request: ImportPointCloudByPathRequest):
     """Parse a point-cloud file from disk and stream back a packed binary
     representation. Dispatches by extension:
 
@@ -17802,7 +21757,7 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     # PCD (no angular sweep / grid), so the rest of ScanParameters stays default.
     vp = _pcd_viewpoint_origin(source_path)
     if vp is not None:
-        _e57_scan_meta[str(out_las.resolve())] = {
+        _import_scan_meta[str(out_las.resolve())] = {
             "origin": vp,
             "scan_params": {"origin": vp},
             "has_misses": False,
@@ -17813,13 +21768,19 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     return n, []
 
 
-# Scanner origin recovered from the most recent E57 conversion, keyed by the
-# absolute output LAS path. `_e57_to_las` writes it; `create_cloud_session` pops
-# it right after conversion to surface the origin (and a hasMisses flag) to the
-# renderer so it can place the scan's `ScanParameters.origin` and relocate miss
-# points onto the bounding sphere for display. Threaded this way (rather than
-# widening `_source_to_las`'s tuple) so the many other callers stay untouched.
-_e57_scan_meta: Dict[str, dict] = {}
+# Scanner pose recovered from the most recent header-bearing conversion, keyed by
+# the absolute output LAS path. Written by `_pcd_to_las` (VIEWPOINT origin only),
+# `_e57_to_las` and `_ptx_to_las`; `create_cloud_session` pops it right after
+# conversion to surface the origin (and a hasMisses flag) to the renderer so it
+# can place the scan's `ScanParameters.origin` and relocate miss points onto the
+# bounding sphere for display. Threaded this way (rather than widening
+# `_source_to_las`'s tuple) so the many other callers stay untouched.
+#
+# Keys: origin, scan_origins, scan_params, has_misses, miss_count,
+# unplaceable_miss_count, and optionally `warnings` (a list of human-readable
+# notes the create endpoint splices into its own warning list — PTX uses it to
+# report a swapped header, a degenerate pose, or a truncated final block).
+_import_scan_meta: Dict[str, dict] = {}
 
 
 def _e57_scan_params(header, has_grid: bool) -> dict:
@@ -17899,7 +21860,8 @@ def _e57_scan_params(header, has_grid: bool) -> dict:
     return params
 
 
-def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
+def _e57_to_las(source_path: _Path, out_las: _Path,
+                scan_index: Optional[int] = None) -> tuple[int, List[dict]]:
     """Convert an E57 to LAS, recovering sky/miss points from the structured
     grid so the LAD inversion can account for beams that returned nothing.
 
@@ -17920,7 +21882,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
 
     Each scan is transformed by ITS OWN pose (rotation + translation); a
     multi-scan E57 merges into one cloud with every scan's misses placed relative
-    to its own origin. The first scan's origin is stashed in `_e57_scan_meta`
+    to its own origin. The first scan's origin is stashed in `_import_scan_meta`
     (plus per-scan origins + the unplaceable-miss count) for the create endpoint.
     Intensity is normalised per scan from its observed valid range (E57 intensity
     is often 0..1 float); RGB colour (colorRed/Green/Blue) is carried into the LAS
@@ -17935,6 +21897,18 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         n_scans = e.scan_count
         if n_scans == 0:
             raise HTTPException(status_code=400, detail="E57 file has no scans.")
+        # One E57 scan -> one scan position. When `scan_index` is given the caller
+        # is driving the fan-out (see `_do_create_multi_cloud_session`) and wants
+        # THIS scan's pose and grid to define the session, instead of every scan
+        # merging into one cloud that can only carry the first one's.
+        scan_range = range(n_scans)
+        if scan_index is not None:
+            if not 0 <= scan_index < n_scans:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"{source_path.name}: scan {scan_index} requested but the "
+                            f"file has {n_scans}."))
+            scan_range = range(scan_index, scan_index + 1)
 
         all_xyz: List[np.ndarray] = []
         all_miss: List[np.ndarray] = []
@@ -17949,7 +21923,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         scan_params_list: List[dict] = []
         unplaceable_misses = 0
 
-        for si in range(n_scans):
+        for si in scan_range:
             header = e.get_header(si)
             try:
                 rot = np.asarray(header.rotation_matrix, dtype=np.float64).reshape(3, 3)
@@ -18144,7 +22118,7 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         writer.write_points(record)
 
-    _e57_scan_meta[str(out_las.resolve())] = {
+    _import_scan_meta[str(out_las.resolve())] = {
         "origin": (scan_origins[0] if scan_origins else [0.0, 0.0, 0.0]),
         "scan_origins": scan_origins,
         # Full scan-pattern parameters of the first scan (origin + whatever
@@ -18157,6 +22131,891 @@ def _e57_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         "unplaceable_miss_count": unplaceable_misses,
     }
     return n, extra_dims
+
+
+# ===========================================================================
+# PTX — Leica Cyclone's structured-scan ASCII format (also written by RiSCAN
+# PRO and FARO SCENE). See `_ptx_to_las` for the format and the design.
+# ===========================================================================
+
+
+@dataclass
+class _PtxBlock:
+    """One scan block's header plus where its data starts.
+
+    A PTX file may hold SEVERAL blocks back to back — one per scan setup — and
+    both dimensions can differ between them (a real 3-block RiSCAN file measured
+    5964x3333, 5952x3333, 5959x3332), so nothing may be cached across blocks.
+    """
+    index: int
+    header_line: int         # 1-based, for error messages
+    n1: int                  # header line 1 (columns, under the spec ordering)
+    n2: int                  # header line 2 (rows, under the spec ordering)
+    position: "np.ndarray"   # (3,) line 3
+    axes: "np.ndarray"       # (3,3) lines 4-6, one scanner axis per ROW
+    matrix4: "np.ndarray"    # (4,4) lines 7-10, row-major, translation in row 3
+    n_tokens: int            # 4 (x y z i) or 7 (x y z i r g b)
+    data_byte: int           # byte offset of the first data line
+    n_cells: int             # n1 * n2
+    n_lines: int             # data lines actually present (< n_cells if truncated)
+    # Set once the columns/rows hypothesis is settled (see `_ptx_choose_shape`).
+    rows: int = 0
+    cols: int = 0
+    swapped: bool = False
+
+
+def _ptx_skip_lines(fh, start_byte: int, n_lines: int, size: int) -> "tuple[int, int]":
+    """Advance past `n_lines` newline-terminated lines from `start_byte`.
+
+    Returns (byte offset just past the last one consumed, lines actually found).
+    Counting is done with `bytes.count(b'\\n')` over 8 MB reads, which runs at
+    memchr speed — seconds on a multi-GB file. This is what lets every block be
+    handed to pandas by byte offset instead of an integer `skiprows`, which would
+    re-scan from the top for each block (O(blocks^2)) and, more importantly,
+    would leave the file handle in an unusable position because pandas' C parser
+    reads ahead of what it consumes.
+
+    A final line with no trailing newline still counts as a line.
+    """
+    CHUNK = 8 << 20
+    fh.seek(start_byte)
+    found = 0
+    pos = start_byte
+    while found < n_lines and pos < size:
+        buf = fh.read(CHUNK)
+        if not buf:
+            break
+        c = buf.count(b"\n")
+        if found + c < n_lines:
+            found += c
+            pos += len(buf)
+            continue
+        # The target newline is inside this buffer — walk to it exactly.
+        need = n_lines - found
+        off = -1
+        for _ in range(need):
+            off = buf.find(b"\n", off + 1)
+        return pos + off + 1, n_lines
+    # Ran out of file. A trailing unterminated line still counts.
+    if pos < size:
+        fh.seek(pos)
+        if fh.read(1):
+            found += 1
+    return size, found
+
+
+def _ptx_read_header(fh, start_byte: int, index: int, header_line: int,
+                     source_name: str) -> "tuple[_PtxBlock, int]":
+    """Parse one block header at `start_byte`. Returns (block, data_byte)."""
+    # 10 header lines are at most a few hundred bytes; 8 KB is generous.
+    fh.seek(start_byte)
+    buf = fh.read(8192)
+    raw = buf.split(b"\n")
+    if len(raw) < _PTX_HEADER_LINES + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{source_name}: PTX block {index} at line {header_line} is "
+                    f"truncated — expected {_PTX_HEADER_LINES} header lines."))
+    lines = [raw[i].decode("ascii", "replace").strip() for i in range(_PTX_HEADER_LINES)]
+    data_byte = start_byte + sum(len(raw[i]) + 1 for i in range(_PTX_HEADER_LINES))
+
+    def _bad(msg: str, line_no: int):
+        return HTTPException(
+            status_code=400,
+            detail=(f"{source_name}: PTX block {index}, line "
+                    f"{header_line + line_no}: {msg}"))
+
+    def _floats(line_no: int, want: int) -> "np.ndarray":
+        toks = lines[line_no].split()
+        if len(toks) != want:
+            raise _bad(f"expected {want} numbers, got {len(toks)}", line_no)
+        try:
+            v = np.asarray([float(t) for t in toks], dtype=np.float64)
+        except ValueError:
+            raise _bad(f"expected {want} numbers, got {lines[line_no]!r}", line_no)
+        if not np.all(np.isfinite(v)):
+            raise _bad("header numbers must be finite", line_no)
+        return v
+
+    try:
+        n1, n2 = int(lines[0]), int(lines[1])
+    except ValueError:
+        raise _bad("the first two lines must be the grid dimensions "
+                   f"(got {lines[0]!r}, {lines[1]!r})", 0)
+    if n1 <= 0 or n2 <= 0:
+        raise _bad(f"grid dimensions must be positive (got {n1} x {n2})", 0)
+
+    position = _floats(2, 3)
+    axes = np.vstack([_floats(3, 3), _floats(4, 3), _floats(5, 3)])
+    matrix4 = np.vstack([_floats(6, 4), _floats(7, 4), _floats(8, 4), _floats(9, 4)])
+
+    # Token count comes from the first data line — 4 (x y z intensity) or 7
+    # (+ r g b). Blocks in one file could in principle differ, so sniff per block.
+    fh.seek(data_byte)
+    first = fh.readline().decode("ascii", "replace")
+    n_tokens = len(first.split())
+    if n_tokens not in (4, 7):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{source_name}: PTX block {index} data starts with "
+                    f"{n_tokens} columns ({first.strip()!r}); expected 4 "
+                    f"(x y z intensity) or 7 (+ r g b)."))
+
+    return _PtxBlock(
+        index=index, header_line=header_line, n1=n1, n2=n2,
+        position=position, axes=axes, matrix4=matrix4, n_tokens=n_tokens,
+        data_byte=data_byte, n_cells=n1 * n2, n_lines=0,
+    ), data_byte
+
+
+# Block index cache keyed by (path, size, mtime_ns). Splitting a multi-block PTX
+# into one session per block converts each block separately, and each conversion
+# would otherwise re-walk the whole file to find the boundaries — 3 extra passes
+# over 1.67 GB for the reference dataset. Invalidated by any size/mtime change.
+_ptx_block_index_cache: "Dict[tuple, tuple]" = {}
+
+
+def _ptx_index_blocks_cached(source_path: _Path) -> "tuple[List[_PtxBlock], List[str]]":
+    st = source_path.stat()
+    key = (str(source_path.resolve()), st.st_size, st.st_mtime_ns)
+    hit = _ptx_block_index_cache.get(key)
+    if hit is None:
+        hit = _ptx_index_blocks(source_path)
+        # Bound it: one entry is all the import flow needs, and the blocks hold
+        # only headers (a few hundred bytes each), but don't grow unbounded.
+        if len(_ptx_block_index_cache) > 4:
+            _ptx_block_index_cache.clear()
+        _ptx_block_index_cache[key] = hit
+    return hit
+
+
+def _ptx_index_blocks(source_path: _Path) -> "tuple[List[_PtxBlock], List[str]]":
+    """Walk a PTX end to end, returning every block's header + data byte offset.
+
+    PTX has no block directory: block b+1 begins exactly `n1*n2` data lines after
+    block b's header, and only a newline count turns that into a byte offset.
+    Returns (blocks, warnings).
+
+    Two distinct failure shapes, reported differently on purpose. Running out of
+    file mid-block is a TRUNCATED COPY: the cells present are imported and a
+    warning is raised, because that data is usually still wanted. A desync in the
+    middle of a file that continues — lines lost or added inside a block — instead
+    surfaces as the NEXT block's header failing to parse, which raises a 400
+    naming the exact line. That distinction is why there's no interior
+    short-count branch here: with a fixed cell count per block, a short count can
+    only mean EOF.
+    """
+    warnings: List[str] = []
+    blocks: List[_PtxBlock] = []
+    size = source_path.stat().st_size
+    name = source_path.name
+    with open(source_path, "rb") as fh:
+        pos = 0
+        line_no = 1
+        while pos < size:
+            # A trailing newline / whitespace tail is the end, not a new block.
+            fh.seek(pos)
+            if not fh.read(64).strip():
+                break
+            block, data_byte = _ptx_read_header(fh, pos, len(blocks), line_no, name)
+            end, found = _ptx_skip_lines(fh, data_byte, block.n_cells, size)
+            block.n_lines = found
+            blocks.append(block)
+            if found < block.n_cells:
+                warnings.append(
+                    f"PTX block {block.index} declares {block.n1} x {block.n2} "
+                    f"= {block.n_cells} points but only {found} data lines follow "
+                    f"(from line {line_no + _PTX_HEADER_LINES}). The file looks "
+                    "truncated; importing the cells present and treating the rest "
+                    "as absent.")
+            pos = end
+            line_no += _PTX_HEADER_LINES + found
+    if not blocks:
+        raise HTTPException(
+            status_code=400, detail=f"{name}: no PTX scan blocks found.")
+    return blocks, warnings
+
+
+def _ptx_iter_chunks(source_path: _Path, block: _PtxBlock, usecols, rows: int,
+                     max_cells: Optional[int] = None):
+    """Yield (n_tokens_used, rows, chunk_cols) float64 grids for one block.
+
+    Chunks are WHOLE COLUMNS. PTX is column-major (`k = col*rows + row`), so a
+    chunk of complete columns reshapes to [token, row, column] with no copy games
+    — which is what makes every per-column reduction an `axis=0` and every
+    per-row one an `axis=1`, and is the load-bearing invariant behind the whole
+    angular fit.
+
+    Yields (grid, col0) where `col0` is the chunk's first column index.
+    """
+    chunk_cols = max(1, _PTX_CHUNK_CELLS // max(1, rows))
+    total = block.n_lines if max_cells is None else min(block.n_lines, max_cells)
+    # Only whole columns; a truncated tail column is dropped rather than
+    # mis-shaped (its cells would be attributed to the wrong rows).
+    total_cols = total // rows
+    if total_cols == 0:
+        return
+    ncols_tok = len(usecols)
+    with open(source_path, "rb") as fh:
+        fh.seek(block.data_byte)
+        reader = pd.read_csv(
+            fh, sep=r"\s+", header=None, engine="c", dtype=np.float64,
+            usecols=list(usecols), names=[f"c{i}" for i in usecols],
+            nrows=total_cols * rows, chunksize=chunk_cols * rows,
+            on_bad_lines="error",
+        )
+        col0 = 0
+        for frame in reader:
+            arr = frame.to_numpy(dtype=np.float64, copy=False)
+            cc = arr.shape[0] // rows
+            if cc == 0:
+                continue
+            grid = arr[:cc * rows].reshape(cc, rows, ncols_tok).transpose(2, 1, 0)
+            yield grid, col0
+            col0 += cc
+
+
+def _wrap_pi(a):
+    """Wrap angles to (-pi, pi] — the seam-safe residual form used throughout."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def _ptx_fill_lut(vals: "np.ndarray", unwrap: bool,
+                  max_extrap_frac: float = _PTX_MAX_EXTRAP_FRACTION,
+                  ) -> "tuple[np.ndarray, np.ndarray]":
+    """Complete a per-index angle LUT (NaN where an index had no valid cell).
+
+    Indices with no measurement are linearly INTERPOLATED between populated
+    neighbours — exact for any smooth sweep, uniform or not — and the ENDS are
+    EXTRAPOLATED with the robust median step. Returns (filled, trusted), where
+    `trusted` is False further than `max_extrap_frac` of the axis beyond the
+    populated range.
+
+    Interior gaps are always trusted: a wholly-empty row bracketed by populated
+    rows is bounded on both sides by measurement, however wide the gap. Only the
+    ends are guesses, which is what the budget bounds.
+    """
+    n = vals.size
+    idx = np.arange(n, dtype=np.float64)
+    ok = np.isfinite(vals)
+    if int(ok.sum()) < 2:
+        # Nothing to interpolate along: only the measured indices are usable.
+        return np.where(ok, vals, 0.0), ok.copy()
+    v = vals[ok].astype(np.float64)
+    if unwrap:
+        v = np.unwrap(v)
+    i_ok = idx[ok]
+    filled = np.interp(idx, i_ok, v)
+    # np.interp CLAMPS outside its range, which would park every leading miss on
+    # the first measured angle. Replace both tails with the median-step line —
+    # a median, not a polyfit, so one anomalous LUT entry can't drag it.
+    step = float(np.median(np.diff(v) / np.diff(i_ok)))
+    lo, hi = i_ok[0], i_ok[-1]
+    filled = np.where(idx < lo, v[0] + step * (idx - lo), filled)
+    filled = np.where(idx > hi, v[-1] + step * (idx - hi), filled)
+    budget = max(1.0, max_extrap_frac * n)
+    trusted = (idx >= lo - budget) & (idx <= hi + budget)
+    return filled, trusted
+
+
+class _PtxGridModel:
+    """Per-index angle LUTs for one PTX block, built by streaming its cells.
+
+    PTX point coordinates are in the SCANNER-LOCAL frame, so the local spherical
+    angles ARE the raw instrument angles and the acquisition grid is an exact
+    separable outer product: zenith depends only on the row, azimuth only on the
+    column. The estimator is therefore a non-parametric per-index robust median,
+    not a fitted line — which is exact for non-uniform angular steps (FARO
+    quality-dependent grids, any resampled export), where a global linear fit
+    would bake the non-uniformity into every recovered miss.
+
+    The within-index scatter that falls out of the same computation is the
+    SEPARABILITY RESIDUAL, and it does three jobs at once: it gates whether the
+    recovery is trustworthy, it adjudicates the columns-vs-rows header ordering,
+    and it confirms the row->zenith / column->azimuth assignment. On real data
+    the wrong pairing scores ~4 orders of magnitude worse, so it is decisive.
+    """
+
+    def __init__(self, rows: int, cols: int):
+        self.rows, self.cols = rows, cols
+        self.az_lut = np.full(cols, np.nan)
+        self.az_mad = np.full(cols, np.nan)
+        self._row_med_banks: List["np.ndarray"] = []
+        self._row_mad_banks: List["np.ndarray"] = []
+        self._row_count = np.zeros(rows, np.int64)
+        self.trusted = False
+        self.reason = ""
+
+    def observe(self, grid: "np.ndarray", col0: int) -> "np.ndarray":
+        """Fold one chunk into the accumulators. `grid` is (>=3, rows, cc) with
+        x/y/z first. Returns the chunk's (rows, cc) valid mask so the caller can
+        reuse it without recomputing."""
+        x, y, z = grid[0], grid[1], grid[2]
+        rng2 = x * x + y * y + z * z
+        valid = rng2 > _PTX_MISS_RANGE2
+        hyp = np.hypot(x, y)
+        # arctan2(hypot, z) is well-conditioned across the whole sphere. arccos(z/r)
+        # loses precision at the poles and pi/2 - arcsin(z/r) at the horizon —
+        # which is exactly where a terrestrial scan puts most of its cells. It is
+        # also zenith DIRECTLY, so unlike the E57 path there is no 90-elevation
+        # conversion (and no min/max swap) anywhere downstream.
+        zen = np.arctan2(hyp, z)
+        az = np.arctan2(y, x)
+
+        # --- azimuth: per COLUMN, and a column lives entirely inside one chunk,
+        # so its statistic is complete here.
+        # A cell at the zenith/nadir has an arbitrary azimuth; exclude it.
+        az_ok = valid & (hyp > _PTX_POLE_SIN * np.sqrt(np.where(valid, rng2, 1.0)))
+        w = az_ok.astype(np.float64)
+        s = np.einsum("ij,ij->j", np.sin(az), w)
+        c = np.einsum("ij,ij->j", np.cos(az), w)
+        # The circular MEAN is seam-free; the median of the (now small, unwrapped)
+        # residuals about it supplies the outlier resistance. Together they give a
+        # robust circular median without any explicit unwrapping pass, because a
+        # single column never spans the +/-pi seam.
+        center = np.arctan2(s, c)
+        resid = np.where(az_ok, _wrap_pi(az - center[None, :]), np.nan)
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            off = np.nanmedian(resid, axis=0)
+            mad = np.nanmedian(np.abs(resid - off[None, :]), axis=0)
+        good = az_ok.sum(axis=0) >= _PTX_MIN_CELLS_PER_INDEX
+        cc = grid.shape[2]
+        self.az_lut[col0:col0 + cc] = np.where(
+            good, _wrap_pi(center + np.nan_to_num(off)), np.nan)
+        self.az_mad[col0:col0 + cc] = np.where(good, mad, np.nan)
+
+        # --- zenith: per ROW, and rows span the whole block, so bank this
+        # chunk's estimate and take a median-of-medians at the end. Memory is
+        # rows x n_chunks floats, never rows x cols.
+        zm = np.where(valid, zen, np.nan)
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            rmed = np.nanmedian(zm, axis=1)
+            rmad = np.nanmedian(np.abs(zm - rmed[:, None]), axis=1)
+        self._row_med_banks.append(rmed)
+        self._row_mad_banks.append(rmad)
+        self._row_count += valid.sum(axis=1)
+        return valid
+
+    def finish(self) -> None:
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            zen_lut = (np.nanmedian(np.column_stack(self._row_med_banks), axis=1)
+                       if self._row_med_banks else np.full(self.rows, np.nan))
+            zen_mad = (np.nanmedian(np.column_stack(self._row_mad_banks), axis=1)
+                       if self._row_mad_banks else np.full(self.rows, np.nan))
+        zen_lut = np.where(self._row_count >= _PTX_MIN_CELLS_PER_INDEX, zen_lut, np.nan)
+        self.zen_full, self.zen_ok = _ptx_fill_lut(zen_lut, unwrap=False)
+        self.az_full, self.az_ok = _ptx_fill_lut(self.az_lut, unwrap=True)
+        self.zen_full = np.clip(self.zen_full, 0.0, np.pi)
+
+        self.n_rows_pop = int(np.isfinite(zen_lut).sum())
+        self.n_cols_pop = int(np.isfinite(self.az_lut).sum())
+        with np.errstate(invalid="ignore"), warnings_module.catch_warnings():
+            warnings_module.simplefilter("ignore", RuntimeWarning)
+            self.zen_resid = float(np.nanmedian(zen_mad)) if self.n_rows_pop else np.nan
+            self.az_resid = float(np.nanmedian(self.az_mad)) if self.n_cols_pop else np.nan
+        self.zen_step = _ptx_median_step(zen_lut, unwrap=False)
+        self.az_step = _ptx_median_step(self.az_lut, unwrap=True)
+        self.az_span = _ptx_lut_span(self.az_lut, unwrap=True)
+        self.mono_zen = _ptx_monotonicity(zen_lut, unwrap=False)
+        self.mono_az = _ptx_monotonicity(self.az_lut, unwrap=True)
+        self.trusted, self.reason = self._gate()
+
+    def score(self) -> float:
+        """Residual in units of cell pitch, summed over both axes. Lower is
+        better; this is what adjudicates the header-ordering hypotheses."""
+        out = 0.0
+        for resid, step in ((self.zen_resid, self.zen_step),
+                            (self.az_resid, self.az_step)):
+            if not np.isfinite(resid) or not np.isfinite(step) or step <= 0:
+                return float("inf")
+            out += resid / step
+        return out
+
+    def _gate(self) -> "tuple[bool, str]":
+        if self.n_rows_pop < 2 or self.n_cols_pop < 2:
+            return False, (f"only {self.n_rows_pop} populated row(s) and "
+                           f"{self.n_cols_pop} populated column(s)")
+        for name, resid, step in (("zenith", self.zen_resid, self.zen_step),
+                                  ("azimuth", self.az_resid, self.az_step)):
+            if not np.isfinite(resid) or not np.isfinite(step):
+                return False, f"{name} angles could not be estimated"
+            if resid > max(_PTX_MAX_ANGULAR_RESIDUAL, 0.5 * abs(step)):
+                return False, (f"{name} varies within a single grid index "
+                               f"({math.degrees(resid):.3f} deg scatter vs a "
+                               f"{math.degrees(abs(step)):.3f} deg step)")
+        if self.mono_zen < 0.9 or self.mono_az < 0.9:
+            return False, "the angular sweep is not monotone across the grid"
+        if not np.isfinite(self.az_span) or self.az_span > 2.0 * np.pi + 0.2:
+            return False, "the azimuth sweep exceeds a full revolution"
+        return True, ""
+
+    def directions(self, rows_idx, cols_idx) -> "np.ndarray":
+        """Unit pulse directions in the SCANNER-LOCAL frame for grid cells."""
+        zen = self.zen_full[rows_idx]
+        az = self.az_full[cols_idx]
+        st = np.sin(zen)
+        return np.column_stack([st * np.cos(az), st * np.sin(az), np.cos(zen)])
+
+
+def _ptx_median_step(lut: "np.ndarray", unwrap: bool) -> float:
+    v = lut[np.isfinite(lut)]
+    if v.size < 2:
+        return float("nan")
+    idx = np.flatnonzero(np.isfinite(lut)).astype(np.float64)
+    if unwrap:
+        v = np.unwrap(v)
+    return float(np.median(np.diff(v) / np.diff(idx)))
+
+
+def _ptx_lut_span(lut: "np.ndarray", unwrap: bool) -> float:
+    v = lut[np.isfinite(lut)]
+    if v.size < 2:
+        return float("nan")
+    if unwrap:
+        v = np.unwrap(v)
+    return float(abs(v[-1] - v[0]))
+
+
+def _ptx_monotonicity(lut: "np.ndarray", unwrap: bool) -> float:
+    v = lut[np.isfinite(lut)]
+    if v.size < 3:
+        return 1.0
+    if unwrap:
+        v = np.unwrap(v)
+    d = np.diff(v)
+    if d.size == 0:
+        return 1.0
+    return float(max((d > 0).mean(), (d < 0).mean()))
+
+
+def _ptx_choose_shape(source_path: _Path, block: _PtxBlock) -> None:
+    """Settle whether header line 1 is the column count (the spec) or the row
+    count (some writers), and record the winner on the block.
+
+    Under the wrong reshape the index map becomes `(c*R + r) mod C`, which
+    scrambles the grid — so the separability residual explodes. The trust gate we
+    need anyway IS therefore the detector, and the same number simultaneously
+    covers a row-major writer and the R == C transpose. Scored on a bounded lead
+    sample so a multi-GB file doesn't pay for a second full pass.
+    """
+    def _score(rows: int) -> "tuple[float, bool]":
+        cells = min(block.n_lines, _PTX_HYPOTHESIS_SAMPLE_CELLS)
+        cols_seen = max(1, cells // max(1, rows))
+        model = _PtxGridModel(rows, cols_seen)
+        for grid, col0 in _ptx_iter_chunks(source_path, block, (0, 1, 2), rows,
+                                           max_cells=cols_seen * rows):
+            model.observe(grid, col0)
+        model.finish()
+        return model.score(), model.trusted
+
+    # H1 = the spec: line 1 columns, line 2 rows.
+    s1, ok1 = _score(block.n2)
+    if ok1:
+        block.rows, block.cols, block.swapped = block.n2, block.n1, False
+        return
+    s2, ok2 = _score(block.n1)
+    if ok2 and s2 < s1:
+        block.rows, block.cols, block.swapped = block.n1, block.n2, True
+        return
+    # Neither passed (or the swap was no better): keep the spec ordering for
+    # indexing. The block-level gate re-runs on the full data and will decide
+    # whether the misses are placeable.
+    block.rows, block.cols, block.swapped = block.n2, block.n1, False
+
+
+def _ptx_block_pose(block: _PtxBlock, source_name: str,
+                    warns: List[str]) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    """Resolve a block's pose to (rot_pts, rot_dir, trans).
+
+    PTX stores the transform for ROW-vector multiplication — `world = [x y z 1] @ M`
+    — with the translation in the LAST ROW. So the column-vector rotation is
+    `M[:3,:3].T`, which is the single easiest thing here to get backwards. A
+    transposed rotation yields a plausible-looking but wrong cloud, so it is
+    asserted in the tests.
+
+    `rot_pts` keeps any uniform scale the matrix carries (a PTX exported in mm
+    then transforms correctly); `rot_dir` is the unit rotation used for pulse
+    directions. Lines 4-6 hold the same rotation redundantly: the 4x4 wins when
+    it is usable, the axes are the fallback, and a disagreement is reported
+    rather than silently resolved.
+    """
+    def _usable(r: "np.ndarray") -> "tuple[bool, float]":
+        if not np.all(np.isfinite(r)):
+            return False, 0.0
+        g = r.T @ r
+        sc2 = float(np.trace(g)) / 3.0
+        if sc2 <= 1e-12:
+            return False, 0.0
+        if not np.allclose(g / sc2, np.eye(3), atol=1e-3):
+            return False, 0.0
+        if float(np.linalg.det(r)) <= 0.0:
+            return False, 0.0
+        return True, math.sqrt(sc2)
+
+    m_rot = np.ascontiguousarray(block.matrix4[:3, :3].T)
+    m_trans = block.matrix4[3, :3].copy()
+    ok_m, scale_m = _usable(m_rot)
+    identity_m = ok_m and np.allclose(m_rot / scale_m, np.eye(3), atol=1e-9) \
+        and np.allclose(m_trans, 0.0, atol=1e-9)
+
+    a_rot = np.ascontiguousarray(block.axes.T)
+    ok_a, scale_a = _usable(a_rot)
+    identity_a = ok_a and np.allclose(a_rot / scale_a, np.eye(3), atol=1e-9) \
+        and np.allclose(block.position, 0.0, atol=1e-9)
+
+    if ok_m and not (identity_m and ok_a and not identity_a):
+        rot_pts, trans, scale = m_rot, m_trans, scale_m
+        # Cross-check the redundant encodings; never silently pick one.
+        if ok_a and not np.allclose(a_rot / scale_a, rot_pts / scale, atol=1e-6):
+            warns.append(
+                f"PTX block {block.index}: the 4x4 transform and the scanner-axis "
+                "lines disagree; using the 4x4.")
+        if not np.allclose(block.position, trans, atol=1e-3):
+            d = float(np.linalg.norm(np.asarray(block.position) - trans))
+            warns.append(
+                f"PTX block {block.index}: the scanner position line and the "
+                f"transform translation differ by {d:.3f} m; using the transform.")
+    elif ok_a:
+        rot_pts, trans, scale = a_rot, np.asarray(block.position, np.float64), scale_a
+        warns.append(
+            f"PTX block {block.index}: the 4x4 transform was identity or "
+            "degenerate; using the scanner axis/position header lines.")
+    else:
+        rot_pts = np.eye(3)
+        trans = np.zeros(3)
+        scale = 1.0
+        warns.append(
+            f"PTX block {block.index}: neither the 4x4 transform nor the scanner "
+            "axis lines are a valid rotation; importing unregistered (identity "
+            "pose).")
+    return rot_pts, np.ascontiguousarray(rot_pts / scale), trans
+
+
+def _ptx_decompose_pose(rot_dir: "np.ndarray") -> "Optional[tuple[float, float, float]]":
+    """(yaw, pitch, roll) radians for `rot_dir == Rz(yaw) Ry(pitch) Rx(roll)`,
+    or None when the reconstruction doesn't round-trip.
+
+    The composition matches Helios's tilt/heading model (LiDAR.cpp applies roll
+    and pitch about the yaw-rotated body axes, which telescopes to this
+    fixed-axis Z-Y-X form). Verified by rebuilding rather than trusted, because
+    everything downstream that consumes it — `phi_min/max`, `azimuth_offset_deg`,
+    the tilt fields — is silently wrong if the convention is off.
+    """
+    pitch = -math.asin(max(-1.0, min(1.0, float(rot_dir[2, 0]))))
+    roll = math.atan2(float(rot_dir[2, 1]), float(rot_dir[2, 2]))
+    yaw = math.atan2(float(rot_dir[1, 0]), float(rot_dir[0, 0]))
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cr, sr = math.cos(roll), math.sin(roll)
+    rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    if not np.allclose(rz @ ry @ rx, rot_dir, atol=1e-9):
+        return None
+    return yaw, pitch, roll
+
+
+def _ptx_scan_params(block: _PtxBlock, model: _PtxGridModel,
+                     rot_dir: "np.ndarray", trans: "np.ndarray") -> dict:
+    """Recover ScanParameters from a PTX block header + its fitted angular grid.
+
+    PTX stores NO angles, so unlike `_e57_scan_params` every angular field here is
+    INFERRED. Grid resolution comes from the header and is always trustworthy; the
+    sweep is emitted only when the fit is trusted and the axis is well covered,
+    following the convention that whatever the file doesn't tell us is left out
+    for the renderer's default (blank stays blank).
+
+    Two traps. First, `zen_full` is ALREADY zenith (see `_PtxGridModel.observe`),
+    so there is deliberately no `90 - elevation` conversion here — look for the
+    E57 path's swap and you won't find it. Second, the azimuth LUT is in the
+    SCANNER-LOCAL frame while ScanParameters is world-frame, and the two agree
+    only under a pure-yaw pose; anything else omits the azimuth fields rather
+    than reporting a rotated sweep as if it were the instrument's.
+    """
+    params: dict = {"origin": [float(v) for v in trans]}
+    params["n_theta"] = int(block.rows)
+    params["n_phi"] = int(block.cols)
+    if not model.trusted:
+        return params
+
+    if model.n_rows_pop >= 0.5 * block.rows:
+        zt = model.zen_full[model.zen_ok] if model.zen_ok.any() else model.zen_full
+        params["theta_min"] = float(np.degrees(zt.min()))
+        params["theta_max"] = float(np.degrees(zt.max()))
+
+    ypr = _ptx_decompose_pose(rot_dir)
+    if ypr is None:
+        return params
+    yaw, pitch, roll = ypr
+    if max(abs(roll), abs(pitch)) >= math.radians(0.5):
+        # A tilted scanner: the local azimuth sweep is not the world one, so the
+        # azimuth fields are omitted entirely rather than reported rotated.
+        params["tilt_roll_deg"] = float(math.degrees(roll))
+        params["tilt_pitch_deg"] = float(math.degrees(pitch))
+        return params
+
+    if model.n_cols_pop >= 0.5 * block.cols:
+        # Helios measures phi CLOCKWISE FROM +Y (`arctan2(dx, dy)`), while the LUT
+        # is the mathematical atan2(y, x). For a pure yaw the world direction is
+        # Rz(yaw) applied to the local one, so phi = 90 - az_local - yaw.
+        #
+        # The endpoints must be read off the UNWRAPPED LUT. Wrapped, a sweep that
+        # crosses the seam reports two endpoints that happen to sit next to each
+        # other (a 360 deg scan came out as 90..92), which is not the sweep at all.
+        az_pop = model.az_lut[np.isfinite(model.az_lut)]
+        az_un = np.unwrap(az_pop)
+        span_deg = float(abs(math.degrees(az_un[-1] - az_un[0])))
+        step_deg = abs(math.degrees(model.az_step)) if np.isfinite(model.az_step) else 0.0
+        # The sweep covers the measured span PLUS the final cell's own width, so a
+        # 360 deg scan's LUT spans 360 - one step. Close that before deciding.
+        if span_deg + step_deg >= 359.5:
+            params["phi_min"], params["phi_max"] = 0.0, 360.0
+        else:
+            p0 = 90.0 - math.degrees(az_un[0]) - math.degrees(yaw)
+            p1 = 90.0 - math.degrees(az_un[-1]) - math.degrees(yaw)
+            # phi is a REFLECTION of az, so the sweep's low end is whichever
+            # endpoint maps lower. Normalise only the start and carry the span, so
+            # a sweep crossing north stays contiguous rather than folding to
+            # min=0/max=360 (matching `_e57_scan_params`, which also lets the pair
+            # run outside [0, 360)).
+            params["phi_min"] = float(min(p0, p1) % 360.0)
+            params["phi_max"] = float(params["phi_min"] + span_deg)
+    if abs(math.degrees(yaw)) > 1e-6:
+        params["azimuth_offset_deg"] = float(math.degrees(yaw))
+    return params
+
+
+def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
+                block_index: Optional[int] = None):
+    """Convert a PTX to LAS, recovering sky/miss points from the structured grid.
+
+    PTX is a COMPLETE rectangular raster: every beam the scanner fired gets a
+    line, and a beam that returned nothing is written with all-zero coordinates.
+    That makes it the richest possible source for the LAD inversion — but PTX
+    stores no per-cell angles, so a miss carries no direction of its own.
+
+    Because PTX coordinates are in the SCANNER-LOCAL frame, the local spherical
+    angles are the raw instrument angles and the grid is exactly separable
+    (zenith per row, azimuth per column). `_PtxGridModel` recovers both as robust
+    per-index medians, so every miss cell gets an analytic pulse direction and is
+    PLACED at `origin + dir * _MISS_GAP_DISTANCE`, matching how Helios stores a
+    miss and how `_e57_to_las` places the ones it can. When the fit can't be
+    trusted — or a cell's row/column sits too far past any measurement — the miss
+    is still KEPT and flagged, but left at the scanner origin and counted, again
+    exactly as the E57 path does; `row_index`/`column_index` are emitted either
+    way so the downstream Helios C++ recovery still has the grid to work from.
+
+    A file may hold several blocks (one per scan setup) with DIFFERENT dimensions
+    and poses; each is transformed by its own pose and they merge into one cloud.
+    The first block's origin and scan parameters are stashed in `_import_scan_meta`
+    for the create endpoint, mirroring E57's multi-scan behaviour.
+
+    With `out_las` set, writes that LAS and returns `(n, extra_dims, full_xyz)`;
+    `full_xyz` is the float64 world coordinate array, because PTX is an ASCII
+    source and the LAS synthesised here is 1 mm-quantized so it must not become
+    the session's source of truth.
+
+    With `out_las=None` it writes NOTHING and returns `(LasReadResult, scan_meta)`
+    — the arrays a CloudSession holds, ready for
+    `_do_create_cloud_session(preloaded=...)`. That is the path the importer
+    takes: the LAS in between existed only so the create path could read back
+    what this function had already computed, which measured a 0.91 GB temp file
+    per block and a 0.87 GB re-allocation, taking the per-block peak from 2.4 GB
+    to 3.9 GB. `_ptx_to_arrays` is the named entry point for it.
+    """
+    import laspy  # local: only when this code path runs
+
+    blocks, warns = _ptx_index_blocks_cached(source_path)
+    if block_index is not None:
+        # One block -> one scan position. The caller drives the fan-out (see
+        # `_do_create_multi_cloud_session`); here we simply convert the block it
+        # asked for, so its pose and grid become THE pose and grid of the
+        # resulting session rather than being averaged away into a merged cloud.
+        if not 0 <= block_index < len(blocks):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{source_path.name}: block {block_index} requested but the "
+                        f"file has {len(blocks)}."))
+        blocks = [blocks[block_index]]
+
+    # ---- Pass A: settle each block's shape, fit its angular grid, and collect
+    # the global bounds/intensity range the LAS header needs up front.
+    models: List[_PtxGridModel] = []
+    poses: List[tuple] = []
+    inten_lo, inten_hi = math.inf, -math.inf
+    lo = np.full(3, math.inf)
+    hi = np.full(3, -math.inf)
+    unplaceable = 0
+    for block in blocks:
+        _ptx_choose_shape(source_path, block)
+        if block.swapped:
+            warns.append(
+                f"PTX block {block.index} appears to declare rows before columns; "
+                f"using the {block.rows} x {block.cols} ordering its scan geometry "
+                "supports.")
+        rot_pts, rot_dir, trans = _ptx_block_pose(block, source_path.name, warns)
+        poses.append((rot_pts, rot_dir, trans))
+        model = _PtxGridModel(block.rows, block.cols)
+        for grid, col0 in _ptx_iter_chunks(source_path, block, (0, 1, 2, 3), block.rows):
+            valid = model.observe(grid, col0)
+            if valid.any():
+                iv = grid[3][valid]
+                if iv.size:
+                    inten_lo = min(inten_lo, float(iv.min()))
+                    inten_hi = max(inten_hi, float(iv.max()))
+                local = np.column_stack([grid[0][valid], grid[1][valid], grid[2][valid]])
+                world = local @ rot_pts.T + trans
+                lo = np.minimum(lo, world.min(axis=0))
+                hi = np.maximum(hi, world.max(axis=0))
+        model.finish()
+        if not model.trusted:
+            warns.append(
+                f"PTX block {block.index}: sky/miss directions could not be "
+                f"recovered from the scan grid ({model.reason}). Those points are "
+                "kept and flagged at the scanner origin.")
+        models.append(model)
+        # Placed misses sit a fixed distance from their own origin, so bound the
+        # header by that rather than deriving every direction twice.
+        lo = np.minimum(lo, trans - _MISS_GAP_DISTANCE)
+        hi = np.maximum(hi, trans + _MISS_GAP_DISTANCE)
+
+    total = sum(b.n_lines // b.rows * b.rows for b in blocks)
+    any_color = any(b.n_tokens >= 7 for b in blocks)
+    inten_span = inten_hi - inten_lo if inten_hi > inten_lo else 0.0
+
+    extra_dims = [{"slug": _MISS_SLUG, "label": _MISS_LABEL},
+                  {"slug": "row_index", "label": "Row Index"},
+                  {"slug": "column_index", "label": "Column Index"}]
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = np.floor(lo) if np.all(np.isfinite(lo)) else np.zeros(3)
+    for ed in extra_dims:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+
+    # ---- Pass B: transform, place the misses from the finished LUTs, and fill
+    # the OUTPUT ARRAYS directly.
+    #
+    # These are the arrays a CloudSession holds, so handing them straight to
+    # `_do_create_cloud_session(preloaded=...)` skips writing a LAS and reading
+    # it back — measured on the reference file, that round trip cost a 0.91 GB
+    # temp LAS per block and re-allocated 0.87 GB of arrays this function had
+    # already computed, pushing the per-block peak from 2.4 GB to 3.9 GB. (The
+    # RIEGL importer made the same change for the same reason.)
+    #
+    # Every array is preallocated and filled by slice rather than concatenated
+    # from per-chunk pieces: at 19.9 M cells `positions` alone is 0.48 GB, and a
+    # concatenate would hold both copies at the peak of an already heavy import.
+    positions = np.empty((total, 3), dtype=np.float64)
+    out_intensity = np.zeros(total, dtype=np.uint16) if inten_span > 0 else None
+    out_colors = np.zeros((total, 3), dtype=np.uint16) if any_color else None
+    out_miss = np.empty(total, dtype=np.float32)
+    out_row = np.empty(total, dtype=np.float32)
+    out_col = np.empty(total, dtype=np.float32)
+    written = 0
+    miss_total = 0
+    for block, model, (rot_pts, rot_dir, trans) in zip(blocks, models, poses):
+        cols_used = (0, 1, 2, 3, 4, 5, 6) if block.n_tokens >= 7 else (0, 1, 2, 3)
+        for grid, col0 in _ptx_iter_chunks(source_path, block, cols_used, block.rows):
+            x, y, z = grid[0], grid[1], grid[2]
+            rng2 = x * x + y * y + z * z
+            valid = rng2 > _PTX_MISS_RANGE2
+            miss = ~valid
+            cc = grid.shape[2]
+            local = np.stack([x, y, z], axis=0)                 # (3, rows, cc)
+            world = np.tensordot(rot_pts, local, axes=(1, 0)) + trans[:, None, None]
+
+            if miss.any():
+                rr, ccs = np.nonzero(miss)
+                gcol = ccs + col0
+                place = model.trusted & model.zen_ok[rr] & model.az_ok[gcol]
+                if place.any():
+                    u = model.directions(rr[place], gcol[place])
+                    wd = u @ rot_dir.T
+                    wd /= np.linalg.norm(wd, axis=1, keepdims=True)
+                    placed = trans[None, :] + wd * _MISS_GAP_DISTANCE
+                    world[:, rr[place], ccs[place]] = placed.T
+                if (~place).any():
+                    world[:, rr[~place], ccs[~place]] = trans[:, None]
+                    unplaceable += int((~place).sum())
+                miss_total += int(miss.sum())
+
+            # `.T.ravel()` puts each (row, col) grid back into PTX file order
+            # (column-major), which is the order every output array is in.
+            n_chunk = block.rows * cc
+            sl = slice(written, written + n_chunk)
+            positions[sl, 0] = world[0].T.ravel()
+            positions[sl, 1] = world[1].T.ravel()
+            positions[sl, 2] = world[2].T.ravel()
+            if out_intensity is not None:
+                iv = np.where(valid, (grid[3] - inten_lo) / inten_span, 0.0)
+                out_intensity[sl] = np.clip(iv.T.ravel() * 65535.0, 0, 65535).astype(np.uint16)
+            if out_colors is not None and block.n_tokens >= 7:
+                # PTX colour is 0-255; *256 lifts it into the 16-bit LAS channel,
+                # matching every other converter. Misses go black.
+                for ci, gi in ((0, 4), (1, 5), (2, 6)):
+                    v = np.where(valid, grid[gi], 0.0).T.ravel()
+                    out_colors[sl, ci] = np.clip(v, 0, 255).astype(np.uint16) * 256
+            out_miss[sl] = miss.T.ravel()
+            rows_g, cols_g = np.meshgrid(
+                np.arange(block.rows, dtype=np.float32),
+                np.arange(col0, col0 + cc, dtype=np.float32), indexing="ij")
+            out_row[sl] = rows_g.T.ravel()
+            out_col[sl] = cols_g.T.ravel()
+            written += n_chunk
+
+    extras = {_MISS_SLUG: out_miss, "row_index": out_row, "column_index": out_col}
+    scan_meta = {
+        "origin": [float(v) for v in poses[0][2]],
+        "scan_origins": [[float(v) for v in p[2]] for p in poses],
+        "scan_params": _ptx_scan_params(blocks[0], models[0], poses[0][1], poses[0][2]),
+        "has_misses": miss_total > 0,
+        "miss_count": miss_total,
+        "unplaceable_miss_count": unplaceable,
+        "warnings": warns,
+    }
+    result = LasReadResult(
+        positions=positions, colors=out_colors, intensity=out_intensity,
+        extras=extras, extra_dims_meta=list(extra_dims),
+    )
+
+    if out_las is None:
+        return result, scan_meta
+
+    # LAS path: the arrays are already complete, so write them out in slices —
+    # a single full-length ScaleAwarePointRecord would be another ~0.7 GB
+    # transient at 19.9 M cells, which is the cost this restructure removes.
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        for lo_i in range(0, total, _PTX_CHUNK_CELLS):
+            hi_i = min(lo_i + _PTX_CHUNK_CELLS, total)
+            rec = laspy.ScaleAwarePointRecord.zeros(hi_i - lo_i, header=header)
+            rec.x = positions[lo_i:hi_i, 0]
+            rec.y = positions[lo_i:hi_i, 1]
+            rec.z = positions[lo_i:hi_i, 2]
+            if out_intensity is not None:
+                rec.intensity = out_intensity[lo_i:hi_i]
+            if out_colors is not None:
+                rec.red = out_colors[lo_i:hi_i, 0]
+                rec.green = out_colors[lo_i:hi_i, 1]
+                rec.blue = out_colors[lo_i:hi_i, 2]
+            for slug, arr in extras.items():
+                rec[slug] = arr[lo_i:hi_i]
+            writer.write_points(rec)
+
+    _import_scan_meta[str(out_las.resolve())] = scan_meta
+    return int(total), extra_dims, positions
+
+
+def _ptx_to_arrays(source_path: _Path,
+                   block_index: Optional[int] = None) -> "tuple[LasReadResult, dict]":
+    """One PTX block straight to in-RAM arrays — no intermediate LAS.
+
+    The named entry point for `_ptx_to_las(..., out_las=None)`; see its docstring
+    for why the LAS round trip is worth skipping.
+    """
+    return _ptx_to_las(source_path, None, block_index=block_index)
 
 
 def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
@@ -18190,8 +23049,38 @@ def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
     return [{"slug": d, "label": d} for d in dims if d.lower() not in origin_cols]
 
 
+# Formats that can hold SEVERAL scan positions in one file. Each becomes its own
+# Phytograph scan, because a scan is defined by its pose: merging positions into
+# one cloud leaves a single origin standing in for all of them, which silently
+# breaks LAD (the inversion takes one scanner origin), the sky/miss display shell,
+# and the row/column raster (per-scan indices collide).
+_MULTI_SCAN_EXTENSIONS = {"e57", "ptx"}
+
+
+def _source_scan_count(source_path: _Path) -> int:
+    """How many scan positions `source_path` holds. 1 for every format that can
+    only hold one, and on any probe failure — a file we can't count is imported
+    as a single scan, which is the pre-existing behaviour."""
+    ext = source_path.suffix.lower().lstrip(".")
+    try:
+        if ext == "ptx":
+            blocks, _ = _ptx_index_blocks_cached(source_path)
+            return max(1, len(blocks))
+        if ext == "e57":
+            import pye57
+            e = pye57.E57(str(source_path))
+            try:
+                return max(1, int(e.scan_count))
+            finally:
+                e.close()
+    except Exception:
+        return 1
+    return 1
+
+
 def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path,
                    column_plan: "Optional[ColumnPlan]" = None,
+                   scan_index: Optional[int] = None,
                    ) -> "tuple[_Path, bool, List[dict], Optional[np.ndarray], Optional[np.ndarray]]":
     """Get a LAS file path for `source_path`, converting from another format
     if needed.
@@ -18238,20 +23127,38 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
         return out, True, extra_dims, None, None
     if ext == "e57":
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims = _e57_to_las(source_path, out)
+        _, extra_dims = _e57_to_las(source_path, out, scan_index=scan_index)
         return out, True, extra_dims, None, None
+    if ext == "ptx":
+        # PTX is an ASCII source, so the same precision rule as the XYZ family
+        # applies: return the float64 coordinates rather than let the session read
+        # back the 1 mm-quantized LAS.
+        out = work_dir / (source_path.stem + ".las")
+        _, extra_dims, full_xyz = _ptx_to_las(source_path, out, block_index=scan_index)
+        return out, True, extra_dims, full_xyz, None
     raise HTTPException(
         status_code=400,
         detail=f"Unsupported source extension for octree conversion: .{ext}",
     )
 
 
-def _run_potree_converter(input_las: _Path, out_dir: _Path) -> None:
+def _run_potree_converter(
+    input_las: _Path,
+    out_dir: _Path,
+    cancel_event: "Optional[threading.Event]" = None,
+    poll: float = 0.2,
+) -> None:
     """Invoke PotreeConverter on input_las, writing to out_dir.
 
     PyInstaller-bundled Pythons inject DYLD_LIBRARY_PATH / LD_LIBRARY_PATH
     pointing at the bundle's libs. Those collide with PotreeConverter's
     expectation of system libs, so we scrub them before spawning the child.
+
+    Cancellation: this is the single longest step of an import (minutes on a
+    multi-GB scan), so it must be interruptible. We spawn with Popen and poll
+    instead of `subprocess.run` — run() retains no handle, so its child could
+    never be killed. When `cancel_event` fires we hard-kill the child and raise
+    ScanCancelled, which unwinds `_build_octree_from_las`'s staging cleanup.
     """
     converter = _resolve_potree_converter_path()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -18274,14 +23181,69 @@ def _run_potree_converter(input_las: _Path, out_dir: _Path) -> None:
         str(input_las),
         "-o", str(out_dir),
     ]
-    result = _subprocess.run(cmd, capture_output=True, text=True, env=env)
-    if result.returncode != 0:
-        # Surface the converter's stderr tail directly so failures are debuggable.
-        tail = (result.stderr or result.stdout or "")[-1500:]
+    # Output goes to a LOG FILE, not a pipe. `subprocess.run` could use pipes
+    # safely because it pumps them concurrently; a poll loop with PIPE and no
+    # reader deadlocks the moment PotreeConverter (which prints per-chunk
+    # indexing progress) fills the ~64 KB buffer. Same approach as
+    # `_spawn_seg_worker`'s `logf`.
+    log_path = out_dir.parent / (out_dir.name + ".converter.log")
+    # Spawn via `_SegProc` (os.posix_spawn) on POSIX rather than Popen, for the
+    # reason documented on that class: this backend has libhelios (GLFW via the
+    # lidar→visualizer plugin) and open3d's own GLFW loaded, and fork()+exec()
+    # crashes the child in the post-fork/pre-exec window (SIGSEGV, exit -11).
+    # posix_spawn never forks the loaded image. It also puts the child in its OWN
+    # process group, which is what lets `_kill_seg_worker` killpg the converter's
+    # subtree on cancel without ever signalling the backend's own group.
+    returncode: int
+    if hasattr(_os, "posix_spawn"):
+        proc = _SegProc(cmd, env, str(log_path))
+    else:
+        # Windows: no fork, so Popen is fine. A new process group is the closest
+        # equivalent (mirrors _spawn_seg_worker). NOTE: _kill_seg_worker falls
+        # back to a single-pid kill there, so converter grandchildren may survive
+        # a cancel on Windows — the same limitation the seg workers ship with.
+        logf = open(log_path, "wb")
+        try:
+            proc = _subprocess.Popen(
+                cmd, stdout=logf, stderr=_subprocess.STDOUT, env=env,
+                creationflags=getattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+        finally:
+            logf.close()
+    try:
+        while proc.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                # Reuse the seg-worker killer: it carries the killpg SAFETY guard
+                # (never kill a group that is the backend's own, which would
+                # SIGKILL the whole server if the setpgroup ever failed).
+                _kill_seg_worker(proc)
+                proc.wait()
+                raise ScanCancelled()
+            time.sleep(poll)
+        returncode = proc.poll()
+    finally:
+        if proc.poll() is None:
+            _kill_seg_worker(proc)
+            proc.wait()
+
+    if returncode != 0:
+        # Surface the converter's output tail directly so failures are debuggable.
+        try:
+            tail = log_path.read_text(errors="replace")[-1500:]
+        except OSError:
+            tail = ""
         raise HTTPException(
             status_code=500,
-            detail=f"PotreeConverter failed (exit {result.returncode}): {tail}",
+            detail=f"PotreeConverter failed (exit {returncode}): {tail}",
         )
+    # Success: the log has nothing left to say. (On failure/cancel we leave it
+    # for the error tail above; the staging cleanup in _build_octree_from_las
+    # removes the sibling staging dir, and this file is unlinked on the next
+    # build of the same key.)
+    try:
+        log_path.unlink()
+    except (FileNotFoundError, OSError):
+        pass
 
 
 # Sidecar JSON mapping LAS extra-dimension slugs to human-readable labels.
@@ -18289,17 +23251,42 @@ def _run_potree_converter(input_las: _Path, out_dir: _Path) -> None:
 # _read_octree_metadata so the renderer can show clean picker labels
 # (e.g. slug 'Reflectance_dB' → label 'Reflectance [dB]') even on cache hits.
 _OCTREE_LABELS_FILENAME = "attribute_labels.json"
+# PotreeConverter's own name for the LAS gps_time dimension, and the DISPLAY name
+# Phytograph shows for it. The key must match what PotreeConverter writes into
+# metadata.json — it indexes the GPU buffer — while the label is what the user
+# reads in the Scans panel and the Color-by picker. Mirrors
+# OCTREE_GPS_TIME_ATTRIBUTE / the `timestamp` slug in the renderer.
+_OCTREE_GPS_TIME_ATTRIBUTE = "gps-time"
+_OCTREE_GPS_TIME_LABEL = "Timestamp"
 
 
 def _write_octree_labels(octree_dir: _Path, extra_dims: List[dict]) -> None:
     """Persist the slug→label map for an octree's extra dimensions.
 
-    No-op when there are no extra dims, so LAS/LAZ-sourced octrees don't grow
-    an empty sidecar. `extra_dims` is the list returned by `_xyz_to_las`.
+    `extra_dims` is the list returned by `_xyz_to_las`.
+
+    PotreeConverter names the per-point time column after the LAS dimension it
+    came from, `gps-time`, and that name is LOAD-BEARING: it is the key the
+    renderer looks the GPU buffer up by (`geometry.attributes[field]`), so it
+    must NOT be renamed in the octree itself — doing so silently breaks
+    colour-by, which was a real regression here.
+
+    But `gps-time` is not what a user should READ. Phytograph calls that
+    quantity `timestamp` everywhere else — the import wizard's role, the export
+    column, the tool gates — so surfacing the raw LAS spelling in the Scans
+    panel and the Color-by picker made one column look like two different
+    fields depending on which part of the UI you were in.
+
+    The sidecar is exactly the right place to reconcile that: it maps the buffer
+    key to a DISPLAY name, leaving the key itself untouched. Written for every
+    format, so LAS/LAZ, .riproject and ASCII all agree.
     """
-    if not extra_dims:
+    mapping = {ed["slug"]: ed["label"] for ed in (extra_dims or [])}
+    # The time column never rides in `extra_dims` — it is float64 and lives on
+    # its own session field — so it needs its label added explicitly.
+    mapping.setdefault(_OCTREE_GPS_TIME_ATTRIBUTE, _OCTREE_GPS_TIME_LABEL)
+    if not mapping:
         return
-    mapping = {ed["slug"]: ed["label"] for ed in extra_dims}
     (octree_dir / _OCTREE_LABELS_FILENAME).write_text(json.dumps(mapping))
 
 
@@ -18310,13 +23297,23 @@ def _read_octree_labels(octree_dir: _Path) -> dict:
     renderer falls back to showing the raw slug in that case.
     """
     p = octree_dir / _OCTREE_LABELS_FILENAME
-    if not p.is_file():
-        return {}
-    try:
-        data = json.loads(p.read_text())
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+    data: dict = {}
+    if p.is_file():
+        try:
+            loaded = json.loads(p.read_text())
+            if isinstance(loaded, dict):
+                data = loaded
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    # Applied on READ, not just at write time, because octrees are CACHED BY
+    # CONTENT HASH: re-importing the same file reuses the existing directory and
+    # never re-runs `_write_octree_labels`. A label added only at write time
+    # would therefore never reach any cloud a user had already imported — which
+    # is exactly how this fix appeared to do nothing after shipping.
+    #
+    # `setdefault` so a source that names the column itself still wins.
+    data.setdefault(_OCTREE_GPS_TIME_ATTRIBUTE, _OCTREE_GPS_TIME_LABEL)
+    return data
 
 
 def _read_octree_metadata(octree_dir: _Path) -> dict:
@@ -18820,18 +23817,34 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
         names = [d.name for d in pf.dimensions]
         # Present standard + extra dims; mark x/y/z and rgb/intensity roles.
         def role_for(n: str) -> str:
-            ln = n.lower()
-            if ln in ('x', 'y', 'z'):
-                return ln
-            if ln == 'red':
-                return 'r255'
-            if ln == 'green':
-                return 'g255'
-            if ln == 'blue':
-                return 'b255'
-            if ln == 'intensity':
-                return 'intensity'
-            return 'extra'
+            # Resolved through the canonical table (`_CANONICAL_NAME_ALIASES`),
+            # so the wizard agrees with what the READER will actually do — the
+            # two disagreeing is how a column could be shown as `gps_time` here
+            # and land under `timestamp` (or nowhere) after import.
+            #
+            # LAS colour dims are the 255-scale roles; the table already returns
+            # r255/g255/b255 for red/green/blue.
+            slug = _canonical_slug_for_name(n)
+            if slug is None:
+                return 'extra'
+            # A file can carry TWO spellings of the same quantity, and only one
+            # column may hold an exclusive role. Phytograph's own historical
+            # export is exactly this shape: real values in float32 extra dims
+            # (`timestamp`, `target_index`, `target_count`) alongside the LAS
+            # standard dims (`gps_time`, `return_number`, `number_of_returns`)
+            # left at zero. The wizard keeps the FIRST claimant and demotes the
+            # rest to 'skip', so if the all-zero standard dim won, the import
+            # would silently take zeros.
+            #
+            # `_dims_for_slug` puts the explicit/canonical spelling first — the
+            # same order the READER uses — so defer to it and report every other
+            # claimant as a plain scalar. Applies to every exclusive role, not
+            # just timestamp.
+            best = _dims_for_slug({d.name for d in pf.dimensions}, slug)
+            if best and best[0] != n:
+                return 'extra'
+            return slug
+
         extra_names = {d.name for d in pf.extra_dimensions}
         # Beam-origin ExtraBytes (ox/oy/oz or an alias set) are auto-consumed by
         # `_read_las_into_arrays` into the float64 `beam_origins` array — exactly
@@ -18862,6 +23875,11 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
                 suggested_label=n, suggested_slug=n if is_extra else '',
                 type_hint='categorical' if n.lower() == 'classification' else 'float',
                 remappable=False,
+                # Scalars can be reassigned; geometry cannot. An ExtraBytes name
+                # is a vendor string we may not recognise, so the user needs a
+                # way to say what it is. x/y/z are a defined layout — offering to
+                # reassign them would only create a broken import.
+                role_assignable=role not in ('x', 'y', 'z'),
             ))
         # Cheap value sample: read a small batch of points.
         try:
@@ -18948,6 +23966,196 @@ def _preview_e57(file_path: str) -> PointCloudPreviewResponse:
     )
 
 
+def _ptx_probe_first_block(file_path: str) -> dict:
+    """Read ONLY the first PTX block's header (plus one data line) — O(1).
+
+    Deliberately does not run `_ptx_index_blocks`: that walks the entire file to
+    find block boundaries, and a multi-GB scan must not cost seconds in a preview
+    endpoint competing for the threadpool with everything else.
+    """
+    src = _Path(file_path)
+    with open(src, "rb") as fh:
+        block, _ = _ptx_read_header(fh, 0, 0, 1, src.name)
+        fh.seek(block.data_byte)
+        # Mean bytes per line over a sample, for a total-cell estimate. The same
+        # window supplies the wizard's preview rows — PTX is plain ASCII, so the
+        # rows are free to read (unlike E57, where sampling values means decoding
+        # binary point data).
+        sample = fh.read(1 << 16)
+        nl = sample.count(b"\n")
+    bytes_per_line = (len(sample) / nl) if nl else 0.0
+    est_cells = (int((src.stat().st_size - block.data_byte) / bytes_per_line)
+                 if bytes_per_line > 0 else block.n_cells)
+    lines = sample.decode("ascii", "replace").split("\n")
+    if nl:
+        del lines[-1]              # the window almost certainly cut one mid-number
+    return {"block": block, "est_cells": est_cells,
+            "lines": [l.strip() for l in lines if l.strip()]}
+
+
+def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
+    """Summarise a RIEGL raw project for the import wizard.
+
+    A `.riproject` or `.PROJ` is a DIRECTORY and its point data is only
+    reachable through RiVLib inside a container, so unlike every other preview
+    this one cannot read the file cheaply. Running the reader just to list columns would cost
+    ~10 s per position before the user has agreed to anything.
+
+    Instead the columns are declared: the reader's output schema is fixed code,
+    not something discovered per file, and the wizard only needs the names so
+    the user can pick which scalars to keep. The one genuinely per-scanner part
+    is that columns an instrument never populates are dropped at read time (a
+    VZ-1000 records no background_radiation); those simply won't appear on the
+    imported cloud, which is the same "the file didn't have it" outcome the
+    other formats produce.
+
+    Columns are NOT remappable — the layout is defined by the reader, exactly as
+    E57/PLY/PCD layouts are defined by their formats.
+    """
+    columns = [
+        PreviewColumn(index=0, header_name='x', detected_role='x',
+                      suggested_label='x', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=1, header_name='y', detected_role='y',
+                      suggested_label='y', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=2, header_name='z', detected_role='z',
+                      suggested_label='z', suggested_slug='', type_hint='float',
+                      remappable=False),
+        # Assignable like every other scalar, matching the LAS preview: a user
+        # who wants the intensity channel treated as something else (or wants
+        # another column to BE the intensity) should not be blocked just because
+        # this reader happens to name the column itself. Geometry above stays
+        # locked — that genuinely is fixed by the reader.
+        PreviewColumn(index=3, header_name='intensity', detected_role='intensity',
+                      suggested_label='intensity', suggested_slug='',
+                      type_hint='float', remappable=False, role_assignable=True),
+    ]
+    # The scalar columns the reader can produce, in wire order. `is_miss` is
+    # omitted for the same reason E57 omits it: a system-managed flag, not a
+    # user column — it drives the Hit/Miss scheme and the octree exclusion.
+    idx = 4
+    for slug in _RIEGL_STREAM_ATTRS:
+        if slug == 'is_miss':
+            continue
+        # Resolve the role through the canonical table instead of hardcoding
+        # 'extra'. Several of these columns ARE first-class roles — reflectance,
+        # target_index, target_count — and reporting them as anonymous scalars
+        # made the wizard show "Scalar" for a column every downstream tool keys
+        # off by name (multi-return grouping, the reflectance colour mode).
+        # A column with no canonical role (amplitude, deviation, facet, …) still
+        # falls back to 'extra' and is carried under its own name.
+        columns.append(PreviewColumn(
+            index=idx, header_name=slug,
+            detected_role=_canonical_slug_for_name(slug) or 'extra',
+            suggested_label=_RIEGL_LABELS.get(
+                slug, slug.replace('_', ' ').title()),
+            suggested_slug=slug, type_hint='float', remappable=False,
+            role_assignable=True))
+        idx += 1
+    # Time is carried in double precision as the LAD join key, so it is offered
+    # like any other scalar even though it never rides in the float32 extras.
+    columns.append(PreviewColumn(
+        index=idx, header_name='timestamp', detected_role='timestamp',
+        suggested_label='Timestamp', suggested_slug='timestamp',
+        type_hint='float', remappable=False, role_assignable=True))
+
+    # Layout-aware, mirroring rxp_reader.detect_layout: a .PROJ suffixes its
+    # position directories and nests the scans, a .riproject does neither. Only
+    # the COUNT is needed here, so this stays a cheap directory listing rather
+    # than a reader invocation.
+    root = Path(project_path)
+    proj_dirs = sorted(d.name for d in root.glob('ScanPos*.SCNPOS') if d.is_dir())
+    if proj_dirs or (root / 'project.json').is_file():
+        positions = proj_dirs
+        kind_label = "RIEGL project (.PROJ)"
+    else:
+        positions = sorted(d.name for d in root.glob('ScanPos*') if d.is_dir())
+        kind_label = "RIEGL raw project"
+    warn = (
+        f"{kind_label} with {len(positions)} scan position(s). Sky/miss "
+        "points are recovered from the scanner's per-shot record and tagged "
+        "for LAD (hidden by default; use 'Show sky/miss points' to view). "
+        "Columns an instrument does not record are omitted automatically."
+    )
+    return PointCloudPreviewResponse(
+        kind='riproject', delimiter=None, has_header=True,
+        columns=columns, sample_rows=[], warning=warn,
+    )
+
+
+def _preview_ptx(file_path: str, max_rows: int = 20) -> PointCloudPreviewResponse:
+    """Summarise a PTX for the import wizard, with real sample rows.
+
+    Columns are fixed — PTX defines its own layout (`x y z intensity [r g b]`)
+    and `_ptx_to_las` reads those positions by spec — so they are not remappable;
+    offering a mapping the converter ignores would be worse than offering none.
+    But fixed schema does NOT mean no preview: PTX is plain ASCII sitting behind
+    a 10-line header, so its rows cost nothing to read, and seeing them is how a
+    user confirms the column count and the intensity/colour scales before
+    committing. (ASCII PLY, also fixed-schema, shows its rows for the same
+    reason; E57 does not, because sampling it means decoding binary point data.)
+
+    Rows that are the all-zero no-return sentinel are skipped where possible: a
+    scan commonly opens with a whole column of sky, and ten rows of zeros would
+    tell the user nothing about their data. `is_miss` is deliberately omitted
+    from the columns for the reason `_preview_e57` gives — it's a system-managed
+    flag the converter populates, not a user column.
+    """
+    probe = _ptx_probe_first_block(file_path)
+    block = probe["block"]
+    columns = [
+        PreviewColumn(index=0, header_name='x', detected_role='x',
+                      suggested_label='x', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=1, header_name='y', detected_role='y',
+                      suggested_label='y', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=2, header_name='z', detected_role='z',
+                      suggested_label='z', suggested_slug='', type_hint='float',
+                      remappable=False),
+        PreviewColumn(index=3, header_name='intensity', detected_role='intensity',
+                      suggested_label='intensity', suggested_slug='',
+                      type_hint='float', remappable=False),
+    ]
+    if block.n_tokens >= 7:
+        for i, (ch, role) in enumerate((('red', 'r255'), ('green', 'g255'),
+                                        ('blue', 'b255'))):
+            columns.append(PreviewColumn(
+                index=4 + i, header_name=ch, detected_role=role,
+                suggested_label=ch, suggested_slug='', type_hint='float',
+                remappable=False))
+
+    # More cells than the first block declares ⇒ the file holds further scan
+    # setups. Counting them exactly would mean walking the file, so say "1+".
+    multi = probe["est_cells"] > block.n_cells * 1.05
+    warn = (f"PTX structured scan, {'1+' if multi else '1'} scan position(s), "
+            f"first grid {block.n1} x {block.n2} = {block.n_cells:,} cells "
+            f"({block.n_tokens} columns). Sky/miss points are recovered from the "
+            "structured grid and tagged for LAD (hidden by default; use "
+            "'Show sky/miss points' to view).")
+
+    # Prefer rows with an actual return. A scan that opens on sky would otherwise
+    # preview as ten identical all-zero lines.
+    ntok = block.n_tokens
+    hits, raw = [], []
+    for line in probe["lines"]:
+        toks = line.split()
+        if len(toks) != ntok:
+            continue
+        raw.append(toks)
+        if any(t.strip("-") not in ("0", "0.0", "0.000000", "") for t in toks[:3]):
+            hits.append(toks)
+        if len(hits) >= max_rows:
+            break
+    sample_rows = (hits or raw)[:max_rows]
+
+    return PointCloudPreviewResponse(
+        kind='ptx', delimiter=None, has_header=True, columns=columns,
+        sample_rows=sample_rows, warning=warn,
+    )
+
+
 # Any coordinate whose magnitude exceeds this triggers a suggested global shift:
 # at ~1e4 m, float32's ~1e-7 relative precision already gives ~1 mm error, and it
 # degrades linearly past that (UTM ~1e6 → ~0.1 m). Below it, raw coordinates render
@@ -18989,6 +24197,14 @@ def _suggest_global_shift(file_path: str,
             import laspy
             with laspy.open(file_path) as reader:
                 mins = np.asarray(reader.header.mins, dtype=np.float64)
+        elif ext == 'ptx':
+            # PTX point coordinates are SCANNER-LOCAL (small by construction), so
+            # the body carries no shift signal at all — the registered world
+            # position is the header translation. Reading it is O(1), and an
+            # unregistered PTX has a zero translation, which falls below the
+            # threshold and correctly suggests nothing.
+            blk = _ptx_probe_first_block(file_path)["block"]
+            mins = np.asarray(blk.matrix4[3, :3], dtype=np.float64)
         if mins is None or mins.shape != (3,) or not np.all(np.isfinite(mins)):
             return None
         if not np.any(np.abs(mins) > _SHIFT_SUGGEST_THRESHOLD):
@@ -18999,7 +24215,7 @@ def _suggest_global_shift(file_path: str,
 
 
 @app.post("/api/pointcloud/preview")
-async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewResponse:
+def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewResponse:
     """Cheaply inspect a point-cloud file for the import wizard.
 
     Reads only enough of the file to show the wizard what was auto-detected and
@@ -19007,7 +24223,15 @@ async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPre
     a `warning` and best-effort columns so the wizard can still offer
     "import with auto-detect"."""
     source = _Path(request.file_path).expanduser()
-    if not source.is_file():
+    # A RIEGL project is a DIRECTORY of scan positions, not a file — every
+    # other previewable format is a single file.
+    if source.suffix.lower() in _RIEGL_PROJECT_SUFFIXES:
+        if not source.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not a directory: {request.file_path}",
+            )
+    elif not source.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
     max_rows = max(1, min(int(request.max_rows or 20), 100))
     ext = source.suffix.lower().lstrip('.')
@@ -19021,8 +24245,12 @@ async def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPre
             resp = _preview_pcd(str(source))
         elif ext == 'e57':
             resp = _preview_e57(str(source))
+        elif ext == 'ptx':
+            resp = _preview_ptx(str(source), max_rows)
         elif ext in ('las', 'laz'):
             resp = _preview_las(str(source), max_rows)
+        elif ext in _RIEGL_PROJECT_EXTS:
+            resp = _preview_riproject(str(source))
         if resp is not None:
             # Probe coordinate magnitude and pre-fill a suggested global shift for
             # large (e.g. UTM) clouds, so the wizard can offer it on by default.
@@ -19161,9 +24389,85 @@ def _canonical_region(region: dict) -> str:
             int(w), int(h),
             "1" if invert else "0",
         )
+    if kind == "spheres_union":
+        invert = bool(region.get("invert", False))
+        centers = region.get("centers", [])
+        radii = region.get("radii", [])
+        if not isinstance(centers, list) or not isinstance(radii, list):
+            raise HTTPException(
+                status_code=400,
+                detail="region.centers and region.radii must be arrays.",
+            )
+        if len(centers) != len(radii):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"region.centers ({len(centers)}) and region.radii "
+                        f"({len(radii)}) must be the same length."),
+            )
+        if len(centers) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="region.centers must have at least one sphere.",
+            )
+        for c in centers:
+            if not isinstance(c, (list, tuple)) or len(c) != 3:
+                raise HTTPException(
+                    status_code=400,
+                    detail="each region.centers entry must be an [x, y, z] triple.",
+                )
+        for r in radii:
+            if not isinstance(r, (int, float)) or r <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="each region.radii entry must be a positive number.",
+                )
+        stamps = ";".join(
+            "{:.6g},{:.6g},{:.6g},{:.6g}".format(
+                float(c[0]), float(c[1]), float(c[2]), float(r))
+            for c, r in zip(centers, radii)
+        )
+        return "spheres_union|{}|{}".format(stamps, "1" if invert else "0")
+    if kind == "slab":
+        invert = bool(region.get("invert", False))
+        a = region.get("a")
+        b = region.get("b")
+        for name, v in (("a", a), ("b", b)):
+            if not isinstance(v, (list, tuple)) or len(v) != 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"region.{name} must be an [x, y] pair for a slab region.",
+                )
+        depth = region.get("depth")
+        if not isinstance(depth, (int, float)) or depth <= 0:
+            raise HTTPException(
+                status_code=400, detail="region.depth must be a positive slab thickness.",
+            )
+        z_min = region.get("zMin")
+        z_max = region.get("zMax")
+        for name, v in (("zMin", z_min), ("zMax", z_max)):
+            if not isinstance(v, (int, float)):
+                raise HTTPException(
+                    status_code=400, detail=f"region.{name} must be a number for a slab region.",
+                )
+        if float(z_max) < float(z_min):
+            raise HTTPException(
+                status_code=400, detail="region.zMax must be >= region.zMin.",
+            )
+        if math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1])) < 1e-12:
+            raise HTTPException(
+                status_code=400,
+                detail="region.a and region.b must differ (a slab needs a centreline).",
+            )
+        return "slab|{:.6g},{:.6g}|{:.6g},{:.6g}|{:.6g}|{:.6g},{:.6g}|{:.6g}|{}".format(
+            float(a[0]), float(a[1]), float(b[0]), float(b[1]),
+            float(depth), float(z_min), float(z_max),
+            float(region.get("offset", 0.0)),
+            "1" if invert else "0",
+        )
     raise HTTPException(
         status_code=400,
-        detail=f"region.kind must be 'box', 'polygon', or 'squares_union'. Got: {kind!r}",
+        detail=(f"region.kind must be 'box', 'polygon', 'squares_union', 'spheres_union', or "
+                f"'slab'. Got: {kind!r}"),
     )
 
 
@@ -19215,6 +24519,30 @@ def _scalar_filter_mask(vals: "np.ndarray", lo: float, hi: float,
     return (vals >= lo) & (vals <= hi)
 
 
+def _spheres_union_mask(
+    positions: "np.ndarray", centers: "np.ndarray", radii: "np.ndarray",
+) -> "np.ndarray":
+    """Boolean mask: True for points inside ANY of the world-space brush spheres.
+
+    The brush counterpart to `_squares_union_mask`, and deliberately a different
+    KIND of test. A square stamp is screen-space, so it extrudes through the
+    whole cloud and removes points at every depth behind it. A sphere is
+    world-space: it is inherently depth-limited, needs no projection matrix, no
+    canvas size and no frozen camera, and the membership test is a squared
+    distance. That makes preview/apply parity exact by construction — the
+    renderer evaluates the same closed form against the same numbers, so there
+    is no projection round-trip for the two sides to disagree about.
+
+    `positions` is (n, 3) world coordinates, `centers` is (k, 3), `radii` is
+    (k,). Compared squared to avoid k sqrt passes over the whole cloud.
+    """
+    mask = np.zeros(positions.shape[0], dtype=bool)
+    for i in range(centers.shape[0]):
+        d = positions - centers[i]
+        mask |= np.einsum("ij,ij->i", d, d) <= float(radii[i]) ** 2
+    return mask
+
+
 def _squares_union_mask(
     pixels: "np.ndarray", centers: "np.ndarray", half_sizes: "np.ndarray",
 ) -> "np.ndarray":
@@ -19237,7 +24565,68 @@ def _squares_union_mask(
     return mask
 
 
-def _region_mask(positions: "np.ndarray", region: Optional[dict]) -> "np.ndarray":
+def _slab_mask(positions: "np.ndarray", region: dict) -> "np.ndarray":
+    """Boolean mask for a vertical cross-section slab.
+
+    MIRRORS `slabPredicate` in src/renderer/lib/crossSection.ts — a golden-vector
+    parity test pins the two together, the same discipline `_points_in_polygon_mask`
+    keeps with `pointInPolygon`.
+
+    Unlike every other region kind this involves NO CAMERA: the slab is a
+    world-space prism, so the preview and this replay agree by construction
+    rather than by two implementations of a projection happening to match. That
+    is also why a slab session never has to freeze the camera.
+
+    A point is inside when it lies within depth/2 of the (offset) centreline
+    plane, between the centreline's endpoints along the tangent, and within the
+    vertical extent."""
+    a = np.asarray(region["a"], dtype=np.float64)
+    b = np.asarray(region["b"], dtype=np.float64)
+    t = b - a
+    length = float(np.hypot(t[0], t[1]))
+    if length < 1e-12:
+        raise HTTPException(
+            status_code=400,
+            detail="region.a and region.b must differ (a slab needs a centreline).",
+        )
+    t = t / length
+    n = np.array([-t[1], t[0]], dtype=np.float64)   # left normal
+
+    d = positions[:, :2] - a
+    along = d @ t
+    across = d @ n - float(region.get("offset", 0.0))
+    half = float(region["depth"]) / 2.0
+    z = positions[:, 2]
+    return (
+        (np.abs(across) <= half)
+        & (along >= 0.0) & (along <= length)
+        & (z >= float(region["zMin"])) & (z <= float(region["zMax"]))
+    )
+
+
+def _region_pixels(positions: "np.ndarray", region: dict) -> "np.ndarray":
+    """Project `positions` to canvas pixels using a screen-space region's frozen
+    camera. Returns (n, 2). Only meaningful for polygon / squares_union kinds.
+
+    Split out so a caller applying SEVERAL regions that share one frozen camera
+    — every stamp of a single brush drag — can project once and reuse the
+    result via `_region_mask(..., pixels=...)`. The projection is O(N) over the
+    whole cloud and dominates the cost of a stroke, so re-projecting per stamp
+    turns one pass over a 50 M-point cloud into k passes."""
+    return _project_world_to_pixel(
+        positions,
+        np.asarray(region["projection"], dtype=np.float64),
+        np.asarray(region["view"], dtype=np.float64),
+        int(region["canvas"]["width"]),
+        int(region["canvas"]["height"]),
+    )
+
+
+def _region_mask(
+    positions: "np.ndarray",
+    region: Optional[dict],
+    pixels: Optional["np.ndarray"] = None,
+) -> "np.ndarray":
     """Spatial keep-mask for already-materialised Nx3 world positions.
 
     Supports box / polygon / squares_union regions over a whole positions
@@ -19249,6 +24638,11 @@ def _region_mask(positions: "np.ndarray", region: Optional[dict]) -> "np.ndarray
     polygon/squares_union the camera matrices and canvas come from `region`,
     matching the renderer's frozen-camera preview. Returns a bool ndarray of
     length N.
+
+    `pixels` optionally supplies the projected (n, 2) canvas pixels for the
+    screen-space kinds, so a batch of regions sharing one frozen camera projects
+    once (see `_region_pixels`). It MUST have been produced from the same
+    projection/view/canvas this region carries; pass None to project here.
     """
     n = positions.shape[0]
     if region is None:
@@ -19267,29 +24661,28 @@ def _region_mask(positions: "np.ndarray", region: Optional[dict]) -> "np.ndarray
             (zs >= cmin[2]) & (zs <= cmax[2])
         )
     elif kind == "polygon":
-        proj = np.asarray(region["projection"], dtype=np.float64)
-        view = np.asarray(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
         polygon = np.asarray(region["points"], dtype=np.float64)
         if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
             raise HTTPException(
                 status_code=400,
                 detail="region.points must be at least 3 [x, y] entries.",
             )
-        pixels = _project_world_to_pixel(
-            positions, proj, view, int(canvas["width"]), int(canvas["height"]),
-        )
-        mask = _points_in_polygon_mask(pixels, polygon)
+        px = pixels if pixels is not None else _region_pixels(positions, region)
+        mask = _points_in_polygon_mask(px, polygon)
     elif kind == "squares_union":
-        proj = np.asarray(region["projection"], dtype=np.float64)
-        view = np.asarray(region["view"], dtype=np.float64)
-        canvas = region["canvas"]
         centers = np.asarray(region["centers"], dtype=np.float64)
         half_sizes = np.asarray(region["half_sizes"], dtype=np.float64)
-        pixels = _project_world_to_pixel(
-            positions, proj, view, int(canvas["width"]), int(canvas["height"]),
+        px = pixels if pixels is not None else _region_pixels(positions, region)
+        mask = _squares_union_mask(px, centers, half_sizes)
+    elif kind == "spheres_union":
+        # World-space, so it never touches `pixels` — no projection needed.
+        mask = _spheres_union_mask(
+            positions,
+            np.asarray(region["centers"], dtype=np.float64),
+            np.asarray(region["radii"], dtype=np.float64),
         )
-        mask = _squares_union_mask(pixels, centers, half_sizes)
+    elif kind == "slab":
+        mask = _slab_mask(positions, region)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
@@ -19404,6 +24797,23 @@ class CropOctreeRegion(BaseModel):
     # in pixels (axis-aligned in screen space).
     centers: Optional[List[List[float]]] = None
     half_sizes: Optional[List[float]] = None
+    # Spheres-union fields (the label brush). Shares `centers` with the squares
+    # union, but the entries are WORLD-space [x, y, z] triples rather than
+    # screen pixels, and `radii` are world radii. A sphere is depth-limited by
+    # its own geometry, so unlike a square stamp it does NOT paint through the
+    # cloud — and it needs no projection/view/canvas, which is what makes
+    # preview and apply agree exactly. See `_spheres_union_mask`.
+    radii: Optional[List[float]] = None
+    # Cross-section slab fields. WORLD-space and camera-free — see `_slab_mask`.
+    # `a`/`b` are the horizontal centreline endpoints, `depth` the thickness,
+    # `offset` how far the slab has been STEPPED along its normal from where it
+    # was drawn (so the centreline keeps expressing the user's chosen azimuth).
+    a: Optional[List[float]] = None
+    b: Optional[List[float]] = None
+    depth: Optional[float] = None
+    zMin: Optional[float] = None
+    zMax: Optional[float] = None
+    offset: float = 0.0
     invert: bool = False
 
 
@@ -19536,6 +24946,144 @@ def _sweep_plant_sessions() -> None:
             print(f"[Plant Session] Evicted idle/over-cap session {sid}")
 
 
+# Manual-labelling undo budget. Capped by BYTES rather than by entry count
+# (the idiom `_MAX_DELETED_HISTORY` uses) because label-edit sizes span four
+# orders of magnitude: a brush stamp changes a few thousand points (~25 KB)
+# while a bulk/propagate pass rewrites millions. A count cap would either waste
+# hundreds of MB or silently drop undo steps depending on which kind the user
+# happened to make. The count cap below is a belt-and-braces guard against a
+# pathological all-tiny-strokes session bloating the Python list itself.
+_MAX_LABEL_HISTORY_BYTES = int(
+    os.environ.get("PHYTOGRAPH_MAX_LABEL_HISTORY_BYTES", str(256 * 1024 * 1024))
+)
+_MAX_LABEL_HISTORY = int(os.environ.get("PHYTOGRAPH_MAX_LABEL_HISTORY", "2000"))
+
+
+@dataclass
+class _LabelDelta:
+    """Prior values of the points ONE label edit changed, so it can be rolled
+    back exactly.
+
+    Reverse-applying these is exact even when several strokes repainted the same
+    point, because each entry stored the value as it was AT THE TIME that entry
+    ran — the same correctness property `deleted_history`'s snapshots give, at
+    roughly 1/1000th the memory.
+
+    Two encodings, chosen by whichever is smaller at write time:
+
+      'sparse' — `idx` (absolute int64 indices) + `prev` (uint8 prior classes),
+        ~5 bytes per CHANGED point. This is the common case and the reason RLE
+        alone is not enough: a screen-space region selects points that are
+        scattered in absolute/morton order, so run-length encoding degenerates
+        to one run per point (~13 bytes) — 2.6x WORSE than sparse for the
+        dominant case.
+
+      'runs' — `starts` + `lengths` + one `prev` per run, ~13 bytes per run.
+        Wins when the changed set is contiguous in absolute index space with a
+        constant prior value per run, which is exactly the bulk/propagate case
+        (a whole-cloud rewrite is a handful of ranges). Without this encoding the
+        propagate loop is what blows the memory budget.
+
+    `prev` is uint8 because class values are a single byte (MANUAL_CLASS_MIN..MAX)
+    — a 4x saving over float32, lossless GIVEN that invariant. `prev_float` is
+    the escape hatch for a column that holds non-integral or out-of-range values
+    (e.g. a palette bound to an imported float column), where the uint8
+    assumption would silently corrupt the rollback.
+    """
+    stroke_id: str
+    encoding: str                                  # 'sparse' | 'runs'
+    idx: Optional[np.ndarray] = None               # sparse: (k,) int64 absolute
+    prev: Optional[np.ndarray] = None              # (k,) or (runs,) uint8
+    starts: Optional[np.ndarray] = None            # runs: (r,) int64 absolute
+    lengths: Optional[np.ndarray] = None           # runs: (r,) int64
+    prev_float: Optional[np.ndarray] = None        # non-integral fallback
+    changed_count: int = 0
+
+    def nbytes(self) -> int:
+        """Approximate resident size, for the history byte budget."""
+        total = 0
+        for arr in (self.idx, self.prev, self.starts, self.lengths, self.prev_float):
+            if arr is not None:
+                total += int(arr.nbytes)
+        return total
+
+
+def _encode_label_delta(
+    stroke_id: str, changed_idx: np.ndarray, prev_vals: np.ndarray,
+) -> _LabelDelta:
+    """Build the smaller of the two encodings for one edit's prior values.
+
+    `changed_idx` is ASCENDING absolute indices (np.flatnonzero output already
+    is) and `prev_vals` are the matching pre-edit column values."""
+    k = int(changed_idx.shape[0])
+    # Values outside the single-byte class range (or non-integral) can't ride the
+    # uint8 encoding without corruption — fall back to float32 and keep it sparse.
+    integral = k == 0 or (
+        np.all(np.isfinite(prev_vals))
+        and np.all(prev_vals == np.rint(prev_vals))
+        and float(prev_vals.min(initial=0)) >= MANUAL_CLASS_MIN
+        and float(prev_vals.max(initial=0)) <= MANUAL_CLASS_MAX
+    )
+    if not integral:
+        return _LabelDelta(
+            stroke_id=stroke_id, encoding="sparse",
+            idx=changed_idx.astype(np.int64, copy=False),
+            prev_float=prev_vals.astype(np.float32, copy=False),
+            changed_count=k,
+        )
+    prev_u8 = np.rint(prev_vals).astype(np.uint8, copy=False)
+    sparse_bytes = k * (8 + 1)
+    # Run boundaries: a new run starts where the index is not contiguous with the
+    # previous one, or the prior value changes.
+    if k == 0:
+        run_starts = np.zeros(0, dtype=np.int64)
+    else:
+        brk = np.ones(k, dtype=bool)
+        brk[1:] = (changed_idx[1:] != changed_idx[:-1] + 1) | (prev_u8[1:] != prev_u8[:-1])
+        run_starts = np.flatnonzero(brk)
+    runs = int(run_starts.shape[0])
+    runs_bytes = runs * (8 + 8 + 1)
+    if runs_bytes < sparse_bytes:
+        starts = changed_idx[run_starts].astype(np.int64, copy=False)
+        ends = np.append(run_starts[1:], k)
+        lengths = (ends - run_starts).astype(np.int64, copy=False)
+        return _LabelDelta(
+            stroke_id=stroke_id, encoding="runs", starts=starts, lengths=lengths,
+            prev=prev_u8[run_starts], changed_count=k,
+        )
+    return _LabelDelta(
+        stroke_id=stroke_id, encoding="sparse",
+        idx=changed_idx.astype(np.int64, copy=False), prev=prev_u8, changed_count=k,
+    )
+
+
+def _apply_label_delta_reverse(col: np.ndarray, delta: _LabelDelta) -> None:
+    """Restore the prior values this delta recorded, in place on `col`."""
+    if delta.encoding == "runs":
+        for start, length, value in zip(delta.starts, delta.lengths, delta.prev):
+            col[start:start + length] = float(value)
+        return
+    if delta.prev_float is not None:
+        col[delta.idx] = delta.prev_float
+    else:
+        col[delta.idx] = delta.prev.astype(np.float32, copy=False)
+
+
+def _trim_label_history_locked(sess: "CloudSession", slug: str) -> int:
+    """Evict OLDEST-first until the slug's history fits the byte and count caps.
+    Returns the surviving entry count so the caller can report it — the renderer
+    holds a parallel stroke list and must trim to match, and this is the one
+    place the two can silently drift. Caller holds the lock."""
+    hist = sess.label_history.get(slug)
+    if not hist:
+        return 0
+    total = sum(d.nbytes() for d in hist)
+    while hist and (total > _MAX_LABEL_HISTORY_BYTES or len(hist) > _MAX_LABEL_HISTORY):
+        total -= hist[0].nbytes()
+        hist.pop(0)
+    return len(hist)
+
+
 @dataclass
 class CloudSession:
     """An imported point cloud held in RAM as the COMPLETE source of truth.
@@ -19641,6 +25189,31 @@ class CloudSession:
     # to georeference DEM raster exports (GeoTIFF). Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     crs_epsg: Optional[int] = None
+    # Manual-labelling undo stack, keyed by label-column slug. Each entry records
+    # the PRIOR values of the points one edit changed (see `_LabelDelta`), so a
+    # rollback is a reverse-apply rather than a snapshot restore.
+    #
+    # Deliberately NOT shaped like `deleted_history`: that stores a full (N,) bool
+    # mask per edit, which is ~1 bit/point and capped at 50 entries. A label
+    # snapshot would be an (N,) float32 column — 200 MB per stroke on a 50 M-point
+    # cloud — and labelling produces hundreds of strokes, so snapshots are wrong by
+    # two orders of magnitude in both directions. Deltas are ~5 bytes per CHANGED
+    # point instead, and the stack is bounded by BYTES (see
+    # `_trim_label_history_locked`) because entry sizes span four orders of
+    # magnitude between a brush stamp and a whole-cloud bulk apply.
+    #
+    # Cleared by `bake`, which compacts the arrays and so invalidates every
+    # absolute index these deltas hold. Defaulted so existing direct
+    # CloudSession(...) constructions need no change.
+    label_history: Dict[str, List["_LabelDelta"]] = field(default_factory=dict)
+    # Per-slug flag: the in-RAM label column has edits the DERIVED OCTREE does not
+    # carry yet, so the renderer must overlay them client-side until an explicit
+    # `commit_labels` rebuild. Distinct from `octree_cache_id = None` ("the octree
+    # is stale"), which label edits deliberately do NOT set — see
+    # `label_cloud_region`'s docstring. Purely a DISPLAY concern: every backend op
+    # reads the in-RAM arrays, so split/filter/extract/export already see fresh
+    # labels with no commit.
+    label_dirty: Dict[str, bool] = field(default_factory=dict)
 
 
 def _epsg_from_wkt_vlr(header) -> Optional[int]:
@@ -19794,8 +25367,30 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
         name = d.name
         if name in _origin_skip:
             continue  # carried as float64 beam_origins, not a float32 scalar
-        extras[name] = np.asarray(las[name], dtype=np.float32)
-        extra_dims_meta.append({"slug": name, "label": name})
+        # An ExtraBytes name is an arbitrary vendor string — RIEGL writes
+        # `Reflectance`, another exporter `refl`. Downstream tools key off the
+        # CANONICAL slug, so carrying the raw name verbatim meant a perfectly
+        # ordinary reflectance column was invisible to the reflectance colour
+        # mode purely because of its capital R. Resolve it; keep the file's own
+        # spelling as the LABEL so the UI still shows the user what their file
+        # called it.
+        #
+        # Only when the canonical slug isn't already taken: a file carrying both
+        # `Reflectance` and `reflectance` would otherwise have the second clobber
+        # the first. First writer wins, matching `_dims_for_slug`'s ordering.
+        slug = _canonical_slug_for_name(name) or name
+        # The beam-origin slugs are only meaningful as a COMPLETE triple: the
+        # reader consumes ox/oy/oz together into float64 `beam_origins` and
+        # `_origin_skip` holds them when all three are present. Reaching here
+        # means the triple was INCOMPLETE (a lone `ox`, say), which is
+        # deliberately an ordinary scalar — renaming it to `origin_x` would
+        # advertise a triple that does not exist and could not be consumed.
+        if slug in _ORIGIN_SLUGS:
+            slug = name
+        if slug != name and slug in extras:
+            slug = name
+        extras[slug] = np.asarray(las[name], dtype=np.float32)
+        extra_dims_meta.append({"slug": slug, "label": name})
 
     # Auto-map LAS native per-pulse multi-return dimensions to the canonical
     # slugs Helios's LAD path reads (see `_MULTI_RETURN_SLUGS`). return_number
@@ -19854,6 +25449,38 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
                     else 'gps_week'
                 )
 
+    # Fall back to a `timestamp` EXTRA dimension when the standard field carried
+    # nothing usable.
+    #
+    # Phytograph's own LAZ export writes exactly that shape — real times in a
+    # float32 extra dim, the standard gps_time field left at zero — so a scan
+    # exported and re-imported came back with its timestamps stranded in
+    # `extras` while the dedicated float64 field stayed None. The result was TWO
+    # visible columns: a lower-case `timestamp` holding the data, and an
+    # upper-case `Timestamp` (the canonical channel) reading all zeros.
+    #
+    # Resolved through the canonical table so any recognised spelling works, and
+    # the column is MOVED (not copied) so it cannot show up twice.
+    if timestamps is None:
+        _ts_key = next(
+            (k for k in extras if _canonical_slug_for_name(k) == 'timestamp'), None)
+        if _ts_key is not None:
+            _cand = np.asarray(extras[_ts_key], dtype=np.float64)
+            if _cand.size and np.any(_cand != _cand.flat[0]):
+                # COPY, don't move. The float64 field is what the LAD join and
+                # Backfill Misses read, but the extras entry is what reaches the
+                # OCTREE — `extra_dims_meta` is handed to PotreeConverter, so
+                # deleting it here strips the column from the Color-by picker,
+                # the scalar filter, the point inspector and every export.
+                # (`_read_points_and_extras` re-derives the export column from
+                # the float64 field, but only for clouds that never had the
+                # extra dim in the first place.)
+                #
+                # The duplicate is not a problem: an ASCII import's `timestamp`
+                # extra dim and this field hold the same values, and every
+                # consumer prefers the float64 one when both are present.
+                timestamps = _cand
+
     # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
     # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
     # fields. Without this they'd be dropped here — the octree is rebuilt from
@@ -19879,7 +25506,12 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
         vals = np.asarray(las[name])
         if vals.size and np.any(vals != vals.flat[0]):  # not constant
             extras[slug] = vals.astype(np.float32)
-            extra_dims_meta.append({"slug": slug, "label": name})
+            # Label it "LAS <name>", not the bare name. PotreeConverter always
+            # emits its OWN built-in `classification` attribute (all zeros here,
+            # since it does not read our extra dims), so a bare label put two
+            # entries called "classification" in the colour-by list — one real,
+            # one empty, with nothing to tell them apart.
+            extra_dims_meta.append({"slug": slug, "label": f"LAS {name}"})
     return LasReadResult(
         positions=positions,
         colors=colors,
@@ -20006,6 +25638,10 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     # transient stacked on top of the session arrays. Chunking caps the record to
     # one block (`_LAS_WRITE_CHUNK` rows) at a time — same bytes on disk, a
     # fraction of the peak RAM. Mirrors `_xyz_to_las_stream`'s chunked writer.
+    # Does the session already carry the time as a named extra dim? If so the
+    # standard gps_time field must stay empty — see the note in the write loop.
+    _ts_is_extra = any(_canonical_slug_for_name(str(ed.get("slug", ""))) == 'timestamp'
+                       for ed in sess.extra_dims_meta)
     idx = np.flatnonzero(keep)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         for start in range(0, n, _LAS_WRITE_CHUNK):
@@ -20021,6 +25657,21 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
                 record.red, record.green, record.blue = c[:, 0], c[:, 1], c[:, 2]
             if sess.intensity is not None:
                 record.intensity = sess.intensity[block]
+            # Point format 3 HAS a gps_time field, but nothing wrote it, so it
+            # stayed identically zero — PotreeConverter then reported an
+            # all-zero range for `gps-time` and the renderer's degenerate-range
+            # filter (correctly) dropped it from the export picker and the
+            # colour-by list. Timestamps live outside `extras` (they are float64,
+            # the extras are float32), so the extra-dims loop above never
+            # covered them; they need their own assignment.
+            # Only when the column is not ALSO an extra dim. An ASCII import
+            # carries its time in a `timestamp` extra dim AND on the float64
+            # field; writing both here makes PotreeConverter emit two real
+            # columns for one quantity, so the Color-by picker offered
+            # `gps-time` and `timestamp` with identical ranges and the same
+            # "Timestamp" label — indistinguishable in the menu.
+            if sess.timestamps is not None and not _ts_is_extra:
+                record.gps_time = sess.timestamps[block]
             for ed in sess.extra_dims_meta:
                 record[ed["slug"]] = sess.extras[ed["slug"]][block]
             writer.write_points(record)
@@ -20131,12 +25782,17 @@ def _miss_positions_to_las(positions: np.ndarray, out_las: _Path) -> int:
 
 
 def _build_miss_octree(sess: "CloudSession",
-                       origin: Optional[List[float]]) -> Optional[str]:
+                       origin: Optional[List[float]],
+                       cancel_event: "Optional[threading.Event]" = None) -> Optional[str]:
     """Build a projected-miss octree for the session and return its cache id, or
     None when the session has no placeable misses. Failures are logged and
     swallowed (return None) — a miss-octree build must never abort the caller
     (session create, bake, or backfill); the hits octree and LAD are the
-    priority. Eager but cheap: when there are no misses, no PotreeConverter runs."""
+    priority. Eager but cheap: when there are no misses, no PotreeConverter runs.
+
+    A user CANCEL is not a failure and must NOT be swallowed: re-raise
+    ScanCancelled so the caller unwinds instead of reporting a successful import
+    with a silently missing miss overlay."""
     import tempfile
     try:
         positions, _radius = _gather_miss_positions(sess, origin)
@@ -20145,18 +25801,44 @@ def _build_miss_octree(sess: "CloudSession",
         with tempfile.TemporaryDirectory() as td:
             miss_las = _Path(td) / "octree_misses.las"
             _miss_positions_to_las(positions, miss_las)
-            cache_key, _cache_dir, _meta = _build_octree_from_las(miss_las, [])
+            cache_key, _cache_dir, _meta = _build_octree_from_las(
+                miss_las, [], cancel_event=cancel_event)
         return cache_key
+    except ScanCancelled:
+        raise
     except Exception:
         logger.exception("Miss octree build failed for session %s", sess.session_id)
         return None
 
 
-def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tuple[str, _Path, dict]:
+def _build_octree_from_las(
+    las_path: _Path,
+    extra_dims_meta: List[dict],
+    progress=None,
+    cancel_event: "Optional[threading.Event]" = None,
+    span: "Tuple[float, float]" = (0.0, 1.0),
+) -> tuple[str, _Path, dict]:
     """Run PotreeConverter on a LAS and atomically install it into the octree
     cache keyed by the LAS bytes' hash. Returns (cache_key, cache_dir, meta).
     Shared by create (initial) and bake (post-edit) — both now feed a LAS that
-    was produced WITHOUT re-reading the source file at edit time."""
+    was produced WITHOUT re-reading the source file at edit time.
+
+    `progress` (a _ProgressReporter) and `cancel_event` are optional so every
+    existing caller keeps working untouched. `span` maps this build's internal
+    0..1 onto the caller's overall bar (e.g. (0.62, 0.90) during an import).
+
+    CANCEL-SAFETY INVARIANT — do not add a checkpoint between the `rename` and
+    `_read_octree_metadata` below. The install is an atomic same-filesystem
+    rename that runs only after the converter returned 0, and the cache-hit gate
+    is `metadata.json` existing, so a cancelled build leaves an entry that is
+    either ABSENT or FULLY BUILT — never half. A checkpoint in that window would
+    break that and let a later import happily reuse a poisoned cache entry."""
+    def _report(frac: float, msg: str) -> None:
+        if progress is not None:
+            lo, hi = span
+            progress(lo + (hi - lo) * frac, msg)
+
+    _report(0.0, "Hashing point data…")
     h = _hashlib.sha1()
     with open(las_path, "rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
@@ -20169,24 +25851,31 @@ def _build_octree_from_las(las_path: _Path, extra_dims_meta: List[dict]) -> tupl
     # re-checked inside the lock so the first builder wins and the rest no-op.
     with _octree_build_lock(cache_key):
         if not (cache_dir / "metadata.json").is_file():
+            if cancel_event is not None and cancel_event.is_set():
+                raise ScanCancelled()
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
             staging_dir = cache_dir.parent / (cache_key + ".staging")
             if staging_dir.exists():
                 _shutil.rmtree(staging_dir)
             staging_dir.mkdir(parents=True)
             try:
-                _run_potree_converter(las_path, staging_dir)
+                _report(0.2, "Building octree…")
+                _run_potree_converter(las_path, staging_dir, cancel_event=cancel_event)
                 _write_octree_labels(staging_dir, extra_dims_meta)
+                _report(0.95, "Installing octree…")
                 if cache_dir.exists():
                     _shutil.rmtree(cache_dir)
                 staging_dir.rename(cache_dir)
             except Exception:
+                # Catches ScanCancelled too (it subclasses Exception), so a
+                # killed converter's partial output is always removed.
                 try:
                     _shutil.rmtree(staging_dir)
                 except (FileNotFoundError, OSError):
                     pass
                 raise
 
+    _report(1.0, "Reading octree metadata…")
     meta = _read_octree_metadata(cache_dir)
     return cache_key, cache_dir, meta
 
@@ -20218,6 +25907,31 @@ class CloudSessionCreateRequest(BaseModel):
     # bare cloud with no scanner geometry. E57 pose (resolved backend-side from the
     # file) takes precedence when both are present.
     origin: Optional[List[float]] = None
+    # Which scan position inside a multi-scan source (E57 with several scans, PTX
+    # with several blocks) this session is for. None = the whole file, merging
+    # every position into one cloud — the pre-multi-scan behaviour, kept for
+    # single-scan sources and for any caller that doesn't fan out.
+    scan_index: Optional[int] = None
+    # Scalar fields to leave out of the import, from the wizard's per-column
+    # Import checkboxes. Names the extra-dim SLUG (case-insensitive), not a
+    # column position — this is the in-file formats' equivalent of the ASCII
+    # path's positional role='skip', which those formats can't express because
+    # their layout is defined by the file rather than by the request.
+    drop_slugs: Optional[List[str]] = None
+    # Per-column role reassignment for IN-FILE formats, `{source_slug: role}`.
+    #
+    # An ExtraBytes / E57 / .riproject column name is an arbitrary vendor string.
+    # Auto-detection (`_canonical_slug_for_name`) covers the spellings we know,
+    # but it cannot know that a column called `t` or `shot_time` is the
+    # timestamp — and until now the user had no way to say so: the wizard's role
+    # dropdown is disabled for these formats, so an unrecognised column could
+    # only ever be an anonymous scalar. Tools that key off a canonical slug
+    # (Backfill Misses, the LAD trajectory join, multi-return grouping) then
+    # refused the scan while naming an internal slug the user never chose.
+    #
+    # This renames the column at READ time; the source file is never modified.
+    # `{}` / None means pure auto-detection, exactly as before.
+    role_overrides: Optional[Dict[str, str]] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -20226,6 +25940,52 @@ class DeleteRegionRequest(BaseModel):
     deletion on the GPU via its clip-volume stack, so the viewport updates
     immediately."""
     region: CropOctreeRegion
+
+
+class LabelStroke(BaseModel):
+    """One replayable label edit: "inside `region`, points whose CURRENT class
+    is in `from_classes` become `to_class`".
+
+    `from_classes` is TerraScan's From-class filter and is what makes fast,
+    sloppy selection safe — "only repaint leaf→wood" turns overspray onto the
+    ground into a no-op. `None` means "any visible", i.e. no class gate at all.
+    That is deliberately NOT the same as listing every palette value: a point
+    holding a class the palette doesn't define (imported data, or a class the
+    user removed) must still be repaintable, so the None sentinel is load-bearing.
+    Visibility composes here explicitly — the renderer sends the currently
+    visible class set, because the backend cannot know what is hidden.
+
+    `stroke_id` is generated by the renderer and is the join key between its
+    stroke list and this session's label history, so undo can truncate both to
+    the same point."""
+    region: CropOctreeRegion
+    to_class: int
+    from_classes: Optional[List[int]] = None
+    stroke_id: str
+    # Optional cross-section slab the stroke was drawn inside. INTERSECTED with
+    # `region` rather than replacing it: the lasso says where on screen, the slab
+    # says how deep, and a stroke drawn in a section must not paint the points
+    # behind it. Carried per-stroke (not per-request) because the slab can be
+    # stepped between strokes in one batch.
+    #
+    # A dedicated field rather than a general and/or region combinator — that
+    # would mean canonicalisation, nesting rules and validation for a composition
+    # this is the only caller of.
+    slab: Optional[CropOctreeRegion] = None
+
+
+class LabelRegionRequest(BaseModel):
+    """Repaint points on a cloud session. Instant: mutates the in-RAM label
+    column and does NOT rebuild the octree.
+
+    `strokes` are applied IN ORDER and atomically (one lock acquisition), so a
+    brush drag flushes its whole batch in a single call rather than one request
+    per stamp. Order matters: labelling is not commutative (paint-everything-leaf
+    then paint-a-subregion-wood is not the reverse), so the list is never sorted
+    or deduped."""
+    strokes: List[LabelStroke]
+    slug: str = MANUAL_CLASS_SLUG
+    label: str = MANUAL_CLASS_LABEL
 
 
 class BackfillMissesRequest(BaseModel):
@@ -20251,21 +26011,28 @@ class BackfillMissesRequest(BaseModel):
     trajectory: Optional[PoseStream] = None
 
 
-@app.post("/api/cloud/session/create")
-async def create_cloud_session(request: CloudSessionCreateRequest):
-    """Load a source cloud FULLY into an in-RAM session (the complete source of
-    truth — positions + colours + intensity + every scalar extra-dim), build its
-    first octree, and return `{session_id, ...octree metadata}`. This is the ONLY
-    point the source FILE is read; every later edit/bake/op works on the arrays.
+def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
+                             progress=None, cancel_event=None,
+                             preloaded: "Optional[LasReadResult]" = None,
+                             preloaded_meta: "Optional[dict]" = None) -> dict:
+    """The heavy worker behind `/api/cloud/session/create`, factored out so it can
+    run OFF the event loop under `_bin_frame_streaming_response` and report
+    per-stage progress via `progress(fraction, message)`.
 
-    The source is normalised to a LAS once via `_source_to_las` (handling
-    XYZ/PLY/PCD/LAS/LAZ + the wizard column_plan uniformly), that LAS is read
-    into the session arrays AND fed to PotreeConverter for the first octree."""
-    source_path = _Path(request.source_path).expanduser()
-    if not source_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+    Before this split the endpoint was an `async def` doing every blocking step
+    inline, which froze the whole backend for the duration of an import — a
+    concurrent `POST /api/cancel/{run_id}` could not even be serviced, so the
+    import was structurally uncancellable.
 
-    import time
+    Cancellation unwinds via `ScanCancelled` from `_cancel_checkpoint`. Cleanup is
+    inherent: the body runs inside a TemporaryDirectory, `_build_octree_from_las`
+    removes its own staging dir on any exception, and the session is registered in
+    `_cloud_sessions` only as the LAST statement — so a cancel leaves nothing
+    behind and nothing registered. Do NOT register the session early."""
+    def _report(fraction, message):
+        if progress is not None:
+            progress(fraction, message)
+
     session_id = uuid.uuid4().hex[:8]
 
     # Normalise to a LAS in a temp dir, read it fully into RAM, then build the
@@ -20273,10 +26040,34 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_dir = _Path(_tmp)
-        las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
-            source_path, request.ascii_format, tmp_dir, request.column_plan,
-        )
-        _las = _read_las_into_arrays(las_path)
+        _report(0.02, "Reading source file…")
+        _cancel_checkpoint(progress)
+        if preloaded is not None:
+            # ALREADY IN RAM — skip the normalise-to-LAS + read-it-back round
+            # trip entirely. The RIEGL importer streams arrays straight out of
+            # the reader container, so writing them to a LAS purely so this
+            # function could read them again cost ~10 s and ~1.6 GB of disk per
+            # scan position for no gain. `source_path` stays as provenance only,
+            # exactly as CloudSession documents.
+            las_path, las_is_temp = source_path, False
+            # Prefer the labels the producer supplied ("Miss", "Row Index", …).
+            # Falling back to slug==label here would relabel every extra dim to
+            # its raw slug in the octree sidecar and the renderer's colour-by menu.
+            source_extra_dims = (
+                [dict(ed) for ed in preloaded.extra_dims_meta]
+                if preloaded.extra_dims_meta
+                else [{"slug": k, "label": k} for k in preloaded.extras.keys()]
+            )
+            full_xyz, source_origins = None, None
+            _las = preloaded
+        else:
+            las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
+                source_path, request.ascii_format, tmp_dir, request.column_plan,
+                scan_index=request.scan_index,
+            )
+            _report(0.25, "Loading points into memory…")
+            _cancel_checkpoint(progress)
+            _las = _read_las_into_arrays(las_path)
         # The session array is the source of truth and must hold FULL precision
         # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
         # synthesised is 1 mm-quantized — coarse enough to shatter precision-
@@ -20350,10 +26141,49 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         _label_by_slug = {ed["slug"]: ed.get("label", ed["slug"]) for ed in (source_extra_dims or [])}
         for ed in extra_dims_meta:
             ed["label"] = _label_by_slug.get(ed["slug"], ed["label"])
+        # Drop the scalars the user unticked in the import wizard. Applied HERE,
+        # after every format's arrays are in RAM and before the session exists,
+        # because this is the one place all in-file formats converge — and the
+        # octree is rebuilt from these arrays rather than the source file, so a
+        # field removed here is gone from the octree, the colour-by menu and
+        # every export. Deliberately BEFORE miss auto-detection: dropping
+        # `is_miss` must let the detector re-derive misses from the remaining
+        # signals, not read the column the user just removed.
+        extras, extra_dims_meta = _apply_drop_slugs(
+            extras, extra_dims_meta, request.drop_slugs)
+        # Rename the columns the user reassigned in the wizard. AFTER the drop
+        # pass so a column the user both dropped and renamed stays dropped, and
+        # BEFORE miss auto-detection so a column promoted to `is_miss` is seen by
+        # the detector — the same ordering rationale as the drop pass itself.
+        extras, extra_dims_meta, _ts_src = _apply_role_overrides(
+            extras, extra_dims_meta, request.role_overrides, timestamps)
+        if _ts_src is not None:
+            # `timestamp` is float64 in its own session field, not a float32
+            # extra — the LAD trajectory join and multi-return pulse grouping
+            # both need sub-microsecond precision that a float32 cast destroys
+            # (62 ms per step at full GPS week-seconds). So promoting a column to
+            # timestamp MOVES it out of extras rather than renaming it in place.
+            _src_key = next((k for k in (extras or {}) if k.lower() == _ts_src), None)
+            if _src_key is not None:
+                timestamps = np.asarray(extras[_src_key], dtype=np.float64)
+                extras = {k: v for k, v in extras.items() if k != _src_key}
+                if extra_dims_meta is not None:
+                    extra_dims_meta = [ed for ed in extra_dims_meta
+                                       if str(ed.get("slug", "")) != _src_key]
+        # Intensity and colour are first-class session channels rather than
+        # entries in `extras`, so they need dropping explicitly — the wizard
+        # offers them a checkbox like any other column.
+        if _drops_channel(request.drop_slugs, "intensity"):
+            intensity = None
+        if _drops_channel(request.drop_slugs, "colors"):
+            colors = None
         # E57 stashes the scanner origin + miss summary keyed by the temp LAS
         # path; pop it so we can surface them in the response (renderer uses the
         # origin for the scan params and miss-point display relocation).
-        scan_meta = _e57_scan_meta.pop(str(las_path.resolve()), None)
+        # `_import_scan_meta` is keyed by the temp LAS path, so a `preloaded`
+        # import — which writes no LAS — hands its pose/params in directly.
+        scan_meta = (preloaded_meta if preloaded_meta is not None
+                     else _import_scan_meta.pop(str(las_path.resolve()), None))
         if las_is_temp:
             try:
                 las_path.unlink()
@@ -20378,6 +26208,8 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             _miss_origin = list(request.origin)
         if _miss_origin is not None and world_shift_arr is not None:
             _miss_origin = (np.asarray(_miss_origin, dtype=np.float64) - world_shift_arr).tolist()
+        _report(0.45, "Detecting sky/miss points…")
+        _cancel_checkpoint(progress)
         autodetected_misses = _autodetect_misses(
             positions, extras, extra_dims_meta,
             origin=_miss_origin,
@@ -20391,11 +26223,17 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         # the file). Sky/miss points are excluded: they are projected ~1 km out
         # along the beam and would drag the percentile with them. Reported in the
         # same (post-world-shift) frame as `positions`, matching `tight_bounds`.
+        _report(0.52, "Computing bounds…")
+        _cancel_checkpoint(progress)
         _gz_mask = None
         if extras is not None and "is_miss" in extras:
             _gz_mask = np.asarray(extras["is_miss"]) == 0
         _gz_src = positions[_gz_mask] if _gz_mask is not None else positions
         ground_z = _robust_ground_z(_gz_src)
+        # Same hits-only source: misses sit ~1 km out along the beam and would
+        # dominate a percentile span exactly as they do the raw bounding box.
+        robust_extent = _robust_extent(_gz_src)
+        robust_bounds = _robust_aabb(_gz_src)
 
         sess = CloudSession(
             session_id=session_id,
@@ -20421,9 +26259,14 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         # Build the octree from a HITS-ONLY LAS so far-field misses (~20 km) don't
         # poison its bounding box / camera framing. Misses stay in the session
         # (is_miss + true coords) for LAD and the on-demand miss overlay.
+        _report(0.58, "Writing octree source…")
+        _cancel_checkpoint(progress)
         hits_las = tmp_dir / "octree_hits.las"
         _session_to_las(sess, hits_las, exclude_misses=True)
-        cache_key, cache_dir, meta = _build_octree_from_las(hits_las, extra_dims_meta)
+        cache_key, cache_dir, meta = _build_octree_from_las(
+            hits_las, extra_dims_meta, progress=progress,
+            cancel_event=cancel_event, span=(0.62, 0.90),
+        )
         sess.octree_cache_id = cache_key
         # Build a SECOND octree from the projected (or true-coord, when no origin)
         # misses, so the renderer streams them with LOD just like the hits —
@@ -20431,9 +26274,13 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
         # `_miss_origin` is already in the session's frame (world_shift subtracted).
         # The projection radius is baked in here; bake reprojects from the stored
         # origin. None when the scan has no placeable misses.
+        _report(0.92, "Building miss overlay…")
+        _cancel_checkpoint(progress)
         sess.miss_octree_origin = _miss_origin
-        sess.miss_octree_cache_id = _build_miss_octree(sess, _miss_origin)
+        sess.miss_octree_cache_id = _build_miss_octree(
+            sess, _miss_origin, cancel_event=cancel_event)
 
+    _report(1.0, "Finalising…")
     _sweep_cloud_sessions()
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
@@ -20514,6 +26361,14 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             "directions are recovered from the scan grid during LAD."
         )
 
+    # Converter-level notes (PTX reports a swapped header, a degenerate or
+    # disagreeing pose, an untrusted angular fit, or a truncated final block this
+    # way). Spliced in beside the miss warnings so the user sees them on the same
+    # import toast rather than only in the backend log.
+    if scan_meta and scan_meta.get("warnings"):
+        miss_info.setdefault("warnings", []).extend(
+            str(w) for w in scan_meta["warnings"])
+
     # Surface the LAS GPS-time encoding so the renderer can record it on the cloud
     # and the user knows which clock the per-point time uses. A GPS Week Time clock
     # carries no absolute epoch, so a moving-platform trajectory join (attached
@@ -20537,8 +26392,182 @@ async def create_cloud_session(request: CloudSessionCreateRequest):
             # it for the default scene origin's height and the ground grid instead
             # of tight_bounds.min.z, which a single stray low point can sink.
             "ground_z": ground_z,
+            # Outlier-resistant per-axis extent (see `_robust_extent`). The
+            # renderer scales the camera's zoom limits from it, so a few stray
+            # returns hundreds of metres out can't make the scene un-navigable.
+            # Cannot be derived renderer-side: rejecting the tail needs the points.
+            "robust_extent": robust_extent,
+            # The percentile box those spans were measured across. The renderer
+            # needs its CENTRE: with far outliers the raw box centre sits out in
+            # empty space, so a camera converging on it stalls short of the data.
+            "robust_bounds": robust_bounds,
             **miss_info, **meta}
 
+
+@app.post("/api/cloud/session/create")
+def create_cloud_session(request: CloudSessionCreateRequest, http_request: Request):
+    """Load a source cloud FULLY into an in-RAM session (the complete source of
+    truth — positions + colours + intensity + every scalar extra-dim), build its
+    first octree, and return `{session_id, ...octree metadata}`. This is the ONLY
+    point the source FILE is read; every later edit/bake/op works on the arrays.
+
+    The source is normalised to a LAS once via `_source_to_las` (handling
+    XYZ/PLY/PCD/LAS/LAZ + the wizard column_plan uniformly), that LAS is read
+    into the session arrays AND fed to PotreeConverter for the first octree.
+
+    Streams PHP1 progress markers ahead of the JSON result and is CANCELLABLE via
+    `/api/cancel/{run_id}` — importing a multi-GB scan is a minute-scale operation
+    that can wedge on a bad file, and the user needs a way out that actually stops
+    the work (the PotreeConverter child is killed, not just detached)."""
+    # Validate before the stream opens: once the 200 + first chunk is out, an
+    # HTTPException can only reach the client as a truncated body.
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    run_id, cancel_event = _new_cancel_token()
+
+    def _build(progress):
+        try:
+            return json.dumps(_do_create_cloud_session(
+                request, source_path, progress=progress, cancel_event=cancel_event,
+            )).encode("utf-8")
+        except ScanCancelled:
+            raise
+        except BaseException as exc:
+            # The response stream is already open, so an exception here could only
+            # reach the client as a truncated body ("Unexpected end of JSON input").
+            # Report the failure IN the JSON tail instead, where the renderer can
+            # surface the real reason (an unsupported extension, a malformed column
+            # plan, a PotreeConverter crash).
+            logger.exception("create_cloud_session failed for %s", request.source_path)
+            detail = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
+            return json.dumps({"error": str(detail)}).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        _build, request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
+                                   progress=None, cancel_event=None) -> dict:
+    """Build ONE SESSION PER SCAN POSITION for a multi-scan source.
+
+    A scan is defined by its pose. A multi-scan E57 or multi-block PTX holds
+    several genuinely separate acquisitions, and merging them leaves one origin
+    standing in for all of them — which silently breaks the LAD inversion (it
+    takes a single scanner origin), puts the sky/miss display shell around the
+    wrong centre, and makes the per-scan `row_index`/`column_index` rasters
+    collide. So each position gets its own session, its own octree, and its own
+    `ScanParameters`.
+
+    Returns `{"scans": [ ... ], "scan_count": N}` where each entry is a
+    `_do_create_cloud_session` result plus a `scan_index` and a display `name`.
+    A single-scan source returns a one-element list, so the caller has one shape
+    to handle.
+
+    Per-position failures are isolated: the entry carries `error` instead of a
+    session and the remaining positions still import. Progress markers carry the
+    `[i/N]` prefix the renderer's counter parses.
+    """
+    n = _source_scan_count(source_path)
+    # A single-position file keeps the FULL basename it always had — that string
+    # becomes the scan's label, and shortening it to the stem would silently
+    # rename every existing import.
+    stem = source_path.stem
+    out: List[dict] = []
+    for i in range(n):
+        _cancel_checkpoint(progress)
+        # Each position gets its own request so `scan_index` selects it; every
+        # other field (world_shift above all) is shared, or the siblings would
+        # not be co-located.
+        sub = request.model_copy(update={"scan_index": i if n > 1 else None})
+        entry: dict = {"scan_index": i,
+                       "name": source_path.name if n == 1 else f"{stem} — scan {i + 1}"}
+
+        # Window each sub-import's own 0..1 sweep into ITS SLICE of the overall
+        # bar. Suppressing the inner progress entirely (the obvious way to stop N
+        # sub-imports rewinding the bar N times) would leave a single-scan import
+        # — the common case — with no per-stage fraction at all, which is exactly
+        # the 0%-for-the-whole-import bar the streaming progress exists to fix.
+        # The [i/N] prefix stays on the message so the renderer's counter parses.
+        lo, hi = i / n, (i + 1) / n
+        prefix = "" if n == 1 else f"[{i + 1}/{n}] "
+        is_ptx = source_path.suffix.lower() == ".ptx"
+        # PTX decodes to arrays BEFORE the session is built, and that decode is a
+        # real share of the position's work. Give it the front of the slice and
+        # map the session's own 0..1 into the remainder — otherwise the decode's
+        # marker sits ahead of the session's opening 0.02 and the bar visibly
+        # jumps forward then back.
+        sess_lo = lo + (hi - lo) * (0.35 if is_ptx else 0.0)
+
+        def _sub_progress(fraction, message="", _lo=sess_lo, _hi=hi, _p=prefix):
+            if progress is None:
+                return
+            f = None if fraction is None else _lo + (_hi - _lo) * max(0.0, min(1.0, fraction))
+            progress(f, f"{_p}{message}" if message else _p.strip())
+
+        if progress is not None:
+            progress(lo, f"{prefix}Importing scan position {i + 1} of {n}…" if n > 1
+                     else f"{prefix}Reading source file…")
+        try:
+            # PTX decodes straight to the arrays a session holds, skipping the
+            # write-a-LAS-then-read-it-back round trip. Measured on the reference
+            # file that saved a 0.91 GB temp LAS and a 0.87 GB re-allocation per
+            # block. Other formats keep the LAS route, which is also how their
+            # column plans and precision overrides are applied.
+            pre, pre_meta = None, None
+            if is_ptx:
+                pre, pre_meta = _ptx_to_arrays(
+                    source_path, block_index=(i if n > 1 else None))
+            entry["session"] = _do_create_cloud_session(
+                sub, source_path, progress=_sub_progress, cancel_event=cancel_event,
+                preloaded=pre, preloaded_meta=pre_meta)
+            # Drop this position's arrays before decoding the next one: the
+            # session owns them now, and holding a second reference would keep a
+            # whole block resident across the loop.
+            del pre, pre_meta
+        except ScanCancelled:
+            raise
+        except BaseException as exc:
+            logger.exception("multi-scan import failed for %s scan %d",
+                             source_path, i)
+            entry["error"] = str(getattr(exc, "detail", None) or exc
+                                 or exc.__class__.__name__)
+        out.append(entry)
+    if progress is not None:
+        progress(1.0, "Import complete.")
+    return {"scans": out, "scan_count": n}
+
+
+@app.post("/api/cloud/session/create-multi")
+def create_multi_cloud_session(request: CloudSessionCreateRequest, http_request: Request):
+    """Import a source as one session PER SCAN POSITION.
+
+    The plural sibling of `/api/cloud/session/create`. Multi-scan formats (E57
+    with several scans, PTX with several blocks) fan out here; every other format
+    returns a single-element list, so the renderer has one code path.
+
+    Same streaming + cancellation contract as the singular endpoint."""
+    source_path = _Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Source file not found: {request.source_path}")
+
+    run_id, cancel_event = _new_cancel_token()
+
+    def _build(progress):
+        try:
+            return json.dumps(_do_create_multi_cloud_session(
+                request, source_path, progress=progress, cancel_event=cancel_event,
+            )).encode("utf-8")
+        except ScanCancelled:
+            raise
+        except BaseException as exc:
+            logger.exception("create_multi_cloud_session failed for %s", request.source_path)
+            detail = getattr(exc, "detail", None) or str(exc) or exc.__class__.__name__
+            return json.dumps({"error": str(detail)}).encode("utf-8")
+
+    return _bin_frame_streaming_response(
+        _build, request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None) -> dict:
@@ -20714,7 +26743,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
 
 
 @app.post("/api/cloud/session/{session_id}/backfill-misses")
-async def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest):
+def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest):
     """Explicitly recover sky/miss points for a session and persist them.
 
     LAD needs miss points (beams that returned nothing) for the Beer's-law
@@ -20774,7 +26803,7 @@ async def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest)
 
 
 @app.post("/api/cloud/session/{session_id}/delete_region")
-async def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
+def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
     """Set the per-point deleted mask for points inside `region`. No rebuild."""
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump()
@@ -20830,6 +26859,148 @@ async def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
     }
 
 
+def _label_class_summary_locked(
+    sess: "CloudSession", slug: str, editable: np.ndarray,
+) -> tuple[dict, list]:
+    """(class_counts, value_range) over the EDITABLE points only.
+
+    Restricting to editable is not cosmetic: computing over the whole column
+    would count deleted rows and sky/miss points (which are always 0), so a scan
+    that is 40% misses would report a huge phantom "Unclassified" tally and the
+    user's "how much have I labelled?" readout would be meaningless. Caller
+    holds the lock."""
+    col = sess.extras.get(slug)
+    if col is None or not editable.any():
+        return {}, [0.0, 0.0]
+    vals = np.rint(col[editable]).astype(np.int64)
+    uniq, counts = np.unique(vals, return_counts=True)
+    return (
+        {int(v): int(c) for v, c in zip(uniq, counts)},
+        [float(uniq.min()), float(uniq.max())],
+    )
+
+
+@app.post("/api/cloud/session/{session_id}/label_region")
+def label_cloud_region(session_id: str, request: LabelRegionRequest):
+    """Repaint points inside each stroke's region. No octree rebuild.
+
+    Deliberately does NOT null `octree_cache_id`, which is where this diverges
+    from `delete_region` — and the divergence is load-bearing, so do not
+    "fix" the inconsistency:
+
+      A deletion is expressible on the GPU (the renderer hides the points with a
+      clip volume), so a stale octree still renders correctly. A LABEL change is
+      not: the octree bakes attribute values into octree.bin at PotreeConverter
+      time. Nulling the cache id per stroke would either remount the cloud (a
+      full re-stream per brush stamp) or leave the renderer pointing at a cache
+      the backend considers stale. The octree is not WRONG after a stroke, it is
+      BEHIND, and the renderer's client-side label overlay closes the gap until
+      an explicit `commit_labels` rebuild.
+
+    Strokes are applied IN ORDER under one lock acquisition, so a brush drag is
+    one request and one critical section rather than one per stamp."""
+    sess = _get_cloud_session(session_id)
+    slug = _validate_label_slug(request.slug)
+    if not request.strokes:
+        raise HTTPException(status_code=400, detail="strokes must not be empty.")
+
+    # Validate every region and class BEFORE taking the lock — these raise 400
+    # and must not leave a half-applied batch behind.
+    region_dicts = []
+    for stroke in request.strokes:
+        rd = stroke.region.model_dump()
+        _canonical_region(rd)
+        if stroke.slab is not None:
+            _canonical_region(stroke.slab.model_dump())   # validate (raises 400)
+        if not (MANUAL_CLASS_MIN <= stroke.to_class <= MANUAL_CLASS_MAX):
+            raise HTTPException(
+                status_code=400,
+                detail=(f"to_class must be in [{MANUAL_CLASS_MIN}, {MANUAL_CLASS_MAX}]; "
+                        f"got {stroke.to_class}"),
+            )
+        for fc in (stroke.from_classes or []):
+            if not (MANUAL_CLASS_MIN <= fc <= MANUAL_CLASS_MAX):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"from_classes entries must be in [{MANUAL_CLASS_MIN}, "
+                            f"{MANUAL_CLASS_MAX}]; got {fc}"),
+                )
+        region_dicts.append(rd)
+
+    with _cloud_session_lock:
+        created = _ensure_label_column_locked(sess, slug, request.label)
+        col = sess.extras[slug]
+        # Loop-invariant: alive AND not a sky/miss point. Hoisted so a 12-stamp
+        # drag computes it once.
+        editable = _session_editable_mask_locked(sess)
+        history = sess.label_history.setdefault(slug, [])
+
+        # Project ONCE per distinct frozen camera. Every stamp of one drag shares
+        # the camera, and the projection is a full O(N) pass over the cloud, so
+        # this turns k passes into one on the dominant path.
+        pixel_cache: dict = {}
+
+        def pixels_for(rd: dict):
+            if rd.get("kind") not in ("polygon", "squares_union"):
+                return None
+            key = (
+                tuple(rd.get("projection") or ()), tuple(rd.get("view") or ()),
+                rd["canvas"]["width"], rd["canvas"]["height"],
+            )
+            cached = pixel_cache.get(key)
+            if cached is None:
+                cached = _region_pixels(sess.positions, rd)
+                pixel_cache[key] = cached
+            return cached
+
+        applied = []
+        for stroke, rd in zip(request.strokes, region_dicts):
+            select = _region_mask(sess.positions, rd, pixels=pixels_for(rd))
+            select &= editable
+            if stroke.slab is not None:
+                # Depth bound from the cross-section. Closed-form and
+                # camera-free, so this matches the renderer's preview exactly.
+                select &= _region_mask(sess.positions, stroke.slab.model_dump())
+            if stroke.from_classes is not None:
+                # np.rint before comparing: the column is float32 on disk and a
+                # LAS round-trip can leave an integer class as 4.999999. Same
+                # convention as _scalar_filter_mask.
+                current = np.rint(col).astype(np.int64)
+                select &= np.isin(current, list(stroke.from_classes))
+            selected_count = int(select.sum())
+            # Exclude no-ops so `changed_count` means what it says and the delta
+            # carries no dead weight for points already in the target class.
+            changed = select & (np.rint(col).astype(np.int64) != stroke.to_class)
+            changed_idx = np.flatnonzero(changed)
+            if changed_idx.size:
+                history.append(_encode_label_delta(
+                    stroke.stroke_id, changed_idx, col[changed_idx].copy(),
+                ))
+                col[changed_idx] = float(stroke.to_class)
+            applied.append({
+                "stroke_id": stroke.stroke_id,
+                "selected_count": selected_count,
+                "changed_count": int(changed_idx.size),
+            })
+
+        kept = _trim_label_history_locked(sess, slug)
+        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+        sess.last_accessed = time.time()
+        # Mark the derived octree as behind for this column (NOT stale — see the
+        # docstring); the renderer overlays until commit.
+        sess.label_dirty[slug] = True
+
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "created_column": created,
+        "applied": applied,
+        "class_counts": class_counts,
+        "value_range": value_range,
+        "label_edit_count": kept,
+    }
+
+
 class ResetCloudEditsRequest(BaseModel):
     """Undo. `edit_count` = how many committed deletes to KEEP; the mask is
     restored to that snapshot in the history and later ones are discarded.
@@ -20838,7 +27009,7 @@ class ResetCloudEditsRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/reset_edits")
-async def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
+def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
     """Restore the deleted mask to an earlier snapshot (undo)."""
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
@@ -20860,8 +27031,134 @@ async def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
     }
 
 
+class ResetLabelEditsRequest(BaseModel):
+    """Undo. `edit_count` = how many committed label edits to KEEP; the column is
+    rolled back to that point and later entries are discarded. Omit to clear ALL
+    labelling on the slug (edit_count = 0)."""
+    edit_count: Optional[int] = None
+    slug: str = MANUAL_CLASS_SLUG
+
+
+@app.get("/api/cloud/session/{session_id}/label_summary")
+def get_cloud_label_summary(session_id: str, slug: str = MANUAL_CLASS_SLUG):
+    """Current per-class counts for a label column. Read-only.
+
+    Exists so the renderer can populate the class list the moment the tool
+    opens. Without it the panel showed every class as 0 on a fresh cloud — which
+    reads as "nothing here" when in fact every point is Unclassified.
+
+    The renderer cannot compute this itself: the counts are over EDITABLE points
+    (excluding deleted rows and sky/miss points), so a client-side
+    `data.pointCount` would disagree with every subsequent update and the total
+    would visibly jump after the first stroke.
+
+    A session with no label column yet reports every point as unclassified
+    rather than an empty map, which is the true state."""
+    sess = _get_cloud_session(session_id)
+    _validate_label_slug(slug)
+    with _cloud_session_lock:
+        editable = _session_editable_mask_locked(sess)
+        if slug in sess.extras:
+            class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+        else:
+            # No column: every editable point is unclassified by definition.
+            n = int(editable.sum())
+            class_counts = {MANUAL_CLASS_UNLABELED: n} if n else {}
+            value_range = [float(MANUAL_CLASS_UNLABELED), float(MANUAL_CLASS_UNLABELED)]
+        edit_count = len(sess.label_history.get(slug, []))
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "class_counts": class_counts,
+        "value_range": value_range,
+        "label_edit_count": edit_count,
+    }
+
+
+@app.post("/api/cloud/session/{session_id}/reset_label_edits")
+def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
+    """Roll the label column back to an earlier point in its history (undo).
+
+    Same shape as `reset_edits` so the renderer's undo path reads alike, but the
+    mechanism differs: `reset_edits` restores a stored bool-mask SNAPSHOT, which
+    for a label column would be (N,) float32 — 200 MB per stroke on a 50 M-point
+    cloud. Here we REVERSE-APPLY the stored deltas instead, newest first. That is
+    exact even when several strokes repainted the same point, because each delta
+    holds the value as it was when that delta ran.
+
+    Redo needs no endpoint: the renderer holds the stroke list and simply
+    re-issues `label_region` with the truncated tail."""
+    sess = _get_cloud_session(session_id)
+    slug = _validate_label_slug(request.slug)
+    with _cloud_session_lock:
+        hist = sess.label_history.get(slug, [])
+        k = 0 if request.edit_count is None else max(0, int(request.edit_count))
+        k = min(k, len(hist))
+        col = sess.extras.get(slug)
+        if col is not None:
+            for delta in reversed(hist[k:]):
+                _apply_label_delta_reverse(col, delta)
+        sess.label_history[slug] = hist[:k]
+        editable = _session_editable_mask_locked(sess)
+        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+        sess.label_dirty[slug] = True
+        sess.last_accessed = time.time()
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "class_counts": class_counts,
+        "value_range": value_range,
+        "label_edit_count": k,
+    }
+
+
+class CommitLabelsRequest(BaseModel):
+    slug: str = MANUAL_CLASS_SLUG
+
+
+@app.post("/api/cloud/session/{session_id}/commit_labels")
+def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
+    """Rebuild the derived octree so the label column is baked into octree.bin.
+    The slow step (a PotreeConverter run).
+
+    THIS IS PURELY A DISPLAY OPERATION, which is counterintuitive enough to be
+    worth stating plainly: every backend op already reads the in-RAM session
+    arrays, so `split`, `filter`, `extract`, `extract_by_column` and LAS/LAZ
+    export ALL see fresh labels with no commit at all. Do not insert a defensive
+    commit before those paths. The only thing a commit changes is that the
+    renderer no longer needs its client-side overlay to show the labels.
+
+    Unlike `bake` this does NOT compact arrays, clear deletions, or clear the
+    label history — an undo after a commit still works; it just needs another
+    commit to become visible in the baked octree."""
+    sess = _get_cloud_session(session_id)
+    slug = _validate_label_slug(request.slug)
+    with _cloud_session_lock:
+        if slug not in sess.extras:
+            raise HTTPException(
+                status_code=400,
+                detail=f"session has no label column {slug!r} to commit",
+            )
+    # _session_rebuild takes the lock itself (and must not be called holding it —
+    # PotreeConverter is slow).
+    cache_key, cache_dir, meta = _session_rebuild(sess)
+    with _cloud_session_lock:
+        sess.label_dirty[slug] = False
+        editable = _session_editable_mask_locked(sess)
+        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "cache_id": cache_key,
+        "cache_dir": str(cache_dir),
+        "class_counts": class_counts,
+        "value_range": value_range,
+        **meta,
+    }
+
+
 @app.post("/api/cloud/session/{session_id}/bake")
-async def bake_cloud_session(session_id: str):
+def bake_cloud_session(session_id: str):
     """Permanently apply deletions by rebuilding the octree FROM THE IN-RAM
     ARRAYS — the survivors (positions[~deleted] + colours + intensity + every
     scalar extra-dim) are written to a LAS via `_session_to_las` and fed to
@@ -20924,6 +27221,12 @@ async def bake_cloud_session(session_id: str):
             sess.beam_origins = sess.beam_origins[keep]
         sess.deleted = np.zeros(len(sess.positions), dtype=bool)
         sess.deleted_history = []
+        # Bake COMPACTS every point-aligned array, so every absolute index the
+        # label deltas hold is now invalid. Undo across a bake is therefore
+        # impossible, not merely undesirable — clear it. (The label COLUMN
+        # itself rides the extras compaction loop above and survives intact.)
+        sess.label_history = {}
+        sess.label_dirty = {}
         sess.octree_cache_id = cache_key
         remaining = int(len(sess.positions))
 
@@ -20977,11 +27280,75 @@ def _session_survivor_hit_mask(sess: "CloudSession") -> np.ndarray:
     return np.ones(int(surv.sum()), dtype=bool)
 
 
+def _ensure_label_column_locked(
+    sess: "CloudSession",
+    slug: str,
+    label: str,
+    default: int = MANUAL_CLASS_UNLABELED,
+) -> bool:
+    """Create the (N,) float32 manual-label column if absent. Returns True if it
+    was created. Caller holds `_cloud_session_lock`.
+
+    The column is FULL-LENGTH and ABSOLUTE-indexed (one entry per row of
+    `sess.positions`, including deleted rows), because label edits are applied
+    in place by absolute index.
+
+    DELIBERATELY NOT `_session_add_extra_column` — see that function below.
+    It takes SURVIVOR-aligned values and rebuilds the whole column as
+    `np.zeros(N); full[~deleted] = values`, which is wrong here twice over:
+
+      1. It ZEROES every deleted row on each call. Deleted rows come back —
+         `reset_edits` restores them from `deleted_history` — so a user who
+         paints, erases over some painted points, then undoes the erase would
+         get their points back with the labels silently destroyed.
+      2. It is an O(N) allocation + full-column rewrite per call. A brush stroke
+         touches thousands of points; on a 50 M-point cloud that is a ~200 MB
+         allocation per stroke.
+
+    `_session_add_extra_column` remains correct for the BULK path (a whole-cloud
+    classification result), where survivor alignment is the natural contract.
+    """
+    existing = sess.extras.get(slug)
+    if existing is not None:
+        if existing.shape[0] != sess.positions.shape[0]:
+            raise HTTPException(
+                status_code=500,
+                detail=(f"label column {slug!r} has {existing.shape[0]} rows but "
+                        f"the session has {sess.positions.shape[0]} points"),
+            )
+        return False
+    sess.extras[slug] = np.full(len(sess.positions), float(default), dtype=np.float32)
+    if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
+        sess.extra_dims_meta.append({"slug": slug, "label": label})
+    return True
+
+
+def _session_editable_mask_locked(sess: "CloudSession") -> np.ndarray:
+    """Absolute-indexed bool mask of the points a label edit may touch: alive
+    (not deleted) AND a real return (not a sky/miss point). Caller holds the lock.
+
+    Miss exclusion mirrors `delete_region`'s guard. A miss is a ray that hit
+    nothing, projected ~1 km out along the beam, so it lands inside screen-space
+    regions by coordinate accident rather than user intent. Labelling one would
+    poison the class counts, the legend's value range, and any child cloud split
+    out by class — and a "Leaf" cloud carrying sky points at 1 km hangs the next
+    reconstruction tool rather than erroring."""
+    editable = ~sess.deleted
+    miss_arr = sess.extras.get(_MISS_SLUG)
+    if miss_arr is not None:
+        editable = editable & (miss_arr == 0)
+    return editable
+
+
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
     """Append (or replace) a per-point scalar extra-dim column on the session
     array. `values` is aligned to the SURVIVING points (positions[~deleted]);
     it's scattered back to a full-length (N,) column with 0 for deleted rows so
-    every session array stays the same length. Caller holds the lock."""
+    every session array stays the same length. Caller holds the lock.
+
+    NOTE for label edits: use `_ensure_label_column_locked` + an in-place write
+    instead. This function's zero-fill of deleted rows destroys labels on points
+    that `reset_edits` can later restore — see that helper's docstring."""
     full = np.zeros(len(sess.positions), dtype=np.float32)
     full[~sess.deleted] = values.astype(np.float32)
     sess.extras[slug] = full
@@ -21085,7 +27452,7 @@ class SessionSplitRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/split")
-async def session_split(session_id: str, request: SessionSplitRequest):
+def session_split(session_id: str, request: SessionSplitRequest):
     """Keep the filter-passing points on this session; move the excluded points
     to a NEW leftover session. Rebuilds both octrees from arrays. Returns
     {kept: {...octree}, leftover: {session_id, ...octree}} (leftover null if
@@ -21130,6 +27497,7 @@ async def session_split(session_id: str, request: SessionSplitRequest):
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[leftover_mask]] = True
         sess.deleted_history = []
+        sess.label_history = {}   # label undo must not reach across this commit either
         sess.octree_cache_id = None
 
     leftover_meta = None
@@ -21156,7 +27524,7 @@ class SessionExtractRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/extract")
-async def session_extract(session_id: str, request: SessionExtractRequest):
+def session_extract(session_id: str, request: SessionExtractRequest):
     """Create a NEW child session from the filter-selected points (parent
     untouched). Returns {session_id, ...octree} or null if the selection is
     empty. No source file read."""
@@ -21301,7 +27669,7 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
 
 
 @app.post("/api/cloud/session/{session_id}/extract_by_column")
-async def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
+def session_extract_by_column(session_id: str, request: SessionExtractByColumnRequest,
                                     http_request: Request):
     """Fan a categorical column out into one child session per distinct value
     (parent untouched). Returns {session_id, children: [{value, ...octree}]}
@@ -21331,7 +27699,7 @@ async def session_extract_by_column(session_id: str, request: SessionExtractByCo
 
 
 @app.post("/api/cloud/session/{session_id}/duplicate")
-async def session_duplicate(session_id: str):
+def session_duplicate(session_id: str):
     """Copy a session's SURVIVING points into a NEW independent session (parent
     untouched) and build its octree. This is the keep-everything degenerate case
     of `extract`: a pure array copy via `_session_subset` — NO source file read,
@@ -21522,7 +27890,7 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
 
 
 @app.post("/api/cloud/session/merge")
-async def session_merge(request: SessionMergeRequest):
+def session_merge(request: SessionMergeRequest):
     """Concatenate the surviving points of >=2 sessions into one new session and
     build its octree (+ a projected-miss octree when any input carried misses).
     Reconciles differing global shifts and unions scalar extra-dim columns. No
@@ -21624,7 +27992,7 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
-    cache_key, cache_dir, meta = _session_rebuild(sess)
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key,
             "cache_dir": str(cache_dir), **meta,
             "class_threshold_used": gmeta.get("class_threshold"),
@@ -21807,7 +28175,7 @@ def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress
 
 
 @app.post("/api/cloud/session/{session_id}/dem")
-async def session_generate_dem(session_id: str, request: SessionDemRequest, http_request: Request):
+def session_generate_dem(session_id: str, request: SessionDemRequest, http_request: Request):
     """DEM from a session's in-RAM survivors (ground-aware). Returns a PHB1 frame
     (heightmap mesh + grid). When `add_height_column`, also appends a
     `height_above_ground` scalar and rebuilds the octree (cache_id in meta)."""
@@ -21897,7 +28265,7 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
-    cache_key, cache_dir, meta = _session_rebuild(sess)
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "warnings": warns, **meta}
 
 
@@ -21941,11 +28309,6 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # TreeIso sees only non-ground HIT points; ground AND misses stay id 0.
     plant_mask = (~is_ground) & is_hit
     n_plant = int(plant_mask.sum())
-    if n_plant > _TREEISO_MAX_POINTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tree segmentation is capped at {_TREEISO_MAX_POINTS:,} points; this cloud has {n_plant:,} non-ground points. Crop or downsample first.",
-        )
     if n_plant < 10:
         raise HTTPException(
             status_code=400,
@@ -21958,6 +28321,22 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     plant_pts = pts[plant_mask]
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
+    size_error = _treeiso_size_error(plant_pts, ti_param_dict)
+    if size_error:
+        raise HTTPException(status_code=400, detail=size_error)
+    # Advisory cost check on the post-decimation node count, not raw point count
+    # — TreeIso decimates before every expensive stage, so a big cloud that
+    # collapses to ~600 k voxels is unremarkable. This is a CONFIRMATION, not a
+    # cap: 409 + a structured `cost_warning` body tells the panel to prompt, and
+    # the retry carries `acknowledge_cost`. 409 (not 400) so the renderer can
+    # tell "needs confirmation" from a genuine bad request.
+    if not request.acknowledge_cost:
+        warning = _treeiso_cost_warning(plant_pts, ti_param_dict)
+        if warning:
+            raise HTTPException(
+                status_code=409,
+                detail={"cost_warning": warning, "message": warning["message"]},
+            )
     try:
         plant_labels = await _run_killable(
             "trees", plant_pts, ti_param_dict, http_request=http_request, seeds=seeds,
@@ -21971,7 +28350,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     labels[plant_mask] = np.asarray(plant_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
-    cache_key, cache_dir, meta = _session_rebuild(sess)
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
     # Number of distinct trees (max tree id; ground/misses are 0). The renderer
     # uses this to iterate ids 1..num_trees when "split into one cloud per tree"
     # is enabled, extracting each into its own child session.
@@ -21990,7 +28369,7 @@ class SessionTransformRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/transform")
-async def session_transform(session_id: str, request: SessionTransformRequest):
+def session_transform(session_id: str, request: SessionTransformRequest):
     """Bake a rigid 4x4 transform into the session's in-RAM geometry and rebuild
     the octree. The matrix acts in WORLD coordinates; the session stores points
     with `world_shift` subtracted, so we conjugate by the shift:
@@ -22047,6 +28426,7 @@ async def session_transform(session_id: str, request: SessionTransformRequest):
         sess.octree_cache_id = None
         sess.deleted_history = []
         remaining = int((~sess.deleted).sum())
+        sess.label_history = {}   # label undo must not reach across this commit either
         total = int(len(sess.positions))
 
     # Rebuild derived octrees OUTSIDE the lock (PotreeConverter is slow).
@@ -22076,7 +28456,7 @@ class SessionFilterRequest(BaseModel):
 
 
 @app.post("/api/cloud/session/{session_id}/filter")
-async def session_filter(session_id: str, request: SessionFilterRequest):
+def session_filter(session_id: str, request: SessionFilterRequest):
     """Delete the points a spatial+scalar filter excludes, on the in-RAM arrays."""
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump() if request.region else None
@@ -22133,6 +28513,7 @@ async def session_filter(session_id: str, request: SessionFilterRequest):
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[~keep]] = True
         sess.deleted_history = []
+        sess.label_history = {}   # label undo must not reach across this commit either
         sess.octree_cache_id = None
         remaining = int((~sess.deleted).sum())
 
@@ -22143,7 +28524,7 @@ async def session_filter(session_id: str, request: SessionFilterRequest):
 
 
 @app.delete("/api/cloud/session/{session_id}")
-async def delete_cloud_session(session_id: str):
+def delete_cloud_session(session_id: str):
     """Free a cloud session's in-RAM arrays."""
     with _cloud_session_lock:
         existed = _cloud_sessions.pop(session_id, None) is not None
@@ -22411,7 +28792,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2m/distance")
-async def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
+def compute_c2m_distance(request: C2MDistanceRequest, http_request: Request):
     """
     Compute Cloud-to-Mesh (C2M) distance statistics.
 
@@ -22828,7 +29209,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2m/icp-register")
-async def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Request):
+def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Request):
     """
     Perform ICP (Iterative Closest Point) registration to align a mesh to a point cloud.
 
@@ -23019,7 +29400,7 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
 
 
 @app.post("/api/c2c/icp-register")
-async def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: Request):
+def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: Request):
     """
     Perform ICP (Iterative Closest Point) registration to align one point cloud to another.
 
@@ -23947,8 +30328,14 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
 
 
 @app.post("/api/multi/register")
-async def multi_scan_register(request: MultiScanRegisterRequest, http_request: Request):
+def multi_scan_register(request: MultiScanRegisterRequest, http_request: Request):
     """Register several scans together, validated by loop closure.
+
+    Declared `def`, NOT `async def`: the work is blocking CPU (a coarse search
+    plus ICP for every pair, minutes on a real set), so FastAPI must run it in
+    the worker threadpool. An `async def` handler owns the single event loop for
+    its whole duration and starves every other request behind it -- see
+    tests/test_event_loop_not_blocked.py.
 
     Prefer this over repeated /api/c2c/global-register calls whenever three or
     more overlapping scans are available: the extra scans are what make a
@@ -23961,8 +30348,11 @@ async def multi_scan_register(request: MultiScanRegisterRequest, http_request: R
 
 
 @app.post("/api/c2c/global-register")
-async def global_register_cloud_to_cloud(request: GlobalRegisterRequest, http_request: Request):
+def global_register_cloud_to_cloud(request: GlobalRegisterRequest, http_request: Request):
     """Coarse (global) registration of one point cloud onto another.
+
+    Declared `def` rather than `async def` so the blocking coarse search and ICP
+    run in the worker threadpool instead of holding the event loop.
 
     Unlike /api/c2c/icp-register this does NOT need the clouds to start close
     together: it reduces both to sparse per-plant anchors, matches those, and
@@ -24136,7 +30526,7 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
 
 
 @app.post("/api/m2m/icp-register")
-async def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest, http_request: Request):
+def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest, http_request: Request):
     """
     Perform ICP (Iterative Closest Point) registration to align one mesh to another.
 

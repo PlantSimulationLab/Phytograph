@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // Invisible click target that fills the canvas. While active (mounted),
 // every left-click is raycast against a horizontal plane at z=groundZ
@@ -59,7 +60,9 @@ export function BoxDrawRaycaster({
   // +Z (the default), and set side=DoubleSide so picks register from
   // either side of the plane.
   return (
+    // UI overlay, not content — see lib/sceneOverlay.ts.
     <mesh
+      {...SCENE_OVERLAY}
       position={[0, 0, groundZ]}
       onClick={handleClick}
       onPointerMove={handleMove}

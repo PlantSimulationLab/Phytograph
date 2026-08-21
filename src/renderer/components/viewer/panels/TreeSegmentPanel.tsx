@@ -1,4 +1,4 @@
-import { Sprout, Loader2, X } from 'lucide-react';
+import { Sprout, Loader2, X, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 
@@ -16,6 +16,11 @@ interface TreeSegmentPanelProps {
   splitClouds: boolean;
   inProgress: boolean;
   error: string | null;
+  // Set when the backend wants confirmation before an expensive run. Shows the
+  // estimate and turns the run button into "Segment Anyway"; clicking `onSegment`
+  // again re-sends with acknowledge_cost. Not a blocker — the run is always
+  // available, and Cancel still works once it starts.
+  costWarning: string | null;
   // True when the selected cloud already has a tree_instance field — enables the
   // Refine (merge/split) section.
   hasTrees: boolean;
@@ -47,6 +52,7 @@ export function TreeSegmentPanel({
   splitClouds,
   inProgress,
   error,
+  costWarning,
   hasTrees,
   mergeA,
   mergeB,
@@ -67,7 +73,16 @@ export function TreeSegmentPanel({
   onSplit,
 }: TreeSegmentPanelProps) {
   return (
-    <div data-testid="tree-segment-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto">
+    <div
+      data-testid="tree-segment-panel"
+      // z-20 keeps the panel above the trunk-seed overlay (z-10), which fills the
+      // whole viewport while "Seed trunks" is on. Without it the transparent SVG
+      // swallowed this panel's own controls — including the checkbox that turns
+      // seeding off and "Clear seeds", which left the mode with no way out.
+      // (Same reason CropPanel carries z-20.) Being above the overlay also makes
+      // the panel a genuine blocker, so ViewportBlockedZone hatches it.
+      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64 max-h-[80vh] overflow-y-auto z-20"
+    >
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Sprout className="w-3 h-3" />
@@ -165,9 +180,16 @@ export function TreeSegmentPanel({
           />
         </label>
         {seedMode && (
-          <div className="text-[10px] text-neutral-500 mb-1">
-            Click trunks in the view (camera locked); right-click removes the last seed.
-          </div>
+          <>
+            <div className="text-[10px] text-neutral-500 mb-1">
+              Click trunks in the view (camera locked); right-click removes the last seed.
+            </div>
+            <div data-testid="tree-seed-blocked-hint" className="text-[10px] text-amber-400/90 leading-tight mb-1">
+              ⊘ These panels sit over the viewport and take the click
+              themselves — seeds can&apos;t land on them. Orbit or pan (turn
+              seeding off first) to bring those trunks into the open.
+            </div>
+          </>
         )}
         <div className="flex items-center justify-between text-[10px] text-neutral-500">
           <span data-testid="tree-seed-count">{seedCount} seed{seedCount === 1 ? '' : 's'}</span>
@@ -208,6 +230,18 @@ export function TreeSegmentPanel({
         </div>
       )}
 
+      {/* Cost advisory: amber, not red — the run is still available, it just
+          wants a deliberate second click. */}
+      {costWarning && !inProgress && (
+        <div
+          data-testid="tree-segment-cost-warning"
+          className="mb-3 p-2 bg-amber-900/30 border border-amber-600/50 rounded text-[10px] text-amber-200 flex gap-1.5"
+        >
+          <AlertTriangle className="w-3 h-3 shrink-0 mt-px" />
+          <span>{costWarning}</span>
+        </div>
+      )}
+
       {inProgress ? (
         <div className="flex gap-2">
           <button
@@ -231,10 +265,14 @@ export function TreeSegmentPanel({
         <button
           data-testid="tree-segment-run-button"
           onClick={onSegment}
-          className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+          className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 text-white ${
+            costWarning
+              ? 'bg-amber-600 hover:bg-amber-500'
+              : 'bg-green-600 hover:bg-green-500'
+          }`}
         >
-          <Sprout className="w-3 h-3" />
-          Segment Trees
+          {costWarning ? <AlertTriangle className="w-3 h-3" /> : <Sprout className="w-3 h-3" />}
+          {costWarning ? 'Segment Anyway' : 'Segment Trees'}
         </button>
       )}
 

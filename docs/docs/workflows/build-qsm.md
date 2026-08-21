@@ -133,8 +133,9 @@ file** — see [Export](#export) below.
 
 ### Switch the coloring
 
-The **Color by** dropdown at the bottom of the QSM panel offers two
-modes:
+The **Color by** dropdown at the bottom of the QSM panel offers four
+modes. The first two encode *data* as color; the last two are about
+*appearance*.
 
 - **Shoot rank** (default) — colors by branching order: a wood-tan trunk
   (rank 0), red-orange scaffolds (rank 1), then blue, green, violet, pink
@@ -142,8 +143,37 @@ modes:
 - **Shoot id** — gives every shoot its own distinct color, so each
   continuous axis reads as one object regardless of rank. Best for
   *seeing the shoots themselves*.
+- **Color** — one flat color for the whole tree, picked from the swatch
+  or typed as a hex value. Useful for figures where the QSM is context
+  rather than the subject, or to match a house style.
+- **Texture** — wraps a bark image around every branch, for a
+  presentation-ready tree.
 
 ![The same QSM colored by shoot id](../assets/screenshots/qsm-03-shoot.png)
+
+#### Bark textures
+
+In **Texture** mode two extra controls appear:
+
+- **Bark** — the bark image. The dropdown lists the five bark textures
+  that ship with the Helios plant-architecture library (almond, apple,
+  grape, olive, western redbud). **Upload** picks your own JPEG or PNG
+  instead — a photograph of the species you actually scanned, for
+  example. A texture that tiles seamlessly gives the best result.
+- **Tile (m)** — the real-world size of one bark tile, in metres
+  (default `0.25`). *Smaller* values make the bark pattern finer and
+  repeat more often; *larger* values make it coarser. This is a
+  physical size, not a repeat count.
+
+Because the tile is defined in world units, the bark stays at a
+consistent physical scale everywhere on the tree: the pattern on a thick
+trunk looks the same size as the pattern on a thin branch, instead of
+being stretched wider as the branch thickens. Only very thin twigs
+(under a couple of centimetres across) narrow the pattern, where the
+detail is too small to see anyway.
+
+The bark images are read from the backend, so the first switch into
+Texture mode may take a moment while the image loads.
 
 See [Color modes → QSM](../reference/color-modes.md#qsm-color-modes) for
 the full palette.
@@ -168,26 +198,63 @@ registration.
 ## Export
 
 A QSM lives in the current viewer session and is **not** persisted when
-you close the app — but you can **export it to a file** to keep the model
-or take it into other tooling.
+you close the app — so **export it to a file** to keep the model, take it
+into other tooling, or load it again later. Exporting to **CSV** is the way
+to keep a QSM: that file imports straight back into Phytograph (see
+[Re-importing a QSM](#re-importing-a-qsm)).
 
 1. Click the **Export** (download) icon at the top of the **QSM** results
    panel.
 2. In the export dialog, pick a **format**, then tick which QSMs to write
    (all are selected by default — use **Select all / Select none** to
    toggle).
-3. Click **Export** and choose a **folder**. One file is written per
-   selected QSM, named after the source scan.
+3. Click **Export**. For a **single** QSM you get a save dialog with a
+   suggested filename (the source scan's name, with the format's
+   extension) — edit it to whatever you like before saving. When you
+   selected **several** QSMs, you choose a **folder** instead and one file
+   is written per QSM, each named after its source scan.
 
 | Format | What it is | Use it for |
 |---|---|---|
-| **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder, segmentID, parentSegmentID`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Analysis and round-tripping into the standard QSM ecosystem: it follows the SimpleForest schema that [rTwig](https://aidanmorales.github.io/rTwig/) and [aRchi](https://github.com/umr-amap/aRchi) read (the TreeQSM-compatible path). The column set is validated against rTwig's importer. |
-| **OBJ** | Triangulated cylinder mesh. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
-| **PLY** | The same cylinder mesh, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
+| **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder, segmentID, parentSegmentID`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Keeping the model — **this is the only format Phytograph can read back**. Also analysis and round-tripping into the standard QSM ecosystem: it follows the SimpleForest schema that [rTwig](https://aidanmorales.github.io/rTwig/) and [aRchi](https://github.com/umr-amap/aRchi) read (the TreeQSM-compatible path). The column set is validated against rTwig's importer. |
+| **OBJ** | Triangulated tube mesh with smooth vertex normals — the same geometry the viewport draws. Each shoot is one named object (`shoot_<id>_rank_<n>`), so the tree arrives separable. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
+| **PLY** | The same tube mesh plus vertex normals, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
 
 !!! note "Coordinates and units"
     Exports are in the cloud's **world coordinates**, in **metres**. The
     CSV root cylinder has `parentID = -1`.
+
+!!! note "The mesh exports match the viewport"
+    OBJ and PLY are built from the **same geometry the viewer renders**: each
+    shoot is swept as one continuous tube, so the surface is seamless and the
+    radius varies smoothly through each joint rather than stepping. There are no
+    end caps — a shoot simply overlaps its parent at the fork, exactly as in the
+    viewport — which also keeps the exported surface area from being inflated by
+    cap faces buried inside the joints.
+
+    Consequently the mesh formats carry **per-node** radii, not one radius per
+    cylinder. If you need the raw fitted cylinder parameters (each with its own
+    single radius, start, and end), export **CSV** — that's the format that
+    preserves them.
+
+### Re-importing a QSM
+
+An exported **CSV** loads straight back in — drag it onto the window, or use
+**File → Import → QSM CSV…**. You get the same model you exported: the same
+cylinders and shoots, colorable by **Shoot rank** or **Shoot id**, and the same
+trunk diameter, height, woody volume, and max rank in the results panel. (Those
+metrics aren't stored in the file; they're recomputed from the cylinders.) You
+can add leaves to a re-imported QSM just as you would a freshly built one.
+
+CSVs written by other SimpleForest/TreeQSM-family tools import too. See
+[Importing a QSM](import-export.md#importing-a-qsm) for how Phytograph tells a
+QSM CSV apart from a point-cloud CSV, and
+[File formats](../reference/file-formats.md#qsm-cylinder-csv) for the columns.
+
+The **OBJ** and **PLY** exports are visualization outputs and can't be
+re-imported as QSMs — they're triangle meshes, with the cylinder topology
+already baked away. Bringing one back into Phytograph gives you a mesh, not a
+QSM, so keep the CSV if you want the model itself.
 
 ## How it works
 

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import main
+from tests.binframe import decode_streamed_json
 
 # Reuse the stubbed-pyhelios fixture from the static LAD suite so pytest resolves
 # `stub_pyhelios` in this module too.
@@ -171,7 +172,7 @@ def test_bake_compacts_beam_origins_so_lad_still_works(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_build_octree_from_las",
                         lambda *a, **k: ("cache_key", pathlib.Path(cache_dir), {}))
     try:
-        asyncio.run(main.bake_cloud_session(sess.session_id))
+        main.bake_cloud_session(sess.session_id)
 
         assert sess.beam_origins is not None
         assert sess.beam_origins.shape[0] == sess.positions.shape[0] == 4
@@ -369,7 +370,7 @@ def test_create_session_trajectory_is_world_frame_under_shift(client, tmp_path, 
     res = client.post("/api/cloud/session/create",
                       json={"source_path": str(las_path), "world_shift": ws})
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
 
     sp = body.get("scan_params")
     assert sp is not None, "beam-origin LAS must surface scan_params"

@@ -16,6 +16,9 @@ import {
   getBackendUrl,
   getDeviceInfo,
   getPlantSessionStatus,
+  getRieglStatus,
+  formatBackendDetail,
+  extractRieglProject,
   heliosTriangulate,
   icpRegisterCloudToCloud,
   icpRegisterMeshToCloud,
@@ -31,6 +34,10 @@ import {
   triangulatePointCloud,
   decodeBinaryFrame,
   parseProgressMarkers,
+  abortOnTimeout,
+  BackendTimeoutError,
+  describeBackendError,
+  isBackendUnreachable,
 } from './backendApi';
 
 // Silence the production console.* calls — they're informational and just
@@ -428,26 +435,97 @@ describe('generatePlantStreaming', () => {
 });
 
 describe('importTexturedMesh', () => {
-  it('POSTs the disk path to /api/mesh/import', async () => {
-    const expected = {
-      success: true,
-      vertices: [[0, 0, 0]],
-      indices: [[0, 1, 2]],
-      vertex_count: 6,
-      triangle_count: 2,
-      has_textures: true,
-    };
-    const spy = mockFetchOk(expected);
-    const res = await importTexturedMesh('/abs/path/model.obj');
+  it('POSTs the disk path and decodes the binary frame into typed arrays', async () => {
+    // Two triangles sharing an edge, with per-vertex colors — the shape a PLY
+    // mesh import returns. Geometry rides in the frame's buffers, not JSON.
+    const spy = mockFetchBinaryFrame(
+      { success: true, vertex_count: 4, triangle_count: 2, filename: 'model.ply', has_textures: false },
+      [
+        { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0] },
+        { name: 'indices', dtype: 'u32', data: [0, 1, 2, 0, 2, 3] },
+        { name: 'colors', dtype: 'f32', data: [1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0] },
+      ],
+    );
+    const res = await importTexturedMesh('/abs/path/model.ply');
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe('http://127.0.0.1:8008/api/mesh/import');
-    expect(JSON.parse(init?.body as string)).toEqual({ path: '/abs/path/model.obj' });
-    expect(res.has_textures).toBe(true);
+    expect(JSON.parse(init?.body as string)).toEqual({ path: '/abs/path/model.ply' });
+
+    expect(res.success).toBe(true);
+    expect(res.hasTextures).toBe(false);
+    expect(res.data.vertexCount).toBe(4);
+    expect(res.data.triangleCount).toBe(2);
+    // Zero-copy typed arrays, NOT re-flattened number[][].
+    expect(res.data.vertices).toBeInstanceOf(Float32Array);
+    expect(res.data.indices).toBeInstanceOf(Uint32Array);
+    expect(Array.from(res.data.vertices)).toEqual([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]);
+    expect(Array.from(res.data.indices)).toEqual([0, 1, 2, 0, 2, 3]);
+    expect(Array.from(res.data.vertexColors!)).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0]);
+  });
+
+  it('maps materials/textures from meta onto plantMaterials', async () => {
+    mockFetchBinaryFrame(
+      {
+        success: true,
+        vertex_count: 3,
+        triangle_count: 1,
+        has_textures: true,
+        materials: [{ name: 'bark', color: [0.5, 0.25, 0.1], texture_name: 'bark.png', has_alpha: false }],
+        material_groups: [{ material_name: 'bark', triangle_indices: [0] }],
+        textures: { 'bark.png': 'BASE64DATA' },
+      },
+      [
+        { name: 'vertices', dtype: 'f32', data: [0, 0, 0, 1, 0, 0, 0, 1, 0] },
+        { name: 'indices', dtype: 'u32', data: [0, 1, 2] },
+        { name: 'uv_coordinates', dtype: 'f32', data: [0, 0, 1, 0, 0, 1] },
+      ],
+    );
+    const res = await importTexturedMesh('/abs/path/tree.obj');
+    expect(res.hasTextures).toBe(true);
+    expect(res.plantMaterials).toHaveLength(1);
+    expect(res.plantMaterials![0]).toMatchObject({
+      name: 'bark',
+      textureData: 'BASE64DATA',
+      hasAlpha: false,
+      triangleIndices: [0],
+    });
+    expect(Array.from(res.data.uvCoordinates!)).toEqual([0, 0, 1, 0, 0, 1]);
   });
 
   it('surfaces detail on error', async () => {
     mockFetchError(404, { detail: 'Mesh file not found' });
     await expect(importTexturedMesh('/missing.obj')).rejects.toThrow('Mesh file not found');
+  });
+
+  it('throws the backend error carried in a failed frame', async () => {
+    // A frame with success:false carries the reason in meta, with no buffers.
+    mockFetchBinaryFrame(
+      { success: false, error: 'No faces found in PLY mesh (file appears to be a point cloud).' },
+      [],
+    );
+    await expect(importTexturedMesh('/cloud.ply')).rejects.toThrow('No faces found in PLY mesh');
+  });
+});
+
+describe('isBackendUnreachable', () => {
+  it('is true for a connection failure', () => {
+    expect(isBackendUnreachable(new TypeError('Failed to fetch'))).toBe(true);
+    expect(isBackendUnreachable(new Error('NetworkError when attempting to fetch'))).toBe(true);
+  });
+
+  it('is false for an error the backend itself returned', () => {
+    // The regression this guards: a backend that answered with a failure (or a
+    // client-side decode error) must NOT be reported as "backend unavailable",
+    // because that sends users to restart a process that was up the whole time.
+    expect(isBackendUnreachable(new Error('Mesh file not found'))).toBe(false);
+    expect(isBackendUnreachable(new Error('HTTP 500: Internal Server Error'))).toBe(false);
+    expect(
+      isBackendUnreachable(new Error('Cannot create a string longer than 0x1fffffe8 characters')),
+    ).toBe(false);
+  });
+
+  it('is false for a timeout — the backend was reachable, just slow', () => {
+    expect(isBackendUnreachable(new BackendTimeoutError('/api/mesh/import', 600000))).toBe(false);
   });
 });
 
@@ -666,11 +744,63 @@ describe('point cloud LAS/LAZ import/export', () => {
     expect(JSON.parse(init?.body as string)).toEqual(req);
   });
 
+  it('exportPointCloudLasLaz forwards dest_path so the backend writes the file itself', async () => {
+    // Regression: without dest_path the backend returns the file base64-encoded
+    // inside JSON. That body is ~1.8x the file size, so a 25 M-point export
+    // lands near 1 GB and `response.json()` dies on V8's ~512 MB string cap
+    // ("Unexpected end of JSON input"). dest_path must reach the backend, and
+    // the response then carries metadata only — `data` is null.
+    const spy = mockFetchOk({
+      success: true,
+      data: null,
+      filename: 'cloud.xyz',
+      point_count: 25_000_000,
+      has_colors: false,
+      format: 'xyz',
+    });
+    const res = await exportPointCloudLasLaz({
+      source: { source_path: '/abs/in.xyz' },
+      format: 'xyz',
+      dest_path: '/abs/out/cloud.xyz',
+    });
+    const [, init] = spy.mock.calls[0];
+    expect(JSON.parse(init?.body as string).dest_path).toBe('/abs/out/cloud.xyz');
+    expect(res.success).toBe(true);
+    expect(res.data ?? null).toBeNull();
+    expect(res.point_count).toBe(25_000_000);
+  });
+
   it('exportPointCloudLasLaz surfaces error', async () => {
     mockFetchError(500, { detail: 'lazrs missing' });
     await expect(
       exportPointCloudLasLaz({ points: [], format: 'laz' }),
     ).rejects.toThrow('lazrs missing');
+  });
+
+  // Regression: a request that outlived its deadline used to reject with
+  // Chromium's own "signal is aborted without reason", which reached the Export
+  // Failed toast verbatim — no operation, no endpoint, no duration, no next step.
+  it('exportPointCloudLasLaz reports a timeout with the endpoint, budget and a next step', async () => {
+    vi.spyOn(global, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = (init as RequestInit).signal as AbortSignal;
+          signal.addEventListener('abort', () => reject(signal.reason));
+        }),
+    );
+    vi.useFakeTimers();
+    try {
+      const pending = exportPointCloudLasLaz({ points: [], format: 'laz' });
+      // 10 min budget — a 25 M-point export takes ~35 s on a fast disk, and the
+      // failure mode of a too-short deadline is a truncated file.
+      const assertion = expect(pending).rejects.toThrow(
+        /Export timed out\..*within 10 min \(POST \/api\/pointcloud\/export\).*\[slow\].*restart the backend/s,
+      );
+      await vi.advanceTimersByTimeAsync(600000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('exportScanXml POSTs to /api/scan/export-xml with the scan bundle request', async () => {
@@ -709,6 +839,40 @@ describe('point cloud LAS/LAZ import/export', () => {
     const spy = mockFetchOk({ success: true, files: [{ name: 'out_0.e57', data: 'eA==', is_xml: false }] });
     await exportScanXml(req);
     expect(JSON.parse(spy.mock.calls[0][1]?.body as string)).toEqual(req);
+  });
+
+  it('exportScanXml forwards dest_dir so a multi-scan bundle never returns base64', async () => {
+    // The regression: every scan's bytes used to come back base64 in ONE JSON
+    // body, so exporting several scans (LAZ especially) overran V8's ~512 MB
+    // string cap and died in response.json() with "Unexpected end of JSON input".
+    // dest_dir must reach the backend, and the response carries metadata only.
+    const req = {
+      scans: [
+        { origin: [0, 0, 3] as [number, number, number], session_id: 's1' },
+        { origin: [1, 0, 3] as [number, number, number], session_id: 's2' },
+      ],
+      base_name: 'scans',
+      include_misses: true,
+      write_xml: false,
+      data_format: 'laz',
+      dest_dir: '/tmp/exports',
+    };
+    const spy = mockFetchOk({
+      success: true,
+      files: [
+        { name: 'scans_ScanPos002.laz', data: null, is_xml: false, bytes: 1024, written: true },
+        { name: 'scans_ScanPos001.laz', data: null, is_xml: false, bytes: 2048, written: true },
+      ],
+      point_count: 200,
+      scan_count: 2,
+    });
+    const resp = await exportScanXml(req);
+    const body = JSON.parse(spy.mock.calls[0][1]?.body as string);
+    expect(body.dest_dir).toBe('/tmp/exports');
+    expect(body).toEqual(req);
+    // Nothing for the renderer to decode or write.
+    expect(resp.files?.every(f => f.written && f.data === null)).toBe(true);
+    expect(resp.files?.map(f => f.bytes)).toEqual([1024, 2048]);
   });
 
   it('exportScanXml surfaces error', async () => {
@@ -853,6 +1017,9 @@ describe('importPointCloudByPath (renamed from importXyzByPath; now also serves 
       ascii_format: null,
       column_plan: null,
       world_shift: null,
+      // No column was unticked in the wizard, so nothing is dropped. Sent as
+      // null rather than [] — the backend reads null as "keep everything".
+      drop_slugs: null,
     });
   });
 
@@ -1245,6 +1412,42 @@ describe('parseProgressMarkers', () => {
     expect(markers[0].cancelled).toBe(true);
     expect(markers[0].message).toBe('Cancelled');
   });
+
+  // These endpoints stream, so `200 OK` and the headers are already on the wire
+  // before the worker runs — a later exception can't change the status code. The
+  // backend therefore reports the failure in-band as a terminal `error` marker
+  // (see _pack_progress_marker). Previously a crashed worker produced a 200 with
+  // a truncated body, and the renderer reported a decode error instead of the
+  // real cause.
+  it('surfaces the terminal error marker', () => {
+    const failed = buildPhp1Marker(null, '', {
+      error: "Helios triangulation needs an ASCII point file, but 'scan.las' is a binary .las file.",
+    });
+    const { markers } = parseProgressMarkers(failed, 0);
+    expect(markers[0].error).toContain('scan.las');
+    expect(markers[0].cancelled).toBeUndefined();
+  });
+
+  it('keeps progress reported before a failure', () => {
+    // A worker can report progress and then raise; both must reach the client,
+    // in order, so the UI can show where it got to.
+    const p = buildPhp1Marker(0.3, 'Reading points');
+    const failed = buildPhp1Marker(null, '', { error: 'boom' });
+    const { markers } = parseProgressMarkers(concat(p, failed), 0);
+    expect(markers).toHaveLength(2);
+    expect(markers[0].message).toBe('Reading points');
+    expect(markers[0].error).toBeUndefined();
+    expect(markers[1].error).toBe('boom');
+  });
+
+  it('distinguishes an error marker from a cancellation', () => {
+    // The two map to different client types (Error vs ScanCancelledError), so a
+    // user cancel must never be reported as a crash or vice versa.
+    const cancelled = buildPhp1Marker(null, 'Cancelled', { cancelled: true });
+    const failed = buildPhp1Marker(null, '', { error: 'boom' });
+    expect(parseProgressMarkers(cancelled, 0).markers[0].error).toBeUndefined();
+    expect(parseProgressMarkers(failed, 0).markers[0].cancelled).toBeUndefined();
+  });
 });
 
 describe('decodeBinaryFrame with leading progress markers', () => {
@@ -1354,5 +1557,187 @@ describe('getDeviceInfo', () => {
   it('throws on a non-ok response', async () => {
     mockFetchError(500, { detail: 'boom' });
     await expect(getDeviceInfo()).rejects.toThrow(/device-info failed: 500/);
+  });
+});
+
+describe('getRieglStatus', () => {
+  const ready = {
+    available: true,
+    platform_supported: true,
+    docker_present: true,
+    image_built: true,
+    rivlib_path: '/opt/rivlib',
+    rivlib_valid: true,
+    image: 'phytograph-riegl:latest',
+    reason: 'RIEGL .rxp import is ready.',
+  };
+
+  it('maps backend snake_case fields to a camelCase RieglStatus', async () => {
+    mockFetchOk(ready);
+    const s = await getRieglStatus('/opt/rivlib');
+    expect(s).toEqual({
+      available: true,
+      platformSupported: true,
+      dockerPresent: true,
+      imageBuilt: true,
+      rivlibPath: '/opt/rivlib',
+      rivlibValid: true,
+      image: 'phytograph-riegl:latest',
+      reason: 'RIEGL .rxp import is ready.',
+    });
+  });
+
+  it('sends the configured rivlib path as a query parameter', async () => {
+    // The path travels per request (not in the backend's environment) because
+    // the sidecar is spawned once at launch and would otherwise need a restart
+    // to notice the user picking a different folder.
+    const spy = mockFetchOk(ready);
+    await getRieglStatus('/opt/riv lib');
+    const url = new URL(String(spy.mock.calls[0][0]));
+    expect(url.pathname).toBe('/api/riegl/status');
+    // Read the parameter back rather than asserting on the encoded string:
+    // URLSearchParams encodes a space as '+', not '%20'.
+    expect(url.searchParams.get('rivlib_path')).toBe('/opt/riv lib');
+  });
+
+  it('omits the query parameter when no path is configured', async () => {
+    const spy = mockFetchOk({ ...ready, available: false, rivlib_path: null });
+    await getRieglStatus(null);
+    expect(String(spy.mock.calls[0][0])).not.toContain('rivlib_path');
+  });
+
+  it('defaults missing fields to unavailable rather than undefined', async () => {
+    // A backend that omits a field must never read as "available" — the whole
+    // point of the probe is that the capability is conditional.
+    mockFetchOk({ reason: 'partial' });
+    const s = await getRieglStatus();
+    expect(s.available).toBe(false);
+    expect(s.platformSupported).toBe(false);
+    expect(s.dockerPresent).toBe(false);
+    expect(s.imageBuilt).toBe(false);
+    expect(s.rivlibValid).toBe(false);
+    expect(s.rivlibPath).toBeNull();
+    expect(s.image).toBe('');
+    expect(s.reason).toBe('partial');
+  });
+
+  it('treats truthy-but-not-true values as false', async () => {
+    mockFetchOk({ ...ready, available: 'yes', docker_present: 1 });
+    const s = await getRieglStatus();
+    expect(s.available).toBe(false);
+    expect(s.dockerPresent).toBe(false);
+  });
+
+  it('throws on a non-ok response', async () => {
+    mockFetchError(500, { detail: 'boom' });
+    await expect(getRieglStatus()).rejects.toThrow(/riegl-status failed: 500/);
+  });
+});
+
+describe('request deadlines', () => {
+  it('aborts with a BackendTimeoutError naming the endpoint and the budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      abortOnTimeout(controller, 300000, '/api/cloud/session/:id/split');
+      expect(controller.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(300000);
+      expect(controller.signal.aborted).toBe(true);
+      const reason = controller.signal.reason as BackendTimeoutError;
+      expect(reason).toBeInstanceOf(BackendTimeoutError);
+      expect(reason.endpoint).toBe('/api/cloud/session/:id/split');
+      expect(reason.timeoutMs).toBe(300000);
+      expect(reason.message).toContain('5 min');
+      expect(reason.message).toContain('/api/cloud/session/:id/split');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renders sub-minute budgets in seconds', () => {
+    expect(new BackendTimeoutError('/api/pointcloud/preview', 60000).message).toContain('1 min');
+    expect(new BackendTimeoutError('/api/pointcloud/preview', 30000).message).toContain('30 s');
+  });
+
+  // The two aborts must stay distinguishable: several viewer catch blocks
+  // swallow a user cancel silently, so a deadline that presented as a plain
+  // AbortError would fail with no message shown at all.
+  it('distinguishes a deadline from a user cancel', () => {
+    const timedOut = describeBackendError(
+      new BackendTimeoutError('/api/segment/wood', 300000),
+      'Wood segmentation',
+    );
+    expect(timedOut.message).toMatch(/^Wood segmentation timed out\./);
+    expect(timedOut.message).toContain('/api/segment/wood');
+
+    const cancelled = describeBackendError(
+      new DOMException('signal is aborted without reason', 'AbortError'),
+      'Wood segmentation',
+    );
+    expect(cancelled.message).toBe('Wood segmentation was cancelled.');
+  });
+
+  it('still rewrites an unreachable backend', () => {
+    const e = describeBackendError(new TypeError('Failed to fetch'), 'Import');
+    expect(e.message).toMatch(/could not reach the backend/);
+  });
+});
+
+describe('formatBackendDetail', () => {
+  it('renders a FastAPI 422 validation array readably', () => {
+    // THE BUG: a 422's `detail` is an ARRAY of {loc,msg,type}, and
+    // interpolating it into a template literal produced "[object Object]" —
+    // which is what a user saw when the request shape was wrong.
+    const detail = [
+      { type: 'list_type', loc: ['body', 'keep_columns'], msg: 'Input should be a valid list' },
+    ];
+    expect(formatBackendDetail(detail)).toBe('keep_columns: Input should be a valid list');
+  });
+
+  it('joins several validation errors', () => {
+    expect(formatBackendDetail([
+      { loc: ['body', 'a'], msg: 'bad a' },
+      { loc: ['body', 'b'], msg: 'bad b' },
+    ])).toBe('a: bad a; b: bad b');
+  });
+
+  it('passes a plain string detail through', () => {
+    // A raised HTTPException — the common case — must be unchanged.
+    expect(formatBackendDetail('Docker is not running.')).toBe('Docker is not running.');
+  });
+
+  it('never yields "[object Object]"', () => {
+    for (const d of [[{ loc: ['body', 'x'], msg: 'no' }], { msg: 'hi' }, {}, null, undefined]) {
+      expect(formatBackendDetail(d)).not.toContain('[object Object]');
+    }
+  });
+});
+
+describe('extractRieglProject argument shapes', () => {
+  it('sends keep_columns as a list when given one', async () => {
+    const spy = mockFetchOk({ scans: [] });
+    await extractRieglProject('/p.riproject', ['ScanPos001'], '/riv', ['reflectance']);
+    const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit).body));
+    expect(body.keep_columns).toEqual(['reflectance']);
+  });
+
+  it('tolerates the options object in the keepColumns position', async () => {
+    // A caller written against the older 4-arg signature passes opts here. That
+    // used to reach the backend as `keep_columns`, which 422'd with "Input
+    // should be a valid list" and surfaced in the UI as "[object Object]".
+    const spy = mockFetchOk({ scans: [] });
+    const ctl = new AbortController();
+    await extractRieglProject('/p.riproject', ['ScanPos001'], '/riv', {
+      signal: ctl.signal,
+    } as never);
+    const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit).body));
+    expect(body.keep_columns).toBeNull();
+  });
+
+  it('sends null when nothing is specified', async () => {
+    const spy = mockFetchOk({ scans: [] });
+    await extractRieglProject('/p.riproject', null, '/riv');
+    const body = JSON.parse(String((spy.mock.calls[0][1] as RequestInit).body));
+    expect(body.keep_columns).toBeNull();
   });
 });

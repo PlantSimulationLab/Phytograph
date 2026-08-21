@@ -46,6 +46,9 @@ test('generates a DEM from ground points and exports raster grids', async () => 
     //    DEM tool is ground-aware and will grid only the ground points.
     await page.getByTestId('tool-ground-segment').click();
     await page.getByTestId('ground-cloth-resolution').fill('0.1');
+    // Measuring from the scan is the default; this test wants its own
+    // fixture-tuned tolerance, so turn the measurement off first.
+    await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.05');
     await page.getByTestId('ground-segment-run-button').click();
     await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
@@ -150,6 +153,9 @@ test('generates a CHM (DSM − DTM) with canopy heights, never negative', async 
     // Segment ground so the CHM's DTM half grids ground points only.
     await page.getByTestId('tool-ground-segment').click();
     await page.getByTestId('ground-cloth-resolution').fill('0.1');
+    // Measuring from the scan is the default; this test wants its own
+    // fixture-tuned tolerance, so turn the measurement off first.
+    await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.05');
     await page.getByTestId('ground-segment-run-button').click();
     await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
@@ -208,6 +214,9 @@ test('generates DTM, DSM and CHM together in one run', async () => {
 
   await page.getByTestId('tool-ground-segment').click();
   await page.getByTestId('ground-cloth-resolution').fill('0.1');
+  // Measuring from the scan is the default; this test wants its own
+  // fixture-tuned tolerance, so turn the measurement off first.
+  await page.getByTestId('ground-auto-class-threshold').uncheck();
   await page.getByTestId('ground-class-threshold').fill('0.05');
   await page.getByTestId('ground-segment-run-button').click();
   await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
@@ -256,6 +265,9 @@ test('a DTM carries colour-by layers and exports the selected one as a raster', 
 
     await page.getByTestId('tool-ground-segment').click();
     await page.getByTestId('ground-cloth-resolution').fill('0.1');
+    // Measuring from the scan is the default; this test wants its own
+    // fixture-tuned tolerance, so turn the measurement off first.
+    await page.getByTestId('ground-auto-class-threshold').uncheck();
     await page.getByTestId('ground-class-threshold').fill('0.05');
     await page.getByTestId('ground-segment-run-button').click();
     await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });

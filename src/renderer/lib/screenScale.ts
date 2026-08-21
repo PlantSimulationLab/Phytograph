@@ -14,6 +14,8 @@
 // Kept free of three.js *classes* (it only reads plain fields) so it's directly
 // unit-testable without a renderer.
 
+import { isOrthographicProjection } from './cameraRay';
+
 /** Minimal camera shape this needs — satisfied by both THREE camera classes. */
 export interface ScreenScaleCamera {
   isPerspectiveCamera?: boolean;
@@ -23,6 +25,21 @@ export interface ScreenScaleCamera {
   top?: number;
   bottom?: number;
   zoom?: number;
+  /**
+   * The live projection matrix. When present it DECIDES which branch runs, in
+   * preference to `isPerspectiveCamera`.
+   *
+   * The ortho overrides (SectionProjectionOverride, OrthoProjectionOverride)
+   * write `camera.projectionMatrix` directly on a camera that remains a
+   * PerspectiveCamera instance, so the class flag stays true while the actual
+   * projection is orthographic. Trusting the flag took the perspective branch
+   * and scaled overlays by distance-from-camera — meaningless under ortho, and
+   * visibly wrong in a cross-section, where the camera is pulled well back from
+   * the slab and the origin marker inflated with that distance.
+   *
+   * Same trap `cameraRay.ts` documents for `Raycaster.setFromCamera`.
+   */
+  projectionMatrix?: { elements: ArrayLike<number> };
 }
 
 export interface Vec3Readonly {
@@ -49,8 +66,24 @@ export function worldPerPixel(
 ): number {
   if (!(viewportHeight > 0) || !isFinite(viewportHeight)) return 0;
 
+  // The matrix is authoritative when we have it: an override can make a
+  // PerspectiveCamera project orthographically without changing the flag.
+  const elements = camera.projectionMatrix?.elements;
+  const orthoByMatrix = elements ? isOrthographicProjection(elements) : false;
+
+  if (elements && orthoByMatrix) {
+    // Read the frustum height straight off the matrix. P[5] = 2 / (top - bottom)
+    // with the zoom already folded in, so this stays correct for an override
+    // that never touches camera.top/bottom/zoom — which is exactly the case
+    // that made this function wrong.
+    const p5 = elements[5];
+    if (!(Math.abs(p5) > 0)) return 0;
+    const s = 2 / Math.abs(p5) / viewportHeight;
+    return isFinite(s) && s > 0 ? s : 0;
+  }
+
   let scale: number;
-  if (camera.isPerspectiveCamera) {
+  if (camera.isPerspectiveCamera && !orthoByMatrix) {
     const fov = camera.fov ?? 0;
     if (!(fov > 0) || fov >= 180) return 0;
     const dx = point.x - cameraPosition.x;

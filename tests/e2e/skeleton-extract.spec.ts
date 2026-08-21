@@ -1,7 +1,10 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { mkdtempSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree.xyz');
@@ -72,6 +75,40 @@ test('extracts a skeleton from a Y-shaped plant cloud via the UI', async () => {
 
     // Sanity: the visible stats row formats as "{N.NN}m · {count} pts".
     await expect(skelRow.getByTestId('skeleton-row-stats')).toContainText('m ·');
+
+    // ---- Export the extracted skeleton to JSON ----
+    // Skeleton export shares the save path that used to hand its bytes to an
+    // `<a download>` click (serviced out-of-band by Electron, so nothing was
+    // observable to the renderer). Assert the file actually lands on disk.
+    const outDir = mkdtempSync(join(tmpdir(), 'phytograph-skelexport-'));
+    const savePath = join(outDir, 'tree_skeleton.json');
+    await stubSaveDialog(app, savePath);
+
+    // The export modal shows the skeleton section only when a skeleton is the
+    // current selection — the cloud is still selected from the import.
+    await skelRow.click();
+
+    await page.evaluate(() => (window as unknown as { __openExportPanel: () => void }).__openExportPanel());
+    await expect(page.getByTestId('export-modal')).toBeVisible();
+    await expect(page.getByTestId('export-skeleton-section')).toBeVisible();
+    await page.getByTestId('export-skeleton-json').click();
+
+    await expect.poll(() => (existsSync(savePath) ? statSync(savePath).size : 0), { timeout: 30_000 })
+      .toBeGreaterThan(0);
+
+    // The written JSON must describe the same skeleton the panel reported —
+    // proving real data was serialized, not an empty stub.
+    const exported = JSON.parse(readFileSync(savePath, 'utf8'));
+    expect(Array.isArray(exported.nodes)).toBe(true);
+    expect(exported.nodes.length).toBe(ptCount);
+    expect(exported.metadata.nodeCount).toBe(ptCount);
+    expect(exported.metadata.totalLength).toBeCloseTo(length, 5);
+    expect(Array.isArray(exported.edges)).toBe(true);
+    expect(exported.edges.length).toBeGreaterThan(0);
+    // Nodes carry real finite coordinates, not placeholders.
+    for (const c of ['x', 'y', 'z'] as const) {
+      expect(Number.isFinite(exported.nodes[0][c])).toBe(true);
+    }
   } finally {
     await close();
   }

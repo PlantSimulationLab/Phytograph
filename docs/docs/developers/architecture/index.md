@@ -12,7 +12,7 @@ Phytograph runs as three cooperating processes inside one packaged binary:
 │  │   └─ backend.ts                 │                           │
 │  │       └─ spawns ────────────────┼──► phytograph_backend     │
 │  │   └─ ipc.ts (handlers)          │     (PyInstaller bundle)  │
-│  │   └─ updater.ts                 │     listens on :8008      │
+│  │   └─ updater.ts                 │   (dynamic port)          │
 │  └─────────────────────────────────┘             ▲             │
 │           ▲                                      │ HTTP        │
 │           │ IPC (contextBridge)                  │ (fetch)     │

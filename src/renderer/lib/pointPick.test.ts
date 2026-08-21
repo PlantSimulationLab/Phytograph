@@ -11,6 +11,10 @@ import {
   pickedPointsToCsv,
   pickedPointToText,
   labelOffsetFor,
+  worldPerPixel,
+  nearSurfaceDistance,
+  pickProbeOffsets,
+  chooseNearestCandidate,
   type PickedPoint,
 } from './pointPick';
 import {
@@ -126,7 +130,8 @@ describe('buildAttributeRows', () => {
       'scan angle rank': 0,
       'user data': 0,
       'point source id': 0,
-      'gps-time': 0,
+      // No 'gps-time': it reaches the renderer as `timestamp` (a real scalar),
+      // never under the raw LAS dimension name.
       Deviation: 2,
     });
     expect(rows.map((r) => r.slug)).toEqual(['Deviation']);
@@ -323,5 +328,162 @@ describe('labelOffsetFor', () => {
 
   it('handles a negative sequence without producing a negative step', () => {
     expect(labelOffsetFor(-1)).toEqual(labelOffsetFor(4));
+  });
+});
+
+describe('worldPerPixel', () => {
+  const persp = { isPerspectiveCamera: true as const, fov: 50 };
+
+  it('scales linearly with distance under a perspective camera', () => {
+    // Twice as far away ⇒ each pixel spans twice as much world.
+    const near = worldPerPixel(persp, 1000, 10);
+    const far = worldPerPixel(persp, 1000, 20);
+    expect(far / near).toBeCloseTo(2, 10);
+  });
+
+  it('matches the frustum height at a known distance', () => {
+    // Frustum height at distance d is 2·d·tan(fov/2); over 1000 px rows that
+    // is the per-pixel span.
+    const expected = (2 * 10 * Math.tan((50 * Math.PI) / 360)) / 1000;
+    expect(worldPerPixel(persp, 1000, 10)).toBeCloseTo(expected, 12);
+  });
+
+  it('ignores distance under an orthographic camera', () => {
+    const ortho = { top: 5, bottom: -5, zoom: 1 };
+    expect(worldPerPixel(ortho, 500, 1)).toBeCloseTo(worldPerPixel(ortho, 500, 9999), 12);
+    expect(worldPerPixel(ortho, 500, 1)).toBeCloseTo(10 / 500, 12);
+  });
+
+  it('divides the ortho span by zoom', () => {
+    const zoomed = { top: 5, bottom: -5, zoom: 4 };
+    expect(worldPerPixel(zoomed, 500, 1)).toBeCloseTo(10 / 4 / 500, 12);
+  });
+
+  it('treats zoom 0 as 1 rather than dividing by zero', () => {
+    expect(worldPerPixel({ top: 5, bottom: -5, zoom: 0 }, 500, 1)).toBeCloseTo(10 / 500, 12);
+  });
+
+  it('returns 0 for a zero-height viewport instead of Infinity', () => {
+    expect(worldPerPixel(persp, 0, 10)).toBe(0);
+  });
+});
+
+describe('nearSurfaceDistance', () => {
+  it('measures to the near surface, not the centre', () => {
+    // Camera 100 m from the centre of a 40 m-radius cloud: the closest visible
+    // points are 60 m out, not 100.
+    expect(nearSurfaceDistance(100, 40)).toBeCloseTo(60, 12);
+  });
+
+  it('keeps the near half of a deep cloud clickable', () => {
+    // The regression this exists for. A 100 m-deep scan viewed end-on, camera
+    // 10 m off its near face: centre-based sizing computed the tolerance for a
+    // point 60 m away, ~6x too large in world terms for the near face — which
+    // in practice meant the pixel tolerance the user experienced at the near
+    // points was far off the intended one.
+    const cameraToCenter = 60;
+    const radius = 50;
+    const centreBased = cameraToCenter;
+    const nearBased = nearSurfaceDistance(cameraToCenter, radius);
+
+    expect(nearBased).toBeCloseTo(10, 12);
+    // Sizing from the centre over-states the near-face distance six-fold.
+    expect(centreBased / nearBased).toBeCloseTo(6, 10);
+  });
+
+  it('scales the radius by the object matrix', () => {
+    // A cloud scaled 2x has a world radius twice its local one.
+    expect(nearSurfaceDistance(100, 20, 2)).toBeCloseTo(60, 12);
+  });
+
+  it('stays positive when the camera is inside the cloud', () => {
+    // Camera 5 m from the centre of a 50 m-radius cloud is deep inside it; a
+    // naive subtraction gives -45, which would invert the tolerance.
+    const d = nearSurfaceDistance(5, 50);
+    expect(d).toBeGreaterThan(0);
+    expect(Number.isFinite(d)).toBe(true);
+  });
+
+  it('is a no-op for a degenerate zero-radius bound', () => {
+    expect(nearSurfaceDistance(42, 0)).toBeCloseTo(42, 12);
+  });
+});
+
+describe('pickProbeOffsets', () => {
+  it('probes the cursor itself first so an exact hit short-circuits the ring', () => {
+    expect(pickProbeOffsets(5)[0]).toEqual({ dx: 0, dy: 0 });
+  });
+
+  it('rings the cursor at the requested radius', () => {
+    const ring = pickProbeOffsets(5).slice(1);
+    expect(ring).toHaveLength(8);
+    for (const o of ring) expect(Math.hypot(o.dx, o.dy)).toBeCloseTo(5, 10);
+  });
+
+  it('spreads the ring over eight distinct compass directions', () => {
+    const dirs = pickProbeOffsets(4)
+      .slice(1)
+      .map((o) => `${Math.round(Math.atan2(o.dy, o.dx) * 1000)}`);
+    expect(new Set(dirs).size).toBe(8);
+  });
+
+  it('collapses to the centre alone for a zero radius', () => {
+    expect(pickProbeOffsets(0)).toEqual([{ dx: 0, dy: 0 }]);
+  });
+});
+
+describe('chooseNearestCandidate', () => {
+  it('returns -1 when nothing was hit', () => {
+    expect(chooseNearestCandidate([])).toBe(-1);
+    expect(chooseNearestCandidate([null, null])).toBe(-1);
+  });
+
+  it('prefers the nearer surface over the one closer to the cursor', () => {
+    // The silhouette case this exists for: a background trunk whose splat
+    // happens to sit nearer the cursor must NOT beat the foreground twig.
+    const background = { depth: 20, offsetPx: 1 };
+    const foreground = { depth: 3, offsetPx: 5 };
+    expect(chooseNearestCandidate([background, foreground])).toBe(1);
+  });
+
+  it('breaks a same-surface tie by screen proximity', () => {
+    // Two probes on the same twig — depths differ by less than the tolerance,
+    // so the one nearest where the user actually clicked wins. Without this the
+    // label would drift to whichever probe grazed marginally nearer.
+    const far = { depth: 10.0, offsetPx: 5 };
+    const near = { depth: 9.99, offsetPx: 1 };
+    expect(chooseNearestCandidate([far, near])).toBe(1);
+  });
+
+  it('treats a sub-tolerance depth difference as the same surface', () => {
+    // 1% apart at 2% tolerance: not a different surface, so offset decides.
+    expect(chooseNearestCandidate([{ depth: 100, offsetPx: 0 }, { depth: 99, offsetPx: 7 }]))
+      .toBe(0);
+  });
+
+  it('treats a super-tolerance depth difference as a nearer surface', () => {
+    // 10% apart: genuinely different surfaces, so depth decides despite the
+    // winner being further from the cursor.
+    expect(chooseNearestCandidate([{ depth: 100, offsetPx: 0 }, { depth: 90, offsetPx: 7 }]))
+      .toBe(1);
+  });
+
+  it('scales the tolerance with distance rather than using a fixed metric one', () => {
+    // The same 1 m gap is noise on a 100 m stand but a real separation on a
+    // 10 m one. Offset is held equal so only the tolerance can decide.
+    const a = [{ depth: 100, offsetPx: 0 }, { depth: 99, offsetPx: 0 }];
+    const b = [{ depth: 10, offsetPx: 0 }, { depth: 9, offsetPx: 0 }];
+    expect(chooseNearestCandidate(a)).toBe(0);   // within tolerance → keeps first
+    expect(chooseNearestCandidate(b)).toBe(1);   // outside tolerance → takes nearer
+  });
+
+  it('skips null and non-finite probes', () => {
+    expect(chooseNearestCandidate([null, { depth: 5, offsetPx: 3 }])).toBe(1);
+    expect(chooseNearestCandidate([{ depth: NaN, offsetPx: 0 }, { depth: 5, offsetPx: 3 }])).toBe(1);
+    expect(chooseNearestCandidate([{ depth: Infinity, offsetPx: 0 }])).toBe(-1);
+  });
+
+  it('handles a single candidate', () => {
+    expect(chooseNearestCandidate([{ depth: 7, offsetPx: 2 }])).toBe(0);
   });
 });

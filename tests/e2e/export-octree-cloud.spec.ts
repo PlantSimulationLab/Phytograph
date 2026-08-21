@@ -1,7 +1,10 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { completeImportWizard } from './helpers/importWizard';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -11,43 +14,26 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // export format must go through the backend, which streams the source file
 // back out. This drives the full path: select → Export panel → XYZ button →
 // backend /api/pointcloud/export with a `source` descriptor → base64 decode →
-// blob download. We capture the blob and assert it contains the right number
-// of points, proving the octree export round-trips real bytes (not "no error").
+// native save dialog → real fs write. We read the written file back and assert
+// it contains the right number of points, proving the octree export round-trips
+// real bytes (not "no error").
+//
+// This asserts against the FILE ON DISK rather than intercepting the blob: the
+// export used to hand its bytes to an `<a download>` click, which Electron
+// services out-of-band with its own Save-As, so the renderer reported success
+// before anything was written. Reading the real file is what makes that
+// impossible to regress into.
 test('exports an octree-backed cloud to XYZ via the backend', async () => {
   const { app, page, close } = await launchApp();
 
   try {
-    // Capture the downloaded blob. Key by the object URL (not a sequence
-    // counter) — potree-core/three.js may create unrelated worker blobs during
-    // octree rendering, so a positional claim would grab the wrong one. We map
-    // each object URL to its text and look it up by the anchor's href at click.
-    await page.evaluate(() => {
-      const textByUrl = new Map<string, Promise<string>>();
-      const captured: { name: string; text: string }[] = [];
-      (window as unknown as { __exportedBlobs: typeof captured }).__exportedBlobs = captured;
-
-      const origCreate = URL.createObjectURL;
-      URL.createObjectURL = function (obj: Blob | MediaSource): string {
-        const url = origCreate.call(URL, obj);
-        if (obj instanceof Blob) textByUrl.set(url, obj.text());
-        return url;
-      };
-
-      const origAnchorClick = HTMLAnchorElement.prototype.click;
-      HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-        if (this.download) {
-          const textPromise = textByUrl.get(this.href);
-          if (textPromise) {
-            textPromise.then((text) => captured.push({ name: this.download, text }));
-          }
-          return; // suppress real download
-        }
-        return origAnchorClick.call(this);
-      };
-    });
+    const outDir = mkdtempSync(join(tmpdir(), 'phytograph-octree-export-'));
+    const savePath = join(outDir, 'tiny.xyz');
 
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
+
+    await stubSaveDialog(app, savePath);
 
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
@@ -68,26 +54,23 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
     await page.getByTestId('export-format-xyz').click();
     await page.getByTestId('export-cloud-go').click();
 
-    await expect.poll(
-      async () =>
-        page.evaluate(
-          () =>
-            ((window as unknown as { __exportedBlobs?: { name: string; text: string }[] })
-              .__exportedBlobs ?? []).length,
-        ),
-      { timeout: 30_000, intervals: [200, 500, 1000] },
-    ).toBeGreaterThan(0);
+    // The bytes must land at the chosen path via a real fs write.
+    await expect.poll(() => (existsSync(savePath) ? readFileSync(savePath, 'utf8').length : 0), {
+      timeout: 30_000,
+      intervals: [200, 500, 1000],
+    }).toBeGreaterThan(0);
 
-    const captured = await page.evaluate(
-      () =>
-        (window as unknown as { __exportedBlobs: { name: string; text: string }[] })
-          .__exportedBlobs[0],
-    );
+    // A finished export must announce itself — a silent one reads as a no-op and
+    // gets re-triggered. Assert the success toast names the file and the real
+    // point count, not just that some toast appeared.
+    const successToast = page.getByTestId('toast-success').filter({ hasText: 'Export Complete' });
+    await expect(successToast).toBeVisible({ timeout: 30_000 });
+    await expect(successToast.getByTestId('toast-message')).toHaveText('Wrote tiny.xyz (60 points).');
 
-    expect(captured.name).toBe('tiny.xyz');
-    // Every non-empty line is one "x y z" point — the count must match the
-    // source cloud, proving the backend streamed all points from the source.
-    const lines = captured.text.split('\n').filter((l) => l.trim().length > 0);
+    // Every non-empty, non-comment line is one "x y z" point — the count must
+    // match the source cloud, proving the backend streamed all points.
+    const text = readFileSync(savePath, 'utf8');
+    const lines = text.split('\n').filter((l) => l.trim().length > 0 && !l.trim().startsWith('#'));
     expect(lines.length).toBe(60);
     // First line is three parseable floats.
     const cols = lines[0].trim().split(/\s+/).map(Number);

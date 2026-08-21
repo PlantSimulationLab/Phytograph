@@ -13,11 +13,13 @@ import {
   plyHasFaces,
   parsePointCloud,
   parsePointCloudFromPath,
+  parsePointCloudsFromPath,
   parseSkeleton,
   parseSkeletonJSON,
   parseSkeletonOBJ,
   parseSTLMesh,
   parseXYZ,
+  looksLikeAsciiPointCloud,
   POINT_CLOUD_FORMATS,
   SKELETON_FORMATS,
   SUPPORTED_FORMATS,
@@ -455,6 +457,193 @@ describe('parseSTLMesh', () => {
       /No mesh data/,
     );
   });
+
+  it("does not let a malformed facet steal the next facet's vertices", async () => {
+    // The first facet is missing its third vertex. An unbounded scan would pull
+    // the second facet's first vertex into it, emitting a spliced triangle and
+    // shifting everything after — silent wrong geometry, no error.
+    const content = [
+      'solid test',
+      'facet normal 0 0 1',
+      'outer loop',
+      'vertex 0 0 0',
+      'vertex 1 0 0',
+      'endloop',
+      'endfacet',
+      'facet normal 0 1 0',
+      'outer loop',
+      'vertex 5 5 5',
+      'vertex 6 5 5',
+      'vertex 5 6 5',
+      'endloop',
+      'endfacet',
+      'endsolid test',
+      '',
+    ].join('\n');
+    const mesh = await parseSTLMesh(textFile(content, 'malformed.stl'));
+    // Only the well-formed second facet survives.
+    expect(mesh.triangleCount).toBe(1);
+    expect(Array.from(mesh.vertices)).toEqual([5, 5, 5, 6, 5, 5, 5, 6, 5]);
+    // ...and it carries its OWN normal, not the malformed facet's.
+    expect(Array.from(mesh.normals!)).toEqual([0, 1, 0, 0, 1, 0, 0, 1, 0]);
+  });
+});
+
+// Binary STL. Layout: 80-byte header, uint32 LE triangle count, then 50 bytes per
+// triangle (12 float32 + a uint16 attribute word).
+interface StlTri {
+  normal: [number, number, number];
+  verts: [[number, number, number], [number, number, number], [number, number, number]];
+}
+
+function makeBinaryStlBuffer(
+  triangles: StlTri[],
+  opts: {
+    header?: string;
+    attrs?: number[];
+    trailingBytes?: number;
+    declaredCount?: number;
+  } = {},
+): ArrayBuffer {
+  const trailing = opts.trailingBytes ?? 0;
+  const buf = new ArrayBuffer(84 + 50 * triangles.length + trailing);
+  const view = new DataView(buf);
+
+  // Header defaults to 80 zero bytes — the shape a Blender-exported binary STL has,
+  // and the one that defeats a `solid`-prefix heuristic.
+  if (opts.header) {
+    const bytes = new TextEncoder().encode(opts.header);
+    new Uint8Array(buf).set(bytes.subarray(0, 80), 0);
+  }
+
+  view.setUint32(80, opts.declaredCount ?? triangles.length, true);
+
+  triangles.forEach((tri, i) => {
+    const off = 84 + i * 50;
+    view.setFloat32(off, tri.normal[0], true);
+    view.setFloat32(off + 4, tri.normal[1], true);
+    view.setFloat32(off + 8, tri.normal[2], true);
+    tri.verts.forEach((v, vi) => {
+      const vo = off + 12 + vi * 12;
+      view.setFloat32(vo, v[0], true);
+      view.setFloat32(vo + 4, v[1], true);
+      view.setFloat32(vo + 8, v[2], true);
+    });
+    view.setUint16(off + 48, opts.attrs?.[i] ?? 0, true);
+  });
+
+  return buf;
+}
+
+const TRI_A: StlTri = {
+  normal: [0, 0, 1],
+  verts: [
+    [0, 0, 0],
+    [1, 0, 0],
+    [0, 1, 0],
+  ],
+};
+const TRI_B: StlTri = {
+  normal: [0, 1, 0],
+  verts: [
+    [2, 0, 0],
+    [3, 0, 0],
+    [2, 1, 0],
+  ],
+};
+const TRI_C: StlTri = {
+  normal: [1, 0, 0],
+  verts: [
+    [4, 0, 0],
+    [5, 0, 0],
+    [4, 1, 0],
+  ],
+};
+
+function binaryStlFile(buf: ArrayBuffer, name = 'tri.stl'): File {
+  return new File([buf], name);
+}
+
+describe('parseSTLMesh (binary)', () => {
+  it('parses a single-triangle binary STL', async () => {
+    const mesh = await parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A])));
+    expect(mesh.vertexCount).toBe(3);
+    expect(mesh.triangleCount).toBe(1);
+    expect(Array.from(mesh.vertices)).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    expect(Array.from(mesh.indices)).toEqual([0, 1, 2]);
+    expect(mesh.fileName).toBe('tri.stl');
+  });
+
+  it('replicates the facet normal to all three vertices', async () => {
+    const mesh = await parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A])));
+    expect(Array.from(mesh.normals!)).toEqual([0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    expect(mesh.normals!.length).toBe(mesh.vertices.length);
+  });
+
+  it('parses multiple triangles unwelded with sequential indices', async () => {
+    const mesh = await parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A, TRI_B, TRI_C])));
+    expect(mesh.vertexCount).toBe(9);
+    expect(mesh.triangleCount).toBe(3);
+    expect(Array.from(mesh.indices)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    // Triangle 2's first vertex — only a correct 50-byte stride lands here.
+    expect(Array.from(mesh.vertices.slice(18, 21))).toEqual([4, 0, 0]);
+  });
+
+  it('detects binary even when the header starts with "solid"', async () => {
+    const buf = makeBinaryStlBuffer([TRI_A], { header: 'solid exported by SomeTool' });
+    const mesh = await parseSTLMesh(binaryStlFile(buf));
+    expect(mesh.triangleCount).toBe(1);
+    expect(Array.from(mesh.vertices)).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  });
+
+  it('detects binary when the header is 80 zero bytes', async () => {
+    // The reported bug: no `solid` prefix at all, so only the length test classifies it.
+    const mesh = await parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A, TRI_B])));
+    expect(mesh.triangleCount).toBe(2);
+    expect(Array.from(mesh.vertices.slice(9, 18))).toEqual([2, 0, 0, 3, 0, 0, 2, 1, 0]);
+  });
+
+  it('returns no vertexColors when no facet sets the color-valid bit', async () => {
+    // All-zero attributes, as in the reported file. Under the SolidWorks dialect
+    // this would read as "every facet is black"; we must leave it uncolored.
+    const mesh = await parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A, TRI_B], { attrs: [0, 0] })));
+    expect(mesh.vertexColors).toBeUndefined();
+  });
+
+  it('reads VisCAM RGB555 color when a facet sets the valid bit', async () => {
+    const red = 0x8000 | (31 << 10);
+    const mesh = await parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A, TRI_B], { attrs: [red, 0] })));
+    expect(mesh.vertexColors).toBeDefined();
+    // Facet 0 is red on all three of its vertices.
+    expect(Array.from(mesh.vertexColors!.slice(0, 9))).toEqual([1, 0, 0, 1, 0, 0, 1, 0, 0]);
+    // Facet 1 didn't opt in — neutral, not black.
+    expect(Array.from(mesh.vertexColors!.slice(9, 18))).toEqual([1, 1, 1, 1, 1, 1, 1, 1, 1]);
+  });
+
+  it('tolerates trailing bytes after the triangle data', async () => {
+    const mesh = await parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A], { trailingBytes: 7 })));
+    expect(mesh.triangleCount).toBe(1);
+    expect(Array.from(mesh.vertices)).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  });
+
+  it('reports truncation when the declared count exceeds the file', async () => {
+    const buf = makeBinaryStlBuffer([TRI_A], { declaredCount: 100 });
+    await expect(parseSTLMesh(binaryStlFile(buf))).rejects.toThrow(/truncated/i);
+    // Must NOT fall through to the generic message — that's what made this opaque.
+    await expect(parseSTLMesh(binaryStlFile(buf))).rejects.not.toThrow(/No mesh data/);
+  });
+
+  it('rejects an absurd triangle count without attempting the allocation', async () => {
+    const buf = makeBinaryStlBuffer([TRI_A], { declaredCount: 0xffffffff });
+    await expect(parseSTLMesh(binaryStlFile(buf))).rejects.toThrow(Error);
+    // A RangeError would mean we tried to allocate ~154 GB before validating.
+    await expect(parseSTLMesh(binaryStlFile(buf))).rejects.not.toThrow(RangeError);
+  });
+
+  it('rejects NaN vertex coordinates', async () => {
+    const bad: StlTri = { normal: [0, 0, 1], verts: [[0, 0, 0], [NaN, 0, 0], [0, 1, 0]] };
+    await expect(parseSTLMesh(binaryStlFile(makeBinaryStlBuffer([bad])))).rejects.toThrow(/NaN or infinite/i);
+  });
 });
 
 describe('parseMesh (auto-detect)', () => {
@@ -478,6 +667,12 @@ describe('parseMesh (auto-detect)', () => {
     ].join('\n');
     const mesh = await parseMesh(textFile(content, 'x.stl'));
     expect(mesh.triangleCount).toBe(1);
+  });
+
+  it('dispatches to STL for a binary file', async () => {
+    const mesh = await parseMesh(binaryStlFile(makeBinaryStlBuffer([TRI_A, TRI_B]), 'x.stl'));
+    expect(mesh.triangleCount).toBe(2);
+    expect(Array.from(mesh.vertices.slice(0, 3))).toEqual([0, 0, 0]);
   });
 
   it('rejects unsupported extensions', async () => {
@@ -681,6 +876,94 @@ describe('parsePointCloud (auto-detect)', () => {
       parsePointCloud(textFile('# this has no numbers\n', 'a.weird')),
     ).rejects.toThrow();
   });
+
+  // PTX is numeric ASCII, so the XYZ fallback used to ACCEPT this file and
+  // produce a silently wrong cloud: the 4x4 transform rows became four junk
+  // points at the origin and the `x y z intensity r g b` data row read its
+  // colour from (intensity, r, g). It is now genuinely supported, and because
+  // the raster + scanner pose only mean anything to the backend converter it is
+  // octree-only (like E57) rather than parsed here.
+  const PTX_SAMPLE = [
+    '1024', '1024',
+    '0 0 0', '1 0 0', '0 1 0', '0 0 1',
+    '1 0 0 0', '0 1 0 0', '0 0 1 0', '0 0 0 1',
+    '0.1 0.2 0.3 0.5 10 20 30',
+    '',
+  ].join('\n');
+
+  it('does not hand a path-less PTX to the XYZ parser', async () => {
+    // A Blob with no on-disk path can't reach the backend converter, and the
+    // XYZ fallback would mangle it. Refuse rather than import junk.
+    const file = textFile(PTX_SAMPLE, 'scan.ptx');
+    await expect(parsePointCloud(file)).rejects.toThrow(/PTX structured scan.*read from disk/s);
+  });
+
+  it('lists PTX among the supported formats', () => {
+    expect(POINT_CLOUD_FORMATS.map(f => f.ext)).toContain('.ptx');
+  });
+
+  it('names the other scanner formats it cannot read', async () => {
+    for (const [ext, needle] of [['fls', /FARO/], ['rcs', /ReCap/], ['zfs', /Z\+F/],
+                                 ['ptg', /PTG structured scan/]] as const) {
+      await expect(parsePointCloud(textFile('x', `scan.${ext}`))).rejects.toThrow(needle);
+    }
+  });
+
+  it('rejects an unknown binary extension from the head, not a full parse', async () => {
+    const bytes = new Uint8Array(4096);
+    bytes[0] = 0x89;
+    bytes[3] = 0x00;
+    const file = new File([bytes], 'scan.zzz');
+    const textSpy = vi.spyOn(file, 'text');
+    await expect(parsePointCloud(file)).rejects.toThrow(/Unsupported file format: \.zzz/);
+    expect(textSpy).not.toHaveBeenCalled();
+  });
+
+  it('lists every supported format in the rejection message', async () => {
+    await expect(parsePointCloud(textFile('nope nope\n', 'a.zzz'))).rejects.toThrow(
+      new RegExp(POINT_CLOUD_FORMATS.map(f => f.name).join(', ')),
+    );
+  });
+
+  it('rejects a numeric file with fewer than three columns', async () => {
+    await expect(parsePointCloud(textFile('1 2\n3 4\n5 6\n', 'a.zzz'))).rejects.toThrow(
+      /Unsupported file format: \.zzz/,
+    );
+  });
+});
+
+describe('looksLikeAsciiPointCloud', () => {
+  it('accepts a delimited coordinate table with a header row', async () => {
+    const body = Array.from({ length: 50 }, (_, i) => `${i} ${i + 1} ${i + 2}`).join('\n');
+    expect(await looksLikeAsciiPointCloud(textFile(`X,Y,Z\n${body}\n`, 'a.zzz'))).toBe(true);
+  });
+
+  it('accepts comma / tab / semicolon delimiters', async () => {
+    expect(await looksLikeAsciiPointCloud(textFile('1,2,3\n4,5,6\n', 'a.zzz'))).toBe(true);
+    expect(await looksLikeAsciiPointCloud(textFile('1\t2\t3\n4\t5\t6\n', 'a.zzz'))).toBe(true);
+    expect(await looksLikeAsciiPointCloud(textFile('1;2;3\n4;5;6\n', 'a.zzz'))).toBe(true);
+  });
+
+  it('rejects prose, markup and comment-only files', async () => {
+    expect(await looksLikeAsciiPointCloud(textFile('# only comments\n# here\n', 'a.zzz'))).toBe(false);
+    expect(await looksLikeAsciiPointCloud(textFile('<scene><n>1 2 3</n></scene>\n', 'a.zzz'))).toBe(false);
+    expect(await looksLikeAsciiPointCloud(textFile('hello there friend\n'.repeat(20), 'a.zzz'))).toBe(false);
+  });
+
+  it('rejects binary content', async () => {
+    const bytes = new Uint8Array([0x4c, 0x41, 0x53, 0x46, 0x00, 0x01, 0x02, 0xff, 0xfe]);
+    expect(await looksLikeAsciiPointCloud(new File([bytes], 'a.zzz'))).toBe(false);
+  });
+
+  it('only reads the first 64 KB of a large file', async () => {
+    const line = '1.5 2.5 3.5\n';
+    const file = textFile(line.repeat(40_000), 'big.zzz'); // ~480 KB
+    const sliceSpy = vi.spyOn(file, 'slice');
+    const textSpy = vi.spyOn(file, 'text');
+    expect(await looksLikeAsciiPointCloud(file)).toBe(true);
+    expect(sliceSpy).toHaveBeenCalledWith(0, 64 * 1024);
+    expect(textSpy).not.toHaveBeenCalled();
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -734,7 +1017,46 @@ describe('parsePointCloudFromPath', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain('/api/cloud/session/create');
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null });
+    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null, role_overrides: null });
+  });
+
+  it('forwards the wizard column plan, carrying a skipped column as role "skip"', async () => {
+    // The wizard's Import checkbox becomes role 'skip' on the ASCII path. It has
+    // to survive serialisation, or the untick is silently ignored and the field
+    // still lands in the octree.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    await parsePointCloudFromPath('/p/a.xyz', null, {
+      columns: [
+        { index: 0, role: 'x' }, { index: 1, role: 'y' }, { index: 2, role: 'z' },
+        { index: 3, role: 'skip' },
+      ],
+      rgbIs255: true,
+    });
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.column_plan.columns[3]).toMatchObject({ index: 3, role: 'skip' });
+    expect(body.column_plan.rgb_is_255).toBe(true);
+  });
+
+  it('forwards droppedSlugs as drop_slugs for in-file formats', async () => {
+    // LAS/PLY/E57 fix their own layout, so an unticked column can't ride the
+    // positional plan — it travels as a slug list instead.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    await parsePointCloudFromPath('/p/cloud.las', null, null, undefined, null, undefined,
+      null, null, undefined, ['Deviation', 'amplitude']);
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.drop_slugs).toEqual(['Deviation', 'amplitude']);
+    // No plan is invented for an in-file format.
+    expect(body.column_plan).toBeNull();
+  });
+
+  it('sends drop_slugs as null when nothing was unticked', async () => {
+    // An empty list must not reach the wire as [] — the backend treats null as
+    // "drop nothing", and an empty array would be a needless difference.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    await parsePointCloudFromPath('/p/cloud.las', null, null, undefined, null, undefined,
+      null, null, undefined, []);
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.drop_slugs).toBeNull();
   });
 
   it('forwards ascii_format to create_cloud_session when provided', async () => {
@@ -760,7 +1082,8 @@ describe('parsePointCloudFromPath', () => {
 
   // PLY / PCD / LAS / LAZ now route to create_cloud_session like the XYZ family —
   // every path-backed format produces a session-backed streaming octree.
-  it.each(['/p/cloud.ply', '/p/cloud.pcd', '/p/cloud.las', '/p/cloud.laz'])(
+  it.each(['/p/cloud.ply', '/p/cloud.pcd', '/p/cloud.las', '/p/cloud.laz',
+           '/p/cloud.e57', '/p/cloud.ptx'])(
     'routes %s to create_cloud_session',
     async (path) => {
       const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
@@ -797,5 +1120,93 @@ describe('format predicates and lists', () => {
       ...MESH_FORMATS,
       ...SKELETON_FORMATS,
     ]);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// parsePointCloudsFromPath — the plural path. A multi-scan E57 / multi-block
+// PTX becomes one cloud PER SCAN POSITION, because a scan is defined by its
+// pose and merging positions leaves one origin standing in for all of them.
+// ────────────────────────────────────────────────────────────────────────
+
+describe('parsePointCloudsFromPath', () => {
+  const sessionMeta = (id: string, overrides: Record<string, unknown> = {}) => ({
+    session_id: id,
+    cache_id: id.padEnd(40, 'z'),
+    cache_dir: `/cache/${id}`,
+    hierarchy_step_size: 5,
+    point_count: 2,
+    spacing: 0.1,
+    scale: [0.001, 0.001, 0.001],
+    offset: [0, 0, 0],
+    bounds: { min: [1, 2, 3], max: [4, 5, 6] },
+    attributes: [{ name: 'position', size: 12, type: 'int32', num_elements: 3 }],
+    ...overrides,
+  });
+
+  const multiResponse = (scans: unknown[]) => new Response(
+    JSON.stringify({ scans, scan_count: scans.length }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+
+  it('returns one entry per scan position, each with its own session and params', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'scan — scan 1',
+        session: sessionMeta('s0', { scan_params: { origin: [1, 2, 3], n_theta: 8 } }) },
+      { scan_index: 1, name: 'scan — scan 2',
+        session: sessionMeta('s1', { scan_params: { origin: [9, 9, 9], n_theta: 7 } }) },
+    ]));
+    const out = await parsePointCloudsFromPath('/abs/scan.ptx');
+    expect(out).toHaveLength(2);
+    expect(out.map(o => o.name)).toEqual(['scan — scan 1', 'scan — scan 2']);
+    expect(out.map(o => o.scanIndex)).toEqual([0, 1]);
+    // Each cloud is backed by ITS OWN session and carries ITS OWN scan params —
+    // that separation is the entire point of the split.
+    expect(out.map(o => o.data.octree?.sessionId)).toEqual(['s0', 's1']);
+    expect(out[0].data.octree?.scanParams?.n_theta).toBe(8);
+    expect(out[1].data.octree?.scanParams?.n_theta).toBe(7);
+    expect(out[1].data.octree?.scanParams?.origin).toEqual([9, 9, 9]);
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/api/cloud/session/create-multi');
+  });
+
+  it('returns a single element for an ordinary single-scan source', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'cloud.xyz', session: sessionMeta('only') },
+    ]));
+    const out = await parsePointCloudsFromPath('/abs/cloud.xyz');
+    expect(out).toHaveLength(1);
+    // The full basename, unchanged — this string becomes the scan's label.
+    expect(out[0].name).toBe('cloud.xyz');
+  });
+
+  it('keeps the positions that imported when one of them failed', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'a', error: 'octree build failed' },
+      { scan_index: 1, name: 'b', session: sessionMeta('ok') },
+    ]));
+    const out = await parsePointCloudsFromPath('/abs/scan.ptx');
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe('b');
+  });
+
+  it('surfaces the real reason when every position failed', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'a', error: 'grid was unreadable' },
+      { scan_index: 1, name: 'b', error: 'grid was unreadable' },
+    ]));
+    await expect(parsePointCloudsFromPath('/abs/scan.ptx'))
+      .rejects.toThrow(/grid was unreadable/);
+  });
+
+  it('does not use the multi endpoint for a format that cannot fan out', async () => {
+    // A path-less / non-octree route is inherently 1:1, so it must go through
+    // the singular path rather than asking the backend to split it.
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    const out = await parsePointCloudsFromPath('/abs/cloud.obj').catch(() => null);
+    for (const call of fetchSpy.mock.calls) {
+      expect(String(call[0])).not.toContain('create-multi');
+    }
+    expect(out === null || out.length === 1).toBe(true);
   });
 });

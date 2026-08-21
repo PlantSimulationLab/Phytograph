@@ -174,9 +174,55 @@ def test_estimate_class_threshold_finds_the_gap():
         rng.uniform(2.0, 5.0, 120_000),                  # canopy
     ])
     threshold, meta = main._estimate_class_threshold(heights, 0.5, fallback=0.5)
-    assert meta["method"] == "knee"
+    # Either rule may claim this shape — the gap here is genuinely empty, so the
+    # density reaches the tail before any valley is found and `tail` answers.
+    # What matters is WHERE the cut lands, not which rule produced it.
+    assert meta["method"] in ("knee", "tail")
     # Must clear the ground band (~3 sigma) and stay under the canopy base.
     assert 0.35 <= threshold < 2.0, meta
+
+
+@requires_csf
+def test_auto_class_threshold_survives_a_differently_settled_cloth():
+    """The estimate must come from the histogram's SHAPE, not from one bin.
+
+    Regression test for a bimodality that made this endpoint's answer depend
+    on floating-point luck. Perturbing the cloud far below the measurement
+    scale re-settles CSF's cloth slightly, and the old single-step knee test
+    then chose between a shallow ripple at ~0.021 and the true knee at ~0.051
+    — collapsing to the ripple in 27 of 60 runs. 0.021 is barely above the
+    0.02 clip floor, i.e. back at the extent-scaled seed auto mode exists to
+    beat, costing 8 points of ground recall (0.997 -> 0.920).
+
+    It surfaced as a macOS-passes/Linux-fails CI failure, but it is NOT
+    platform-specific — it reproduces on macOS at the same rate. The
+    platforms merely rolled the dice differently. Hence the sample count: at
+    a ~45% per-run failure rate, 8 runs on a lucky seed pass while the bug is
+    live (which is exactly what happened), so use enough draws that surviving
+    by luck is not plausible."""
+    points, _ = _load_fixture()
+    # Seed 5 is chosen deliberately: swept over 40 seeds x 24 settles (960
+    # cloths), persistence is in-band on all of them, while the single-step
+    # rule fails on 22 of the 40 seeds and a fixed 10% rise-margin variant
+    # still fails on this one (3 of 24). A seed that no wrong rule fails would
+    # test nothing.
+    rng = np.random.default_rng(5)
+    seen = []
+    for _ in range(24):
+        # Displacement ~0.3 mm: three orders of magnitude below the ~5 cm
+        # threshold being estimated, and well under the fixture's own noise.
+        jittered = points + rng.normal(0.0, 3e-4, size=points.shape)
+        meta: dict = {}
+        main.segment_ground(
+            jittered, cloth_resolution=0.05, rigidness=3,
+            class_threshold=0.02, auto_class_threshold=True, meta=meta,
+        )
+        seen.append(meta["class_threshold"])
+
+    assert all(0.03 <= t <= 0.08 for t in seen), seen
+    # And genuinely stable, not merely in-band by luck: the observed spread is
+    # ~0.007, versus ~0.035 when the estimate is flipping between the two modes.
+    assert max(seen) - min(seen) < 0.015, seen
 
 
 def test_estimate_class_threshold_without_vegetation():
@@ -187,6 +233,75 @@ def test_estimate_class_threshold_without_vegetation():
         rng.normal(0.0, 0.10, 200_000), 0.5, fallback=0.5)
     assert meta["method"] == "tail"
     assert threshold >= 0.30, meta
+
+
+def test_estimate_class_threshold_on_a_cleanly_separated_scene():
+    """A SHARP ground mode with no valley below the canopy must not send the
+    knee walk out into the canopy.
+
+    Regression test for the `tree_1` reference scene (a single tree on flat,
+    densely-sampled ground). Measured from the settled cloth there, ground
+    spans -0.015..+0.021 and non-ground starts at +0.543 — a 25x gap, i.e. the
+    easiest possible separation. The estimator nevertheless returned 0.762
+    against an oracle optimum of 0.225, which swept ~100k trunk points into
+    the ground class as a single contiguous column ~1.7 m tall.
+
+    WHY it failed: the knee rule looks for a valley the density CLIMBS OUT OF.
+    On a clean scene there is no valley — the histogram decays monotonically
+    from the ground mode and only turns back up once it reaches canopy mass.
+    Worse, a sharp mode (HWHM ~0.010 m) clamps the smoothing window to its
+    floor, so the persistence test only looks ~0.03 m ahead and rejects every
+    honest candidate for "dips back" while the curve is still falling. The
+    walk then runs on until the canopy's rise finally satisfies it.
+
+    The `tail` rule already handles this shape correctly (see
+    `test_estimate_class_threshold_without_vegetation`) — it just never got to
+    run, because `knee` claimed a match first. So the fix is not a new rule
+    but a guard: a knee is only real if the density genuinely flattened out
+    before it, rather than still being in free-fall from the mode.
+
+    Mirrors tree_1's statistics rather than shipping a 29 M-point fixture."""
+    rng = np.random.default_rng(0)
+    heights = np.concatenate([
+        rng.normal(0.0, 0.010, 3_000_000),        # sharp ground band
+        rng.exponential(0.15, 60_000) + 0.02,     # sparse decaying near-ground
+        rng.uniform(0.8, 6.0, 400_000),           # canopy, well clear above
+    ])
+    threshold, meta = main._estimate_class_threshold(heights, 0.05, fallback=0.02)
+    # Must clear the ground band (3 sigma = 0.03) but stay far below the canopy
+    # base at 0.8. The pre-fix value was 0.709 — inside the canopy.
+    assert 0.03 <= threshold <= 0.30, meta
+
+
+def test_desnag_cloth_pulls_down_a_snagged_node():
+    """A node hung up on a trunk is pulled back to local terrain; flat terrain
+    and genuine relief are left alone.
+
+    Models the `tree_1` reference, where 19 of 29,920 nodes (0.06%) rode up to
+    1.19 m on a trunk while the rest sat at -0.08 m. Bilinear interpolation
+    spreads each bad node across its neighbourhood, so that handful of nodes
+    put ~125k trunk points into the ground class."""
+    ys, xs = np.mgrid[0:40, 0:40]
+    flat = np.zeros((40, 40))
+    nodes = np.column_stack([xs.ravel().astype(float), ys.ravel().astype(float), flat.ravel()])
+    nodes[20 * 40 + 20, 2] = 1.2                     # one snagged node
+    out, n = main._desnag_cloth(nodes)
+    assert n == 1
+    assert out[20 * 40 + 20, 2] == pytest.approx(0.0, abs=1e-9)
+
+    # A smooth slope is terrain, not a snag — it must survive untouched.
+    slope = np.column_stack([xs.ravel().astype(float), ys.ravel().astype(float),
+                             0.25 * xs.ravel()])
+    _, n_slope = main._desnag_cloth(slope)
+    assert n_slope == 0
+
+    # A node sitting LOW is never a snag (one-sided test): flattening those
+    # would erase real relief.
+    dip = nodes.copy()
+    dip[20 * 40 + 20, 2] = 0.0
+    dip[10 * 40 + 10, 2] = -1.2
+    _, n_dip = main._desnag_cloth(dip)
+    assert n_dip == 0
 
 
 @pytest.mark.parametrize("bad", [
@@ -232,10 +347,10 @@ def test_segment_ground_endpoint_inline(client):
 
 
 @requires_csf
-def test_segment_ground_endpoint_from_source(client):
+def test_segment_ground_endpoint_from_source(client, make_file_session):
     res = client.post(
         "/api/segment/ground",
-        json={"source": {"source_path": str(FIXTURE), "ascii_format": ASCII_FORMAT}},
+        json={"source": {"session_id": make_file_session(str(FIXTURE), ASCII_FORMAT)}},
     )
     assert res.status_code == 200, res.text
     body = res.json()

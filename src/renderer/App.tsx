@@ -5,13 +5,23 @@ import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
 import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
-import { scanDisplayName, type Scan } from "./lib/scan";
+import { scanDisplayName, type Scan, allocateScanColor } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
-import { parsePointCloud, parsePointCloudFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree } from "./lib/pointCloudParsers";
-import { importTexturedMesh, type MeshImportResponse, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession } from "./utils/backendApi";
+import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
+import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
+import { isQsmCsvFile } from "./lib/qsmImport";
+
+// A user cancel is not a failure: it must never land in the per-file `errors[]`
+// list or raise an error toast. Covers all three shapes the abort can take — the
+// backend's terminal `cancelled` marker, an already-aborted signal, and the
+// DOMException fetch throws when the request is torn down mid-flight.
+function isImportCancel(err: unknown, signal?: AbortSignal): boolean {
+  return err instanceof ScanCancelledError
+    || signal?.aborted === true
+    || (err instanceof Error && err.name === 'AbortError');
+}
 import { useScene } from "./state/sceneStore";
-import { plantResponseToMeshData } from "./lib/plantMeshData";
 import { PointCloudImportWizard, type WizardScanInput, type WizardResult } from "./components/PointCloudImportWizard";
 import { registerCategoricalSlug, registerContinuousSlug } from "./lib/classification";
 import { parseHeliosScanXml, HeliosXmlParseError } from "./lib/heliosScanXml";
@@ -19,18 +29,28 @@ import { resolveTargets } from "./lib/bulkActions";
 import { FeedbackDialog } from "./components/FeedbackDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
+import {
+  RieglProjectDialog,
+  type RieglProjectSelection,
+} from "./components/RieglProjectDialog";
 import StatusPill from "./components/StatusPill";
 import { getSettings } from "./lib/store";
+import { isRieglProjectPath, parseRieglProgress } from "./lib/rieglProject";
 import type { FeedbackMode } from "./lib/feedback";
 
 // Extensions that go through the backend's Potree 2.0 octree pipeline when
 // we have a disk path. Every supported point-cloud format is here; only inputs
 // without an on-disk path (Blob/test fixtures) fall back to the in-renderer
 // flat-array parsers.
-const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
+// Mirrors OCTREE_PATH_EXTENSIONS in pointCloudParsers.ts — these two must stay
+// in step. This set decides whether an import routes to the wizard + backend
+// octree at all, so an extension missing here never reaches the parser's list:
+// 'ptx' was added there and not here, and PTX imports silently fell through to
+// the flat in-renderer parser instead of opening the wizard.
+const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57', 'ptx']);
 import logoImage from "./assets/logo.png";
 
-type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml';
+type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml' | 'qsm';
 
 // Optional overrides for an import. Menu-driven imports (which go through the
 // native Electron dialog, not the renderer dropzone) pass the import type and
@@ -190,6 +210,23 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // File → Import menu) is in flight. Reuses BulkImportProgress so every
   // import pathway shows the same spinner + bar + filename modal.
   const [importProgress, setImportProgress] = useState<BulkImportProgressState | null>(null);
+  // Cancellation for the in-flight import. The abort tears down the fetch; the
+  // run id is what /api/cancel/{id} targets so the BACKEND actually stops (and
+  // kills its PotreeConverter child) instead of finishing the work into a
+  // dismissed dialog. `importCancelledRef` stops the sequential multi-file loop
+  // between files — aborting one file's fetch says nothing about the next.
+  const importAbortRef = useRef<AbortController | null>(null);
+  const importRunIdRef = useRef<string | null>(null);
+  const importCancelledRef = useRef(false);
+  const cancelImport = useCallback(() => {
+    importCancelledRef.current = true;
+    // Order matters (mirrors cancelScan in PointCloudViewer): tell the backend to
+    // stop and free its memory FIRST, then tear down the fetch. Aborting first
+    // can drop the connection before the cancel POST lands; the backend's own
+    // disconnect detection is the backstop either way.
+    if (importRunIdRef.current) void cancelRun(importRunIdRef.current);
+    importAbortRef.current?.abort();
+  }, []);
   // Progress shown over the viewer while a Stitch Clouds merge runs in the
   // backend (concatenate sessions + rebuild octree). Reuses the same modal.
   const [stitchProgress, setStitchProgress] = useState<BulkImportProgressState | null>(null);
@@ -329,21 +366,33 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     resolve?.(results);
   }, []);
 
-  // Build a Scan from a finished wizard result: run the real import with the
-  // chosen column plan, register any categorical slugs, and return the Scan.
-  // Shared by the single-file, multi-file, and XML import paths.
-  const buildScanFromWizardResult = useCallback(async (
+  // Build the Scans from a finished wizard result: run the real import with the
+  // chosen column plan, register any categorical slugs, and return one Scan PER
+  // SCAN POSITION. Shared by the single-file, multi-file, and XML import paths.
+  //
+  // Plural because a multi-scan source (a multi-block PTX, a multi-scan E57) is
+  // decoded position by position in the backend, each with its own session,
+  // octree and pose. A scan is defined by its pose, so merging positions would
+  // leave one origin standing in for all of them — which breaks every
+  // pose-dependent tool downstream (miss recovery, LAD, registration). Every
+  // other format yields exactly one element, so callers never branch on it.
+  const buildScansFromWizardResult = useCallback(async (
     result: WizardResult,
-    color: string,
-  ): Promise<Scan> => {
-    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, worldShift } = result;
+    // A GENERATOR, not a colour: a multi-scan file needs a distinct colour per
+    // position, and only the caller knows the scene's palette cursor.
+    nextColor: () => string,
+    // Cancellation + per-stage progress for this one file's import. Optional so
+    // callers that don't offer a cancel (none, currently) still work.
+    opts?: ImportProgressOptions,
+  ): Promise<Scan[]> => {
+    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, droppedSlugs, worldShift } = result;
     // Far-field miss-detection threshold is a user setting; thread it into the
     // import so the backend's distance fallback honours it (the primary
     // target_index==99 signal ignores it).
     const missDistanceThreshold = (await getSettings()).missDistanceThreshold;
-    const data = await parsePointCloudFromPath(
+    const positions = await parsePointCloudsFromPath(
       input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
-      missDistanceThreshold,
+      missDistanceThreshold, null, opts, droppedSlugs,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
     for (const slug of continuousSlugs) registerContinuousSlug(slug);
@@ -353,6 +402,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // import creates a Scan with as much of ScanParameters filled as the format
     // recorded — fields the file omitted stay at their default. Plain formats
     // (XYZ/LAS/PLY/...) carry nothing, so params stays undefined as before.
+    return positions.map(({ data, name }) => {
     const fileScanParams = data.octree?.scanParams ?? null;
     const baseParams = input.params
       ?? (fileScanParams ? scanParametersFromFile(fileScanParams) : undefined);
@@ -368,14 +418,21 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       : baseParams;
     return {
       id: crypto.randomUUID(),
-      label: input.label ?? data.fileName ?? 'Scan',
+      // `name` already reads `<stem> — scan N` for a multi-scan source and the
+      // bare stem for a single one, so it is the right label whenever the file
+      // fanned out. An explicit wizard/XML label still wins, but only for a
+      // single position — applying it to every position would give a multi-scan
+      // import N identically-named scans.
+      label: (positions.length === 1 ? input.label : undefined) ?? name ?? data.fileName ?? 'Scan',
       visible: true,
-      color: input.color ?? color,
+      // Likewise: one explicit colour can only claim a single position.
+      color: (positions.length === 1 ? input.color : undefined) ?? nextColor(),
       data,
       params,
       sourcePath: input.path,
       asciiFormat,
     };
+    });
   }, []);
 
   // Import a Helios scan XML (scans + grids) from disk, routing into the same
@@ -418,6 +475,76 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     await importRefsRef.current.bulkImportScans(parsed.scans, parsed.grids, path);
   }, []);
 
+  // The worldShift an imported QSM should be placed against. Point clouds loaded
+  // from projected/UTM sources are stored shifted toward the origin (for float
+  // precision) and rendered in that shifted frame, while QSM cylinders are always
+  // world-frame — so a QSM dropped into such a scene has to subtract the same
+  // shift or it lands hundreds of kilometres away. Every shifted scan in a scene
+  // shares one shift (it's per-scene georeferencing, not per-file), so the first
+  // non-zero one is the scene's frame. Returns null for an unshifted scene, which
+  // renders unchanged.
+  const qsmWorldShiftForScene = useCallback((): [number, number, number] | null => {
+    for (const scan of scans) {
+      const ws = scan.data?.octree?.worldShift;
+      if (ws && (ws[0] !== 0 || ws[1] !== 0 || ws[2] !== 0)) {
+        return [ws[0], ws[1], ws[2]];
+      }
+    }
+    return null;
+  }, [scans]);
+
+  // Import a QSM from a per-cylinder CSV (the inverse of the QSM CSV export).
+  // The backend parses the table and recomputes the metrics, returning the same
+  // shape /api/qsm/build does, so the entry we build here is indistinguishable
+  // from a freshly built one — including the shoot id / rank the viewer colors by.
+  // Needs an on-disk `path` because the parsing happens backend-side.
+  // Returns true when a QSM was added, so the multi-file loop can count it.
+  const importQsmCsv = useCallback(async (file: File, path: string | undefined): Promise<boolean> => {
+    if (!importRefsRef.current) {
+      showToast({ title: 'Viewer not ready for QSM import', type: 'error' });
+      return false;
+    }
+    if (!path) {
+      showToast({
+        title: `Can't import ${file.name}: no file path available. A QSM CSV must be ` +
+          `opened from disk.`,
+        type: 'error',
+        duration: 0,
+      });
+      return false;
+    }
+    try {
+      const resp = await importQSMCsv(path);
+      if (!resp.success) throw new Error(resp.error || 'QSM import failed');
+      importRefsRef.current.importQSM({
+        // No originating scan: the CSV carries absolute world-frame coordinates
+        // and no provenance, so anchor to the same 'imported' sentinel meshes use
+        // and show the file name instead of a source cloud's.
+        sourceCloudId: 'imported',
+        sourceLabel: baseNameForLabel(file.name),
+        // Cylinders are world-frame, but a scene loaded from projected/UTM data
+        // renders in a SHIFTED frame — so without this an imported QSM lands
+        // hundreds of km from the cloud it describes. There's no source scan to
+        // read the shift from, so take it from the scene the QSM is landing in.
+        worldShift: qsmWorldShiftForScene(),
+        cylinders: resp.cylinders,
+        shoots: resp.shoots,
+        metrics: resp.metrics ?? null,
+        visible: true,
+      });
+      setSettingsOpen(false);
+      showToast({
+        title: `Loaded QSM with ${resp.n_cylinders.toLocaleString()} cylinders from ${file.name}`,
+        type: 'success',
+      });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast({ title: `QSM import failed: ${msg}`, type: 'error', duration: 0 });
+      return false;
+    }
+  }, [qsmWorldShiftForScene]);
+
   const handleFileUpload = useCallback(async (file: File, opts?: ImportOptions) => {
     setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
 
@@ -441,6 +568,24 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           catch { xmlPath = undefined; }
         }
         await importScanXml(file, xmlPath);
+        return; // handled — the finally{} below still resets pendingImportTypeRef
+      }
+
+      // QSM CSV short-circuit. `.csv` is an ambiguous container already claimed by
+      // the point-cloud path, so an auto-detected import sniffs the header (the
+      // same trick .ply uses via plyHasFaces) — a cylinder table has branchID +
+      // branchOrder, which no point-cloud CSV carries. A forced 'qsm' import skips
+      // the sniff so a non-standard dialect can still be opened deliberately.
+      const csvExt = file.name.toLowerCase().split('.').pop() ?? '';
+      if (importType === 'qsm'
+        || (importType === 'auto' && csvExt === 'csv' && (await isQsmCsvFile(file)))) {
+        setImportProgress(null);
+        let qsmPath: string | undefined = explicitPath;
+        if (!qsmPath) {
+          try { qsmPath = window.electronAPI?.getPathForFile?.(file) || undefined; }
+          catch { qsmPath = undefined; }
+        }
+        await importQsmCsv(file, qsmPath);
         return; // handled — the finally{} below still resets pendingImportTypeRef
       }
 
@@ -470,9 +615,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       }
 
       if (shouldImportAsMesh) {
-        // The default hint talks about "large scans" — wrong for a mesh. Swap
-        // in mesh wording while keeping the same in-flight label.
-        setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, hint: 'Reading mesh from disk…' });
+        // The default header and hint both talk about scans — wrong for a mesh.
+        // Swap in mesh wording while keeping the same in-flight label.
+        setImportProgress({
+          current: 1, total: 1, label: `Loading ${file.name}`,
+          title: 'Importing mesh…', hint: 'Reading mesh from disk…',
+        });
         if (!importRefsRef.current) {
           showToast({ title: 'Viewer not ready for mesh import', type: 'error' });
         } else {
@@ -492,10 +640,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             }
           }
 
-          let backendMesh: MeshImportResponse | null = null;
+          let backendMesh: MeshImportResult | null = null;
           // True when the backend importer was attempted for a materials-capable
-          // file (OBJ/PLY with a disk path) but threw, so the local fallback
-          // below will produce geometry without the embedded materials.
+          // file (OBJ/PLY with a disk path) but the backend was UNREACHABLE, so
+          // the local fallback below will produce geometry without the embedded
+          // materials. A backend that answered with an error is not this case.
           let materialsDropped = false;
           if ((ext === 'obj' || ext === 'ply') && objPath) {
             try {
@@ -507,25 +656,31 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               // whenever it succeeds; fall back locally only on error.
               if (resp.success) backendMesh = resp;
             } catch (e) {
-              console.warn('Backend mesh import failed, falling back to local parse:', e);
+              // Only a genuinely unreachable backend justifies the silent local
+              // fallback. If the backend answered and failed, surface THAT error:
+              // swallowing it here used to report "the backend was unavailable"
+              // for a backend that was up, then cascade into a second, unrelated
+              // error from the local parser (binary PLY can't be parsed in-
+              // renderer at all, so the fallback could never have succeeded).
+              if (!isBackendUnreachable(e)) throw e;
+              console.warn('Backend unreachable, falling back to local mesh parse:', e);
               materialsDropped = true;
             }
           }
 
           if (backendMesh) {
-            const { data, plantMaterials } = plantResponseToMeshData(backendMesh);
             importRefsRef.current.importMesh({
               sourceCloudId: 'imported',
-              data,
-              plantMaterials,
+              data: backendMesh.data,
+              plantMaterials: backendMesh.plantMaterials,
               visible: true,
               color: getNextColor(),
               method: 'delaunay',
               name: baseNameForLabel(file.name),
             });
             setSettingsOpen(false);
-            const texturedLabel = backendMesh.has_textures ? 'textured mesh' : 'mesh';
-            showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.triangle_count.toLocaleString()} triangles from ${file.name}`, type: 'success' });
+            const texturedLabel = backendMesh.hasTextures ? 'textured mesh' : 'mesh';
+            showToast({ title: `Loaded ${texturedLabel} with ${backendMesh.data.triangleCount.toLocaleString()} triangles from ${file.name}`, type: 'success' });
           } else {
             const meshData = await parseMesh(file);
             importRefsRef.current.importMesh({
@@ -546,7 +701,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             setSettingsOpen(false);
             if (materialsDropped) {
               showToast({
-                title: `Imported geometry from ${file.name}, but couldn't load its materials — the backend was unavailable. Re-import to apply colors/textures.`,
+                title: `Imported geometry from ${file.name}, but couldn't load its materials — could not reach the backend. Re-import once it's running to apply colors/textures.`,
                 type: 'warning',
                 duration: 0,
               });
@@ -556,8 +711,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           }
         }
       } else if (shouldImportAsSkeleton) {
-        // Mesh-style hint; "large scans" wording is wrong for a skeleton too.
-        setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, hint: 'Reading skeleton from disk…' });
+        // Mesh-style header/hint; the scan wording is wrong for a skeleton too.
+        setImportProgress({
+          current: 1, total: 1, label: `Loading ${file.name}`,
+          title: 'Importing skeleton…', hint: 'Reading skeleton from disk…',
+        });
         // Parse as skeleton
         const skeletonData = await parseSkeleton(file);
         if (importRefsRef.current) {
@@ -607,12 +765,35 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           setImportProgress(null);
           const results = await openImportWizard([{ path: sourcePath, fileName: file.name }]);
           if (!results || results.length === 0) return; // user cancelled
-          setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}` });
-          const newScan = await buildScanFromWizardResult(results[0], getNextColor());
-          addScanTx(newScan, 'Import scan');
-          setSelectedScanIds(new Set([newScan.id]));
+          importCancelledRef.current = false;
+          const controller = new AbortController();
+          importAbortRef.current = controller;
+          setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, fraction: null });
+          let imported: Scan[];
+          try {
+            imported = await buildScansFromWizardResult(results[0], getNextColor, {
+              signal: controller.signal,
+              onProgress: (fraction, message) =>
+                setImportProgress(p => (p ? { ...p, fraction, hint: message || undefined } : p)),
+              onRunId: (runId) => { importRunIdRef.current = runId; },
+            });
+          } catch (err) {
+            // The user asked for this — no error toast. The modal closing (in
+            // the `finally` below) is the feedback.
+            if (isImportCancel(err, controller.signal)) return;
+            throw err;
+          }
+          // One file, but possibly several scan positions out of it.
+          addScansTx(imported, imported.length > 1 ? 'Import scans' : 'Import scan');
+          setSelectedScanIds(new Set(imported.map(sc => sc.id)));
           setSettingsOpen(false);
-          showToast({ title: `Loaded ${newScan.data!.pointCount.toLocaleString()} points from ${file.name}`, type: 'success' });
+          const total = imported.reduce((n, sc) => n + (sc.data?.pointCount ?? 0), 0);
+          showToast({
+            title: imported.length > 1
+              ? `Loaded ${total.toLocaleString()} points as ${imported.length} scan positions from ${file.name}`
+              : `Loaded ${total.toLocaleString()} points from ${file.name}`,
+            type: 'success',
+          });
         } else {
           // No on-disk path (Blob/test fixture): the wizard can't preview, so
           // fall back to the in-renderer flat parser with auto-detection.
@@ -650,10 +831,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       showToast({ title: message, type: 'error' });
     } finally {
       setImportProgress(null);
+      importAbortRef.current = null;
+      importRunIdRef.current = null;
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
-  }, [getNextColor, openImportWizard, buildScanFromWizardResult, importScanXml, materializeDroppedFile]);
+  }, [getNextColor, openImportWizard, buildScansFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[], opts?: ImportOptions) => {
@@ -665,6 +848,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const materialsDroppedFiles: string[] = [];
     let meshCount = 0;
     let skeletonCount = 0;
+    let qsmCount = 0;
     let colorIndex = 0;
 
     const importType = opts?.importType ?? pendingImportTypeRef.current;
@@ -708,6 +892,21 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           continue;
         }
 
+        // QSM CSV (forced 'qsm', or an auto-detected `.csv` whose header is a
+        // cylinder table). Imported inline like meshes/skeletons and counted for
+        // the summary toast, so it never reaches the point-cloud wizard below.
+        const csvExt = file.name.toLowerCase().split('.').pop() ?? '';
+        if (importType === 'qsm'
+          || (importType === 'auto' && csvExt === 'csv' && (await isQsmCsvFile(file)))) {
+          let qsmPath: string | undefined = explicitPaths?.[fileIdx];
+          if (!qsmPath) {
+            try { qsmPath = window.electronAPI?.getPathForFile?.(file) || undefined; }
+            catch { qsmPath = undefined; }
+          }
+          if (await importQsmCsv(file, qsmPath)) qsmCount++;
+          continue;
+        }
+
         // Determine how to import based on user selection or auto-detect
         let shouldImportAsMesh = false;
         let shouldImportAsSkeleton = false;
@@ -731,6 +930,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         }
 
         if (shouldImportAsMesh) {
+          // Now that the file's type is known, correct the header the loop set
+          // generically above — "Importing scans…" is wrong for a mesh. A mixed
+          // batch retitles per file as it moves through them.
+          setImportProgress(p => (p ? { ...p, title: 'Importing mesh…' } : p));
           // Path-backed PLY/OBJ prefer the backend importer (binary PLY + per-vertex
           // color for PLY; MTL/textures for OBJ); everything else parses locally.
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
@@ -743,7 +946,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             }
           }
 
-          let backendMesh: MeshImportResponse | null = null;
+          let backendMesh: MeshImportResult | null = null;
           if ((ext === 'obj' || ext === 'ply') && meshPath) {
             try {
               const resp = await importTexturedMesh(meshPath);
@@ -752,17 +955,22 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               // colors, textures, binary PLY). Local parse is the fallback.
               if (resp.success) backendMesh = resp;
             } catch (e) {
-              console.warn('Backend mesh import failed, falling back to local parse:', e);
+              // Only an unreachable backend falls back locally; a backend that
+              // answered with an error rethrows so the per-file catch reports
+              // the REAL cause instead of the misleading "backend unavailable"
+              // warning plus a cascaded local-parser error. See the single-file
+              // path above for the full rationale.
+              if (!isBackendUnreachable(e)) throw e;
+              console.warn('Backend unreachable, falling back to local mesh parse:', e);
               materialsDroppedFiles.push(file.name);
             }
           }
 
           if (backendMesh && importRefsRef.current) {
-            const { data, plantMaterials } = plantResponseToMeshData(backendMesh);
             importRefsRef.current.importMesh({
               sourceCloudId: 'imported',
-              data,
-              plantMaterials,
+              data: backendMesh.data,
+              plantMaterials: backendMesh.plantMaterials,
               visible: true,
               color: getColorForFile(),
               method: 'delaunay',
@@ -791,6 +999,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             }
           }
         } else if (shouldImportAsSkeleton) {
+          setImportProgress(p => (p ? { ...p, title: 'Importing skeleton…' } : p));
           // Parse as skeleton
           const skeletonData = await parseSkeleton(file);
           if (importRefsRef.current) {
@@ -861,15 +1070,33 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // Walk path-backed point clouds through the wizard, then import each with
     // the user's choices. Clear the progress modal so it doesn't sit behind the
     // wizard; re-show per-scan during the actual import.
+    let cancelledAfter = -1;   // index of the file the user cancelled on, if any
     if (wizardFiles.length > 0) {
       setImportProgress(null);
       const results = await openImportWizard(wizardFiles);
       if (results) {
+        importCancelledRef.current = false;
         for (let i = 0; i < results.length; i++) {
-          setImportProgress({ current: i + 1, total: results.length, label: `Loading ${results[i].input.fileName}` });
+          // A cancel during file i must also stop files i+1.. — aborting one
+          // fetch says nothing about the next.
+          if (importCancelledRef.current) { cancelledAfter = i; break; }
+          // A FRESH controller per file: reusing one would leave every
+          // subsequent file's fetch born already-aborted after any cancel.
+          const controller = new AbortController();
+          importAbortRef.current = controller;
+          setImportProgress({
+            current: i + 1, total: results.length,
+            label: `Loading ${results[i].input.fileName}`, fraction: null,
+          });
           try {
-            newScans.push(await buildScanFromWizardResult(results[i], getColorForFile()));
+            newScans.push(...await buildScansFromWizardResult(results[i], getColorForFile, {
+              signal: controller.signal,
+              onProgress: (fraction, message) =>
+                setImportProgress(p => (p ? { ...p, fraction, hint: message || undefined } : p)),
+              onRunId: (runId) => { importRunIdRef.current = runId; },
+            }));
           } catch (err) {
+            if (isImportCancel(err, controller.signal)) { cancelledAfter = i; break; }
             errors.push(`${results[i].input.fileName}: ${err instanceof Error ? err.message : 'Failed to import'}`);
           }
         }
@@ -881,22 +1108,42 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       setSelectedScanIds(new Set(newScans.map(e => e.id)));
     }
 
-    const loadedCount = newScans.length + meshCount + skeletonCount;
-    if (loadedCount > 0) {
+    // qsmCount counts toward "something imported" (so a QSM-only drop isn't
+    // reported as a failure) but is left out of the summary parts below, since
+    // importQsmCsv already toasts each QSM with its cylinder count.
+    const loadedCount = newScans.length + meshCount + skeletonCount + qsmCount;
+    if (cancelledAfter >= 0) {
+      // Scans imported before the cancel are KEPT — they're complete and correct,
+      // and their backend sessions/octrees are already built. Say so explicitly:
+      // "the modal vanished and 3 of 8 scans appeared" is otherwise
+      // indistinguishable from a partial failure.
+      if (loadedCount > 0) setSettingsOpen(false);
+      showToast({
+        title: newScans.length > 0
+          ? `Import cancelled — kept ${newScans.length} of ${wizardFiles.length} scan(s)`
+          : 'Import cancelled',
+        type: 'info',
+      });
+    } else if (loadedCount > 0) {
       setSettingsOpen(false);
       const parts = [];
       if (newScans.length > 0) parts.push(`${newScans.length} scan(s)`);
       if (meshCount > 0) parts.push(`${meshCount} mesh(es)`);
       if (skeletonCount > 0) parts.push(`${skeletonCount} skeleton(s)`);
-      showToast({ title: `Loaded ${parts.join(', ')}`, type: 'success' });
+      // Empty only when the drop was QSMs alone, which already toasted per file.
+      if (parts.length > 0) {
+        showToast({ title: `Loaded ${parts.join(', ')}`, type: 'success' });
+      }
     }
 
     if (materialsDroppedFiles.length > 0) {
       // The geometry imported, but the backend (the only path that reads MTL
-      // colors/textures and per-vertex PLY color) was unavailable, so these
-      // came in without their materials. Warn so the user knows to re-import.
+      // colors/textures and per-vertex PLY color) could not be REACHED, so these
+      // came in without their materials. Only a genuine connection failure gets
+      // here — a backend that answered with an error rethrows and is reported
+      // with its own message. Warn so the user knows to re-import.
       showToast({
-        title: `Imported ${materialsDroppedFiles.length} mesh(es) without materials — the backend was unavailable. Re-import to apply colors/textures.`,
+        title: `Imported ${materialsDroppedFiles.length} mesh(es) without materials — could not reach the backend. Re-import once it's running to apply colors/textures.`,
         message: materialsDroppedFiles.join('\n'),
         type: 'warning',
         duration: 0,
@@ -917,9 +1164,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     }
 
     setImportProgress(null);
+    importAbortRef.current = null;
+    importRunIdRef.current = null;
     // Reset import type to auto after import
     pendingImportTypeRef.current = 'auto';
-  }, [scans, openImportWizard, buildScanFromWizardResult, importScanXml, materializeDroppedFile]);
+  }, [scans, openImportWizard, buildScansFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setIsDragOver(false);
@@ -1105,6 +1354,175 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     setSelectedScanIds(new Set(newOnes.map(s => s.id)));
   }, [addScansTx]);
 
+  // ── RIEGL raw project import ────────────────────────────────────────────
+  //
+  // A .riproject is a DIRECTORY of scan positions, so this can't ride the
+  // ordinary file-import path (which reads bytes per path). The flow is:
+  //   pick directory → inspect (fast) → user selects positions → extract to LAS
+  //   → import each LAS through the NORMAL cloud path → one batched add.
+  //
+  // Extraction is what makes this worth a bespoke flow: each position becomes
+  // an ordinary LAS, so everything downstream — sessions, octrees, the viewer —
+  // needs no RIEGL-specific handling at all.
+  const [rieglProjectPath, setRieglProjectPath] = useState<string | null>(null);
+  const [rieglRivlibPath, setRieglRivlibPath] = useState<string | null>(null);
+  const rieglResolveRef = useRef<
+    ((selection: RieglProjectSelection | null) => void) | null
+  >(null);
+
+  const chooseRieglScans = useCallback(
+    (path: string): Promise<RieglProjectSelection | null> =>
+      new Promise((resolve) => {
+        rieglResolveRef.current = resolve;
+        setRieglProjectPath(path);
+      }),
+    [],
+  );
+
+  // `presetPath` skips the picker: a dropped RIEGL project folder already knows
+  // its path (see onDropCapture), and re-prompting would be absurd.
+  const handleImportRieglProject = useCallback(async (presetPath?: string) => {
+    const picked = presetPath ?? await window.electronAPI?.dialog.open({
+      directory: true,
+      title: 'Select a RIEGL project (.riproject or .PROJ)',
+    });
+    if (typeof picked !== 'string' || !picked) return;
+
+    const settings = await getSettings().catch(() => null);
+    const rivlibPath = settings?.rivlibPath ?? null;
+    setRieglRivlibPath(rivlibPath);
+
+    // The dialog runs the inspect itself so its own spinner covers the wait,
+    // and it surfaces a 503 (Docker down / RiVLib unset) inline rather than as
+    // a toast detached from the thing the user just clicked.
+    const selection = await chooseRieglScans(picked);
+    setRieglProjectPath(null);
+    if (!selection || selection.scans.length === 0) return;
+    const chosen = selection.scans;
+
+    // Let the user pick which scalars to keep, as every other path-backed
+    // import does. One wizard step covers the whole project: the reader
+    // produces the same schema for every position, so per-position choices
+    // would be noise. Cancelling here cancels the import.
+    const wizard = await openImportWizard([
+      { path: picked, fileName: picked.split('/').pop() ?? 'RIEGL project' },
+    ]);
+    if (!wizard) return;
+    // A RIEGL project is a fixed-layout format, so the choice arrives as
+    // `droppedSlugs` (the wizard's Import checkboxes) rather than inside a
+    // positional column plan, which is always null here. The extract endpoint
+    // takes a KEEP list, so invert: everything the preview offered, minus the
+    // unticked slugs. Undefined when nothing was dropped, which the backend
+    // reads as "keep everything" (and it force-keeps `is_miss` regardless).
+    const keepSlugs = (wizard[0]?.droppedSlugs?.length ?? 0) > 0
+      ? (wizard[0]?.keptSlugs ?? [])
+      : undefined;
+
+    importCancelledRef.current = false;
+    const controller = new AbortController();
+    importAbortRef.current = controller;
+    setImportProgress({
+      current: 1,
+      total: chosen.length,
+      title: 'Importing RIEGL project',
+      label: `Extracting ${chosen.length} scan position${chosen.length > 1 ? 's' : ''}…`,
+      hint: 'Reading .rxp through RiVLib — expect tens of seconds per position.',
+      fraction: null,
+    });
+
+    try {
+      const project = await extractRieglProject(picked, chosen, rivlibPath, keepSlugs ?? null, {
+        signal: controller.signal,
+        onRunId: (id: string) => { importRunIdRef.current = id; },
+        onProgress: (fraction: number | null, message: string) =>
+          setImportProgress((p) => {
+            if (!p) return p;
+            const parsed = parseRieglProgress(message);
+            return {
+              ...p,
+              current: parsed ? parsed.current : p.current,
+              total: parsed ? parsed.total : p.total,
+              label: parsed ? parsed.label : message,
+              fraction,
+            };
+          }),
+      }, selection.frame);
+      if (importCancelledRef.current) return;
+
+      // The backend already built a cloud session (and its octree) for every
+      // position while streaming, so there is nothing left to import here — no
+      // file to re-read, no second pass. This loop only wraps each session in a
+      // Scan.
+      const newScans: Scan[] = [];
+      const okScans = project.scans.filter(
+        (s: RieglScanPosition) => s.session && !s.error,
+      );
+      for (const s of okScans) {
+        if (importCancelledRef.current) break;
+        const data = buildPointCloudFromOctree(
+          s.session!,
+          // Provenance: the project directory, since no per-scan file exists.
+          picked,
+          `${s.name}`,
+          { sessionId: s.session!.session_id },
+        );
+        newScans.push({
+          id: crypto.randomUUID(),
+          label: s.name,
+          visible: true,
+          color: allocateScanColor(
+            new Set([...scans.map((sc) => sc.color), ...newScans.map((sc) => sc.color)]),
+          ),
+          data,
+          // The scan pattern (.pat or .scn), the instrument, the origin and —
+          // on a registered import — the pose decomposed into heading and tilt
+          // all ride in on scan_params.
+          params: s.scan_params
+            ? scanParametersFromFile(s.scan_params)
+            : undefined,
+          sourcePath: picked,
+        });
+      }
+
+      if (newScans.length > 0 && !importCancelledRef.current) {
+        handleAddScans(newScans);
+        const warned = project.scans.filter((s: RieglScanPosition) => s.warning);
+        // Say what actually happened. A .PROJ is routinely a MIX — some
+        // positions surveyed, some falling back to a metre-level prior — so a
+        // blanket "run ICP" is as unhelpful as a blanket "they're aligned".
+        const placed = okScans.filter(
+          (s: RieglScanPosition) => s.registration === 'registered',
+        ).length;
+        const unplaced = newScans.length - placed;
+        const alignment =
+          selection.frame === 'registered' && placed > 0
+            ? unplaced > 0
+              ? `${placed} placed by the project's registration; ${unplaced} from a metre-level prior — run ICP on those.`
+              : 'Placed by the project\u2019s own registration — no ICP needed.'
+            : 'Scans are unregistered — run ICP to align them.';
+        showToast({
+          title: `Imported ${newScans.length} RIEGL scan position${newScans.length > 1 ? 's' : ''}`,
+          message:
+            alignment +
+            (warned.length ? ` ${warned.length} had multi-return warnings.` : ''),
+          type: warned.length ? 'warning' : 'success',
+        });
+      }
+    } catch (err) {
+      if (!importCancelledRef.current) {
+        showToast({
+          title: 'RIEGL import failed',
+          message: describeBackendError(err, 'RIEGL import').message,
+          type: 'error',
+        });
+      }
+    } finally {
+      setImportProgress(null);
+      importAbortRef.current = null;
+      importRunIdRef.current = null;
+    }
+  }, [chooseRieglScans, handleAddScans, scans.length]);
+
   // Stitch multiple data-bearing scans into one. The result is data-only —
   // a merged cloud has no single defined origin, so any source params are
   // dropped. By default the sources are REMOVED from the scene and undo
@@ -1263,12 +1681,15 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         { ...merged, cache_dir: merged.cache_dir ?? '', cached: false },
         firstOctree.sourceXyzPath,
         newFileName,
-        firstOctree.asciiFormat ?? null,
-        firstOctree.columnPlan ?? null,
-        firstOctree.categoricalAttributes,
-        merged.session_id,
-        merged.world_shift ?? null,
-        firstOctree.continuousAttributes,
+        {
+          asciiFormat: firstOctree.asciiFormat ?? null,
+          columnPlan: firstOctree.columnPlan ?? null,
+          categoricalAttributes: firstOctree.categoricalAttributes,
+          sessionId: merged.session_id,
+          worldShift: merged.world_shift ?? null,
+          continuousAttributes: firstOctree.continuousAttributes,
+          classPalettes: firstOctree.classPalettes,
+        },
       );
       if (newData.octree) {
         newData.octree.hasMisses = merged.has_misses;
@@ -1388,6 +1809,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           return [{ name: 'Skeletons', extensions: skel }];
         case 'scanxml':
           return [{ name: 'Helios Scan XML', extensions: ['xml'] }];
+        case 'qsm':
+          return [{ name: 'QSM CSV', extensions: ['csv'] }];
         default:
           return [{ name: 'Supported Files', extensions: [...new Set([...pc, ...mesh, ...skel, 'xml'])] }];
       }
@@ -1477,7 +1900,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         case 'import-scan-xml':
           void handleMenuImport('scanxml');
           break;
-        case 'save':
+        case 'import-qsm':
+          void handleMenuImport('qsm');
+          break;
+        case 'import-riegl':
+          void handleImportRieglProject();
+          break;
         case 'export':
           setSettingsOpen(false);
           (window as any).__openExportPanel?.();
@@ -1715,6 +2143,33 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       onDropCapture={(e) => {
         try {
           const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+          // A dropped RIEGL project (.riproject or .PROJ) is a DIRECTORY.
+          // react-dropzone expands a folder into its contents, so by `onDrop`
+          // it has already become ~100
+          // .rxp/.jpg/.ppm files and the generic importer rejects every one of
+          // them ("Unsupported file format: .ppm"). This capture phase sees the
+          // un-expanded entry, which is the only place the folder can still be
+          // recognised as a single thing.
+          const rieglDir = files
+            .map((f) => {
+              let p: string | undefined;
+              try { p = window.electronAPI?.getPathForFile?.(f) || undefined; }
+              catch { p = undefined; }
+              return p;
+            })
+            .find((p) => isRieglProjectPath(p));
+          if (rieglDir) {
+            e.preventDefault();
+            e.stopPropagation();
+            // Stopping propagation means react-dropzone never sees this drop —
+            // so its `onDrop` (the ONLY place `setIsDragOver(false)` runs) never
+            // fires and the "Drop to load scans" overlay stays up forever,
+            // covering the dialog we just opened. Clear it ourselves.
+            setIsDragOver(false);
+            droppedPathsRef.current.clear();
+            void handleImportRieglProject(rieglDir);
+            return;
+          }
           for (const f of files) {
             let p: string | undefined;
             try { p = window.electronAPI?.getPathForFile?.(f) || undefined; } catch { p = undefined; }
@@ -1742,8 +2197,19 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       {/* Import progress modal for imports (drag-drop or File → Import).
           Reuses the same BulkImportProgress
           component as the Helios XML and per-scan attach pathways so every
-          import shows an identical modal. */}
-      <BulkImportProgress progress={importProgress} />
+          import shows an identical modal. Cancel really stops the backend work
+          (kills the PotreeConverter child) — it does not just hide the dialog. */}
+      <BulkImportProgress progress={importProgress} onCancel={cancelImport} />
+
+      <RieglProjectDialog
+        projectPath={rieglProjectPath}
+        rivlibPath={rieglRivlibPath}
+        onResolve={(picked) => {
+          setRieglProjectPath(null);
+          rieglResolveRef.current?.(picked);
+          rieglResolveRef.current = null;
+        }}
+      />
 
       {/* Stitch Clouds merge progress — reuses the same modal as imports, but
           with its own header (the default reads "Importing scans…"). */}
@@ -1769,13 +2235,27 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             className="relative bg-neutral-800 rounded-xl shadow-2xl border border-neutral-700 w-full max-w-sm mx-4 p-6"
           >
             <h2 className="text-lg font-semibold text-white mb-2">New project</h2>
-            <p className="text-sm text-neutral-300 mb-6">
+            <p className="text-sm text-neutral-300 mb-4">
               This clears everything — all point clouds, meshes, skeletons, plant
               models, scans, and analysis results — and resets the app to a fresh
               start. This can&rsquo;t be undone.
             </p>
+            {/* Hand-made labels are the one thing here that cannot be recomputed,
+                so call them out specifically rather than relying on the generic
+                "clears everything" line. */}
+            {((window as any).__uncommittedLabelStrokes ?? 0) > 0 && (
+              <p
+                data-testid="new-confirm-label-warning"
+                className="text-sm text-amber-400 mb-6"
+              >
+                You have {(window as any).__uncommittedLabelStrokes} unsaved
+                labelling stroke(s). They will be lost — commit them first to keep
+                them.
+              </p>
+            )}
             <div className="flex justify-end gap-2">
               <button
+                data-testid="new-confirm-cancel"
                 onClick={() => setNewConfirmOpen(false)}
                 className="px-4 py-2 bg-neutral-700 hover:bg-neutral-600 text-neutral-100 rounded-lg transition-colors text-sm"
               >

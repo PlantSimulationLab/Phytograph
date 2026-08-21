@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
+import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // Click target for placing the scene origin (the CloudCompare-style pivot).
 // While mounted (origin place-mode armed), a left-click prefers a SURFACE hit on
@@ -66,7 +67,8 @@ export function OriginPicker({
   };
 
   return (
-    <mesh position={[0, 0, groundZ]} onClick={handleClick} renderOrder={9999}>
+    // UI overlay, not content — see lib/sceneOverlay.ts.
+    <mesh {...SCENE_OVERLAY} position={[0, 0, groundZ]} onClick={handleClick} renderOrder={9999}>
       <planeGeometry args={[100000, 100000]} />
       <meshBasicMaterial transparent opacity={0} depthWrite={false} side={THREE.DoubleSide} />
     </mesh>

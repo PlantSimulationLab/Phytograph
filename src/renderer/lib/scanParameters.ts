@@ -279,6 +279,12 @@ export interface ScanParamsFromFile {
   // ExtraBytes, from which the backend rebuilds a decimated path. Mapped through
   // poseStreamFromWire so the imported scan is auto-flagged moving with its path drawn.
   trajectory?: unknown;
+  // The instrument that captured the scan, when the format names it. RIEGL raw
+  // projects do (RiVLib reports type_id, e.g. "VZ-1000"); no other file-header
+  // import currently identifies its scanner, so this is usually absent. An
+  // unrecognised id is ignored rather than guessed at — see
+  // scanParametersFromFile.
+  scanner_model?: string;
 }
 
 // Build ScanParameters from the partial set a file header carried, filling any
@@ -318,5 +324,49 @@ export function scanParametersFromFile(src: ScanParamsFromFile): ScanParameters 
       // Leave the scan static if the reconstructed trajectory can't be mapped.
     }
   }
+  // The instrument, when the format names it (RIEGL projects do). This records
+  // IDENTITY only — the model's preset is applied solely when a user picks a
+  // model in the Scan Parameters dialog, and both the Helios export and the LAD
+  // path read the optics (beam divergence, exit diameter) off the parameters
+  // themselves. So naming a near-relative here cannot substitute another
+  // instrument's physics into the scan; it selects a marker mesh and a label.
+  const modelId = scannerModelIdFromFile(src.scanner_model);
+  if (modelId) p.scannerModel = modelId;
   return p;
+}
+
+// Map a scanner identity as a FILE reports it onto our catalog id. RiVLib's
+// `type_id` is the raw instrument string ("VZ-1000"), not our slug, so the two
+// namespaces have to be bridged somewhere; doing it here keeps every file-header
+// importer consistent. Matching is case- and separator-insensitive because
+// vendors are inconsistent about hyphens ("VZ-400i" vs "VZ400i").
+const FILE_SCANNER_MODEL_IDS: Record<string, import('./scannerModels').ScannerModelId> = {
+  vz1000: 'riegl_vz1000',
+  vz400i: 'riegl_vz400i',
+  vz2000i: 'riegl_vz2000i',
+  minivux3uav: 'riegl_minivux3uav',
+};
+
+// A RIEGL V-Line scanner with no entry of its own — "VZ-600i", "VZ-4000" —
+// resolves to the family marker rather than the neutral sphere, so a scan that
+// plainly had an instrument does not render as a featureless ball.
+//
+// It maps to `riegl_vz_series`, NOT to a specific sibling. Aliasing it to the
+// VZ-400i would put a model number the file never reported into the scan info
+// panel and into the exported <scannerModel>; "RIEGL VZ-series" is the honest
+// answer for an instrument we can place in a family but not identify. Models we
+// DO know get an exact entry above and are labelled exactly.
+//
+// Anchored to `vz` + a digit rather than matching anything unrecognised: a
+// Velodyne or Livox identity must not acquire a RIEGL body.
+const VZ_SERIES_RE = /^vz\d/;
+
+export function scannerModelIdFromFile(
+  raw: string | undefined,
+): import('./scannerModels').ScannerModelId | undefined {
+  if (!raw) return undefined;
+  const key = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const exact = FILE_SCANNER_MODEL_IDS[key];
+  if (exact) return exact;
+  return VZ_SERIES_RE.test(key) ? 'riegl_vz_series' : undefined;
 }

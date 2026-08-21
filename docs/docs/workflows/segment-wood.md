@@ -92,7 +92,10 @@ leaves, ready for leaf-area analysis.
 
 !!! note "How accurate is it?"
     On manually-labelled terrestrial-laser scans of real trees (oak, beech,
-    maple, pine, spruce) both methods reach roughly **80–90 %** overall accuracy.
+    maple, pine, spruce) the geometric and connectivity methods reach roughly
+    **80–90 %** overall accuracy; **Branch-segment** — the newer default, which
+    fits cylinders per skeleton segment — is generally the most reliable on real
+    trees.
     Fine twigs embedded in dense foliage are the usual error source — and that is
     exactly where **Connectivity** helps: by tracing branches back to the trunk it
     recovers thin twigs the geometric method drops, which matters most when the
@@ -120,9 +123,10 @@ leaves, ready for leaf-area analysis.
     for geometry — it supplements it.
 
 !!! note "Large clouds"
-    Clouds imported from XYZ files stream from disk as an octree. Wood/leaf
-    segmentation re-reads the original file at full resolution, so the
-    classification covers every point — not a downsampled subset. For very large
+    Large clouds stream to the viewer as an octree, but the *data* lives in
+    an in-memory session that holds every point. Wood/leaf segmentation runs on
+    that in-RAM array — the source file is never re-read — so the
+    classification covers every point, not a downsampled subset. For very large
     clouds the backend can voxel-downsample, classify, and propagate labels back
     to full resolution. The **Connectivity** method builds its skeleton on that
     reduced set, so on very heavily downsampled clouds the traced backbone is

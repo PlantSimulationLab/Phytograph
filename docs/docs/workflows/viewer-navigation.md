@@ -18,15 +18,41 @@ the lowest points, so stray returns beneath the terrain do not drag it down.
 Panning moves the view without moving that pivot, so you can pan off to one
 side and still turn about the same point.
 
-The origin is also what the camera looks at, so **zooming moves you toward
-the origin** rather than toward the middle of the bounding box. Once you
-pan, zoom follows your new view instead — pan is how you say "I want to
-look over here". **Reset View** re-centers on the origin again.
+**Zoom goes wherever you point.** The scroll wheel moves the camera toward
+whatever surface is under the mouse cursor, so the point you are pointing at
+stays put on screen while everything else expands around it. Point at a
+branch on the far side of a plot and scroll, and you fly to that branch —
+no panning required. Zoom stops just short of the surface you are
+approaching rather than passing through it, so you can push in as close as
+you like. This works the same while a tool is open — the crop box, the erase
+brush and the transform gizmos are drawn on top of your data but are never
+what the camera flies to.
 
-To orbit around something else, move the origin: click its ring and drag
-the arrow gizmo, or use **Set Scene Origin** to click a point on a surface
-("Pick in viewport"), type coordinates, or snap it to the selected cloud.
-That is the fastest way to start examining a region of a large scan. See
+Because zoom follows the cursor, the origin is only the point you *orbit*
+around — it does not pull the zoom toward itself. Anywhere you can see, you
+can zoom to.
+
+A continuous scroll keeps flying at whatever you first aimed at, so a long
+burst closes on that one spot smoothly instead of wandering between surfaces
+as the view changes. Pausing, moving the pointer somewhere else, or reversing
+direction starts a fresh gesture and picks a new target.
+
+How close and how far you can zoom is scaled to the size of your scene, so
+the same scroll gesture feels right on a single potted plant and on a
+400-metre plot. A few stray far-away points do not affect it.
+
+**Panning is zoom-dependent.** The closer you are, the finer a drag moves the
+view — a drag always covers about the same fraction of the screen, so panning
+tracks your cursor whether you are surveying a whole plot or inspecting a
+single leaf.
+
+To orbit around something else, move the origin: open **Set Scene Origin**
+and click a point on a surface (click-to-place is armed as soon as the panel
+opens), type coordinates, or snap it to the selected cloud. You can also
+click the marker's ring and drag the arrow gizmo — turn **Pick in viewport**
+off first so the click reaches the marker.
+**Zoom to origin** in that panel flies the camera to the origin without
+changing your viewing angle — handy after typing in coordinates. See
 [Setting the scene origin](clean-point-cloud.md#setting-the-scene-origin).
 
 ### Zoom to Selection vs. Reset Camera
@@ -75,10 +101,16 @@ down that world axis, preserving your current target and zoom.
 
 In the right-side properties panel, toggle:
 
-- **Grid** — a 1m × 1m grid on the world XY plane. Helpful for sanity-
-  checking units and scale.
+- **Grid** — a reference grid on the ground plane. Its cell size adapts as you
+  zoom, stepping through round values (…10 cm, 20 cm, 50 cm, 1 m, 2 m, 5 m…)
+  with a heavier line every fifth cell, so it stays readable at any scale.
 - **Axes** — the bottom-left orientation gizmo. On by default; turn it off
   to clear the corner.
+- **Scan markers** — the scanner position markers in the 3D view.
+- **Origin marker** — the red-and-white ring that marks the
+  [scene origin](clean-point-cloud.md#setting-the-scene-origin). Unchecking it hides the
+  marker (and its gizmo); the pivot itself is unchanged. It stays hidden on an
+  empty viewport regardless, so it never covers the import prompt.
 
 The **orientation gizmo** in the bottom-left corner (red = X, green = Y,
 blue = Z) always tracks the current camera orientation; click its axis
@@ -86,23 +118,30 @@ heads to snap the view as described above.
 
 ## Isolate one object
 
-Hide everything except one cloud or mesh by clicking its eye icon to
-make it visible and clicking everything else's eye icon to hide them.
-Or:
+Each row in the **Scans**, **Meshes**, and **Skeletons** panels has an **eye**
+icon that toggles just that entry.
 
-1. Right-click the entry you want to focus on.
-2. Choose **Solo** (hides all others).
-3. **Unsolo** restores the previous visibility state.
+To isolate one object quickly, use the list header's bulk controls:
+
+1. Click the header's **eye** button with nothing selected — if anything is
+   visible it hides them all.
+2. Click the one entry's own eye icon to bring it back.
+
+The header eye also respects a selection: with rows selected it acts on just
+those ("hide the 3 selected scans") instead of the whole list.
 
 ## Change color modes
 
-Right-click any cloud entry, or use its inline **Color By** dropdown:
+Use the **Color by** dropdown in the Display panel. It is **global** — it
+applies to every cloud at once, not per scan:
 
-- **Height** (Z) — default; good for scans with vertical structure
-- **X / Y** — useful for horizontal stripes
+- **Per-scan color** — default; each cloud in its own swatch color
+- **Z Axis (Height)** — good for scans with vertical structure
+- **X Axis / Y Axis** — useful for horizontal stripes (not offered for
+  octree-streamed clouds)
 - **Intensity** — for LiDAR scans that carry intensity
 - **RGB** — original per-point color from the file
-- **Single Color** — flat color (the cloud's identifier color)
+- **Solid Color** — one flat color for everything
 - **Scalar Field** — any custom scalar present in the file
 
 See **[Color modes](../reference/color-modes.md)** for when each is most
@@ -156,8 +195,8 @@ The right panel has:
 
 - **Point size slider** — small for large clouds, larger for sparse
   ones.
-- **Colormap selector** — viridis (default), plasma, magma, inferno,
-  turbo, grayscale. Applies when coloring by any scalar (height,
+- **Colormap selector** — viridis (default), plasma, inferno, magma, turbo,
+  jet, coolwarm, grayscale. Applies when coloring by any scalar (height,
   intensity, scalar field).
 
 ## Command palette

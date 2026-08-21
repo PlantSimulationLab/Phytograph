@@ -110,6 +110,7 @@ nav:
       - Getting around:
           - Import & export: workflows/import-export.md
           - Export from RiPROCESS: workflows/export-from-riprocess.md
+          - Import a RIEGL project: workflows/import-riegl-project.md
           - Viewer navigation: workflows/viewer-navigation.md
       - 1. Pre-processing:
           - Clean a point cloud: workflows/clean-point-cloud.md
@@ -119,6 +120,7 @@ nav:
           - Segment ground points: workflows/segment-ground.md
           - Separate leaf and wood: workflows/segment-wood.md
           - Segment individual trees: workflows/segment-trees.md
+          - Label points by hand: workflows/label-points.md
       - 3. Reconstruction & analysis:
           - Triangulate a mesh: workflows/triangulate.md
           - Fit a crown & metrics: workflows/fit-crown.md

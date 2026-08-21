@@ -93,7 +93,7 @@ the "shrink-wrap" artifacts that come from cloud-only methods. See
 | Translate / rotate / scale | Click the **⤢** (double-arrow) button on the mesh's row in the Meshes panel to open its Transform panel |
 | Scan it into a point cloud | [Synthetic LiDAR scan](../workflows/simulate-scan.md) |
 | Align two meshes (ICP) | [Register & compare: M2M](../workflows/register-compare.md#mesh-to-mesh-icp) |
-| Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh) |
+| Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh-distance) |
 | Export | [Import & export](../workflows/import-export.md#export) |
 
 ## Display options
@@ -125,6 +125,10 @@ Two sources produce textured meshes:
   it names sit next to the file on disk, Phytograph loads the textures and
   applies them. Faces whose material has no image fall back to that material's
   diffuse color.
+
+Either way, the textures survive an export: writing a textured mesh to `.obj`
+also writes its `.mtl` and the images it names, so the mesh re-imports textured
+(see [Import & export](../workflows/import-export.md#mesh-formats)).
 
 Wireframe applies to textured meshes too. Opacity does not: textured plants
 draw their leaf textures as crisp alpha cut-outs that ignore a blend factor, so

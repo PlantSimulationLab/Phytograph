@@ -11,6 +11,21 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      # Bring-up switch for Windows code signing. The native chain (CUDA
+      # toolkit 17 min + PyHelios 7 min + PyInstaller 4.5 min) dominates a
+      # release build and has nothing to do with whether Authenticode signing
+      # works, so this replaces the sidecars with stub .exe files and packages
+      # against them: ~5 min per iteration instead of ~35.
+      #
+      # The stubs ARE signed (electron-builder signs every .exe it packages),
+      # so this exercises the real Azure signing path, the real timestamp
+      # parameters, and the real certificate — just not the real backend.
+      # It never publishes. Always finish with one normal run before shipping.
+      signing_test:
+        description: 'Signing bring-up: stub the sidecars, skip the native build, do not publish'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -121,8 +136,11 @@ jobs:
         run: |
           echo "sha=$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # Skipped in signing_test mode: restoring a real backend bundle would
+      # collide with the stubs written below (and mask what is being tested).
       - name: Cache PyInstaller backend
         id: backend-cache
+        if: '!inputs.signing_test'
         uses: actions/cache@v4
         with:
           path: resources/${{ matrix.backend_name }}
@@ -159,7 +177,7 @@ jobs:
       # the image. The arm64 runner gets prebuilt wheels for all three and
       # needs none of this.
       - name: Install sdist build deps (macOS Intel)
-        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: |
           set -euo pipefail
           brew install xerces-c swig
@@ -220,7 +238,7 @@ jobs:
       # Installed BEFORE requirements.txt so pip sees the requirement already
       # satisfied and never reaches for the broken sdist.
       - name: Install cut_pursuit_py from source (macOS Intel)
-        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: matrix.platform == 'macos-15-intel' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         shell: bash
         env:
           VERSION_OVERRIDE: "1.0.12"
@@ -247,7 +265,7 @@ jobs:
             assert hasattr(cut_pursuit_py, 'perform_cut_pursuit')"
 
       - name: Install Python dependencies
-        if: steps.backend-cache.outputs.cache-hit != 'true'
+        if: steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         working-directory: backend-api
         shell: bash
         run: |
@@ -286,7 +304,7 @@ jobs:
       # disk is already tight (see the swap step below), so reclaim preinstalled
       # bloat the build never uses before installing.
       - name: Free disk space for CUDA (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: false   # keep Python/Node toolchains the build needs
@@ -307,7 +325,7 @@ jobs:
       # libs give a driver-free toolkit (network method is required for sub-package
       # selection on Linux).
       - name: Install CUDA Toolkit (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
           cuda: '12.6.3'
@@ -319,7 +337,7 @@ jobs:
       # Windows: the full network install works there (no apt/driver dpkg step),
       # and building the CUDA path wants the standard toolkit layout.
       - name: Install CUDA Toolkit (Windows)
-        if: runner.os == 'Windows' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Windows' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
           cuda: '12.6.2'
@@ -328,7 +346,7 @@ jobs:
           use-local-cache: true
 
       - name: Verify CUDA (Windows + Linux)
-        if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'macOS' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: nvcc -V
 
       # The CUDA apt install above REMOVES the mesa/GLVND/X11 dev packages (apt
@@ -339,7 +357,7 @@ jobs:
       # CUDA so they're present when libhelios configures. (The earlier "Install
       # Linux build dependencies" step installs them too, but CUDA runs after it.)
       - name: Re-install GL/X11 dev headers after CUDA (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         # Re-install the SAME set the "Install Linux build dependencies" step did
         # (CUDA's apt transaction removed them). Must include xvfb + libtbb-dev,
         # not just the GL headers: xvfb-run wraps the packaged-backend smoke test
@@ -365,7 +383,7 @@ jobs:
       # that masquerades as GPU-capable. macOS has no CUDA, so it never gets the
       # flag.
       - name: Build PyHelios from source
-        if: steps.backend-cache.outputs.cache-hit != 'true'
+        if: steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: node scripts/build-pyhelios.mjs ${{ runner.os != 'macOS' && '--require-gpu' || '' }}
 
       # Free disk + enlarge swap on Linux before the PyInstaller backend build.
@@ -384,7 +402,7 @@ jobs:
       # swapon. 8 GB swap now fits and gives headroom over the 7.8 GB RAM.
       # `set -x` keeps any failure visible in this step's log.
       - name: Free disk + add swap for PyInstaller (Linux)
-        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: |
           set -x
           echo "== disk BEFORE cleanup =="
@@ -405,15 +423,16 @@ jobs:
           df -h / || true
 
       - name: Build Python backend
-        if: steps.backend-cache.outputs.cache-hit != 'true'
+        if: steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: node scripts/build-backend.mjs
 
       - name: Report memory after backend build (Linux)
         # always() so we capture peak/leftover state even if the build failed.
-        if: always() && runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true'
+        if: always() && runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         run: free -h || true; df -h / || true
 
       - name: Verify backend binary
+        if: '!inputs.signing_test'
         shell: bash
         run: |
           ls -la resources/${{ matrix.backend_name }}
@@ -474,7 +493,7 @@ jobs:
           echo "PASS: packaged backend launched and reported version $got"
 
       - name: Smoke-test backend (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.signing_test
         shell: pwsh
         env:
           PHYTOGRAPH_BACKEND_PORT: '8123'
@@ -542,6 +561,7 @@ jobs:
 
       - name: Cache PotreeConverter binary
         id: potree-cache
+        if: '!inputs.signing_test'
         uses: actions/cache@v4
         with:
           path: resources/potree_converter
@@ -550,11 +570,11 @@ jobs:
           key: potree-${{ runner.os }}-${{ matrix.arch }}-pr686-${{ steps.potree-key-unix.outputs.key || steps.potree-key-win.outputs.key }}
 
       - name: Install TBB (macOS)
-        if: steps.potree-cache.outputs.cache-hit != 'true' && startsWith(matrix.platform, 'macos')
+        if: steps.potree-cache.outputs.cache-hit != 'true' && startsWith(matrix.platform, 'macos') && !inputs.signing_test
         run: brew install tbb
 
       - name: Build PotreeConverter
-        if: steps.potree-cache.outputs.cache-hit != 'true'
+        if: steps.potree-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/build-potree-converter.mjs
@@ -590,7 +610,7 @@ jobs:
           echo "PASS: PotreeConverter launches"
 
       - name: Verify PotreeConverter binary (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.signing_test
         shell: pwsh
         run: |
           $bin = Get-ChildItem -Path resources/potree_converter -Recurse -Filter 'PotreeConverter.exe' | Select-Object -First 1
@@ -655,6 +675,30 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Signing bring-up only: stand in for the sidecars the native chain would
+      # have produced. electron-builder's extraResources globs
+      # (resources/phytograph_backend/**, resources/potree_converter/**) match
+      # nothing when those dirs are absent, and NSIS then packages an installer
+      # with no sidecar .exe to sign — which would make a green run prove less
+      # than it appears to. These stubs are real PE binaries so signtool has
+      # something to sign and the extraResources signing path is exercised.
+      - name: Stub sidecar binaries (signing test)
+        if: inputs.signing_test && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path resources/phytograph_backend | Out-Null
+          New-Item -ItemType Directory -Force -Path resources/potree_converter | Out-Null
+          # Copy a genuine signed-nothing PE rather than fabricating one: an
+          # invalid PE makes signtool fail for reasons unrelated to Azure.
+          Copy-Item "$env:SystemRoot\System32\where.exe" `
+            resources/phytograph_backend/phytograph_backend.exe
+          Copy-Item "$env:SystemRoot\System32\where.exe" `
+            resources/potree_converter/PotreeConverter.exe
+          Write-Host 'Stub sidecars created:'
+          Get-ChildItem -Recurse resources/phytograph_backend, resources/potree_converter |
+            Select-Object FullName, Length | Format-Table -AutoSize
+
       # Linux ships AppImage (squashfs-compressed; the .deb was uncompressed and
       # exceeded GitHub's 2 GiB release-asset limit for this GPU/open3d/torch
       # bundle). The v0.19.0 AppImage hang was electron-builder's appimagetool
@@ -667,6 +711,94 @@ jobs:
       # libfuse2t64 as a belt. timeout-minutes is the safety net the old note
       # asked for: a future stall fails loudly (flushing the step log) instead of
       # burning the whole job budget.
+      # electron-builder 25.1.8 bootstraps Azure signing by running
+      # `Install-Module -Name TrustedSigning -RequiredVersion 0.4.1`, and that
+      # module then pulls its Microsoft.Trusted.Signing.Client payload over
+      # NuGet's legacy v2 endpoint. On hosted runners that download fails
+      #   WARNING: Source Location 'https://www.nuget.org/api/v2/package/
+      #            Microsoft.Trusted.Signing.Client/1.0.53' is not valid.
+      #   ... failed to be installed because: Value cannot be null.
+      # which leaves the SDK BuildTools dir (and signtool.exe) absent, so the
+      # eventual Start-Process dies with "The system cannot find the file
+      # specified" and the build fails AFTER the whole native chain has run
+      # (electron-builder#8828).
+      #
+      # Registering the NuGet v3 feed and pre-installing the same pinned
+      # version makes electron-builder's own Install-Module a cache hit. Keep
+      # the version in lockstep with the hardcoded 0.4.1 in
+      # app-builder-lib/out/codeSign/windowsSignAzureManager.js — a newer
+      # module does NOT satisfy its -RequiredVersion pin. This whole step goes
+      # away on electron-builder v26+.
+      - name: Pre-install TrustedSigning PowerShell module (Windows)
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Deliberately NOT Install-PackageProvider: bootstrapping the NuGet
+          # provider hits a Microsoft endpoint that fails on hosted runners
+          # ("No match was found for the specified search criteria for the
+          # provider 'NuGet'"). electron-builder wraps that same call in a
+          # try/catch for exactly this reason. PowerShellGet's Save-Module
+          # talks to PSGallery directly and needs no provider bootstrap.
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+
+          $dest = Join-Path $env:USERPROFILE 'Documents\PowerShell\Modules'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Save-Module -Name TrustedSigning -RequiredVersion 0.4.1 -Path $dest -Force
+
+          # Save-Module lays the module out where Install-Module would, so
+          # electron-builder's own `Install-Module -RequiredVersion 0.4.1`
+          # resolves it locally instead of re-downloading.
+          $env:PSModulePath = "$dest;$env:PSModulePath"
+          $m = Get-Module -ListAvailable -Name TrustedSigning |
+            Sort-Object Version -Descending | Select-Object -First 1
+          if (-not $m) { Write-Error 'FAIL: TrustedSigning module did not install'; exit 1 }
+          Write-Host "TrustedSigning $($m.Version) at $($m.ModuleBase)"
+
+          # At sign time the module shells out to signtool.exe from a NuGet
+          # package it downloads into %LOCALAPPDATA%\TrustedSigning. That
+          # download uses the same failing v2 feed, and its failure is SILENT:
+          # the module goes on to Start-Process a signtool.exe that was never
+          # written, giving "The system cannot find the file specified" followed
+          # by "SignTool failed with exit code" (with no code, because the
+          # process never started). Pre-populate both packages from the v3 API
+          # so the module finds them already present.
+          #
+          # Versions must match what TrustedSigning 0.4.1 looks for — they are
+          # baked into the module, not negotiated.
+          $root = Join-Path $env:LOCALAPPDATA 'TrustedSigning'
+          $pkgs = @(
+            @{ id = 'Microsoft.Windows.SDK.BuildTools'; ver = '10.0.22621.3233' },
+            @{ id = 'Microsoft.Trusted.Signing.Client'; ver = '1.0.53' }
+          )
+          foreach ($p in $pkgs) {
+            $dir = Join-Path $root "$($p.id)\$($p.id).$($p.ver)"
+            if (Test-Path (Join-Path $dir 'bin')) {
+              Write-Host "$($p.id) $($p.ver) already present"
+              continue
+            }
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $url = "https://api.nuget.org/v3-flatcontainer/$($p.id.ToLower())/$($p.ver)/$($p.id.ToLower()).$($p.ver).nupkg"
+            $nupkg = Join-Path $env:RUNNER_TEMP "$($p.id).$($p.ver).zip"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing
+            Expand-Archive -Path $nupkg -DestinationPath $dir -Force
+            Remove-Item $nupkg -Force
+          }
+
+          # Fail now if signtool.exe is absent — otherwise the build runs the
+          # full package step before dying on a missing file.
+          $st = Join-Path $root 'Microsoft.Windows.SDK.BuildTools\Microsoft.Windows.SDK.BuildTools.10.0.22621.3233\bin\10.0.22621.0\x64\signtool.exe'
+          if (-not (Test-Path $st)) {
+            Write-Error "FAIL: signtool.exe not found at $st"
+            Get-ChildItem -Recurse -Depth 4 $root | Select-Object FullName | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "signtool.exe present: $st"
+
       - name: Build & publish app
         timeout-minutes: 45
         env:
@@ -680,9 +812,20 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows signing (optional — leave empty to skip)
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          # Windows code signing via Azure Artifact Signing (optional — the
+          # build skips signing and still succeeds when these are unset, see
+          # azureSigningArgs() in scripts/run-electron-builder.mjs).
+          #
+          # electron-builder 25.1.8 authenticates to Azure through
+          # EnvironmentCredential ONLY — it cannot consume an `azure/login`
+          # OIDC session — so this path needs a client secret rather than
+          # federated credentials. AZURE_CLIENT_SECRET expires (~24 months,
+          # failing with AADSTS7000222); the "Verify Windows signature" step
+          # below is what stops an expired secret from silently shipping an
+          # unsigned installer.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           # macOS electron-builder 25.1.8 hard-links build/icon.icns into the
           # packaged .app and, within a single build, attempts the link twice —
           # the second fails `EEXIST … link build/icon.icns -> release/mac-arm64/
@@ -697,7 +840,18 @@ jobs:
         # cross-package an x64 dmg again — cross-packaging is exactly what
         # shipped an arm64 backend inside the x64 dmg in v0.50.0 (extraResources
         # copies resources/phytograph_backend verbatim; it is not arch-aware).
-        run: npm run release ${{ startsWith(matrix.platform, 'macos') && format('-- --mac --{0}', matrix.arch) || '' }}
+        #
+        # signing_test builds with `--publish never` (npm run release hardcodes
+        # `--publish always`, which would create a GitHub Release that
+        # electron-updater then offers to users as "Latest" — from a build whose
+        # sidecars are stubs).
+        #
+        # Must go through an npm script: `node scripts/run-electron-builder.mjs`
+        # invoked directly does not get node_modules/.bin on PATH, so the
+        # spawned `electron-builder` is not found.
+        run: ${{ inputs.signing_test
+          && 'npm run package:win -- --publish never'
+          || format('npm run release {0}', startsWith(matrix.platform, 'macos') && format('-- --mac --{0}', matrix.arch) || '') }}
 
       # Each macOS job's electron-builder publish writes a `latest-mac.yml`
       # updater manifest listing ONLY that job's arch files, and both jobs
@@ -733,9 +887,117 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then launcher="xvfb-run -a"; fi
           $launcher npm run test:smoke-packaged
 
+      # Skipped in signing_test mode: the stub sidecars are not a real
+      # backend, so the app cannot boot. Signing is what's under test here.
       - name: Smoke-test packaged app (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.signing_test
         run: npm run test:smoke-packaged
+
+      # ---------------- Verify Windows signature ----------------
+      # Same rationale as the macOS notarization check below: Windows signing
+      # no-ops when the AZURE_* secrets are missing or expired, so a green
+      # "Build & publish" does NOT prove the installer is signed. Without this
+      # step an expired client secret (AADSTS7000222) would silently publish an
+      # unsigned installer that trips SmartScreen for every user.
+      #
+      # `/tw` is the load-bearing flag: it warns when a signature carries no
+      # timestamp. Azure Artifact Signing certificates are valid for only 72
+      # HOURS, so an untimestamped signature stops validating within days of
+      # release. signtool reports that as exit code 2 ("completed with
+      # warnings") rather than a failure, which is why exit 2 is treated as
+      # fatal here — electron-builder 25.1.8 omits timestamp parameters unless
+      # they are passed explicitly (see run-electron-builder.mjs).
+      - name: Verify Windows signature
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outDir = node scripts/build-output-dir.mjs
+          $installer = Get-ChildItem -Path $outDir -Filter '*-Setup.exe' -File |
+            Select-Object -First 1
+          if (-not $installer) {
+            Write-Error "FAIL: no *-Setup.exe found under $outDir"
+            Get-ChildItem -Path $outDir | Format-Table Name
+            exit 1
+          }
+          Write-Host "Verifying: $($installer.FullName)"
+
+          $signtool = Get-ChildItem `
+            -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter 'signtool.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { Write-Error 'FAIL: signtool.exe not found'; exit 1 }
+
+          $expectedCn = 'CN=Brian Bailey'
+
+          # Verify one PE file: valid Authenticode chain, present timestamp, and
+          # the expected publisher.
+          #   /pa  — Authenticode policy, not the driver policy
+          #   /all — verify every signature present
+          #   /tw  — warn (exit 2) when a signature is not timestamped
+          function Assert-Signed([string]$path, [string]$label) {
+            Write-Host "== $label : $path"
+            & $signtool.FullName verify /pa /v /all /tw $path
+            $code = $LASTEXITCODE
+            if ($code -eq 2) {
+              Write-Error "FAIL: $label is signed but NOT timestamped — the signature dies with the 72-hour certificate."
+              return $false
+            }
+            if ($code -ne 0) {
+              Write-Error "FAIL: signtool verify exited $code for $label"
+              return $false
+            }
+            $cn = (Get-AuthenticodeSignature $path).SignerCertificate.Subject
+            Write-Host "   subject: $cn"
+            if ($cn -notmatch [regex]::Escape($expectedCn)) {
+              Write-Error "FAIL: $label has unexpected subject '$cn' — update win.publisherName in scripts/run-electron-builder.mjs to match."
+              return $false
+            }
+            return $true
+          }
+
+          $ok = $true
+          if (-not (Assert-Signed $installer.FullName 'installer')) { $ok = $false }
+
+          # The two sidecars ship inside the installer via extraResources.
+          # electron-builder signs every .exe it packages (winPackager
+          # shouldFile/shouldSignFile walks the whole output tree), but that is
+          # exactly the kind of thing that silently stops being true — the macOS
+          # job signs its sidecars in explicit steps, so assert the Windows
+          # equivalent rather than trusting the walk. Checked in win-unpacked/,
+          # which holds the same bits NSIS compresses into the installer.
+          $unpacked = Join-Path $outDir 'win-unpacked'
+          if (-not (Test-Path $unpacked)) {
+            Write-Error "FAIL: $unpacked not found — cannot verify sidecar signatures."
+            exit 1
+          }
+          $sidecars = @(
+            @{ path = 'resources\resources\phytograph_backend\phytograph_backend.exe'; label = 'backend sidecar' },
+            @{ path = 'resources\resources\potree_converter\PotreeConverter.exe';      label = 'PotreeConverter sidecar' }
+          )
+          foreach ($s in $sidecars) {
+            $full = Join-Path $unpacked $s.path
+            if (-not (Test-Path $full)) {
+              # Locate it rather than guessing: the extraResources nesting has
+              # moved before, and a silent miss here defeats the whole check.
+              $leaf = Split-Path $s.path -Leaf
+              $found = Get-ChildItem -Path $unpacked -Filter $leaf -Recurse -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if (-not $found) {
+                Write-Error "FAIL: $($s.label) ($leaf) not found under $unpacked"
+                $ok = $false
+                continue
+              }
+              $full = $found.FullName
+            }
+            if (-not (Assert-Signed $full $s.label)) { $ok = $false }
+          }
+
+          if (-not $ok) { exit 1 }
+          Write-Host 'All Windows artifacts signed, timestamped, and correctly attributed.'
 
       # ---------------- Verify macOS notarization ----------------
       # The afterSign hook (scripts/notarize.cjs) *submits* to Apple but
@@ -880,3 +1142,30 @@ jobs:
           tag="v$(node -p "require('./package.json').version")"
           echo "Uploading to release $tag"
           gh release upload "$tag" latest-mac.yml --clobber
+
+  # Each release ships ~3.6 GB of installers and release assets NEVER expire
+  # (unlike Actions artifacts, which self-expire in 30 days). Four releases
+  # filled the org's entire 20 GB shared-storage quota — and GitHub then meters
+  # the overage every day whether or not anything runs, so an idle weekend
+  # still burns allowance. This keeps the newest two releases' binaries (the
+  # current one plus a rollback target) and strips the binaries from older
+  # ones, leaving their tags, notes, and updater manifests intact.
+  #
+  # `needs: merge-latest-mac` so pruning is the last thing to happen, and the
+  # signing_test guard keeps a non-publishing bring-up run from deleting
+  # anything. `continue-on-error` because reclaiming storage must never fail a
+  # release that already built and published successfully — a missed prune is
+  # picked up by the next one.
+  prune-old-releases:
+    needs: merge-latest-mac
+    if: always() && !inputs.signing_test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Delete installer binaries from releases older than the newest two
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/prune-release-assets.mjs --keep=2

@@ -17,7 +17,7 @@ npm run test:e2e     # Playwright + _electron
 | `src/renderer/` | Vite HMR — instant |
 | `src/main/` | Restart `npm run dev` |
 | `src/preload/` | Restart `npm run dev` |
-| `backend-api/` (Python) | Restart uvicorn (or `--reload`), or `npm run build:backend` |
+| `backend-api/` (Python) | uvicorn `--reload` — automatic (see [Iterating on Python](#iterating-on-python)) |
 
 ## TypeScript path aliases
 
@@ -38,14 +38,18 @@ Defined in `tsconfig.json`:
 
 Don't hand-edit these; they're produced by the scripts above.
 
-## Port hygiene
+## Stale backend processes
 
-If `npm run dev` fails with the backend stuck, a previous sidecar may
-still hold port 8008:
+Ports are picked dynamically per instance, so a leftover backend no longer
+blocks the next launch — it simply lands on a different free port. To clean up
+orphans anyway:
 
 ```bash
-kill $(lsof -ti :8008)
+pkill -f phytograph_backend      # packaged bundle
+pkill -f 'uvicorn main:app'      # dev
 ```
+
+To see what holds a specific port: `lsof -ti :<port>`.
 
 ## Dev renderer disables React's performance track
 
@@ -67,14 +71,14 @@ move that import — it must evaluate before anything that pulls in React.
 
 ## Iterating on Python
 
-For tight Python iteration, run uvicorn directly so the supervisor reuses
-your process instead of spawning the bundled binary:
+**Nothing to set up — Python hot-reloads automatically.** When
+`backend-api/venv` exists, `scripts/dev.mjs` spawns
+`uvicorn main:app --reload --reload-dir .` on a free port and sets
+`PHYTOGRAPH_DEV_BACKEND=1`, which tells the Electron supervisor to stand down
+rather than spawn the bundled binary. So edits under `backend-api/` reload in
+place, and the PyInstaller sidecar is **not** part of the dev loop — you only
+rebuild it (`npm run build:backend`) for E2E and packaged installers.
 
-```bash
-kill $(lsof -ti :8008) 2>/dev/null
-cd backend-api && source venv/bin/activate
-uvicorn main:app --port 8008 --reload
-```
-
-In another terminal: `npm run dev`. The supervisor checks `/version`; if
-the version matches `EXPECTED_BACKEND_VERSION`, it defers to uvicorn.
+Edits to the PyHelios/Helios C++ source are recompiled too: the backend
+rebuilds `libhelios` on startup when the lib is stale, so restart the backend
+to pick up C++ edits.

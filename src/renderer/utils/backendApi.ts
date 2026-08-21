@@ -1,3 +1,59 @@
+// ==================== REQUEST TIMEOUTS ====================
+
+/**
+ * Thrown when a backend request exceeds its client-side deadline.
+ *
+ * Every fetch helper below guards itself with an `AbortController` + `setTimeout`.
+ * Aborting with NO reason makes `fetch` reject with Chromium's own DOMException,
+ * whose message is the useless `"signal is aborted without reason"` — which is
+ * what users saw in the Export Failed toast: no operation, no endpoint, no
+ * duration, no hint at what to do. `AbortController.abort(reason)` lets us supply
+ * the rejection value ourselves, so the error that reaches the catch block (and
+ * therefore the toast) is already a self-describing message.
+ *
+ * Just as important: it is DISTINGUISHABLE from a user cancel. Several callers
+ * treat `DOMException`/`name === 'AbortError'` as "the user pressed Cancel" and
+ * silently swallow it — so before this, a genuine timeout on those paths showed
+ * the user nothing at all. A cancel still aborts with no reason (a plain
+ * AbortError); only the deadline produces this type.
+ */
+export class BackendTimeoutError extends Error {
+  readonly endpoint: string;
+  readonly timeoutMs: number;
+  constructor(endpoint: string, timeoutMs: number) {
+    const secs = timeoutMs >= 60000
+      ? `${Math.round(timeoutMs / 60000)} min`
+      : `${Math.round(timeoutMs / 1000)} s`;
+    super(
+      `The backend did not respond within ${secs} (POST ${endpoint}). ` +
+      `Requests run concurrently, so this is not another tool holding it up — the ` +
+      `operation itself is either still working on an unusually large cloud or it ` +
+      `is stuck. The backend logs a "[slow]" line naming any request over 5 s; if ` +
+      `nothing is progressing there, restart the backend.`,
+    );
+    this.name = 'BackendTimeoutError';
+    this.endpoint = endpoint;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Arm a request deadline. Returns the timer id to `clearTimeout` on completion.
+ * Prefer this over a bare `setTimeout(() => controller.abort(), ms)` — the reason
+ * is what the user ends up reading. `endpoint` is the route (a `:id` placeholder
+ * is fine; it is for the human, not for parsing).
+ */
+export function abortOnTimeout(
+  controller: AbortController,
+  timeoutMs: number,
+  endpoint: string,
+): ReturnType<typeof setTimeout> {
+  return setTimeout(
+    () => controller.abort(new BackendTimeoutError(endpoint, timeoutMs)),
+    timeoutMs,
+  );
+}
+
 // ==================== SHARED POINT SOURCE ====================
 
 /**
@@ -24,18 +80,49 @@ export interface BackendPointSource {
 // ==================== KILLABLE SEGMENTATION HELPER ====================
 
 /**
+ * Advisory workload estimate for a tree segmentation run. TreeIso's cost tracks
+ * the POST-DECIMATION voxel count, not raw point count (it decimates before every
+ * expensive stage), so `nodes` — not `points` — is what makes a run slow.
+ *
+ * Receiving one is a prompt, not a refusal: re-send the request with
+ * `acknowledge_cost: true` to run it anyway. There is no workload the backend
+ * will refuse outright, so a user willing to wait can always proceed (and Cancel
+ * mid-run).
+ */
+export interface TreeCostWarning {
+  nodes: number;           // voxels TreeIso will actually process
+  node_guideline: number;  // the advisory threshold that was exceeded
+  points: number;          // non-ground input points
+  decimate_res1: number;   // resolved stage-1 voxel size, metres
+  message: string;         // ready-to-display copy
+}
+
+/** Thrown when a segmentation endpoint wants explicit confirmation before
+ *  running an expensive job. Carries the estimate so the UI can prompt. */
+export class CostWarningError extends Error {
+  readonly costWarning: TreeCostWarning;
+  constructor(costWarning: TreeCostWarning) {
+    super(costWarning.message);
+    this.name = 'CostWarningError';
+    this.costWarning = costWarning;
+  }
+}
+
+/**
  * POST a JSON request to a (non-streaming) segmentation endpoint, with a 5-minute
  * safety timeout AND optional external cancellation. The external `signal` is the
  * Cancel button: aborting the fetch closes the TCP connection, the backend detects
  * the disconnect and SIGKILLs its worker subprocess (see `_run_killable`). The
- * fetch aborts when EITHER the timeout fires OR the external signal aborts; on
- * abort, `fetch` throws a DOMException named 'AbortError', which callers
- * distinguish from a real failure (user cancel ≠ error).
+ * fetch aborts when EITHER the timeout fires OR the external signal aborts — and
+ * the two are deliberately distinguishable at the catch site: a cancel aborts with
+ * no reason (a plain DOMException 'AbortError', which callers swallow as user
+ * intent), the deadline aborts with a `BackendTimeoutError` (a real failure that
+ * must surface).
  */
 async function postSegment<T>(path: string, request: unknown, signal?: AbortSignal, timeoutMs = 300000): Promise<T> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = abortOnTimeout(controller, timeoutMs, path);
   // Mirror the external signal into our controller so the fetch aborts on either
   // the timeout or a user-initiated cancel. `once` keeps the listener from leaking.
   const onExternalAbort = () => controller.abort();
@@ -52,7 +139,20 @@ async function postSegment<T>(path: string, request: unknown, signal?: AbortSign
     });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+      const detail = errorData?.detail;
+      // A 409 carrying a structured `cost_warning` is a CONFIRMATION prompt, not
+      // a failure: the workload is above the cost guideline and the backend wants
+      // an explicit "run it anyway". Surface it as a typed error so callers can
+      // prompt and retry with `acknowledge_cost` instead of showing a raw
+      // stringified object to the user.
+      if (response.status === 409 && detail && typeof detail === 'object'
+          && (detail as { cost_warning?: TreeCostWarning }).cost_warning) {
+        throw new CostWarningError((detail as { cost_warning: TreeCostWarning }).cost_warning);
+      }
+      throw new Error(
+        (typeof detail === 'string' ? detail : (detail as { message?: string })?.message)
+        || `HTTP ${response.status}: ${response.statusText}`
+      );
     }
     return await response.json();
   } finally {
@@ -129,6 +229,7 @@ import { BACKEND_PORT_PROD } from '../../shared/constants';
 // that turns it into ScanParameters; imported here for CloudSessionMetadata and
 // re-exported below so backendApi consumers get it without a second import.
 import type { ScanParamsFromFile } from '../lib/scanParameters';
+import type { MeshData, PlantMaterialDef } from '../lib/pointCloudTypes';
 
 // Cached backend base URL. The port is chosen per-instance by the main process
 // (src/main/backend.ts) so concurrent app instances / dev sessions / E2E runs
@@ -171,19 +272,72 @@ export function getBackendUrl(): string {
  * we rewrite it; genuine HTTP-status errors (which we throw ourselves with the
  * backend's `detail`) pass through untouched.
  */
+/**
+ * Whether an error means the backend could not be REACHED, as opposed to the
+ * backend answering with a failure. Callers with a local fallback path use this
+ * to tell the two apart: falling back is right when the backend is genuinely
+ * absent, but reporting "the backend was unavailable" for an error the backend
+ * itself returned (or for a client-side decode failure) sends users chasing a
+ * process that was up the whole time.
+ */
+export function isBackendUnreachable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  // A deadline abort means the backend was reachable but too slow — not absent.
+  if (error instanceof BackendTimeoutError) return false;
+  return (
+    error.name === 'TypeError' ||
+    /failed to fetch|networkerror|load failed|connection/i.test(error.message)
+  );
+}
+
+/**
+ * Render a FastAPI `detail` as text.
+ *
+ * A raised HTTPException gives a plain string, but a 422 VALIDATION error gives
+ * an ARRAY of `{loc, msg, type}` objects — and interpolating that into a
+ * template literal yields the useless "[object Object]" a user actually saw.
+ * Flatten those into "field: message" so a malformed request says which field
+ * was wrong.
+ */
+export function formatBackendDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((e) => {
+        if (typeof e === 'string') return e;
+        const err = e as { loc?: unknown[]; msg?: string };
+        // `loc` is like ["body", "keep_columns"]; the last element names the
+        // offending field, which is the part worth showing.
+        const field = Array.isArray(err.loc) ? String(err.loc[err.loc.length - 1]) : '';
+        return field ? `${field}: ${err.msg ?? 'invalid'}` : (err.msg ?? 'invalid');
+      })
+      .join('; ');
+  }
+  if (detail && typeof detail === 'object') {
+    const d = detail as { msg?: string; detail?: string };
+    return d.msg ?? d.detail ?? JSON.stringify(detail);
+  }
+  return '';
+}
+
 export function describeBackendError(error: unknown, action: string): Error {
   if (error instanceof Error) {
-    const isConnectionFailure =
-      error.name === 'TypeError' ||
-      /failed to fetch|networkerror|load failed|connection/i.test(error.message);
+    const isConnectionFailure = isBackendUnreachable(error);
     if (isConnectionFailure) {
       return new Error(
         `${action} failed: could not reach the backend (it may still be starting, ` +
           `or it crashed processing this file). Check the backend status and try again.`,
       );
     }
+    // A deadline abort already carries the endpoint, the elapsed budget and what
+    // to do about it (see BackendTimeoutError) — only prefix the operation name.
+    if (error instanceof BackendTimeoutError) {
+      return new Error(`${action} timed out. ${error.message}`);
+    }
+    // A reason-less AbortError is a user-initiated cancel (the Cancel button
+    // mirrors its signal into the request's controller without a reason).
     if (error.name === 'AbortError') {
-      return new Error(`${action} timed out. The file may be too large, or the backend is stuck.`);
+      return new Error(`${action} was cancelled.`);
     }
     return error;
   }
@@ -215,6 +369,268 @@ export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
     gpuName: typeof j.gpu_name === 'string' ? j.gpu_name : null,
     driverVersion: typeof j.driver_version === 'string' ? j.driver_version : null,
     effectivePath: j.effective_path === 'gpu' ? 'gpu' : 'cpu',
+    reason: typeof j.reason === 'string' ? j.reason : '',
+  };
+}
+
+/**
+ * Whether RIEGL raw-project (.riproject / .rxp) import is available here, and
+ * why not when it isn't.
+ *
+ * Reading .rxp needs RIEGL's closed-source RiVLib, which has no macOS build, so
+ * Phytograph runs it inside a linux/amd64 container. That makes the feature
+ * conditional on three things at once — Docker reachable, the user's own RiVLib
+ * supplied, and the image built from it — and RiVLib's licence forbids us from
+ * shipping it, so this is a runtime probe rather than a build-time flag.
+ * See /api/riegl/status.
+ */
+export interface RieglStatus {
+  available: boolean;
+  platformSupported: boolean;
+  dockerPresent: boolean;
+  imageBuilt: boolean;
+  rivlibPath: string | null;
+  rivlibValid: boolean;
+  image: string;
+  reason: string;
+}
+
+/**
+ * Build the RIEGL reader Docker image from the bundled Dockerfile.
+ *
+ * The image is always built locally and never pulled: publishing it would mean
+ * redistributing RiVLib, which its licence forbids. The build itself carries no
+ * licensed bytes (RiVLib is bind-mounted at run time), so it is safe to re-run
+ * and cheap on a warm cache.
+ *
+ * Streams PHP1 progress like every other long backend operation.
+ */
+export async function buildRieglImage(
+  rivlibPath: string | null,
+  opts?: ImportProgressOptions,
+): Promise<{ ok: boolean; image: string }> {
+  return fetchJsonWithProgress<{ ok: boolean; image: string }>(
+    '/api/riegl/image/build',
+    { rivlib_path: rivlibPath },
+    opts?.signal,
+    // Docker pulls a ~150 MB base image on a cold cache, so allow well beyond
+    // the default; the backend enforces its own 30-minute ceiling.
+    30 * 60 * 1000,
+    opts?.onProgress,
+    opts?.onRunId,
+  );
+}
+
+/** One scan position inside a raw RIEGL project. */
+/**
+ * How well a scan position is placed.
+ *
+ * - `registered` — a real registration result (a .PROJ's plane or voxel .sopv).
+ *   Placed to the registration's own accuracy, millimetres in practice.
+ * - `prior` — only the inclinometer/compass/GNSS estimate. Metre-level; the
+ *   user should refine it with ICP.
+ * - `none` — no pose at all: an aborted acquisition, or any .riproject, which
+ *   carries no registration whatsoever.
+ */
+export type RieglRegistration = 'registered' | 'prior' | 'none';
+
+export type RieglFrame = 'local' | 'registered';
+
+export interface RieglScanPosition {
+  name: string;
+  /** How this position is placed — see RieglRegistration. */
+  registration?: RieglRegistration;
+  /**
+   * SOCS -> project-frame transform as a 4x4, row-major. Present only for a
+   * .PROJ, and only when the position has a pose. The backend applies it; this
+   * is here so the UI can describe the placement.
+   */
+  sop?: number[][];
+  /**
+   * project.json's own verdict on this position's registration, kept distinct
+   * from `registration`: a position can be absent from the manifest entirely
+   * (an aborted acquisition) and still hold perfectly good point data.
+   */
+  manifest_success?: boolean | null;
+  /**
+   * The cloud session the backend built for this position, present after
+   * extraction. The importer streams points straight into a session — no
+   * intermediate LAS is written, so there is no file for the renderer to
+   * re-import (that round trip cost ~10 s and ~1.6 GB per position).
+   */
+  session?: CloudSessionMetadata;
+  /** Exact after extraction; a bounded probe read during inspect. */
+  point_count?: number;
+  point_count_probed?: number;
+  /**
+   * Approximate count from the .rxp's size. A .PROJ preview reads no points at
+   * all (all its metadata is in JSON sidecars), so this is the only figure
+   * available before extraction — approximate, not a floor like
+   * `point_count_probed`.
+   */
+  point_count_estimated?: number;
+  size_bytes?: number;
+  max_returns_per_pulse?: number;
+  instrument?: { model?: string; serial?: string };
+  /** The commanded scan pattern, from the position's .pat or .scn file. */
+  scan_params?: ScanParamsFromFile & {
+    theta_increment?: number;
+    phi_increment?: number;
+  };
+  gnss?: {
+    latitude: number;
+    longitude: number;
+    height_m: number;
+    height_datum: string;
+  } | null;
+  /** Centroid-anchored ENU offset (metres) derived from the GNSS fix. */
+  enu?: { east_m: number; north_m: number; up_m: number } | null;
+  origin_prior?: [number, number, number];
+  /** Set when pulse grouping disagreed with RiVLib's echo flags. */
+  warning?: string;
+  error?: string;
+}
+
+export interface RieglProject {
+  project: string;
+  rivlib_version: string;
+  scan_count: number;
+  gnss_anchor: {
+    latitude: number;
+    longitude: number;
+    height_m: number;
+  } | null;
+  /** Which layout the backend detected. */
+  layout?: 'riproject' | 'proj';
+  /** The reader container's contract version. */
+  reader_version?: number;
+  /** The frame the points were placed in. */
+  frame?: RieglFrame;
+  /**
+   * Whether ANY position carried a real registration. Always false for a
+   * .riproject: raw scanner data carries no registration (that is what RiSCAN
+   * PRO produces), so every position sits in its own frame and the
+   * GNSS-derived `origin_prior` is a metres-level seed for ICP, not a
+   * placement. A .PROJ reports what it actually found — check
+   * `registered_count` and each position's `registration`, because a project
+   * is routinely a mix.
+   */
+  registered: boolean;
+  /** How many positions carried a real registration. */
+  registered_count?: number;
+  scans: RieglScanPosition[];
+  /** Extraction only: the directory holding the written LAS files. */
+  extract_dir?: string;
+}
+
+/** List a RIEGL project's scan positions without extracting point data. */
+export async function inspectRieglProject(
+  projectPath: string,
+  rivlibPath: string | null,
+  signal?: AbortSignal,
+  frame: RieglFrame = 'registered',
+): Promise<RieglProject> {
+  const res = await fetch(`${getBackendUrl()}/api/riegl/project/inspect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      project_path: projectPath,
+      rivlib_path: rivlibPath,
+      frame,
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    // 503 carries the capability remediation ("start Docker", "choose a RiVLib
+    // folder"); surface it verbatim rather than a generic status message.
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail ?? `riegl inspect failed: ${res.status}`);
+  }
+  return (await res.json()) as RieglProject;
+}
+
+/**
+ * Extract the chosen scan positions to LAS, one file per position.
+ *
+ * Each written file is an ordinary point cloud: the caller imports it through
+ * the normal `parsePointCloudFromPath` path, so nothing downstream has to know
+ * what a .riproject is.
+ */
+export async function extractRieglProject(
+  projectPath: string,
+  scans: string[] | null,
+  rivlibPath: string | null,
+  /**
+   * Scalar columns to keep, from the import wizard. null/undefined keeps
+   * everything the scanner recorded. `is_miss` is always retained regardless —
+   * it is a system flag driving the Hit/Miss scheme and the octree exclusion,
+   * not a user column.
+   */
+  keepColumns?: string[] | null | ImportProgressOptions,
+  opts?: ImportProgressOptions,
+  /**
+   * `registered` applies each position's SOP so a .PROJ's scans land
+   * pre-aligned; `local` keeps scanner-local coordinates, which is all a
+   * .riproject can offer and what a user wanting the exact LAD raster picks.
+   */
+  frame: RieglFrame = 'registered',
+): Promise<RieglProject> {
+  // Tolerate the options object being passed in the keepColumns position.
+  // A caller written against the older 4-arg signature does exactly that, and
+  // the failure mode was ugly: the object reached the backend as
+  // `keep_columns`, which 422'd with "Input should be a valid list" — rendered
+  // in the UI as "[object Object]". Detecting it here costs nothing and turns a
+  // silent shape mismatch into correct behaviour.
+  let keep: string[] | null = null;
+  let options = opts;
+  if (Array.isArray(keepColumns)) {
+    keep = keepColumns;
+  } else if (keepColumns && typeof keepColumns === 'object') {
+    options = keepColumns as ImportProgressOptions;
+  }
+
+  return fetchJsonWithProgress<RieglProject>(
+    '/api/riegl/project/extract',
+    {
+      project_path: projectPath,
+      scans,
+      rivlib_path: rivlibPath,
+      keep_columns: keep,
+      frame,
+    },
+    options?.signal,
+    // ~14 M points per position, plus LAS writing, under x86 emulation: a
+    // six-position project runs into the minutes. The backend enforces its own
+    // one-hour ceiling.
+    60 * 60 * 1000,
+    options?.onProgress,
+    options?.onRunId,
+  );
+}
+
+export async function getRieglStatus(
+  rivlibPath?: string | null,
+  signal?: AbortSignal,
+): Promise<RieglStatus> {
+  // The path travels per request because the backend sidecar is spawned once at
+  // launch: passing it in the environment would go stale as soon as the user
+  // picked a different folder, and only an app restart would pick it up.
+  const url = new URL(`${getBackendUrl()}/api/riegl/status`);
+  if (rivlibPath) url.searchParams.set('rivlib_path', rivlibPath);
+
+  const res = await fetch(url.toString(), { signal });
+  if (!res.ok) throw new Error(`riegl-status failed: ${res.status}`);
+  const j = (await res.json()) as Record<string, unknown>;
+  // Validate every field: a backend that omits one should yield a safe default
+  // (i.e. "not available"), never `undefined` leaking into the UI.
+  return {
+    available: j.available === true,
+    platformSupported: j.platform_supported === true,
+    dockerPresent: j.docker_present === true,
+    imageBuilt: j.image_built === true,
+    rivlibPath: typeof j.rivlib_path === 'string' ? j.rivlib_path : null,
+    rivlibValid: j.rivlib_valid === true,
+    image: typeof j.image === 'string' ? j.image : '',
     reason: typeof j.reason === 'string' ? j.reason : '',
   };
 }
@@ -515,7 +931,7 @@ export async function exportDemRaster(
 ): Promise<{ success: boolean; format: string; data_base64: string }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/dem/export-raster');
   try {
     const response = await fetch(`${baseUrl}/api/dem/export-raster`, {
       method: 'POST',
@@ -547,7 +963,7 @@ export async function parseTrajectory(
 ): Promise<unknown> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/trajectory/parse'); // 2 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/trajectory/parse`, {
@@ -654,6 +1070,11 @@ export interface TreeSegmentationRequest {
   source?: BackendPointSource;  // octree-backed clouds read from disk
   seed_points?: number[][];     // [[x, y, z], ...] trunk seeds (HITL)
   ground_class?: number[];      // per-point ground/plant labels (1=ground) to exclude
+  // Confirms an expensive run. When the workload is above the cost guideline the
+  // backend returns a `cost_warning` (inline) / 409 `CostWarningError` (session)
+  // instead of running; re-send with this true to proceed. Not a cap — purely a
+  // "are you sure" step, so any workload can ultimately run.
+  acknowledge_cost?: boolean;
 
   // TreeIso parameters (defaults match the backend / Xi & Hopkinson 2022).
   reg_strength1?: number;
@@ -677,6 +1098,9 @@ export interface TreeSegmentationResponse {
   num_trees: number;
   num_points: number;
   ground_warning: boolean;
+  // Set (with success=false and no error) when the run needs confirmation.
+  // Re-send with `acknowledge_cost: true` to proceed.
+  cost_warning?: TreeCostWarning;
   error?: string;
 }
 
@@ -694,9 +1118,10 @@ export interface HeliosScanEntry {
   //   session_id — a session-backed (octree) cloud; the backend triangulates its
   //     in-RAM surviving HIT points (deletions honored, misses excluded). This is
   //     the source of truth after any edit (crop/erase/backfill/segment), so the
-  //     file is never re-read. Sent alongside file_path as a restart fallback.
+  //     file is never re-read, and file_path is NOT sent alongside it — a stale
+  //     session must fail loudly, not silently fall back to the pre-edit file.
   session_id?: string | null;
-  file_path?: string;       // Path to scan file on disk (file-backed cloud, no session)
+  file_path?: string;       // Path to scan file on disk (cloud that never had a session)
   ascii_format?: string | null;  // Column format e.g. "x y z timestamp" (auto-detected if omitted/null)
   points?: number[][];      // [[x, y, z], ...] flat in-RAM cloud (no session, no file)
   colors?: number[][];      // [[r, g, b], ...] point colors (0-1 range)
@@ -1302,7 +1727,7 @@ export async function generatePlantModel(
 
   // Use AbortController for 5 minute timeout (plant generation can be slow)
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/generate'); // 5 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/generate`, {
@@ -1344,7 +1769,7 @@ export async function generatePlantCanopy(
 
   // Canopies build N plants, so allow the full 5 minute timeout.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/canopy/generate'); // 5 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/canopy/generate`, {
@@ -1522,7 +1947,7 @@ export async function createPlantSession(
   console.log('Creating plant session:', request.plant_type, 'initial_age:', request.initial_age);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/plant/session/create');
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/session/create`, {
@@ -1558,7 +1983,7 @@ export async function advancePlantSession(
   console.log('Advancing plant session:', sessionId, 'dt:', dt);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/plant/session/:id/advance');
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/session/${sessionId}/advance`, {
@@ -1721,7 +2146,7 @@ export async function morphPlant(
   console.log('Morphing plant:', request.plant_type);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/plant/morph'); // 5 minutes
 
   try {
     const response = await fetch(`${baseUrl}/api/plant/morph`, {
@@ -1958,6 +2383,21 @@ export interface PointCloudExportRequest {
   // octree clouds may send any of these (the backend formats the text).
   format: 'las' | 'laz' | 'xyz' | 'txt' | 'csv' | 'ply' | 'obj';
   filename?: string;
+  // Absolute path for the backend to write directly. Always set this when a
+  // destination is known: the base64-in-JSON alternative inflates the body ~1.8x,
+  // so a 25 M-point cloud lands near 1 GB and `response.json()` dies on V8's
+  // ~512 MB string cap ("Unexpected end of JSON input"). With dest_path the
+  // response is ~100 bytes of metadata and `data` comes back null.
+  dest_path?: string;
+  // Ordered column slugs from the export modal's column picker, e.g.
+  // ['x','y','z','reflectance','ground_class']. Applies to the TEXT formats
+  // (xyz/txt/csv) and to PLY's property list; a slug this cloud doesn't carry is
+  // dropped rather than written as zeros. Omit for the format's default layout.
+  //
+  // LAS/LAZ ignore it by design: the format has a fixed standard schema plus
+  // named extra dimensions, so the backend writes EVERY available scalar as its
+  // own extra dimension and the UI hides the picker for it.
+  columns?: string[];
 }
 
 export interface PointCloudExportResponse {
@@ -1981,51 +2421,51 @@ export interface PointCloudImportResponse {
 }
 
 /**
- * Export a point cloud to LAS or LAZ format via the backend.
- * Uses laspy with lazrs for efficient LAZ compression.
+ * Export a point cloud via the backend (LAS/LAZ via laspy, text formats via the
+ * vectorised formatter).
+ *
+ * Streams PHP1 progress markers ahead of its JSON tail, so `onProgress` gets a
+ * real percentage rather than an indeterminate spinner: formatting a text export
+ * is ~97% of its wall time and the backend reports it per chunk. `signal` +
+ * `onRunId` make the export cancellable — POST /api/cancel/{runId} stops the
+ * backend work, and aborting the signal tears down the fetch.
+ *
+ * 10 minute budget, matching the import: a 25 M-point cloud takes ~35 s to read,
+ * format and write on a fast disk. fetchJsonWithProgress refreshes the deadline
+ * on every chunk, so a slow-but-streaming export is never killed mid-write.
  */
 export async function exportPointCloudLasLaz(
-  request: PointCloudExportRequest
+  request: PointCloudExportRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<PointCloudExportResponse> {
-  const baseUrl = getBackendUrl();
   console.log('Point cloud export -', request.points ? `${request.points.length} points` : `source:${request.source?.source_path}`, 'format:', request.format);
-
-  // Use AbortController for timeout
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
-
+  const t0 = performance.now();
   try {
-    const response = await fetch(`${baseUrl}/api/pointcloud/export`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
+    return await fetchJsonWithProgress<PointCloudExportResponse>(
+      '/api/pointcloud/export', request, signal, 600000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('LAS/LAZ export failed:', error);
-    throw error;
+    console.error(`Point cloud export failed after ${Math.round(performance.now() - t0)} ms:`, error);
+    throw describeBackendError(error, 'Export');
   }
 }
 
 // One scan to export to the Helios XML + per-scan ASCII bundle. Point source is
-// one of session_id / points / file_path (resolved in that order, backend-side).
+// EXACTLY one of session_id / points / file_path (resolved in that order,
+// backend-side). A session-backed cloud sends session_id alone: a stale session
+// is an error, never a fall-back to the pre-edit source file.
 export interface ScanExportEntry {
   origin: [number, number, number];
-  // 'raster' (default) or 'spinning_multibeam'. Multibeam scans are exported via
-  // beam_elevation_angles_deg; n_theta/theta_* are ignored for them.
-  scan_pattern?: 'raster' | 'spinning_multibeam';
+  // Display name, used only for the export's progress messages ("Writing
+  // plot_A…"). The backend ignores it everywhere else.
+  label?: string;
+  // 'raster' (default), 'spinning_multibeam', or 'risley_prism'. Multibeam scans
+  // are exported via beam_elevation_angles_deg; n_theta/theta_* are ignored for
+  // them. A Risley rosette can only be written to the DATA formats — the Helios
+  // XML bundle and PTX both need a grid it doesn't have, and the backend rejects
+  // it for the bundle with its own message.
+  scan_pattern?: 'raster' | 'spinning_multibeam' | 'risley_prism';
   beam_elevation_angles_deg?: number[];  // degrees above horizon (multibeam only)
   n_theta?: number;
   n_phi?: number;
@@ -2070,16 +2510,27 @@ export interface ScanExportRequest {
   // false → write only the per-scan data files (no XML), in `data_format`.
   write_xml: boolean;
   // Data-only output format (write_xml=false): las/laz/ply/xyz/csv/txt/obj/e57.
+  // 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj' | 'e57' | 'ptx'.
   data_format?: string;
   // Voxel-box grids to write as <grid> blocks (XML mode only). Omitted/empty →
   // no grid blocks. Lets a bundle like sphere.xml round-trip its grid.
   grids?: HeliosGrid[];
+  // Absolute directory for the backend to write the bundle into. Always set this
+  // when the destination is known: base64-in-JSON inflates each file ~1.33x and
+  // this response carries EVERY scan at once, so exporting several scans (the LAZ
+  // case especially) overruns V8's ~512 MB string cap in `response.json()` and
+  // fails as "Unexpected end of JSON input". With dest_dir the backend writes the
+  // files and returns names + sizes only.
+  dest_dir?: string;
 }
 
 export interface ScanExportFile {
   name: string;
-  data: string;       // base64
+  // base64 file content — null when the backend wrote the file itself (dest_dir).
+  data: string | null;
   is_xml: boolean;
+  bytes?: number;    // size on disk
+  written?: boolean; // true → already written by the backend; renderer must skip it
 }
 
 export interface ScanExportResponse {
@@ -2091,35 +2542,37 @@ export interface ScanExportResponse {
 }
 
 /**
- * Export one or more scans to a Helios XML metadata file + one ASCII data file
- * per scan (re-loadable via PyHelios loadXML). Preserves the `is_miss` flag and
- * other per-hit scalar columns, applies viewer translation, and honors session
- * edits — so the bundle round-trips losslessly back into Phytograph/Helios.
+ * Export one or more objects: either a Helios XML metadata file + one ASCII data
+ * file per scan (re-loadable via PyHelios loadXML), or one data file per object
+ * in a chosen format. Preserves the `is_miss` flag and other per-hit scalar
+ * columns, applies viewer translation, and honors session edits — so the bundle
+ * round-trips losslessly back into Phytograph/Helios.
+ *
+ * Streams PHP1 progress markers ahead of its JSON tail, so `onProgress` gets a
+ * real per-object percentage rather than an indeterminate spinner, and `signal`
+ * + `onRunId` make it cancellable (POST /api/cancel/{runId} stops the backend
+ * work; aborting the signal tears down the fetch).
+ *
+ * 10 minute budget, matching the point-cloud export: a multi-scan LAZ bundle is
+ * tens of seconds of formatting. fetchJsonWithProgress refreshes the deadline on
+ * every chunk, so a slow-but-streaming export is never killed mid-write.
  */
 export async function exportScanXml(
-  request: ScanExportRequest
+  request: ScanExportRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
 ): Promise<ScanExportResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
-
   try {
-    const response = await fetch(`${baseUrl}/api/scan/export-xml`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
+    return await fetchJsonWithProgress<ScanExportResponse>(
+      '/api/scan/export-xml', request, signal, 600000, onProgress, onRunId);
   } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Scan XML export failed:', error);
-    throw error;
+    console.error('Scan export failed:', error);
+    // Same treatment the point-cloud export gets: a raw fetch failure here is
+    // almost always "the backend went away", which needs saying in those words.
+    // A user cancel arrives as a reason-less AbortError; the caller checks its
+    // own signal first, so wrapping it is harmless.
+    throw describeBackendError(error, 'Scan export');
   }
 }
 
@@ -2182,6 +2635,10 @@ export interface PreviewColumn {
   suggested_slug: string;
   type_hint: string;              // integer | float | categorical | empty
   remappable: boolean;            // true for ASCII; false for PLY/PCD/LAS
+  // Whether the column's ROLE may be reassigned even though the layout is fixed
+  // (LAS/LAZ extra dims, .riproject scalars). Orthogonal to `remappable`, which
+  // is about column POSITION and is ASCII-only.
+  role_assignable?: boolean;
 }
 
 export interface PointCloudPreviewResponse {
@@ -2209,7 +2666,7 @@ export async function previewPointCloud(
 ): Promise<PointCloudPreviewResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/pointcloud/preview');
   try {
     const response = await fetch(`${baseUrl}/api/pointcloud/preview`, {
       method: 'POST',
@@ -2244,12 +2701,15 @@ export async function importPointCloudByPath(
   asciiFormat?: string | null,
   columnPlan?: ColumnPlan | null,
   worldShift?: [number, number, number] | null,
+  // Scalar slugs to leave out (wizard Import checkboxes), for formats whose
+  // layout the file fixes. ASCII skips ride `columnPlan` as role 'skip'.
+  droppedSlugs?: string[] | null,
 ): Promise<ImportPointCloudByPathResult> {
   const baseUrl = getBackendUrl();
   // 10 minute timeout: a multi-GB scan takes tens of seconds to parse and
   // additional time to stream back. Matches the triangulation budget.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 600000);
+  const timeoutId = abortOnTimeout(controller, 600000, '/api/pointcloud/import_by_path');
   try {
     const response = await fetch(`${baseUrl}/api/pointcloud/import_by_path`, {
       method: 'POST',
@@ -2259,6 +2719,7 @@ export async function importPointCloudByPath(
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
         world_shift: worldShift ?? null,
+        drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
       }),
       signal: controller.signal,
     });
@@ -2280,51 +2741,70 @@ export async function importPointCloudByPath(
 
 // ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
 
-export interface MeshImportResponse {
+export interface MeshImportResult {
   success: boolean;
-  vertices: number[][];          // [[x, y, z], ...]
-  indices: number[][];           // [[v0, v1, v2], ...]
-  normals?: number[][];
-  colors?: number[][];           // per-vertex colors (0-1)
-  uv_coordinates?: number[][];   // [[u, v], ...] V-flipped for three.js
-  materials?: PlantMaterial[];
-  material_groups?: PlantMaterialGroup[];
-  textures?: Record<string, string>;  // {basename: base64}
-  vertex_count: number;
-  triangle_count: number;
+  data: MeshData;
+  plantMaterials?: PlantMaterialDef[];
   filename?: string;
-  has_textures: boolean;
+  hasTextures: boolean;
   error?: string;
 }
 
 /**
- * Import a textured mesh (OBJ + sibling MTL + texture images) from a disk path.
- * The backend resolves the MTL and image files relative to the OBJ and returns
- * geometry, real per-vertex UVs, and base64 textures in the same shape the
- * textured renderer already consumes for plant models.
+ * Import a mesh (OBJ + sibling MTL + texture images, or ASCII/binary PLY) from a
+ * disk path. The backend resolves the MTL and image files relative to the OBJ and
+ * returns geometry, real per-vertex UVs, and base64 textures.
+ *
+ * Transport is a PHB1 binary frame, not JSON: a scanner-grade mesh (millions of
+ * triangles) serializes to a JSON body past V8's ~512 MB string cap, where
+ * `response.json()` throws ERR_STRING_TOO_LONG regardless of timeout. The frame's
+ * buffers become the returned MeshData's typed arrays with no per-element
+ * repacking, so this also skips the number[][] round-trip entirely.
  */
-export async function importTexturedMesh(filePath: string): Promise<MeshImportResponse> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
-  try {
-    const response = await fetch(`${baseUrl}/api/mesh/import`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: filePath }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    clearTimeout(timeoutId);
-    console.error('Textured mesh import failed:', error);
-    throw error;
+export async function importTexturedMesh(filePath: string): Promise<MeshImportResult> {
+  // 10 minutes: reading + normal-generating a multi-million-triangle mesh off
+  // disk is tens of seconds, and the frame still has to cross the socket.
+  const { meta, buffers } = await fetchBinaryFrame(
+    '/api/mesh/import', { path: filePath }, undefined, 600000,
+  );
+  if (!meta.success) {
+    throw new Error((meta.error as string) ?? 'Mesh import failed');
   }
+
+  const materials = (meta.materials as PlantMaterial[] | null) ?? undefined;
+  const materialGroups = (meta.material_groups as PlantMaterialGroup[] | null) ?? undefined;
+  const textures = (meta.textures as Record<string, string> | null) ?? undefined;
+
+  let plantMaterials: PlantMaterialDef[] | undefined;
+  if (materials && materialGroups) {
+    plantMaterials = materials.map((mat) => {
+      const group = materialGroups.find((g) => g.material_name === mat.name);
+      const textureData = mat.texture_name && textures ? textures[mat.texture_name] : undefined;
+      return {
+        name: mat.name,
+        color: mat.color as [number, number, number] | undefined,
+        textureData,
+        hasAlpha: mat.has_alpha,
+        triangleIndices: group?.triangle_indices ?? [],
+      };
+    });
+  }
+
+  return {
+    success: true,
+    data: {
+      vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
+      indices: (buffers.indices as Uint32Array) ?? new Uint32Array(0),
+      normals: buffers.normals as Float32Array | undefined,
+      vertexColors: buffers.colors as Float32Array | undefined,
+      uvCoordinates: buffers.uv_coordinates as Float32Array | undefined,
+      vertexCount: meta.vertex_count as number,
+      triangleCount: meta.triangle_count as number,
+    },
+    plantMaterials,
+    filename: meta.filename as string | undefined,
+    hasTextures: Boolean(meta.has_textures),
+  };
 }
 
 // 32-byte header: 4s magic, I count, B has_colors, B has_intensity, 22x reserved.
@@ -2392,6 +2872,13 @@ export interface ProgressMarker {
   // run carries cancelled:true in place of a frame. Both optional on other markers.
   runId?: string;
   cancelled?: boolean;
+  // The terminal marker of a FAILED run carries the error message in place of a
+  // frame. These endpoints stream, so the backend has already sent `200 OK` and
+  // its headers before the worker runs — a later exception cannot change the
+  // status code, so the failure has to travel in-band. Without this the client
+  // saw a 200 with a truncated body and reported a decode error instead of the
+  // real cause.
+  error?: string;
 }
 
 function isWhitespaceByte(b: number): boolean {
@@ -2435,6 +2922,7 @@ export function parseProgressMarkers(
         message: parsed.message ?? '',
         runId: parsed.run_id,
         cancelled: parsed.cancelled,
+        error: parsed.error,
       });
     } catch {
       // Ignore a malformed marker rather than wedging the stream.
@@ -2442,6 +2930,24 @@ export function parseProgressMarkers(
     o += 8 + jsonLen;
   }
   return { markers, consumed: o - offset };
+}
+
+/**
+ * Throw if a buffered (non-streaming) response body carries a terminal
+ * `cancelled` / `error` marker in place of its payload.
+ *
+ * The streaming readers check each marker as it arrives, but the buffered
+ * fallbacks (`!onProgress` / `!response.body`) read the whole body at once and
+ * would otherwise skip straight past a terminal marker to decode a payload that
+ * was never written — turning a real backend error into a confusing "frame too
+ * short" / JSON parse failure.
+ */
+function throwIfTerminalMarker(bytes: Uint8Array): void {
+  const { markers } = parseProgressMarkers(bytes, 0);
+  for (const m of markers) {
+    if (m.cancelled) throw new ScanCancelledError();
+    if (m.error) throw new Error(m.error);
+  }
 }
 
 export function decodeBinaryFrame(buf: ArrayBuffer): BinaryFrame {
@@ -2525,6 +3031,19 @@ function toRequestBody(b: ArrayBuffer | Uint8Array): ArrayBuffer {
 // markers (see _bin_frame_streaming_response in backend-api/main.py).
 export type BinaryFrameProgress = (progress: number | null, message: string) => void;
 
+// Cancellation + progress plumbing for a point-cloud import. Importing a
+// multi-GB scan is a minute-scale operation the user must be able to abort, and
+// the abort has to be REAL: `cancelRun(runId)` tells the backend to stop and
+// free its memory (killing the PotreeConverter child), while `signal` tears down
+// the fetch. See `cancelImport` in App.tsx for the ordering.
+export interface ImportProgressOptions {
+  signal?: AbortSignal;
+  // Per-stage progress streamed as PHP1 markers ("Building octree…", 0.62).
+  onProgress?: BinaryFrameProgress;
+  // Fires once with the backend run id, which is what /api/cancel/{id} targets.
+  onRunId?: (runId: string) => void;
+}
+
 // Thrown when the backend reports a cancelled run (a terminal PHP1 `cancelled`
 // marker) instead of a frame. Callers catch this to treat the cancel as a
 // no-op-success (UI returns to idle) rather than surfacing an error toast.
@@ -2553,10 +3072,10 @@ export async function fetchBinaryFrame(
 ): Promise<BinaryFrame> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  let timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutId = abortOnTimeout(controller, timeoutMs, path);
   const refreshTimeout = () => {
     clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    timeoutId = abortOnTimeout(controller, timeoutMs, path);
   };
   if (signal) signal.addEventListener('abort', () => controller.abort());
   try {
@@ -2569,11 +3088,16 @@ export async function fetchBinaryFrame(
     if (!response.ok) {
       clearTimeout(timeoutId);
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+      throw new Error(
+        formatBackendDetail(errorData.detail)
+          || `HTTP ${response.status}: ${response.statusText}`,
+      );
     }
     if (!onProgress || !response.body) {
       clearTimeout(timeoutId);
-      return decodeBinaryFrame(await response.arrayBuffer());
+      const buf = await response.arrayBuffer();
+      throwIfTerminalMarker(new Uint8Array(buf));
+      return decodeBinaryFrame(buf);
     }
 
     // Streaming path: accumulate bytes, draining leading PHP1 markers as they
@@ -2596,6 +3120,10 @@ export async function fetchBinaryFrame(
           // there is no frame to decode. Surface it as a typed abort so callers
           // can distinguish a user cancel from a real failure.
           if (m.cancelled) throw new ScanCancelledError();
+          // An `error` marker means the worker raised after the 200 was already
+          // committed. Throw the backend's own message rather than falling
+          // through to decode a frame that was never written.
+          if (m.error) throw new Error(m.error);
           onProgress(m.progress, m.message);
         }
         pending = merged.subarray(consumed);
@@ -2647,10 +3175,10 @@ export async function fetchJsonWithProgress<T>(
 ): Promise<T> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  let timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutId = abortOnTimeout(controller, timeoutMs, path);
   const refreshTimeout = () => {
     clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    timeoutId = abortOnTimeout(controller, timeoutMs, path);
   };
   if (signal) signal.addEventListener('abort', () => controller.abort());
   try {
@@ -2670,6 +3198,7 @@ export async function fetchJsonWithProgress<T>(
       // the buffered bytes, then parse the JSON tail.
       clearTimeout(timeoutId);
       const all = new Uint8Array(await response.arrayBuffer());
+      throwIfTerminalMarker(all);
       const { consumed } = parseProgressMarkers(all, 0);
       return JSON.parse(new TextDecoder().decode(all.subarray(consumed))) as T;
     }
@@ -2688,6 +3217,7 @@ export async function fetchJsonWithProgress<T>(
         for (const m of markers) {
           if (m.runId && onRunId) onRunId(m.runId);
           if (m.cancelled) throw new ScanCancelledError();
+          if (m.error) throw new Error(m.error);
           if (onProgress) onProgress(m.progress, m.message);
         }
         pending = merged.subarray(consumed);
@@ -2715,7 +3245,7 @@ export async function importPointCloudLasLaz(
 
   // Use AbortController for timeout
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/pointcloud/import'); // 2 minutes
 
   try {
     const formData = new FormData();
@@ -3240,6 +3770,16 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // a bird, a scanner artefact) sinks it arbitrarily far. null when the backend
   // could not compute one (empty/degenerate cloud) — fall back to the min then.
   ground_z?: number | null;
+  // Outlier-resistant per-axis extent [dx, dy, dz] (see `_robust_extent` in
+  // main.py). The viewer scales the camera's zoom limits from it so a handful of
+  // stray returns hundreds of metres out can't make the scene un-navigable.
+  // Cannot be derived from `tight_bounds`: rejecting the tail needs the points,
+  // which only exist backend-side at import. null on a degenerate cloud.
+  robust_extent?: [number, number, number] | null;
+  // The percentile box `robust_extent` was measured across. Its CENTRE is the
+  // content's centre — unlike `tight_bounds`', which far outliers drag into
+  // empty space. null on a degenerate cloud.
+  robust_bounds?: { min: [number, number, number]; max: [number, number, number] } | null;
 }
 
 // The wire shape of the backend `scan_params` dict. Canonically defined in
@@ -3371,33 +3911,126 @@ export async function createCloudSession(
   // leaving them at far-field, matching a fresh synthetic scan. null when the
   // source carries no scanner geometry.
   origin?: [number, number, number] | null,
+  // Abort the import. Pair with `cancelRun(runId)` so the backend stops and
+  // frees its memory rather than finishing the work into the void.
+  signal?: AbortSignal,
+  // Per-stage progress from the endpoint's PHP1 markers.
+  onProgress?: BinaryFrameProgress,
+  // Receives the backend run id (first marker) — the /api/cancel/{id} target.
+  onRunId?: (runId: string) => void,
+  // Scalar slugs the wizard's Import checkboxes excluded. Only meaningful for
+  // in-file formats (LAS/LAZ/PLY/PCD/E57/PTX) — an ASCII skip travels inside
+  // `columnPlan` as role 'skip' and never reaches here.
+  droppedSlugs?: string[] | null,
+  // Role reassignments from the wizard, `{source_slug: role}`. Only the columns
+  // the user actually changed; an in-file format's auto-detection is otherwise
+  // untouched. Empty/undefined → the previous behaviour exactly.
+  roleOverrides?: Record<string, string> | null,
 ): Promise<CloudSessionMetadata> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/create`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // The endpoint streams PHP1 progress markers ahead of its JSON tail, so it
+    // needs the streaming reader. That also replaces the old hand-rolled 300 s
+    // timeout: fetchJsonWithProgress refreshes its timeout on every chunk, so a
+    // legitimately slow (but actively streaming) import is no longer aborted
+    // mid-flight the way a >5 min import used to be.
+    const meta = await fetchJsonWithProgress<CloudSessionMetadata & { error?: string }>(
+      '/api/cloud/session/create',
+      {
         source_path: filePath,
         ascii_format: asciiFormat ?? null,
         column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
         world_shift: worldShift ?? null,
         miss_distance_threshold: missDistanceThreshold ?? null,
         origin: origin ?? null,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionMetadata;
+        drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
+        role_overrides: roleOverrides && Object.keys(roleOverrides).length
+          ? roleOverrides : null,
+      },
+      signal,
+      600000,
+      onProgress,
+      onRunId,
+    );
+    // Failures raised after the response opened can't be an HTTP error status —
+    // the backend reports them in the JSON tail instead (a truncated body would
+    // otherwise surface as "Unexpected end of JSON input").
+    if (meta.error) throw new Error(meta.error);
+    return meta;
   } catch (error) {
-    clearTimeout(timeoutId);
+    // A cancel is not a failure: rethrow it untouched so callers can identify it
+    // by type. describeBackendError would mangle it into a generic backend
+    // error and every cancel would raise an error toast.
+    if (error instanceof ScanCancelledError) throw error;
     console.error('create_cloud_session failed:', error);
+    throw describeBackendError(error, 'Import');
+  }
+}
+
+/** One scan position of a multi-scan source, as returned by createCloudSessions. */
+export interface CloudScanPosition {
+  /** Index within the file (0-based). */
+  scan_index: number;
+  /** Display name — the file stem, suffixed with the position for multi-scan files. */
+  name: string;
+  /** Present unless this position failed; absent alongside `error`. */
+  session?: CloudSessionMetadata;
+  /** Why this one position failed. Its siblings still imported. */
+  error?: string;
+}
+
+export interface CloudScanPositions {
+  scans: CloudScanPosition[];
+  scan_count: number;
+}
+
+/**
+ * Import a source as one session PER SCAN POSITION.
+ *
+ * The plural sibling of {@link createCloudSession}. A multi-scan E57 or
+ * multi-block PTX holds several genuinely separate acquisitions, and a scan is
+ * defined by its pose — merging them leaves one origin standing in for all of
+ * them, which breaks the LAD inversion (it takes a single scanner origin), puts
+ * the sky/miss display shell around the wrong centre, and makes the per-scan
+ * row/column rasters collide.
+ *
+ * Every other format comes back as a one-element list, so callers have a single
+ * shape to handle rather than branching on the extension.
+ */
+export async function createCloudSessions(
+  filePath: string,
+  asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
+  worldShift?: [number, number, number] | null,
+  missDistanceThreshold?: number | null,
+  origin?: [number, number, number] | null,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+  // See createCloudSession: in-file formats only; ASCII skips ride the plan.
+  droppedSlugs?: string[] | null,
+): Promise<CloudScanPosition[]> {
+  try {
+    const res = await fetchJsonWithProgress<CloudScanPositions & { error?: string }>(
+      '/api/cloud/session/create-multi',
+      {
+        source_path: filePath,
+        ascii_format: asciiFormat ?? null,
+        column_plan: columnPlan ? columnPlanToPayload(columnPlan) : null,
+        world_shift: worldShift ?? null,
+        miss_distance_threshold: missDistanceThreshold ?? null,
+        origin: origin ?? null,
+        drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
+      },
+      signal,
+      600000,
+      onProgress,
+      onRunId,
+    );
+    if (res.error) throw new Error(res.error);
+    return res.scans ?? [];
+  } catch (error) {
+    if (error instanceof ScanCancelledError) throw error;
+    console.error('create_multi_cloud_session failed:', error);
     throw describeBackendError(error, 'Import');
   }
 }
@@ -3463,6 +4096,165 @@ export async function resetCloudEdits(
   }
 }
 
+/** One replayable label edit. Mirrors LabelStroke in backend-api/main.py. */
+export interface LabelStrokeRequest {
+  region: CropOctreeRegion;
+  to_class: number;
+  /** Omit for "any visible" — no class gate. */
+  from_classes?: number[];
+  stroke_id: string;
+}
+
+export interface LabelStrokeResult {
+  stroke_id: string;
+  selected_count: number;
+  changed_count: number;
+}
+
+export interface LabelRegionResult {
+  session_id: string;
+  slug: string;
+  created_column: boolean;
+  applied: LabelStrokeResult[];
+  /** value -> count, over EDITABLE points only (no deleted rows, no misses). */
+  class_counts: Record<string, number>;
+  value_range: [number, number];
+  /** Surviving history length — the renderer trims its stroke list to match. */
+  label_edit_count: number;
+}
+
+/**
+ * Repaint points. Instant: mutates the in-RAM label column with NO octree
+ * rebuild, so the viewport relies on the renderer's client-side label overlay
+ * until an explicit commit.
+ *
+ * Strokes are applied IN ORDER and atomically, so a whole brush drag goes in
+ * one call rather than one request per stamp.
+ */
+export async function labelCloudRegion(
+  sessionId: string,
+  strokes: LabelStrokeRequest[],
+  slug?: string,
+  label?: string,
+): Promise<LabelRegionResult> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/label_region`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strokes, ...(slug ? { slug } : {}), ...(label ? { label } : {}) }),
+      },
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as LabelRegionResult;
+  } catch (error) {
+    console.error('label_cloud_region failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Read the current per-class counts without changing anything. Used to populate
+ * the class list the moment the labelling tool opens — the renderer cannot
+ * derive these itself because they exclude deleted rows and sky/miss points.
+ */
+export async function getCloudLabelSummary(
+  sessionId: string,
+  slug?: string,
+): Promise<Omit<LabelRegionResult, 'created_column' | 'applied'>> {
+  const baseUrl = getBackendUrl();
+  const q = slug ? `?slug=${encodeURIComponent(slug)}` : '';
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/label_summary${q}`,
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('get_cloud_label_summary failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Undo: roll the label column back, keeping the first `editCount` edits. Omit
+ * to clear all labelling on the slug. No rebuild.
+ */
+export async function resetCloudLabelEdits(
+  sessionId: string,
+  editCount?: number,
+  slug?: string,
+): Promise<Omit<LabelRegionResult, 'created_column' | 'applied'>> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/reset_label_edits`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(editCount === undefined ? {} : { edit_count: editCount }),
+          ...(slug ? { slug } : {}),
+        }),
+      },
+    );
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('reset_cloud_label_edits failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Bake the label column into the octree so it colours without the client-side
+ * overlay. One PotreeConverter run — the slow step.
+ *
+ * DISPLAY ONLY: every backend op reads the in-RAM arrays, so split / filter /
+ * extract / LAS export already see fresh labels with no commit. Do not call
+ * this defensively before those.
+ */
+export async function commitCloudLabels(
+  sessionId: string,
+  slug?: string,
+): Promise<OctreeMetadata & { slug: string; class_counts: Record<string, number> }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 600000, '/api/cloud/session/commit_labels');
+  try {
+    const response = await fetch(
+      `${baseUrl}/api/cloud/session/${sessionId}/commit_labels`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(slug ? { slug } : {}),
+        signal: controller.signal,
+      },
+    );
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('commit_cloud_labels failed:', error);
+    throw error;
+  }
+}
+
 /**
  * Permanently apply deletions: rebuild the octree from the survivors (one
  * PotreeConverter run) and clear the mask. The deliberately-slow step. Returns
@@ -3473,7 +4265,7 @@ export async function bakeCloudSession(
 ): Promise<CloudSessionBakeResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/bake');
   try {
     const response = await fetch(
       `${baseUrl}/api/cloud/session/${sessionId}/bake`,
@@ -3503,7 +4295,7 @@ export async function sessionFilter(
 ): Promise<CloudSessionBakeResult & { rebuilt: boolean }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/filter');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/filter`, {
       method: 'POST',
@@ -3541,7 +4333,7 @@ export async function sessionTransform(
 ): Promise<CloudSessionBakeResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/transform');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/transform`, {
       method: 'POST',
@@ -3582,7 +4374,7 @@ export async function sessionSplit(
 ): Promise<CloudSessionSplitResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/split');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/split`, {
       method: 'POST',
@@ -3615,7 +4407,7 @@ export async function sessionExtract(
 ): Promise<{ session_id: string; extracted: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/extract');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/extract`, {
       method: 'POST',
@@ -3693,7 +4485,7 @@ export async function duplicateCloudSession(
 ): Promise<{ session_id: string; duplicate: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/duplicate');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/duplicate`, {
       method: 'POST',
@@ -3723,7 +4515,7 @@ export async function sessionMerge(
 ): Promise<{ merged: OctreeMetadata & { session_id: string; point_count: number; cache_id: string; world_shift?: [number, number, number] | null; has_misses?: boolean; miss_octree_cache_id?: string | null } }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/merge');
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/merge`, {
       method: 'POST',
@@ -3770,7 +4562,9 @@ export async function sessionSegmentWood(
  * and rebuild the octree from the arrays (no file read). Pass TreeIso tuning. */
 export async function sessionSegmentTrees(
   sessionId: string,
-  params: { [k: string]: number | number[][] | undefined; seed_points?: number[][] },
+  // `acknowledge_cost` (boolean) confirms an expensive run after the backend
+  // answered 409 with a cost advisory — hence the boolean in the index signature.
+  params: { [k: string]: number | number[][] | boolean | undefined; seed_points?: number[][]; acknowledge_cost?: boolean },
   signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult> {
   return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_trees`, params, signal, 600000);
@@ -3891,6 +4685,39 @@ export async function buildQSM(
   );
 }
 
+/**
+ * Import a QSM from a per-cylinder CSV on disk — the inverse of the CSV export in
+ * lib/qsmExport.ts. The backend parses the table and recomputes the metrics (which
+ * aren't in the file but are a pure function of the model), returning the same
+ * QSMBuildResponse shape /api/qsm/build does, so a re-imported QSM needs no
+ * separate data path in the renderer.
+ *
+ * Not streamed: parsing a cylinder table is milliseconds, unlike a QSM build.
+ */
+export async function importQSMCsv(filePath: string): Promise<QSMBuildResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 120000, '/api/qsm/import');
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('QSM CSV import failed:', error);
+    throw error;
+  }
+}
+
 // ==================== CROWN FITTING ====================
 
 // Per-crown metrics computed by /api/fit/crown. Coordinates are WORLD-frame
@@ -3904,6 +4731,37 @@ export interface CrownMetrics {
   crown_top_z: number;
   surface_area_m2: number;
   num_points_used: number;
+  // Mesh size. Fixed for the parametric shapes; data-dependent for an alpha hull,
+  // where it's the only honest measure of how big the exported mesh is.
+  num_vertices?: number;
+  num_triangles?: number;
+}
+
+/**
+ * The parameters that DEFINE a fitted crown — what it takes to rebuild the solid,
+ * as opposed to the summary statistics in CrownMetrics. Keys are shape-dependent:
+ *
+ * - ellipsoid / prism: `a_m`/`b_m`/`c_m`, the semi-extent along x/y/z (the
+ *   ellipsoid's semi-axes, the prism's half-extents) — the same meaning in both.
+ * - cone: `base_radius_m` + `height_m`.
+ * - alpha: `alpha_m` (auto-grown unless the user overrode it, hence `alpha_auto`)
+ *   and `watertight`. A concave hull has NO analytic parameters, so these describe
+ *   the fit but can't reproduce it — the mesh has to travel with the table.
+ *
+ * The shape's center is deliberately absent: for all three parametric shapes it is
+ * exactly `metrics.crown_center` (the fitted mesh's AABB center).
+ *
+ * Optional so a backend that predates it degrades to blank columns, not a crash.
+ */
+export interface CrownFitParams {
+  a_m?: number;
+  b_m?: number;
+  c_m?: number;
+  base_radius_m?: number;
+  height_m?: number;
+  alpha_m?: number;
+  alpha_auto?: boolean;
+  watertight?: boolean;
 }
 
 export interface CrownFitCrown {
@@ -3913,6 +4771,7 @@ export interface CrownFitCrown {
   triangles: number[];        // flat indices
   normals: number[];          // flat per-vertex xyz
   metrics: CrownMetrics;
+  params?: CrownFitParams;    // shape-dependent; see CrownFitParams
 }
 
 export interface CrownFitRequest {
@@ -4017,7 +4876,7 @@ export async function detectPhyllotaxis(
 ): Promise<QSMPhyllotaxisResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000); // 1 minute
+  const timeoutId = abortOnTimeout(controller, 60000, '/api/qsm/phyllotaxis'); // 1 minute
   try {
     const response = await fetch(`${baseUrl}/api/qsm/phyllotaxis`, {
       method: 'POST',
@@ -4041,7 +4900,7 @@ export async function detectPhyllotaxis(
 export async function addQSMLeaves(request: QSMLeavesRequest): Promise<QSMLeavesResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/qsm/leaves'); // 5 minutes
   try {
     const response = await fetch(`${baseUrl}/api/qsm/leaves`, {
       method: 'POST',
@@ -4071,6 +4930,62 @@ export async function getLeafTextures(): Promise<string[]> {
     return Array.isArray(body.textures) && body.textures.length ? body.textures : CURATED_LEAF_TEXTURES;
   } catch {
     return CURATED_LEAF_TEXTURES;
+  }
+}
+
+// ==================== QSM BARK TEXTURES ====================
+// Bark images for the QSM viewer's "Color by > Texture" mode. The renderer can't
+// read the PyInstaller bundle directly, so the backend resolves and base64s them.
+// Authoritative list comes from GET /api/qsm/bark-textures; this is the fallback.
+export const CURATED_BARK_TEXTURES: string[] = [
+  'AlmondBark.jpg',
+  'AppleBark.jpg',
+  'GrapeBark.jpg',
+  'OliveBark.jpg',
+  'WesternRedbudBark.jpg',
+];
+
+export interface QSMBarkTextureResponse {
+  success: boolean;
+  name?: string;
+  data_base64?: string;
+  mime?: string;
+  error?: string;
+}
+
+export async function getBarkTextures(): Promise<string[]> {
+  const baseUrl = getBackendUrl();
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/bark-textures`);
+    if (!response.ok) return CURATED_BARK_TEXTURES;
+    const body = await response.json();
+    return Array.isArray(body.textures) && body.textures.length ? body.textures : CURATED_BARK_TEXTURES;
+  } catch {
+    return CURATED_BARK_TEXTURES;
+  }
+}
+
+/** Fetch one bark image as base64, from the builtin library or an uploaded path. */
+export async function getBarkTexture(
+  source: { builtinName: string } | { texturePath: string }
+): Promise<QSMBarkTextureResponse> {
+  const baseUrl = getBackendUrl();
+  const body =
+    'builtinName' in source
+      ? { builtin_name: source.builtinName }
+      : { texture_path: source.texturePath };
+  try {
+    const response = await fetch(`${baseUrl}/api/qsm/bark-texture`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      return { success: false, error: `HTTP ${response.status}: ${response.statusText}` };
+    }
+    return await response.json();
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -4121,7 +5036,7 @@ export async function adjustQSMLeafAngles(
 ): Promise<QSMLeavesResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/qsm/adjust-leaf-angles'); // 5 minutes
   try {
     const response = await fetch(`${baseUrl}/api/qsm/adjust-leaf-angles`, {
       method: 'POST',

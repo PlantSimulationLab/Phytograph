@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 import main
+from tests.binframe import decode_streamed_json
 
 
 LEAFCUBE_XYZ = (Path(__file__).resolve().parents[2]
@@ -60,7 +61,7 @@ def _create(client) -> dict:
         json={"source_path": str(LEAFCUBE_XYZ), "ascii_format": LEAFCUBE_FORMAT},
     )
     assert res.status_code == 200, res.text
-    return res.json()
+    return decode_streamed_json(res.content)
 
 
 def test_create_builds_miss_octree_with_full_count(client, cache_root):
@@ -139,7 +140,7 @@ def test_create_origin_reprojects_misses(client, cache_root):
               "origin": LEAFCUBE_ORIGIN},
     )
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
     sess = main._cloud_sessions[body["session_id"]]
     # The request origin landed on the session (no world_shift here, so verbatim).
     assert sess.miss_octree_origin == LEAFCUBE_ORIGIN
@@ -165,7 +166,7 @@ def test_empty_miss_set_builds_no_octree(client, cache_root, tmp_path):
         json={"source_path": str(src), "ascii_format": "x y z"},
     )
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
     assert body["has_misses"] is False
     assert body["miss_octree_cache_id"] is None
     # Exactly one octree dir (the hits octree) in the cache.

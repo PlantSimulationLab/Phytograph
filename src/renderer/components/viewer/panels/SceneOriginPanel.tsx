@@ -1,4 +1,4 @@
-import { Crosshair, X, Target, MousePointerClick, Eye, EyeOff } from 'lucide-react';
+import { Crosshair, X, Target, MousePointerClick, Focus } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 type Axis = 'x' | 'y' | 'z';
@@ -10,7 +10,8 @@ type Axis = 'x' | 'y' | 'z';
 // "the default", which is all the Reset button needs. The parent
 // (PointCloudViewer) owns the origin state, the pick-mode arming, and the
 // world-frame math; this component only renders the current value and reports
-// intent.
+// intent. Whether the marker is DRAWN is a viewport display setting, not an
+// origin setting, so that toggle lives with Grid/Axes in the Display panel.
 interface SceneOriginPanelProps {
   /** Effective origin in WORLD coords (user override, else the ground-anchored scene center). */
   origin: [number, number, number];
@@ -18,16 +19,13 @@ interface SceneOriginPanelProps {
   isCustom: boolean;
   /** True while click-to-place is armed (next viewport click sets the origin). */
   placeMode: boolean;
-  /** Whether the marker is drawn in the viewport. */
-  showMarker: boolean;
-  /** True when the marker is standing down regardless of `showMarker` (empty scene). */
-  markerSuppressed?: boolean;
   /** Whether a "move to selection center" target is available. */
   canMoveToSelection: boolean;
   onCoordChange: (axis: Axis, value: number) => void;
   onTogglePlaceMode: () => void;
-  onToggleShowMarker: () => void;
   onMoveToSelection: () => void;
+  /** Re-centre the camera on the origin, keeping the current viewing angle. */
+  onFrameOrigin: () => void;
   onReset: () => void;
   onClose: () => void;
 }
@@ -35,17 +33,16 @@ interface SceneOriginPanelProps {
 const AXES: Axis[] = ['x', 'y', 'z'];
 
 export function SceneOriginPanel({
-  origin, isCustom, placeMode, showMarker, markerSuppressed = false, canMoveToSelection,
-  onCoordChange, onTogglePlaceMode, onToggleShowMarker, onMoveToSelection, onReset, onClose,
+  origin, isCustom, placeMode, canMoveToSelection,
+  onCoordChange, onTogglePlaceMode, onMoveToSelection, onFrameOrigin,
+  onReset, onClose,
 }: SceneOriginPanelProps) {
-  const markerDrawn = showMarker && !markerSuppressed;
   return (
     <div
-      className="absolute top-4 right-[280px] bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
       data-testid="scene-origin-panel"
       data-has-origin={isCustom ? 'true' : 'false'}
       data-place-mode={placeMode ? 'true' : 'false'}
-      data-marker-visible={markerDrawn ? 'true' : 'false'}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
         <span className="flex items-center gap-2">
@@ -115,31 +112,22 @@ export function SceneOriginPanel({
         Center on selection
       </button>
 
-      <label
-        className={`w-full mt-2 py-1.5 flex items-center gap-2 text-[11px] select-none ${
-          markerSuppressed ? 'text-neutral-500 cursor-default' : 'text-neutral-300 cursor-pointer'
-        }`}
-        title={markerSuppressed
-          ? 'The marker is hidden until something is loaded'
-          : 'Hide the origin marker in the viewport (the pivot itself is unchanged)'}
+      <button
+        onClick={onFrameOrigin}
+        data-testid="scene-origin-frame"
+        title="Move the camera to look at the origin, keeping the current viewing angle"
+        className="w-full mt-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] flex items-center justify-center gap-1.5"
       >
-        <input
-          type="checkbox"
-          checked={showMarker}
-          onChange={onToggleShowMarker}
-          data-testid="scene-origin-show-marker"
-          className="accent-blue-500"
-        />
-        {markerDrawn ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-        Show origin marker
-      </label>
+        <Focus className="w-3 h-3" />
+        Zoom to origin
+      </button>
 
       <button
         onClick={onReset}
         disabled={!isCustom}
         data-testid="scene-origin-clear"
         title="Move the origin back to the default: the center of the scene, at ground level"
-        className="w-full mt-1 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+        className="w-full mt-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
       >
         Reset to scene center
       </button>

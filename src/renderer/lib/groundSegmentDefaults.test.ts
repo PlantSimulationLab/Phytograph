@@ -78,6 +78,36 @@ describe('groundSegmentDefaultsForExtent', () => {
     });
   });
 
+  describe('a tall plant is not terrain relief', () => {
+    it('uses the flat recipe for a single tree on flat ground', () => {
+      // The `tree_1` reference: an 8.4 m tree over a 9.2 m footprint whose
+      // ground is flat to within 47 cm. Ratio 0.915 — the bounding box measures
+      // the TREE, not the terrain. The conforming (sloped) recipe climbs the
+      // trunk here, costing ~43k extra misclassified trunk points.
+      const d = groundSegmentDefaultsForExtent(9.18, 8.4);
+      expect(d.rigidness).toBe(3);
+      expect(d.slopeSmooth).toBe(false);
+    });
+
+    it('handles a tree taller than its own footprint', () => {
+      // `tree_4`: a 12.2 m tree over a 9.4 m footprint, so the bounding-box
+      // ratio is 1.303 — a "slope" steeper than 45 deg, while the ground under
+      // it is flat to 1.9 deg. Routing this to the flat recipe cuts trunk
+      // points misread as ground from 86,798 to 7,919.
+      const d = groundSegmentDefaultsForExtent(9.37, 12.21);
+      expect(d.rigidness).toBe(3);
+      expect(d.slopeSmooth).toBe(false);
+    });
+
+    it('still treats a genuine slope as sloped', () => {
+      // BR04: 186 m wide, 81 m of relief (~15 deg). Ratio 0.44 — real terrain,
+      // and it must keep the conforming recipe.
+      const d = groundSegmentDefaultsForExtent(186, 81);
+      expect(d.rigidness).toBe(1);
+      expect(d.slopeSmooth).toBe(true);
+    });
+  });
+
   it('falls back to the plant-scale flat default for a non-finite or zero extent', () => {
     for (const bad of [0, -5, NaN, Infinity]) {
       const d = groundSegmentDefaultsForExtent(bad);

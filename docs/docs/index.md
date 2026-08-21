@@ -43,6 +43,18 @@ point clouds, meshes, and procedural plant models.
     Grow Helios plant models — trees, vines, cereals, vegetables — to a
     target age, then morph their parameters interactively.
 
+- :material-layers: **Segment scans**
+
+    Classify ground, separate wood from leaf, and split a plot into
+    individual trees — then carry the labels through the rest of the
+    pipeline.
+
+- :material-grid: **Measure canopy structure**
+
+    Invert overlapping scans into a voxel grid of leaf area density
+    (m²/m³), fit crown shapes for height and volume, and build DTM / DSM
+    / canopy-height surfaces.
+
 - :material-compare: **Register and compare**
 
     Cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh ICP with RMSE, plus
@@ -66,8 +78,7 @@ point clouds, meshes, and procedural plant models.
 
 <p style="opacity: 0.7; font-size: 0.85rem;">
 Phytograph is developed at the
-<a href="https://baileylab.ucdavis.edu/">Bailey Lab</a> at UC Davis as the
-desktop interface to the <a href="https://baileylab.ucdavis.edu/software/helios/">Helios</a>
-plant-modeling framework. Source code at
+<a href="https://baileylab.ucdavis.edu/">Bailey Lab</a> at UC Davis.
+Source code at
 <a href="https://github.com/PlantSimulationLab/Phytograph">github.com/PlantSimulationLab/Phytograph</a>.
 </p>

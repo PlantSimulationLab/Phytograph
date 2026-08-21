@@ -427,7 +427,7 @@ def test_wood_segment_too_few_points():
     assert "at least 3" in body["error"]
 
 
-def test_wood_segment_aggregate_sources_align(tmp_path):
+def test_wood_segment_aggregate_sources_align(tmp_path, make_file_session):
     """Aggregate (multi-source) request: the response reports each source's point
     count in order, and the labels concatenate in that order so a caller can
     slice them back per scan. Models the 'segment scans together' UI mode."""
@@ -447,8 +447,8 @@ def test_wood_segment_aggregate_sources_align(tmp_path):
     client = TestClient(main.app)
     resp = client.post("/api/segment/wood", json={
         "sources": [
-            {"source_path": str(a_path), "ascii_format": "x y z"},
-            {"source_path": str(b_path), "ascii_format": "x y z"},
+            {"session_id": make_file_session(str(a_path), "x y z")},
+            {"session_id": make_file_session(str(b_path), "x y z")},
         ],
     })
     assert resp.status_code == 200

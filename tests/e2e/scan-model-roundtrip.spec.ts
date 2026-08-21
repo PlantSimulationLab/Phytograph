@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
-import { stubOpenDialog } from './helpers/stubOpenDialog';
-import { stubSaveDialog, getSaveDialogCalls } from './helpers/stubSaveDialog';
+import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
+import { stubExportFolder } from './helpers/exportFolder';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
@@ -42,7 +42,6 @@ test('round-trips a scanner model (RIEGL VZ-400i) through XML export and re-impo
 
   const xmlFixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'sphere-scan', 'sphere.xml');
   await stubOpenDialog(app, xmlFixture);
-  await stubSaveDialog(app, xmlPath);
 
   // ── Import the 4 scans (each resolves its sibling .xyz → has data + params) ──
   await page.getByTestId('tool-add-scan').click();
@@ -72,9 +71,10 @@ test('round-trips a scanner model (RIEGL VZ-400i) through XML export and re-impo
   await expect(page.getByTestId('export-modal')).toBeVisible();
   await expect(page.getByTestId('export-scan-section')).toBeVisible();
   await expect(page.getByTestId('export-scan-mode-xml')).toHaveAttribute('data-active', 'true');
+  await stubExportFolder(app, page, outDir, 'sphere');
   await page.getByTestId('export-scan-xml').click();
 
-  await expect.poll(async () => (await getSaveDialogCalls(app)).length, { timeout: 10_000 })
+  await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 10_000 })
     .toBeGreaterThan(0);
   await expect.poll(() => existsSync(xmlPath), { timeout: 30_000, intervals: [200, 500, 1000] }).toBe(true);
 

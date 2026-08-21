@@ -5,9 +5,11 @@ import {
   makeDefaultScanParameters,
   migrateScanReturnFields,
   scanParametersFromFile,
+  scannerModelIdFromFile,
   type ScanParamsFromFile,
 } from './scanParameters';
 import { type PoseStream, shiftPoseStream } from './poseStream';
+import { getScannerModel } from './scannerModels';
 
 // A minimal two-pose PoseStream for the trajectory-attach tests: the platform
 // moves from x=-1 to x=1 at z=5, identity attitude.
@@ -269,5 +271,91 @@ describe('migrateScanReturnFields', () => {
     expect(migrateScanReturnFields({ returnSelection: 'last' }).returnSelection).toBe('last');
     expect(migrateScanReturnFields({ returnSelection: 'bogus' }).returnSelection)
       .toBe(DEFAULT_SCAN_PARAMETERS.returnSelection);
+  });
+});
+
+// A RIEGL raw project names its instrument (RiVLib reports `type_id`), unlike
+// every other file-header import. The file's raw string and our catalog id are
+// different namespaces, so the bridge is worth pinning down.
+describe('scannerModelIdFromFile', () => {
+  it('maps a RiVLib type_id onto the catalog id', () => {
+    expect(scannerModelIdFromFile('VZ-1000')).toBe('riegl_vz1000');
+    expect(scannerModelIdFromFile('VZ-400i')).toBe('riegl_vz400i');
+  });
+
+  it('ignores case and separators, since vendors are inconsistent', () => {
+    expect(scannerModelIdFromFile('vz1000')).toBe('riegl_vz1000');
+    expect(scannerModelIdFromFile('VZ 1000')).toBe('riegl_vz1000');
+  });
+
+  it('names every instrument it has an entry for', () => {
+    // The scan info panel and the exported <scannerModel> both read this, so a
+    // near-miss would display a model number the file never reported.
+    expect(scannerModelIdFromFile('VZ-2000i')).toBe('riegl_vz2000i');
+    expect(scannerModelIdFromFile('vz2000i')).toBe('riegl_vz2000i');
+    expect(scannerModelIdFromFile('VZ 2000i')).toBe('riegl_vz2000i');
+  });
+
+  it('carries a RIEGL instrument string through to the displayed label', () => {
+    // The end-to-end path the user sees: RiVLib's `type_id` (and a .PROJ's
+    // project.json `scanner.type`) is the raw string on the left; the scan info
+    // panel renders getScannerModel(...).label on the right. These must agree
+    // with the instrument, not merely resolve to something in the catalog.
+    const labelFor = (raw: string) =>
+      getScannerModel(scannerModelIdFromFile(raw)).label;
+    expect(labelFor('VZ-2000i')).toBe('RIEGL VZ-2000i');
+    expect(labelFor('VZ-1000')).toBe('RIEGL VZ-1000');
+    expect(labelFor('VZ-400i')).toBe('RIEGL VZ-400i');
+    // Unidentified: a family name, never another model's number.
+    expect(labelFor('VZ-600i')).toBe('RIEGL VZ-series');
+    // And a marker that is not the neutral sphere.
+    expect(getScannerModel(scannerModelIdFromFile('VZ-600i')).meshUrl).toBe(
+      getScannerModel('riegl_vz400i').meshUrl,
+    );
+  });
+
+  it('gives an unidentified V-Line scanner a body but not a model number', () => {
+    // A VZ we have no entry for still gets the family marker rather than the
+    // neutral sphere — but as 'RIEGL VZ-series', never as a specific sibling.
+    expect(scannerModelIdFromFile('VZ-600i')).toBe('riegl_vz_series');
+    expect(scannerModelIdFromFile('VZ-4000')).toBe('riegl_vz_series');
+    // An exact entry always wins over the family fallback.
+    expect(scannerModelIdFromFile('VZ-1000')).toBe('riegl_vz1000');
+    expect(scannerModelIdFromFile('VZ-400i')).toBe('riegl_vz400i');
+  });
+
+  it('does not hand a RIEGL body to another vendor', () => {
+    // The fallback is anchored to the V-Line naming, not to "anything
+    // unrecognised" — a Velodyne or Livox identity must stay unset.
+    expect(scannerModelIdFromFile('VLP-16')).toBeUndefined();
+    expect(scannerModelIdFromFile('Livox Mid-40')).toBeUndefined();
+    expect(scannerModelIdFromFile('VUX-1UAV')).toBeUndefined();
+    expect(scannerModelIdFromFile('')).toBeUndefined();
+    expect(scannerModelIdFromFile(undefined)).toBeUndefined();
+  });
+
+  it('is applied by scanParametersFromFile alongside the sweep', () => {
+    const p = scanParametersFromFile({
+      origin: [1, 2, 3],
+      scanner_model: 'VZ-1000',
+      theta_min: 30,
+      theta_max: 130,
+      phi_min: 0,
+      phi_max: 360,
+    });
+    expect(p.scannerModel).toBe('riegl_vz1000');
+    expect(p.zenithMinDeg).toBe(30);
+    expect(p.zenithMaxDeg).toBe(130);
+    expect(p.origin).toEqual({ x: 1, y: 2, z: 3 });
+  });
+
+  it('falls back to the generic scanner for an unrecognised instrument', () => {
+    // Not "undefined": DEFAULT_SCAN_PARAMETERS already seeds 'generic', which
+    // is exactly the right resting state — an unknown instrument draws a plain
+    // marker and keeps the form's neutral defaults, rather than inheriting
+    // another model's beam divergence and FOV.
+    const p = scanParametersFromFile({ origin: [0, 0, 0], scanner_model: 'Acme 9000' });
+    expect(p.scannerModel).toBe('generic');
+    expect(p.scannerModel).not.toBe('riegl_vz1000');
   });
 });

@@ -44,10 +44,7 @@ you write any subset of these layers to `.asc` / GeoTIFF.
 ## Generate
 
 1. Select a single point cloud.
-2. Tick the **Surfaces** you want (Terrain / Surface / Canopy height) — any
-   combination, generated together in one run. DTM and CHM use the ground
-   classification; DSM does not.
-3. (Recommended, for DTM/CHM) Run [**Segment Ground**](segment-ground.md) first.
+2. (Recommended, for DTM/CHM) Run [**Segment Ground**](segment-ground.md) first.
    The DEM tool is **ground-class aware**: if the cloud carries a ground
    classification, only the ground points are gridded, giving a true bare-earth
    model. If it doesn't, the panel shows a notice and the ground is
@@ -55,9 +52,12 @@ you write any subset of these layers to `.asc` / GeoTIFF.
    scaled to the cloud's size, so a field- or ALS-scale tile is handled as
    efficiently as a close-range scan). Running Segment Ground first just gives you
    control over that step (and lets you reuse the classification elsewhere).
-4. Click **Generate DEM** (the mountain icon in the tool column), or open the
+3. Click **Generate DEM** (the mountain icon in the tool column), or open the
    command palette and choose **Generate DEM** (searching "DSM" or "CHM" also
-   finds it).
+   finds it). The **Generate surfaces** panel opens.
+4. Tick the **Surfaces** you want (Terrain / Surface / Canopy height) — any
+   combination, generated together in one run. DTM and CHM use the ground
+   classification; DSM does not.
 5. Adjust the parameters if needed (hover the **?** beside any for a quick
    explanation):
     - **Cell size (m)** — the horizontal resolution of the grid. Smaller
@@ -82,10 +82,19 @@ you write any subset of these layers to `.asc` / GeoTIFF.
       from each point to add a `height_above_ground` scalar to the cloud (a
       per-point canopy-height precursor). Off by default. For a *rasterised*
       canopy height model, use the **Canopy height (CHM)** surface instead.
-6. Click **Generate DEM** (or **Generate DSM / CHM**). While it runs, the button
-   shows a spinner (with the gridding progress) and a **Cancel** button appears
-   beside it — click Cancel to stop a long or stuck run immediately (the
+6. Click the run button. Its label follows your selection: **Generate DEM**,
+   **Generate DSM**, or **Generate CHM** for a single surface, or
+   **Generate 2 surfaces** / **Generate 3 surfaces** for several. With nothing
+   ticked it reads **Select a surface** and stays disabled. While it runs, the
+   button shows a spinner (with the gridding progress) and a **Cancel** button
+   appears beside it — click Cancel to stop a long or stuck run immediately (the
    computation is killed and nothing is added).
+
+!!! warning "Watch the grid estimate"
+    The panel shows a live **Estimated grid: nx × ny cells** readout. Past
+    **4,000,000 cells** it turns red, adds *"— too fine; increase cell size"*,
+    and disables the run button. If you can't start a run, that's usually why:
+    raise the cell size.
 
 For a **DTM**, robustness against residual non-ground points (low vegetation that
 slipped into the ground class, stray low noise) comes from representing each grid

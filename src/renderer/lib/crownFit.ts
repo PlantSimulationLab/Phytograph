@@ -26,6 +26,7 @@ import {
   WOOD_CLASS_ATTRIBUTE,
   TREE_INSTANCE_ATTRIBUTE,
   treeInstanceColor,
+  rgbToHex,
 } from './classification';
 
 // The four crown shapes the backend can fit. Matches the backend Literal.
@@ -183,7 +184,17 @@ export interface CrownFitOptions {
   alpha: number | null;
   // Export a per-crown metrics CSV after the fit completes.
   exportCsv: boolean;
+  // Base name for the exported files (''  => derived from the first scan's name).
+  exportBaseName: string;
+  // Format for the crown MESH files written beside the CSV. Only alpha crowns get
+  // one: a concave hull has no analytic parameters, so the mesh IS the model and
+  // has to travel with the table. The parametric shapes are fully described by
+  // their params columns, so they get no mesh file and an empty mesh_file cell.
+  meshFormat: CrownMeshFormat;
 }
+
+export type CrownMeshFormat = 'obj' | 'ply' | 'stl';
+export const CROWN_MESH_FORMATS: CrownMeshFormat[] = ['obj', 'ply', 'stl'];
 
 // Fuzziness is capped at this maximum in the UI: past ~0.5 the trim gets too
 // aggressive to be useful, and the useful working range is the low end.
@@ -194,6 +205,8 @@ export const DEFAULT_CROWN_FIT_OPTIONS: CrownFitOptions = {
   strictness: 0.2,
   alpha: null,
   exportCsv: false,
+  exportBaseName: '',
+  meshFormat: 'obj',
 };
 
 export const CROWN_FIT_OPTIONS_STORE_KEY = 'crownFit.options';
@@ -214,22 +227,21 @@ export function coerceCrownFitOptions(stored: unknown): CrownFitOptions {
     typeof s.alpha === 'number' && Number.isFinite(s.alpha) && s.alpha > 0 ? s.alpha : null;
   const exportCsv =
     typeof s.exportCsv === 'boolean' ? s.exportCsv : DEFAULT_CROWN_FIT_OPTIONS.exportCsv;
-  return { shape, strictness, alpha, exportCsv };
+  const exportBaseName =
+    typeof s.exportBaseName === 'string' ? s.exportBaseName : DEFAULT_CROWN_FIT_OPTIONS.exportBaseName;
+  const meshFormat: CrownMeshFormat = CROWN_MESH_FORMATS.includes(s.meshFormat as CrownMeshFormat)
+    ? (s.meshFormat as CrownMeshFormat)
+    : DEFAULT_CROWN_FIT_OPTIONS.meshFormat;
+  return { shape, strictness, alpha, exportCsv, exportBaseName, meshFormat };
 }
 
 // ==================== Crown mesh colors ====================
 
-// sRGB 0-1 triple → "#rrggbb".
-function rgbToHex([r, g, b]: readonly [number, number, number]): string {
-  const to255 = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
-  const h = (v: number) => to255(v).toString(16).padStart(2, '0');
-  return `#${h(r)}${h(g)}${h(b)}`;
-}
-
-// The tree-instance color for a crown, matching the `tree_instance` scalar
-// colormap used in the viewer — so a crown fit from a segmented cloud reads with
-// the same colour as its tree. Returns null for the sentinel id 0 (whole-cloud
-// single tree), where there is no tree-instance colour to match.
+// The tree-instance color for a tree id, matching the `tree_instance` scalar
+// colormap used in the viewer — so anything derived from a segmented cloud (a
+// fitted crown, a cloud split out per tree) reads with the same colour as its
+// tree. Returns null for the sentinel id 0 (whole-cloud single tree) and for
+// unassigned/negative ids, where there is no tree-instance colour to match.
 export function crownColorForTreeId(treeId: number): string | null {
   if (treeId <= 0) return null;
   return rgbToHex(treeInstanceColor(treeId));

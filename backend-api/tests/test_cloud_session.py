@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 import main
+from tests.binframe import decode_streamed_json
 
 
 def _converter_available() -> bool:
@@ -104,7 +105,7 @@ def test_create_returns_session_and_full_octree(client, cache_root, grid_xyz):
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
     )
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
     assert body["session_id"]
     assert body["cache_id"]
     # The derived octree reports the full point count.
@@ -112,10 +113,10 @@ def test_create_returns_session_and_full_octree(client, cache_root, grid_xyz):
 
 
 def test_delete_region_masks_without_rebuild(client, cache_root, grid_xyz, grid_points):
-    create = client.post(
+    create = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()
+    ).content)
     sid = create["session_id"]
 
     expected_deleted = _expected_box_count(_session_positions(sid))
@@ -137,10 +138,10 @@ def test_delete_region_masks_without_rebuild(client, cache_root, grid_xyz, grid_
 
 
 def test_reset_edits_undoes_deletions(client, cache_root, grid_xyz, grid_points):
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
 
     client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": BOX})
     # Undo back to zero edits.
@@ -152,10 +153,10 @@ def test_reset_edits_undoes_deletions(client, cache_root, grid_xyz, grid_points)
 
 
 def test_bake_rebuilds_octree_from_survivors(client, cache_root, grid_xyz, grid_points):
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     expected_deleted = _expected_box_count(_session_positions(sid))
     expected_remaining = 1000 - expected_deleted
 
@@ -176,10 +177,10 @@ def test_bake_with_everything_deleted_returns_empty_no_crash(client, cache_root,
     """Deleting every point then baking must NOT feed a 0-point LAS to
     PotreeConverter (which exits non-zero → 500). It returns point_count=0,
     baked=False; the renderer raises a delete-confirmation."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     # A box enclosing the whole [0,0.9]^3 grid → delete everything.
     whole = {"kind": "box", "min": [-1, -1, -1], "max": [2, 2, 2], "invert": False}
     client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": whole})
@@ -193,10 +194,10 @@ def test_bake_with_everything_deleted_returns_empty_no_crash(client, cache_root,
 def test_reset_edits_partial_undo_restores_intermediate_snapshot(client, cache_root, grid_xyz):
     """Two successive deletes, then undo ONE (edit_count=1) restores the mask to
     after the first delete — the partial-undo branch, not just clear-all."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     box1 = {"kind": "box", "min": [0.0, 0.0, 0.0], "max": [0.4, 0.9, 0.9], "invert": False}
     box2 = {"kind": "box", "min": [0.5, 0.0, 0.0], "max": [0.9, 0.9, 0.9], "invert": False}
     r1 = client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": box1}).json()
@@ -213,10 +214,10 @@ def test_reset_edits_partial_undo_restores_intermediate_snapshot(client, cache_r
 def test_session_extract_creates_child_leaves_parent_untouched(client, cache_root, grid_xyz, grid_points, monkeypatch):
     """extract spins off a child session from the filter-selected points without
     mutating the parent — entirely from the arrays (no source file read)."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     n_select = _expected_box_count(_session_positions(sid))
 
     called = {"loaded": False}
@@ -243,10 +244,10 @@ def test_session_duplicate_copies_all_points_independent_of_parent(
     new independent session — from the arrays (no source file read). After a
     prior deletion the copy carries exactly the survivors, gets a fresh session
     id, and a later deletion on the parent leaves the copy untouched."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
 
     # Delete a region first so "surviving" is a strict subset of the original.
     deleted = client.post(
@@ -293,10 +294,10 @@ def test_session_segment_trees_appends_instance_column(client, cache_root, tmp_p
             for k in range(8):
                 rows.append(f"{cx + (i % 4) * 0.05:.4f} {(i // 4) * 0.05:.4f} {k * 0.1:.4f}")
     f.write_text("\n".join(rows) + "\n")
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(f), "ascii_format": "x y z"},
-    ).json()["session_id"]
+    ).content)["session_id"]
 
     res = client.post(f"/api/cloud/session/{sid}/segment_trees", json={})
     assert res.status_code == 200, res.text
@@ -322,10 +323,10 @@ def test_session_segment_trees_excludes_labeled_ground(client, cache_root, tmp_p
             for k in range(8):
                 rows.append(f"{cx + (i % 4) * 0.05:.4f} {(i // 4) * 0.05:.4f} {0.5 + k * 0.1:.4f}")
     f.write_text("\n".join(rows) + "\n")
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(f), "ascii_format": "x y z"},
-    ).json()["session_id"]
+    ).content)["session_id"]
 
     sess = main._cloud_sessions[sid]
     n = len(sess.positions)
@@ -354,10 +355,10 @@ def test_session_segment_trees_excludes_labeled_ground(client, cache_root, tmp_p
 def test_downstream_source_reads_masked_array(client, cache_root, grid_xyz, grid_points):
     """_read_points_from_source(session_id=...) returns survivors only — the
     contract that lets triangulate/skeleton/etc honor deletions with no bake."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     expected_remaining = 1000 - _expected_box_count(_session_positions(sid))
     client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": BOX})
 
@@ -370,10 +371,10 @@ def test_session_filter_deletes_excluded_points_no_file_read(client, cache_root,
     """The session filter deletes points outside the region, operating on the
     in-RAM arrays — it must NOT re-read the source file. We assert correctness
     (count) AND that no file-reading loader is called during the filter."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     expected_keep = _expected_box_count(_session_positions(sid))
 
     # Trip a guard if any source-file loader runs during the filter.
@@ -399,10 +400,10 @@ def test_session_filter_empty_result_does_not_commit_or_rebuild(client, cache_ro
     """A filter that excludes EVERY point returns point_count=0 WITHOUT committing
     the deletion or rebuilding (PotreeConverter can't ingest 0 points). The
     renderer raises a delete-confirmation on this; the session is untouched."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     # A box far outside the [0,0.9]^3 grid keeps nothing.
     empty_box = {"kind": "box", "min": [100, 100, 100], "max": [200, 200, 200], "invert": False}
     res = client.post(f"/api/cloud/session/{sid}/filter", json={"region": empty_box, "rebuild": True})
@@ -426,8 +427,8 @@ def test_session_filter_composes_on_survivors_not_original(client, cache_root, t
         {"index": 0, "role": "x"}, {"index": 1, "role": "y"}, {"index": 2, "role": "z"},
         {"index": 3, "role": "extra", "slug": "dev", "label": "dev", "categorical": False},
     ], "rgb_is_255": True}
-    sid = client.post("/api/cloud/session/create",
-                      json={"source_path": str(f), "column_plan": plan}).json()["session_id"]
+    sid = decode_streamed_json(client.post("/api/cloud/session/create",
+                      json={"source_path": str(f), "column_plan": plan}).content)["session_id"]
 
     # First filter: keep dev in [0,3] → 4 survivors.
     r1 = client.post(f"/api/cloud/session/{sid}/filter",
@@ -456,10 +457,10 @@ def test_session_segment_ground_appends_class_no_file_read(client, cache_root, t
             rows.append(f"{0.5+i*0.05:.4f} {0.5+j*0.05:.4f} {1.0:.4f}")  # plant blob
     f.write_text("\n".join(rows) + "\n")
 
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(f), "ascii_format": "x y z"},
-    ).json()["session_id"]
+    ).content)["session_id"]
 
     called = {"loaded": False}
     orig = main._load_pointcloud_arrays
@@ -489,10 +490,10 @@ def test_session_split_partitions_into_kept_and_leftover(client, cache_root, gri
     """Split keeps the box-passing points on the session and moves the excluded
     points to a NEW leftover session — entirely on the in-RAM arrays (no file
     read). kept + leftover must partition the original cloud exactly."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     n_keep = _expected_box_count(_session_positions(sid))
 
     called = {"loaded": False}
@@ -520,12 +521,12 @@ def test_extract_by_column_partitions_and_streams_progress(client, cache_root, g
     distinct value: parent untouched, children partition the non-excluded points,
     and the response streams PHP1 progress markers ahead of its JSON (the pill
     the renderer shows while the per-tree octrees build)."""
-    from tests.binframe import decode_progress_markers, decode_streamed_json
+    from tests.binframe import decode_progress_markers
 
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
 
     # Label the 1000-point grid: value 0 (excluded by default) plus three real
     # groups of known, distinct sizes so a mis-sliced child is visible.
@@ -574,12 +575,10 @@ def test_extract_by_column_partitions_and_streams_progress(client, cache_root, g
 def test_extract_by_column_on_empty_selection_returns_no_children(client, cache_root, grid_xyz):
     """A column whose only value is the excluded one yields no children (and no
     octree builds) rather than an empty child session."""
-    from tests.binframe import decode_streamed_json
-
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     with main._cloud_session_lock:
         main._session_add_extra_column(main._cloud_sessions[sid], "tree_instance",
                                        "Tree Instance", np.zeros(1000, dtype=np.float32))
@@ -594,10 +593,10 @@ def test_extract_by_column_unknown_slug_is_a_400_not_a_broken_stream(client, cac
     """The slug is validated BEFORE the stream opens, so a typo still reaches the
     client as a normal 400 with a readable detail (once the 200 + first chunk is
     out, an error can only arrive as a truncated body)."""
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
                       json={"slug": "no_such_column"})
     assert res.status_code == 400
@@ -605,10 +604,10 @@ def test_extract_by_column_unknown_slug_is_a_400_not_a_broken_stream(client, cac
 
 
 def test_delete_session_frees_arrays(client, cache_root, grid_xyz):
-    sid = client.post(
+    sid = decode_streamed_json(client.post(
         "/api/cloud/session/create",
         json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
-    ).json()["session_id"]
+    ).content)["session_id"]
     assert sid in main._cloud_sessions
     res = client.delete(f"/api/cloud/session/{sid}")
     assert res.status_code == 200
@@ -644,7 +643,7 @@ def test_wizard_column_plan_survives_onto_octree(client, cache_root, tmp_path):
         json={"source_path": str(f), "column_plan": column_plan},
     )
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
     attr_names = {a["name"] for a in body.get("attributes", [])}
     assert "tree_class" in attr_names, (
         f"wizard scalar slug missing from octree attributes: {attr_names}"

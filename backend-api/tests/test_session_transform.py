@@ -26,6 +26,7 @@ import pytest
 import requests
 
 import main
+from tests.binframe import _create_session_direct, decode_streamed_json
 
 
 def _converter_available() -> bool:
@@ -152,7 +153,8 @@ def _create(base: str, grid_xyz: Path, world_shift=None) -> tuple[str, dict]:
         body["world_shift"] = list(world_shift)
     r = requests.post(f"{base}/api/cloud/session/create", json=body, timeout=60)
     assert r.status_code == 200, r.text
-    return r.json()["session_id"], r.json()
+    created = decode_streamed_json(r.content)
+    return created["session_id"], created
 
 
 def _transform(base: str, sid: str, matrix: list) -> requests.Response:
@@ -236,7 +238,7 @@ def test_transform_euler_xyz_about_pivot_readback(tmp_path, monkeypatch):
 
     create_req = main.CloudSessionCreateRequest(source_path=str(grid), ascii_format=GRID_FORMAT)
     sid = asyncio.new_event_loop().run_until_complete(
-        main.create_cloud_session(create_req))["session_id"]
+        _create_session_direct(create_req))["session_id"]
 
     src = main.PointSource(source_path="", session_id=sid)
     before = main._read_points_from_source(src)[0].copy()  # world frame
@@ -245,7 +247,7 @@ def test_transform_euler_xyz_about_pivot_readback(tmp_path, monkeypatch):
     pivot = np.array([0.45, 0.45, 0.45])
     t = np.array([2.0, -1.0, 0.5])
     req = main.SessionTransformRequest(matrix=_pivot_matrix(R, pivot, t))
-    asyncio.new_event_loop().run_until_complete(main.session_transform(sid, req))
+    main.session_transform(sid, req)
 
     after = main._read_points_from_source(src)[0]  # world frame
     expected = (before - pivot) @ R.T + pivot + t
@@ -271,7 +273,7 @@ def test_transform_conjugates_world_shift(tmp_path, monkeypatch):
     shift = np.array([1000.0, -500.0, 30.0])
     create_req = main.CloudSessionCreateRequest(
         source_path=str(grid), ascii_format=GRID_FORMAT, world_shift=shift.tolist())
-    sid = asyncio.new_event_loop().run_until_complete(main.create_cloud_session(create_req))["session_id"]
+    sid = asyncio.new_event_loop().run_until_complete(_create_session_direct(create_req))["session_id"]
 
     src = main.PointSource(source_path="", session_id=sid)
     before = main._read_points_from_source(src)[0].copy()  # world frame (shift re-added)
@@ -279,7 +281,7 @@ def test_transform_conjugates_world_shift(tmp_path, monkeypatch):
     R = _rot_z(45.0)
     t = np.array([2.0, 3.0, -1.0])
     req = main.SessionTransformRequest(matrix=_matrix(R, t))
-    asyncio.new_event_loop().run_until_complete(main.session_transform(sid, req))
+    main.session_transform(sid, req)
 
     after = main._read_points_from_source(src)[0]  # world frame
     np.testing.assert_allclose(after, before @ R.T + t, atol=1e-6)
@@ -317,7 +319,7 @@ def test_transform_moves_backfilled_misses_and_flags_stale(tmp_path, monkeypatch
     ) + "\n")
 
     create_req = main.CloudSessionCreateRequest(source_path=str(grid), ascii_format=GRID_FORMAT)
-    created = asyncio.new_event_loop().run_until_complete(main.create_cloud_session(create_req))
+    created = asyncio.new_event_loop().run_until_complete(_create_session_direct(create_req))
     sid = created["session_id"]
     sess = main._cloud_sessions[sid]
 
@@ -331,7 +333,7 @@ def test_transform_moves_backfilled_misses_and_flags_stale(tmp_path, monkeypatch
 
     t = np.array([10.0, 0.0, 0.0])
     req = main.SessionTransformRequest(matrix=_matrix(np.eye(3), t))
-    asyncio.new_event_loop().run_until_complete(main.session_transform(sid, req))
+    main.session_transform(sid, req)
 
     sess = main._cloud_sessions[sid]
     np.testing.assert_allclose(sess.backfilled_misses["positions"], miss_pos + t, atol=1e-6)

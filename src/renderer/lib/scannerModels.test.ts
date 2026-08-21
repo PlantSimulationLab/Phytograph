@@ -12,6 +12,9 @@ describe('scannerModels catalog', () => {
     expect(ids).toEqual([
       'generic',
       'riegl_vz400i',
+      'riegl_vz1000',
+      'riegl_vz2000i',
+      'riegl_vz_series',
       'leica_p40',
       'leica_blk360',
       'leica_blk360_g2',
@@ -62,6 +65,24 @@ describe('scannerModels catalog', () => {
     expect(riegl.zenithMinDeg).toBe(30);
     expect(riegl.zenithMaxDeg).toBe(130);
     expect(riegl.beamExitDiameterM).toBeUndefined();
+
+    // RIEGL VZ-1000: same V-Line family as the VZ-400i and same 100° line FOV
+    // (zenith 30–130°, confirmed against a real scan's .pat file), but a
+    // narrower beam and a much lower effective measurement rate. Those two are
+    // the preset values that distinguish it — assert them, or the catalog entry
+    // could be a copy of the VZ-400i and nothing would notice.
+    const vz1000 = getScannerModel('riegl_vz1000').preset;
+    expect(vz1000.beamDivergenceMrad).toBeCloseTo(0.3);
+    expect(vz1000.pulseRateHz).toBe(122000);
+    expect(vz1000.beamDivergenceMrad).not.toBeCloseTo(riegl.beamDivergenceMrad!);
+    expect(vz1000.pulseRateHz).not.toBe(riegl.pulseRateHz);
+    // Shared with the VZ-400i: full-waveform multi-return and the family's
+    // documented 15-target ceiling.
+    expect(vz1000.pattern).toBe('raster');
+    expect(vz1000.returnMode).toBe('multi');
+    expect(vz1000.maxReturns).toBe(15);
+    expect(vz1000.zenithMinDeg).toBe(30);
+    expect(vz1000.zenithMaxDeg).toBe(130);
 
     // Leica P40: 290° vertical FOV → mirror reaches zenith 0–145° (a ~70° blind
     // cone under the tripod), NOT the full 0–180°.

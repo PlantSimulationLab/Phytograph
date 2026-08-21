@@ -61,7 +61,9 @@ The cloud is recoloured by the `tree_instance` attribute: each tree gets a
 distinct colour. Points TreeIso could not assign keep ID `0` ("Unassigned",
 shown grey). (No legend is shown for tree instances — with one entry per tree it
 would fill the viewport and the IDs are arbitrary anyway.) If you enabled
-**Split**, one new cloud per tree (`… (tree N)`) is added to the list.
+**Split**, one new cloud per tree (`… (tree N)`) is added to the list, each
+carrying the same colour that tree has in the recoloured cloud — so the swatches
+in the scan list match what you see in the viewer.
 
 The split runs after the recoloured cloud appears, and each per-tree cloud gets
 its own display octree — on a large plot with many trees that takes a while. A
@@ -81,6 +83,15 @@ For tricky scenes you can guide the result by marking trunks yourself:
 3. Click **Segment Trees**. Each seed yields exactly one tree, and ambiguous
    segments are assigned to their nearest seed.
 
+!!! note "Panels block seeding"
+    The floating panels (Tree Segmentation, the scan/mesh stack on the right,
+    Display, and any toast) sit *over* the viewport, so they take the click
+    before the seeding overlay can. While **Seed trunks** is on, moving onto one
+    puts a ⊘ at the cursor — a seed can't land there. Only the panels themselves
+    block; the empty space around them in the right-hand column is ordinary
+    viewport. The panels stay usable while seeding; to reach a trunk behind one,
+    turn seeding off, orbit or pan it into the open, and turn seeding back on.
+
 ## Refining the result
 
 Once a cloud is segmented (flat clouds), a **Refine** section appears:
@@ -98,7 +109,17 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 - If one tree is split into several, raise **2D reg. strength** or **Merge** the
   pieces afterward.
 - Segmentation runs in the background, so the rest of the app stays responsive
-  while it works; closing the panel cancels the run.
+  while it works. Use the panel's **Cancel** button to stop a run — closing the
+  panel does *not* cancel it.
+- Large clouds are fine. TreeIso works on a voxel-decimated copy, so a
+  multi-million-point plot is normally reduced to well under a million voxels
+  before the heavy work starts — Phytograph sizes those voxels from the cloud's
+  own point spacing.
+- If a run *would* be unusually expensive, the panel shows an amber warning with
+  the estimated workload and the button changes to **Segment Anyway**. This is
+  only a heads-up, never a block: click again to run it, and use **Cancel** if it
+  takes longer than you want. To make it faster instead, crop to a smaller area
+  or downsample first.
 
 ## See also
 

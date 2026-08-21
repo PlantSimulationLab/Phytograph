@@ -6,6 +6,8 @@
 import * as THREE from 'three';
 import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod, DemLayer } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
+import type { ClassPalette } from './classPalettes';
+import type { SlabRegionPayload } from './crossSection';
 
 // potree-core's RequestManager interface isn't re-exported from the package
 // root in v2.0.15. The shape is small and stable, so mirror it locally
@@ -84,6 +86,17 @@ export interface OctreeRef {
   // registers these as continuous overrides so the fixed Hit/Miss scheme is
   // suppressed for this cloud. See classification.ts registerContinuousSlug.
   continuousAttributes?: string[];
+  // User-defined class palettes bound to this cloud's categorical columns, keyed
+  // by attribute slug. A SIBLING of categoricalAttributes rather than a widening
+  // of it: that field is a bare string[] threaded through half a dozen call
+  // sites, and an optional new field is additive (older clouds simply have none).
+  //
+  // Must be carried forward through EVERY octree-rebuild path, because
+  // categoricalSchemeForRange derives its class list from the OBSERVED value
+  // range — a cloud painted with only classes 0 and 3 reports [0,3] and would
+  // otherwise come back from a rebuild with invented "Class 1"/"Class 2" entries
+  // and the user's own names gone.
+  classPalettes?: Record<string, ClassPalette>;
   // Sky/miss points (laser pulses that returned nothing). They live in the
   // backend session for LAD but are NOT in THIS (hits) octree (their ~20 km
   // coords would poison its bounding box). The backend builds them into their
@@ -140,6 +153,22 @@ export interface PointCloudData {
   // Undefined on clouds that predate this or were built renderer-side; callers
   // fall back to `bounds.min.z`.
   groundZ?: number;
+  // Outlier-resistant per-axis extent [dx, dy, dz], computed by the backend at
+  // import from a 1st-99th percentile span per axis (world units, same frame as
+  // `bounds`).
+  //
+  // Prefer this over `bounds.size` for anything that means "how big is this
+  // scene" — the camera's zoom limits, in particular. The raw size is set by the
+  // most extreme point on each axis, so a few stray returns hundreds of metres
+  // out inflate it by orders of magnitude and produce zoom limits calibrated to
+  // empty space instead of to the data. Undefined on clouds that predate this or
+  // were built renderer-side; callers fall back to `bounds.size`.
+  robustExtent?: [number, number, number];
+  // The percentile box `robustExtent` was measured across (world coords, same
+  // frame as `bounds`). Prefer its centre over `bounds.center` for "where is the
+  // content" — the raw centre is the midpoint of the outlier-inflated box, which
+  // on a scene with far strays lands in empty space nowhere near the data.
+  robustBounds?: { min: [number, number, number]; max: [number, number, number] };
 }
 
 // Point cloud entry with metadata. Internal alias matching the data-bearing
@@ -215,7 +244,78 @@ export type PendingDeleteRegion =
       view: number[];
       canvas: { width: number; height: number };
       invert?: boolean;
+    }
+  | {
+      /**
+       * The label brush: a union of WORLD-space spheres.
+       *
+       * Deliberately not the erase brush's `squares_union`. A square stamp is a
+       * screen-space test, so it extrudes through the whole cloud and paints
+       * the trunk behind the leaf you aimed at. A sphere is bounded in every
+       * direction, so it is depth-limited by its own geometry — and it carries
+       * no projection/view/canvas, which means the renderer's preview and the
+       * backend's replay evaluate the same closed form rather than two
+       * projection implementations that have to agree.
+       */
+      kind: 'spheres_union';
+      centers: Array<[number, number, number]>;
+      radii: number[];
+      invert?: boolean;
     };
+
+/**
+ * One manual-labelling edit: "inside `region`, points whose current class is in
+ * `fromClasses` become `toClass`".
+ *
+ * Reuses `PendingDeleteRegion` rather than defining a parallel region union, so
+ * crop, erase and labelling share ONE region vocabulary — a new region kind
+ * lands in `_canonical_region`/`_region_mask` once and every tool gets it.
+ *
+ * `fromClasses` is TerraScan's From-class gate, and `undefined` means "any
+ * visible" — deliberately NOT the same as listing every palette value, because
+ * a point holding a class the palette doesn't define (imported data, or a class
+ * the user deleted) must still be repaintable.
+ *
+ * `strokeId` is generated renderer-side and is the join key to the backend's
+ * label history, so undo can truncate both to the same point.
+ */
+export interface LabelStroke {
+  strokeId: string;
+  region: PendingDeleteRegion;
+  toClass: number;
+  fromClasses?: number[];
+  /**
+   * Cross-section slab the stroke was drawn inside, INTERSECTED with `region`.
+   * The lasso says where on screen, the slab says how deep — so a stroke drawn
+   * in a section does not paint the points behind it. Captured per-stroke so
+   * undo replays the section that was actually active at the time.
+   */
+  slab?: SlabRegionPayload;
+}
+
+/**
+ * A cloud's pre-commit labelling state.
+ *
+ * A SIBLING of CloudEditState, never a field on it: CloudEditState is
+ * deep-cloned on every transform drag, so piggybacking a several-hundred-stroke
+ * list would copy the whole labelling session on every camera-adjacent gesture.
+ * The two also have different boundary rules — bake clears both, but committing
+ * labels clears neither.
+ */
+export interface LabelEditState {
+  /** Ordered; the undo cursor is simply `strokes.length`. */
+  strokes: LabelStroke[];
+  /** Class the next stroke paints. */
+  activeClass: number;
+  /** Classes currently shown; drives the "any visible" From gate. */
+  visibleClasses?: number[];
+  /** Classes protected from edits. */
+  lockedClasses?: number[];
+  /** Which palette the cloud's classes come from. */
+  paletteId?: string;
+  /** True when the octree is behind the label column (needs a commit). */
+  dirty?: boolean;
+}
 
 // (Undo/redo history types now live in src/renderer/state/sceneActions.ts —
 // the old HistoryEntry/ObjectState snapshots were replaced by the unified
@@ -562,6 +662,12 @@ export interface QSMEntry {
   // Display name override. Set for aggregate QSMs ("scanA + N more"); when
   // absent the results panel falls back to the source scan's fileName.
   sourceLabel?: string;
+  // The worldShift the cylinder coordinates are expressed against, for a QSM with
+  // no source scan to read it from (i.e. one imported from a CSV — a built QSM
+  // resolves it through sourceCloudId instead). Cylinders are always WORLD-frame;
+  // the renderer subtracts this to place them in the scene's stored frame. Without
+  // it an imported QSM built from a UTM cloud renders ~thousands of km away.
+  worldShift?: [number, number, number] | null;
   // Raw backend response payload (cylinders, shoots, metrics, counts).
   cylinders: import('../utils/backendApi').QSMCylinder[];
   shoots: import('../utils/backendApi').QSMShoot[];

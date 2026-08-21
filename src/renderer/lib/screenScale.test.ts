@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import * as THREE from 'three';
 import { worldPerPixel } from './screenScale';
 
 const PERSP = { isPerspectiveCamera: true, fov: 60 };
@@ -72,5 +73,72 @@ describe('worldPerPixel — degenerate inputs return 0 rather than NaN/Infinity'
   it('rejects a collapsed or zero-zoom ortho frustum', () => {
     expect(worldPerPixel({ ...ORTHO, top: 0, bottom: 0 }, ORIGIN, 500, ORIGIN)).toBe(0);
     expect(worldPerPixel({ ...ORTHO, zoom: 0 }, ORIGIN, 500, ORIGIN)).toBe(0);
+  });
+});
+
+describe('worldPerPixel under an ortho projection OVERRIDE', () => {
+  // The overrides (SectionProjectionOverride, OrthoProjectionOverride) write
+  // camera.projectionMatrix directly and leave isPerspectiveCamera true. Before
+  // this, the flag won and overlays were scaled by distance-from-camera under an
+  // orthographic projection — so the scene-origin marker grew as the camera
+  // pulled back to frame a section, instead of holding a constant pixel size.
+  const orthoElements = (top: number, bottom: number, zoom = 1) => {
+    const m = new THREE.Matrix4().makeOrthographic(
+      -10, 10, top / zoom, bottom / zoom, 0.1, 1000,
+    );
+    return { elements: m.elements };
+  };
+
+  it('ignores distance when the MATRIX is orthographic, despite the class flag', () => {
+    const camera = {
+      isPerspectiveCamera: true,          // the lie the override leaves behind
+      fov: 50,
+      projectionMatrix: orthoElements(5, -5),
+    };
+    const near = worldPerPixel(camera, { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 1 });
+    const far = worldPerPixel(camera, { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 900 });
+    expect(near).toBeGreaterThan(0);
+    expect(far).toBeCloseTo(near, 12);
+  });
+
+  it('derives the frustum height from the matrix, not camera.top/bottom', () => {
+    // A 10-unit-tall frustum over 800px is 1/80 world units per pixel. The
+    // override never sets camera.top/bottom, so reading those would give 0.
+    const camera = {
+      isPerspectiveCamera: true,
+      fov: 50,
+      projectionMatrix: orthoElements(5, -5),
+    };
+    expect(worldPerPixel(camera, { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 0 }))
+      .toBeCloseTo(10 / 800, 12);
+  });
+
+  it('a taller frustum means more world per pixel', () => {
+    const small = worldPerPixel(
+      { isPerspectiveCamera: true, fov: 50, projectionMatrix: orthoElements(5, -5) },
+      { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 0 },
+    );
+    const big = worldPerPixel(
+      { isPerspectiveCamera: true, fov: 50, projectionMatrix: orthoElements(50, -50) },
+      { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 0 },
+    );
+    expect(big).toBeCloseTo(small * 10, 10);
+  });
+
+  it('still scales with distance for a genuine perspective matrix', () => {
+    // The fix must not flatten real perspective cameras into constant scale.
+    const m = new THREE.Matrix4().makePerspective(-1, 1, 1, -1, 0.1, 1000);
+    const camera = { isPerspectiveCamera: true, fov: 50, projectionMatrix: { elements: m.elements } };
+    const near = worldPerPixel(camera, { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 1 });
+    const far = worldPerPixel(camera, { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 10 });
+    expect(far).toBeGreaterThan(near * 5);
+  });
+
+  it('falls back to the class flag when no matrix is supplied', () => {
+    // Callers that pass a plain object keep working.
+    const perspective = worldPerPixel(
+      { isPerspectiveCamera: true, fov: 50 }, { x: 0, y: 0, z: 0 }, 800, { x: 0, y: 0, z: 10 },
+    );
+    expect(perspective).toBeGreaterThan(0);
   });
 });

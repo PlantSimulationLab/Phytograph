@@ -18,7 +18,7 @@ export async function stubOpenDialog(
     const g = globalThis as unknown as {
       __openDialogCalls?: unknown[];
       __openDialogIndex?: number;
-      __phytographAllowPath?: (p: string) => void;
+      __phytographAllowPath?: (p: string, kind?: 'file' | 'saveFile' | 'directory') => void;
     };
     g.__openDialogCalls = [];
     g.__openDialogIndex = 0;
@@ -32,6 +32,13 @@ export async function stubOpenDialog(
       const idx = g.__openDialogIndex ?? 0;
       const value = openResponses[Math.min(idx, openResponses.length - 1)];
       g.__openDialogIndex = idx + 1;
+      // Re-allow with the kind the REAL handler would use: a chosen directory
+      // authorizes writes to its children (the export-to-folder flows), which
+      // the up-front 'file' seeding above does not. Without this a folder export
+      // is denied by src/main/fsAllowlist.ts.
+      if (value) {
+        g.__phytographAllowPath?.(value, opts?.directory ? 'directory' : 'file');
+      }
       return value;
     });
   }, responses);

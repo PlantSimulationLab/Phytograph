@@ -81,15 +81,20 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
   const colorMode = page.getByTestId('display-color-mode');
   await expect(colorMode).toBeVisible();
 
-  // Color by the marked categorical field. The slug is "Target_Index".
-  await colorMode.selectOption('scalar:Target_Index');
-  await expect(colorMode).toHaveValue('scalar:Target_Index');
+  // Color by the marked categorical field. "Target Index[]" is a RECOGNISED
+  // multi-return column, so it canonicalises to the slug `target_index` (see
+  // _CANONICAL_NAME_ALIASES) rather than keeping a header-derived spelling —
+  // that is what makes it visible to Backfill Misses and LAD. The other specs
+  // (export-scalar-columns, backfill-misses) already assert the canonical
+  // slug; this one was missed when the vocabulary was consolidated.
+  await colorMode.selectOption('scalar:target_index');
+  await expect(colorMode).toHaveValue('scalar:target_index');
 
   // A categorical field shows the discrete class legend, NOT the continuous
   // colorbar — this is the wizard's categorical mark taking effect end-to-end.
   const legend = page.getByTestId('class-legend');
   await expect(legend).toBeVisible();
-  await expect(legend).toHaveAttribute('data-legend-attribute', 'Target_Index');
+  await expect(legend).toHaveAttribute('data-legend-attribute', 'target_index');
   await expect(page.getByTestId('colorbar')).toBeHidden();
 });
 
@@ -133,6 +138,113 @@ test('mapping columns to Scan Row/Column Index carries the raster grid', async (
   await expect(colorMode).toHaveValue('scalar:row_index');
   await colorMode.selectOption('scalar:column_index');
   await expect(colorMode).toHaveValue('scalar:column_index');
+});
+
+test('unticking Import drops an ASCII column from the imported cloud', async () => {
+  // scalars.xyz carries Timestamp (col 3), Deviation (col 4) and Target Index
+  // (col 5). Untick Deviation: the points must all still import, but the field
+  // must be GONE from the Color-by menu — the ASCII skip travels as role 'skip'
+  // inside the column plan, and the backend never materialises the column.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+
+  const wizard = page.getByTestId('import-wizard');
+  await expect(wizard).toBeVisible({ timeout: 30_000 });
+
+  const colAt = (i: number) =>
+    page.locator(`[data-testid="import-wizard-column"][data-col-index="${i}"]`);
+  // X/Y/Z are mandatory, so they carry no checkbox at all.
+  await expect(colAt(0).getByTestId('import-wizard-include')).toHaveCount(0);
+  await expect(colAt(1).getByTestId('import-wizard-include')).toHaveCount(0);
+  await expect(colAt(2).getByTestId('import-wizard-include')).toHaveCount(0);
+
+  const deviationBox = colAt(4).getByTestId('import-wizard-include');
+  await expect(deviationBox).toBeChecked();
+  await deviationBox.uncheck();
+  // The role select follows the checkbox, so the two controls never disagree.
+  await expect(colAt(4).getByTestId('import-wizard-role')).toHaveValue('skip');
+
+  await page.getByTestId('import-wizard-import').click();
+  await expect(wizard).toBeHidden();
+
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  // Dropping a COLUMN must not drop any POINT.
+  expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
+
+  await page.getByRole('button', { name: 'Display' }).click();
+  const colorMode = page.getByTestId('display-color-mode');
+  await expect(colorMode).toBeVisible();
+  const options = await colorMode.locator('option').evaluateAll(
+    (els) => els.map((e) => (e as HTMLOptionElement).value));
+  // The dropped field is gone…
+  expect(options).not.toContain('scalar:Deviation');
+  // …while its neighbours, which stayed ticked, survived. Without this the test
+  // would also pass if the import had silently carried no scalars at all.
+  // (Target Index is pinned to its canonical lower-case slug by the backend.)
+  expect(options).toContain('scalar:target_index');
+  expect(options).toContain('scalar:timestamp');
+});
+
+test('unticking Import drops a field from an in-file format (PLY)', async () => {
+  // The half with no mechanism before this change: an in-file format fixes its
+  // layout, so there is no column position to skip. The choice travels as a slug
+  // list (drop_slugs) and the backend filters the session's extras by name.
+  // tiny-scalars.ply carries x/y/z plus two carried scalars (deviation,
+  // tree_id) — tiny.ply's lone `reflectance` is consumed as the intensity
+  // channel by the PLY reader, so it never becomes a droppable extra dim.
+  const { app, page } = session;
+  // The Display button TOGGLES the panel, so clicking it unconditionally would
+  // close an already-open panel and leave us reading a stale/absent select.
+  const readOptions = async () => {
+    const colorMode = page.getByTestId('display-color-mode');
+    if (!(await colorMode.isVisible())) {
+      await page.getByRole('button', { name: 'Display' }).click();
+    }
+    await expect(colorMode).toBeVisible();
+    return colorMode.locator('option').evaluateAll(
+      (els) => els.map((e) => (e as HTMLOptionElement).value));
+  };
+
+  // Control run: import untouched, and confirm reflectance IS offered. Without
+  // this half, a bug that dropped every scalar would pass the assertion below.
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'tiny-scalars.ply'));
+  await expect(page.getByTestId('import-wizard')).toBeVisible({ timeout: 30_000 });
+  await completeImportWizard(page);
+  await expect(page.locator('[data-testid="scan-row"]').first())
+    .toBeVisible({ timeout: 20_000 });
+  const before = await readOptions();
+  expect(before).toContain('scalar:deviation');
+  expect(before).toContain('scalar:tree_id');
+
+  // Same file again, this time unticking reflectance.
+  await resetToFreshScene(session.app, session.page);
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'tiny-scalars.ply'));
+  const wizard = page.getByTestId('import-wizard');
+  await expect(wizard).toBeVisible({ timeout: 30_000 });
+
+  const reflCol = page.locator('[data-testid="import-wizard-column"]')
+    .filter({ hasText: 'deviation' }).first();
+  // The file fixes the layout, so this column can't be REMAPPED — its dropdown
+  // offers only the Scalar/Label colouring choice. Membership is nonetheless
+  // the user's call now, which is exactly what the checkbox adds.
+  const roleOptions = await reflCol.getByTestId('import-wizard-role')
+    .locator('option').evaluateAll((els) => els.map((e) => (e as HTMLOptionElement).value));
+  expect(roleOptions).not.toContain('x');
+  const box = reflCol.getByTestId('import-wizard-include');
+  await expect(box).toBeChecked();
+  await box.uncheck();
+
+  await completeImportWizard(page);
+  const row = page.locator('[data-testid="scan-row"]').first();
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  // Dropping a column must not drop any point.
+  expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
+  const after = await readOptions();
+  expect(after).not.toContain('scalar:deviation');
+  // The sibling scalar, left ticked, still made it — so this is a targeted
+  // drop, not a wholesale loss of the file's scalars.
+  expect(after).toContain('scalar:tree_id');
 });
 
 test('E57 fixed columns display their real roles, not a Scalar fallback', async () => {

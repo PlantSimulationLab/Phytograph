@@ -8,6 +8,24 @@ import struct
 import numpy as np
 
 
+async def _create_session_direct(request):
+    """Run an import to completion in-process and return its result DICT.
+
+    `/api/cloud/session/create` is a streaming, cancellable endpoint: the route
+    returns a StreamingResponse, not the payload. Tests that want the result
+    directly (rather than over HTTP) call the worker underneath it instead.
+
+    Declared `async` so the many existing `await main.create_cloud_session(req)` /
+    `run_until_complete(...)` call sites keep working verbatim."""
+    import main
+
+    source_path = main._Path(request.source_path).expanduser()
+    if not source_path.is_file():
+        raise main.HTTPException(
+            status_code=404, detail=f"Source file not found: {request.source_path}")
+    return main._do_create_cloud_session(request, source_path)
+
+
 def decode_bin_frame(content: bytes):
     """Decode a PHB1 frame body into (meta: dict, buffers: dict[str, np.ndarray]).
 

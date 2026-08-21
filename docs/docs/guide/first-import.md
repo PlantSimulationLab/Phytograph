@@ -44,9 +44,11 @@ You have four ways to import:
     current scene. See
     [Import & export](../workflows/import-export.md#import) for details.
 
-A progress indicator appears while the file is parsed. ASCII files in
-the multi-million-point range typically import in a few seconds; LAS/LAZ
-binary formats are faster still.
+A progress indicator appears while the file is parsed, advancing through the
+stages of the import. ASCII files in the multi-million-point range typically
+import in a few seconds; LAS/LAZ binary formats are faster still. If an import
+is taking longer than you want, **Cancel** stops it for real — see
+[Import & export](../workflows/import-export.md#import).
 
 ## See it in 3D
 

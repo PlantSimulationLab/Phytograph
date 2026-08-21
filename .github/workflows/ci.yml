@@ -63,7 +63,17 @@ jobs:
   # --------------------------------------------------------------------------
   heavy:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    # Budget, measured: ~6 min of native build on a cold cache (libhelios +
+    # PyInstaller) + ~11 min pytest + ~50 min E2E. The E2E step is the term that
+    # grows — it was 47 min for ~275 tests on 2026-08-03 and 51+ min for 310 on
+    # 2026-08-21, when the whole job hit the old 75 min cap 13 tests from the
+    # end and was CANCELLED. A cancelled job skips the `if: failure()` report
+    # upload, so it also destroys the traces you need to debug it.
+    #
+    # 100 leaves ~30 min of headroom. When E2E growth eats that, prefer sharding
+    # the suite across runners over raising this again — a 100-minute serial job
+    # is already a slow feedback loop.
+    timeout-minutes: 100
     env:
       # build-potree-converter.mjs fetches upstream PR #686 via the GH API.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

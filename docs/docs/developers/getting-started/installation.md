@@ -11,7 +11,7 @@
 
 Four things to create: the PyHelios submodule + compiled native library, the
 Python venv, Node modules, and the bundled PyInstaller sidecar that the
-Electron app spawns on port 8008.
+Electron app spawns (on a port chosen at runtime) in packaged builds and E2E.
 
 PyHelios is vendored as a git **submodule** (built from source — there is no
 pip wheel), so clone recursively and compile its native `libhelios`. This
@@ -72,17 +72,18 @@ npm run build:backend
     `PYTHON=/path/to/python` if needed. See the header comment of
     `scripts/build-backend.mjs` for the full resolution logic.
 
-Step 5 is **required** before `npm run dev` works — the supervisor in
-`src/main/backend.ts` spawns this binary on port 8008 in dev as well as in
-packaged builds. It takes a few minutes the first time; re-run only when
-backend code changes. (Step 3 is the PyHelios native compile; it's a
-prerequisite of step 5, which bundles `libhelios` into the sidecar.)
+Step 5 is **not** needed for `npm run dev`: with `backend-api/venv` present,
+`scripts/dev.mjs` runs uvicorn directly and the Electron supervisor stands
+down. Build the sidecar when you want to run the **E2E suite** or package an
+installer. It takes a few minutes the first time; re-run only when backend code
+changes. (Step 3 is the PyHelios native compile; it's a prerequisite of step 5,
+which bundles `libhelios` into the sidecar.)
 
 ## Verifying the install
 
 ```bash
 npm run typecheck         # tsc --noEmit, should succeed silently
-npm run test:backend      # pytest in backend-api/, requires venv active
+npm run test:backend      # pytest in backend-api/ (uses ./venv/bin/pytest)
 npm run test:unit         # vitest
 ```
 

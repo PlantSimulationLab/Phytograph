@@ -4,15 +4,17 @@
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.las` | ✅ | ✅ | LAS 1.2/1.4. Standard fields only on export (x, y, z, intensity, RGB, classification). |
+| `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes x/y/z + RGB only (LAS 1.2, point format 0/2 — no intensity, no classification), while the **batch export** (two or more objects checked, or any scan) writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the batch path for full-fidelity round-trips — it takes plain clouds too, so checking a second object is enough to get it. |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
-| `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-scan (one `.e57` per scan) via the scan export's **Data only** mode, carrying x/y/z, intensity, and colour. |
-| `.ply` | ✅ | ✅ | Preserves all scalar fields. Best for full-fidelity round-trips. Structured/organized PLYs recover sky/miss points (see below). |
-| `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL). |
+| `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and colour. |
+| `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** writes only x/y/z + optional RGB. Structured/organized PLYs recover sky/miss points (see below). |
+| `.pcd` | ✅ | — | Point Cloud Data format (PCL). Import only; parsed via Open3D, which drops non-standard scalar fields. |
+| `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. macOS only, and needs Docker plus a user-supplied RiVLib: see **[Import a RIEGL project](../workflows/import-riegl-project.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**; sky/miss points are recovered from the scanner's per-shot record, so LAD works. |
+| `.PROJ` | ✅ | — | RIEGL **on-instrument project** from a newer scanner (e.g. VZ-2000i) — also a *directory*. Same requirements and same columns as `.riproject`, but it also carries the instrument's **own registration**, so scans can land already aligned, level and north-oriented. Registration is often partial; each position reports whether it was registered or only placed from a metre-level prior. The `.rdbx` files beside each `.rxp` are not used. |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
-| `.pts` | ✅ | ✅ | Whitespace-separated, usually with a header line of the point count. |
-| `.asc` | ✅ | ✅ | ASCII point cloud, treated like `.xyz`. |
+| `.pts` | ✅ | — | Whitespace-separated, usually with a header line of the point count. Import only. |
+| `.asc` | ✅ | — | ASCII point cloud, treated like `.xyz`. Import only as a point cloud — `.asc` *is* available as a DEM raster export (see below). |
 | `.obj` | — | ✅ | Vertices only, no faces. |
 
 ### ASCII format details
@@ -49,7 +51,8 @@ column names are, so aliases like `col`, `red`, `easting`, or `reflectivity`
 resolve to their role too. Any other token is carried through as a named
 **scalar field** (color-mappable in the viewer) rather than discarded —
 on large octree-streamed clouds they travel into the octree as extra
-attributes. Field names come from the file's header row when present
+attributes. (That's the *default*: a column whose **Import** checkbox you
+untick in the import wizard is dropped instead, whatever its token.) Field names come from the file's header row when present
 (e.g. `Reflectance[dB]` → `Reflectance [dB]`); when the file has **no**
 header, the `<ASCII_format>` token itself names the field — so a headerless
 `.xyz` referenced by an XML whose legend reads
@@ -146,22 +149,45 @@ If a scan has **no** miss points but **does** have a `timestamp` column, the LAD
 inversion recovers misses automatically by *gapfilling* the scan grid; if it has
 neither, the inversion warns that its result is likely to be inaccurate.
 
-> **RIEGL `.rxp` is not supported.** It needs RIEGL's license-gated RiVLib SDK,
-> which can't be redistributed. Convert `.rxp` to `.e57` (e.g. in RiSCAN Pro)
-> to import it with miss recovery.
+> **RIEGL `.rxp` stores only returns**, but the misses are recovered anyway. A
+> shot that hits nothing is absent from the file rather than flagged, so
+> Phytograph reads the scanner's own per-shot record to reconstruct each miss
+> with its true beam direction — see
+> [Import a RIEGL project](../workflows/import-riegl-project.md). Loose
+> `.rxp` files are not importable on their own; import the containing
+> `.riproject` / `.PROJ` directory.
 
 ## Meshes
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.obj` | ✅ | ✅ | Vertices + faces + normals + vertex colors. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied. |
+| `.obj` | ✅ | ✅ | Vertices + faces + normals + UVs + materials. On import, a sibling `.mtl` with `map_Kd` textures (and the images it names, alongside the file) is loaded and applied; on export, that `.mtl` and its texture images are written back alongside the `.obj`. |
 | `.ply` | ✅ | ✅ | Vertices + faces + normals + per-vertex color. ASCII **and** binary on import (read via open3d). No textures. |
-| `.stl` | ✅ | ✅ | Triangles only — no color or topology metadata. |
+| `.stl` | ✅ | ✅ | Triangles only — no topology metadata. ASCII **and** binary on import; exported as ASCII. Binary STL's non-standard per-facet color is read only for facets that set its "color valid" bit. |
 
 Polygonal faces with more than three vertices are triangulated on
 import. Textured `.obj` import reads UV coordinates (`vt`) and per-material
-diffuse color (`Kd`) and texture (`map_Kd`); textures are **not** written on
-export.
+diffuse color (`Kd`) and texture (`map_Kd`).
+
+Exporting a textured mesh to `.obj` writes a **bundle**, not a single file:
+
+- `<name>.obj` — the geometry, with `vt` texture coordinates and a `usemtl`
+  group per material, referencing the material library via `mtllib`.
+- `<name>.mtl` — the material library: `Kd` diffuse color per material, plus
+  `map_Kd` for textured ones (and `map_d` where the texture carries an alpha
+  cutout, so leaf silhouettes survive).
+- `<name>_<material>.png` / `.jpg` — one image per textured material. The
+  extension follows the image's actual format, not its name.
+
+Organs with **no** image texture — petioles, internodes, stems, flowers — carry
+their color per vertex rather than in a material. OBJ has no portable per-vertex
+color, so on export they are grouped by color into generated materials
+(`color_0`, `color_1`, …) and written as `Kd`, which is the channel the importer
+reads back. A plant typically needs only a handful (a 20-day bean uses three).
+
+Keep the three together: an `.obj` moved away from its `.mtl` and images
+re-imports as untextured geometry. Meshes without materials (a triangulated
+point cloud, a DEM surface) export as a single `.obj`, with no `.mtl`.
 
 A [DEM](../workflows/generate-dem.md) is stored as a surface mesh, so it
 exports through the same OBJ / PLY / STL formats.
@@ -207,35 +233,115 @@ point clouds) does not carry arbitrary per-vertex scalar fields.
 | `crown_surface_area_m2` | Fitted-mesh surface area. |
 | `num_points_used` | Points used after fuzzy trimming. |
 | `strictness` | The fuzziness value used for the fit. |
+| `param_a_m`, `param_b_m`, `param_c_m` | Semi-extent along x/y/z. Ellipsoid + prism only. |
+| `param_base_radius_m`, `param_height_m` | Cone only. |
+| `param_alpha_m`, `param_alpha_auto` | Alpha shape only: the radius used, and whether the fit chose it. |
+| `mesh_vertices`, `mesh_triangles` | Size of the fitted mesh. |
+| `mesh_file` | The crown's mesh file, relative to the CSV. Alpha shapes only; empty otherwise. |
+
+The `param_*` columns are the **fit parameters** — what it takes to
+rebuild the solid, rather than describe it. A column always means the
+same thing: `param_a/b/c_m` are the semi-extent along x/y/z for both
+box-like shapes (an ellipsoid's semi-axes, a prism's half-extents).
+Columns that don't apply to a row's shape are left empty.
+
+There is no separate parameter column for the shape's center: for the
+ellipsoid, prism, and cone it is exactly `crown_center_x/y/z`.
+
+An alpha shape has no analytic parameters — a concave hull's geometry
+*is* the result — so those crowns are written as mesh files beside the
+CSV (`.obj`, `.ply`, or `.stl`, your choice) and `mesh_file` names the
+one belonging to each row. That export writes several files, so it asks
+for a **folder** instead of a save location.
 
 ## Skeletons
 
 | Format | Import | Export | Notes |
 |---|---|---|---|
-| `.json` | ✅ | ✅ | Full graph: nodes, edges, branch orders, attributes. |
-| `.obj` | ✅ | ✅ | Line segments only (lines, not faces). |
+| `.json` | ✅ | ✅ | Full graph: nodes, edges, branch orders. The only importable skeleton format. |
+| `.obj` | ❌ | ✅ | Line segments (and cylinders when diameters are present). Export only. |
+| `.ply` | ❌ | ✅ | Vertices plus an `edge` element (`vertex1`/`vertex2`). Export only. |
 
 ### Skeleton JSON shape
 
 ```json
 {
   "nodes": [
-    {"id": 0, "x": 0.0, "y": 0.0, "z": 0.0, "branch_order": 1},
+    {"x": 0.0, "y": 0.0, "z": 0.0, "branchOrder": 1},
     ...
   ],
   "edges": [
-    {"source": 0, "target": 1, "length": 0.15},
+    [0, 1],
     ...
   ],
   "metadata": {
-    "method": "LAPLACE",
-    "tolerance": 0.02
+    "totalLength": 12.84,
+    "nodeCount": 512,
+    "edgeCount": 511,
+    "maxBranchOrder": 6
   }
 }
 ```
 
-Use `.json` for downstream analysis in Python/R. Use `.obj` for
-visualization in Blender or MeshLab.
+Note the exact shape, since the importer validates it: nodes have **no `id`**
+(their array index *is* the id) and use camelCase **`branchOrder`**; edges are
+flat **`[from, to]` index pairs**, not objects. `metadata` is informational —
+node diameters are not written to JSON (use `.obj` if you need them).
+
+Use `.json` for downstream analysis in Python/R, and to round-trip a skeleton
+back into Phytograph. Use `.obj` or `.ply` for visualization in Blender or
+MeshLab.
+
+## QSMs
+
+| Format | Import | Export | Notes |
+|---|---|---|---|
+| `.csv` | ✅ | ✅ | One row per cylinder. The only importable QSM format, and the one that round-trips. |
+| `.obj` | ❌ | ✅ | Triangulated cylinder mesh, for Blender / CloudCompare / MeshLab. |
+| `.ply` | ❌ | ✅ | Same geometry as OBJ, with per-face `branch_order` and `radius`. |
+
+### QSM cylinder CSV
+
+The CSV uses the SimpleForest column layout, which
+[rTwig](https://cran.r-project.org/package=rTwig) (`import_qsm`) and aRchi
+(`read_QSM(model = "simpleforest")`) both read. Columns:
+
+| Column | Meaning |
+|---|---|
+| `ID` | Cylinder id. |
+| `parentID` | Parent cylinder's `ID`; `-1` at the trunk base. |
+| `branchID` | The continuous shoot (botanical axis) this cylinder belongs to. |
+| `branchOrder` | Shoot rank — trunk `0`, scaffolds `1`, and so on. |
+| `segmentID` | Same as `branchID`; written for reader compatibility. |
+| `parentSegmentID` | The parent shoot's id; `-1` for the trunk. |
+| `startX/Y/Z`, `endX/Y/Z` | Cylinder axis endpoints, meters. |
+| `axisX/Y/Z` | Unit axis direction. Derived — recomputed on import. |
+| `radius` | Cylinder radius, meters. |
+| `length` | Axial length, meters. Derived — recomputed on import. |
+| `surfaceCoverage` | Fit quality in `[0, 1]`; low means the points covered one side only. Blank when unknown. |
+| `meanAbsDeviation` | Mean point-to-surface distance, meters. Blank when unknown. |
+
+Two things worth knowing:
+
+- **Coordinates are absolute world-frame**, in the same coordinate system as
+  the source scan (which for a projected cloud means real UTM values). The file
+  records no CRS, so keep track of it separately.
+- **Row order matters.** Cylinders are written base-to-tip within each shoot,
+  and that ordering is what tells Phytograph how to draw each branch as a
+  continuous tube. If you edit the file, don't re-sort the rows.
+
+Everything Phytograph needs is in the file, so **a QSM CSV round-trips**: export
+one, re-import it, and you get back the same model — same cylinders, same shoot
+topology, and the same numbers in the results panel. Whole-tree metrics (trunk
+diameter, height, woody volume) aren't stored as columns because they are
+recomputed from the cylinders on import.
+
+The importer is tolerant of the wider SimpleForest/TreeQSM family: column names
+match regardless of case or separators (`parentID`, `parent_id`, and `Parent Id`
+are equivalent), comma/semicolon/tab delimiters all work, unknown columns are
+ignored, and files with no `segmentID`/`branchID` have their shoots derived from
+the parent chain. Only `ID`, `parentID`, `branchOrder`, the six start/end
+coordinates, and `radius` are strictly required.
 
 ## Scan position files
 
@@ -308,6 +414,35 @@ flat.
 
 An XML with only `<grid>` blocks (no `<scan>`) imports just the grids.
 
+### Files holding several scan positions
+
+Two point-cloud formats can hold **several scanner setups in one file**: a
+**multi-block `.ptx`** (one block per setup) and a **multi-scan `.e57`**.
+Phytograph imports these as **one scan per position** — each with its own
+pose, its own grid, and its own scan parameters. Every other format holds a
+single position and imports as one scan.
+
+The scans are named after the file without its extension — `plot3.ptx`
+holding three blocks imports as `plot3 — scan 1`, `plot3 — scan 2`,
+`plot3 — scan 3`. A single-position file keeps its full file name
+(extension included) unchanged.
+
+They are **not merged into one cloud**, because a merged cloud would have to
+pick one origin to stand in for all of them, and that origin is used for real
+work:
+
+- [Leaf area density](../workflows/estimate-leaf-area-density.md) inverts
+  transmission from a **single scanner origin**; the wrong one silently
+  corrupts the result.
+- [Sky/miss points](#skymiss-points) are displayed on a shell centred on the
+  scanner, which would sit around the wrong point.
+- The per-scan `row_index` / `column_index` rasters of two setups would
+  collide.
+
+All positions from one file share a single world shift, so they stay
+correctly co-located relative to each other. If one position fails to import,
+it's reported on its own and the remaining positions still import.
+
 ### Scan parameters recovered from the point-cloud file
 
 Some point-cloud formats embed the scanner's geometry in the file header. When
@@ -326,9 +461,11 @@ file *doesn't* record is left at its default (blank), exactly as before.
 
 - **E57** is the richest source: each scan's pose (origin + rotation) is applied
   to its points, and the angular sweep and grid resolution are read when the
-  file includes them. A multi-scan E57 uses the first scan's parameters for the
-  merged cloud. E57 elevation (measured from the horizontal plane) is converted
-  to Phytograph's zenith angle automatically.
+  file includes them. A multi-scan E57 imports as one scan per position, each
+  reading its own parameters — see
+  [Files holding several scan positions](#files-holding-several-scan-positions).
+  E57 elevation (measured from the horizontal plane) is converted to
+  Phytograph's zenith angle automatically.
 - **PCD** records only a sensor origin (`VIEWPOINT`); it's used only when it
   differs from the identity default that most files leave in place.
 - **LAS/LAZ, PLY, and ASCII** carry no standard scanner-geometry fields, so an

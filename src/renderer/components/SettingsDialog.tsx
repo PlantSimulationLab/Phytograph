@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { X, Settings as SettingsIcon } from 'lucide-react';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
+import { RieglStatusBadge } from './RieglStatusBadge';
+import {
+  buildRieglImage,
+  describeBackendError,
+  type RieglStatus,
+} from '../utils/backendApi';
 import { getSettings, updateSettings, type AppSettings } from '../lib/store';
 import { POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from '../lib/pointCloudParsers';
 
@@ -81,6 +87,58 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     // Reject non-finite / non-positive: snap back to the persisted value.
     patch({ syntheticScanMemoryBudgetMb: Number.isFinite(n) && n > 0 ? n : null });
   }, [budgetDraft, patch]);
+
+  // RiVLib is picked as a DIRECTORY (it's a folder of bin/include/lib), which
+  // the dialog IPC already supports and which also allowlists the path for fs
+  // access. Bumping `rieglRefresh` re-probes the badge immediately, so the user
+  // sees the result of their choice without reopening the dialog.
+  const [rieglRefresh, setRieglRefresh] = useState(0);
+
+  const chooseRivlib = useCallback(async () => {
+    const picked = await window.electronAPI?.dialog.open({
+      directory: true,
+      title: 'Select the RiVLib folder',
+    });
+    if (typeof picked !== 'string' || !picked) return; // cancelled
+    patch({ rivlibPath: picked });
+    setRieglRefresh((n) => n + 1);
+  }, [patch]);
+
+  const clearRivlib = useCallback(() => {
+    patch({ rivlibPath: null });
+    setRieglRefresh((n) => n + 1);
+  }, [patch]);
+
+  // The image can only ever be built locally — publishing one would mean
+  // redistributing RiVLib, which its licence forbids. Without this button a
+  // fresh machine reaches "image not built" with no in-app way forward.
+  const [rieglStatus, setRieglStatus] = useState<RieglStatus | null>(null);
+  const [buildingImage, setBuildingImage] = useState(false);
+  const [buildError, setBuildError] = useState<string | null>(null);
+
+  const buildRieglImageNow = useCallback(async () => {
+    if (!settings?.rivlibPath) return;
+    setBuildingImage(true);
+    setBuildError(null);
+    try {
+      await buildRieglImage(settings.rivlibPath);
+      setRieglRefresh((n) => n + 1); // re-probe so the badge flips to ready
+    } catch (err) {
+      setBuildError(describeBackendError(err, 'Building the RIEGL image').message);
+    } finally {
+      setBuildingImage(false);
+    }
+  }, [settings?.rivlibPath]);
+
+  // Offer the build only when it's the ONE thing still missing: Docker up and
+  // RiVLib valid, but no image. Any other gap has its own remedy, and building
+  // would either fail or succeed without making the feature available.
+  const canBuildImage =
+    !!rieglStatus &&
+    rieglStatus.platformSupported &&
+    rieglStatus.dockerPresent &&
+    rieglStatus.rivlibValid &&
+    !rieglStatus.imageBuilt;
 
   if (!isOpen) return null;
 
@@ -235,6 +293,114 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 }}
                 className="w-32 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
               />
+            </div>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <label className="block text-sm text-neutral-200">RIEGL RiVLib folder</label>
+                  <RieglStatusBadge
+                    rivlibPath={settings?.rivlibPath ?? null}
+                    refreshKey={rieglRefresh}
+                    onStatus={setRieglStatus}
+                  />
+                </div>
+                <p className="text-[11px] text-neutral-500 leading-snug">
+                  Needed to import RIEGL raw scanner projects (<code>.riproject</code>). RiVLib is
+                  proprietary and cannot be shipped with Phytograph &mdash; download it from RIEGL's
+                  members area and select the extracted folder (the one containing{' '}
+                  <code>bin/</code>, <code>include/</code>, <code>lib/</code>). Nothing is copied;
+                  the folder is read directly. Requires Docker, and is macOS-only in this release.
+                </p>
+                {settings?.rivlibPath && (
+                  <p
+                    data-testid="settings-rivlib-path"
+                    className="text-[11px] text-neutral-400 mt-1 break-all font-mono"
+                  >
+                    {settings.rivlibPath}
+                  </p>
+                )}
+                {/* Setup has three independent prerequisites and the badge can
+                    only report one bit. Show them as a checklist so a failure
+                    names WHICH step is unmet: a wrong RiVLib folder and an
+                    unbuilt image otherwise look identical (both read
+                    "unavailable", and a bad folder also hides the Build button
+                    below, since building without RiVLib would succeed and still
+                    leave the feature off). */}
+                {rieglStatus && !rieglStatus.available && rieglStatus.platformSupported && (
+                  <ul
+                    data-testid="settings-riegl-checklist"
+                    className="mt-2 space-y-0.5 text-[11px]"
+                  >
+                    {(
+                      [
+                        ['docker', rieglStatus.dockerPresent, 'Docker running',
+                         'Start Docker Desktop'],
+                        ['rivlib', rieglStatus.rivlibValid, 'RiVLib folder',
+                         settings?.rivlibPath
+                           ? 'No lib/libscanifc.so here — pick the extracted folder'
+                           : 'Not set — choose the extracted RiVLib folder'],
+                        ['image', rieglStatus.imageBuilt, 'Reader image built',
+                         rieglStatus.dockerPresent && rieglStatus.rivlibValid
+                           ? 'Use the button below'
+                           : 'Needs the steps above first'],
+                      ] as const
+                    ).map(([key, ok, label, hint]) => (
+                      <li
+                        key={key}
+                        data-testid={`settings-riegl-check-${key}`}
+                        data-ok={ok ? 'true' : 'false'}
+                        className="flex items-start gap-1.5"
+                      >
+                        <span className={ok ? 'text-green-400' : 'text-amber-400'}>
+                          {ok ? '✓' : '✗'}
+                        </span>
+                        <span className={ok ? 'text-neutral-400' : 'text-neutral-300'}>
+                          {label}
+                          {!ok && <span className="text-neutral-500"> — {hint}</span>}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {canBuildImage && (
+                  <button
+                    data-testid="settings-riegl-build-image"
+                    onClick={buildRieglImageNow}
+                    disabled={buildingImage}
+                    className="mt-2 px-3 py-1.5 text-xs rounded bg-blue-600/80 text-white border border-blue-500/50 hover:bg-blue-600 disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {buildingImage
+                      ? 'Building image… (first run pulls a base image)'
+                      : 'Build reader image'}
+                  </button>
+                )}
+                {buildError && (
+                  <p
+                    data-testid="settings-riegl-build-error"
+                    className="text-[11px] text-red-400 mt-1"
+                  >
+                    {buildError}
+                  </p>
+                )}
+              </div>
+              <div className="flex flex-col gap-1">
+                <button
+                  data-testid="settings-rivlib-choose"
+                  onClick={chooseRivlib}
+                  className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-neutral-200 border border-neutral-600 hover:bg-neutral-600"
+                >
+                  Choose…
+                </button>
+                {settings?.rivlibPath && (
+                  <button
+                    data-testid="settings-rivlib-clear"
+                    onClick={clearRivlib}
+                    className="px-3 py-1 text-[11px] rounded text-neutral-400 hover:text-neutral-200"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
             </div>
           </section>
 

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { launchApp, repoRoot } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { stripProgressMarkers } from './helpers/streamedJson';
 
 const fixture = (name: string) => join(repoRoot, 'tests', 'e2e', 'fixtures', name);
 const TREE = fixture('tree.xyz');
@@ -28,9 +29,14 @@ test('File → New clears all data and frees backend sessions', async () => {
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
     // Capture the backend session URL created by the import. The renderer POSTs
-    // /api/cloud/session/create; the response carries the new session_id. We
-    // reconstruct the per-session DELETE URL from that request's origin so we
+    // /api/cloud/session/create-multi, which returns ONE ENTRY PER SCAN POSITION
+    // (a file can hold several scanner setups); a plain .xyz yields exactly one.
+    // We reconstruct the per-session DELETE URL from that request's origin so we
     // can probe the backend directly after the reset.
+    //
+    // The response is a STREAM: PHP1 progress markers (which carry the run_id
+    // the Cancel button targets) followed by the JSON tail. `.json()` chokes on
+    // the leading markers, so strip them first — see stripProgressMarkers below.
     const createResponse = page.waitForResponse(
       (r) => r.url().includes('/api/cloud/session/create') && r.request().method() === 'POST',
     );
@@ -42,8 +48,9 @@ test('File → New clears all data and frees backend sessions', async () => {
     await expect(original).toHaveCount(1, { timeout: 20_000 });
     await expect(original).toHaveAttribute('data-octree', 'true');
 
-    const created = await (await createResponse).json();
-    const sessionId: string = created.session_id;
+    const created = stripProgressMarkers(await (await createResponse).body());
+    expect(created.scan_count, 'a plain .xyz must import as exactly one scan').toBe(1);
+    const sessionId: string = created.scans[0].session.session_id;
     expect(sessionId).toBeTruthy();
     const apiOrigin = new URL((await createResponse).url()).origin;
     const sessionUrl = `${apiOrigin}/api/cloud/session/${sessionId}`;

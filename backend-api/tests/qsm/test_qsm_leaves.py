@@ -322,3 +322,56 @@ def test_builtin_texture_rejects_non_curated():
 def test_builtin_texture_rejects_traversal():
     with pytest.raises(ValueError):
         L.resolve_builtin_texture("../../../etc/passwd")
+
+
+# ---------------------------------------------------------------------------
+# Builtin BARK texture resolution (QSM "Color by > Texture")
+# ---------------------------------------------------------------------------
+def test_builtin_bark_resolves_every_curated_entry():
+    # Every allow-listed name must actually exist on disk in both the source tree
+    # and the bundle; a typo'd entry would only surface as a runtime error.
+    for entry in L.CURATED_BARK_TEXTURES:
+        name, b64, mime = L.resolve_builtin_bark(entry)
+        assert name == entry
+        assert len(b64) > 100
+        assert mime == "image/jpeg"
+
+
+def test_builtin_bark_reports_jpeg_not_png():
+    # The bark library is entirely JPG. The older plant-texture path hardcodes
+    # image/png in the data: URL, which would be the wrong type for these.
+    _, _, mime = L.resolve_builtin_bark("OliveBark.jpg")
+    assert mime == "image/jpeg"
+
+
+def test_builtin_bark_rejects_non_curated():
+    # A leaf texture is a real file in the same directory, so this specifically
+    # proves the allow-list is consulted rather than mere file existence.
+    with pytest.raises(ValueError):
+        L.resolve_builtin_bark("AlmondLeaf.png")
+
+
+def test_builtin_bark_rejects_traversal():
+    with pytest.raises(ValueError):
+        L.resolve_builtin_bark("../../../etc/passwd")
+
+
+def test_bark_upload_rejects_unsupported_format(tmp_path):
+    bogus = tmp_path / "bark.tiff"
+    bogus.write_bytes(b"II*\x00")
+    with pytest.raises(ValueError):
+        L.read_bark_texture_file(bogus)
+
+
+def test_bark_upload_reads_png_with_correct_mime(tmp_path):
+    png = tmp_path / "mybark.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    name, b64, mime = L.read_bark_texture_file(png)
+    assert name == "mybark.png"
+    assert mime == "image/png"
+    assert len(b64) > 10
+
+
+def test_bark_upload_missing_file_raises(tmp_path):
+    with pytest.raises(ValueError):
+        L.read_bark_texture_file(tmp_path / "nope.jpg")

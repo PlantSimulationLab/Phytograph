@@ -612,7 +612,10 @@ describe('octreeScalarFieldOptions', () => {
       'scan angle rank': { min: [0], max: [0] },
       'user data': { min: [0], max: [0] },
       'point source id': { min: [0], max: [0] },
-      'gps-time': { min: [0], max: [0] },
+      // NOTE: no 'gps-time' here. buildPointCloudFromOctree renames that to
+      // `timestamp` before these ranges are built (a degenerate one is dropped
+      // when a real `timestamp` already exists), so by the time the picker sees
+      // them the LAS name no longer appears. See timestampSlug.test.ts.
       rgb: { min: [0], max: [255] },
       timestamp: { min: [100], max: [247] },
       Deviation: { min: [0], max: [3] },
@@ -1492,12 +1495,28 @@ describe('buildHeliosTriangulationRequest / resolveHeliosScanSource', () => {
     expect(JSON.stringify(req).length).toBeLessThan(2_000);
   });
 
-  it('sends both session_id and file_path when the cloud still has its source path (restart fallback)', () => {
+  it('sends session_id ALONE for a session cloud that still has a source path', () => {
+    // Regression: file_path used to ride along as a "restart fallback". The file
+    // predates every edit and every import-wizard choice, so re-reading it after
+    // a backend restart computes on a different cloud and reports success. Worse,
+    // sourcePath is not always a point-cloud file — for a .riproject it is the
+    // project DIRECTORY, which produced a bogus "Scan file not found" on export.
+    // A stale session must reach the backend as session_id only, and fail loudly.
     const scan = scanOf(octreeCloud('sess-2'), { sourcePath: '/data/scan.xyz', asciiFormat: 'x y z' });
     const req = buildHeliosTriangulationRequest([scan], GRID);
     expect(req.scans[0].session_id).toBe('sess-2');
-    expect(req.scans[0].file_path).toBe('/data/scan.xyz');
+    expect(req.scans[0].file_path).toBeUndefined();
+    expect(req.scans[0].ascii_format).toBeUndefined();
     expect(req.scans[0].points).toBeUndefined();
+  });
+
+  it('sends session_id ALONE for a .riproject cloud (source path is a directory)', () => {
+    const scan = scanOf(octreeCloud('sess-riegl'), {
+      sourcePath: '/data/2018-02-23.002.riproject',
+    });
+    const req = buildHeliosTriangulationRequest([scan], GRID);
+    expect(req.scans[0].session_id).toBe('sess-riegl');
+    expect(req.scans[0].file_path).toBeUndefined();
   });
 
   it('sends file_path for a file-backed cloud with no session', () => {

@@ -1,13 +1,18 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
+import type { ClassPalette } from './classPalettes';
 import {
   importPointCloudByPath,
   importPointCloudLasLaz,
   createCloudSession,
+  createCloudSessions,
   type OctreeMetadata,
   type ColumnPlan,
   type ScanParamsFromFile,
+  type ImportProgressOptions,
 } from '../utils/backendApi';
+
+export type { ImportProgressOptions };
 
 // Calculate bounds from position array
 function calculateBounds(positions: Float32Array, pointCount: number): PointCloudData['bounds'] {
@@ -751,7 +756,7 @@ const BACKEND_PATH_EXTENSIONS = new Set([
 // flat fallback for Blob/no-path inputs that can't be octree'd. E57 is
 // octree-only (binary structured scan format; converted via pye57, recovering
 // sky/miss points) with no flat fallback.
-const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57']);
+const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57', 'ptx']);
 
 export async function parsePointCloudFromPath(
   path: string,
@@ -768,6 +773,18 @@ export async function parsePointCloudFromPath(
   // <origin>, when known. Forwarded to createCloudSession so the backend can
   // reproject sky/miss points onto the display shell instead of far-field.
   origin?: [number, number, number] | null,
+  // Cancellation + progress for the (slow) octree import. Grouped into an
+  // options object rather than three more positionals — the list is already
+  // long. Only the octree path consumes them; the flat fallbacks are fast.
+  opts?: ImportProgressOptions,
+  // Scalar fields to leave out, from the wizard's Import checkboxes. Only used
+  // by IN-FILE formats (LAS/LAZ/PLY/PCD/E57/PTX), whose fixed layout a
+  // positional `columnPlan` can't describe — an ASCII skip rides the plan as
+  // role 'skip' instead and never appears here.
+  droppedSlugs?: string[] | null,
+  // Role reassignments from the wizard for an in-file format, `{slug: role}`.
+  // Only the columns the user changed; empty means pure auto-detection.
+  roleOverrides?: Record<string, string> | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -782,21 +799,110 @@ export async function parsePointCloudFromPath(
     const meta = await createCloudSession(
       path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
       missDistanceThreshold ?? null, origin ?? null,
+      opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
+      roleOverrides ?? null,
     );
-    return buildPointCloudFromOctree(
-      meta, path, name, asciiFormat, columnPlan, categoricalAttributes, meta.session_id,
-      meta.world_shift ?? null, continuousAttributes,
-    );
+    return buildPointCloudFromOctree(meta, path, name, {
+      asciiFormat,
+      columnPlan,
+      categoricalAttributes,
+      sessionId: meta.session_id,
+      worldShift: meta.world_shift ?? null,
+      continuousAttributes,
+    });
   }
 
   if (BACKEND_PATH_EXTENSIONS.has(ext)) {
-    const result = await importPointCloudByPath(path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null);
+    const result = await importPointCloudByPath(
+      path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null, droppedSlugs ?? null);
     return buildPointCloudFromBackend(result, name);
   }
+
+  // Reject a known-unreadable format before readBinary — pulling a multi-GB
+  // scan across the IPC boundary just to throw is the slow failure this guard
+  // exists to prevent.
+  const unreadable = UNREADABLE_POINT_CLOUD_FORMATS[ext];
+  if (unreadable) throw new Error(unreadableFormatMessage(name, unreadable));
 
   const buf = await window.electronAPI.fs.readBinary(path);
   const file = new File([buf], name);
   return parsePointCloud(file);
+}
+
+/** One imported scan position: its cloud plus the display name for it. */
+export interface ImportedScanPosition {
+  data: PointCloudData;
+  /** File stem for a single-scan source; `<stem> — scan N` for a multi-scan one. */
+  name: string;
+  scanIndex: number;
+}
+
+/**
+ * Import a path as one cloud PER SCAN POSITION.
+ *
+ * The plural sibling of {@link parsePointCloudFromPath}. Only the octree route
+ * can fan out — a multi-scan E57 or multi-block PTX is decoded position by
+ * position in the backend, each getting its own session, octree and
+ * `ScanParameters`, because a scan is defined by its pose and merging positions
+ * leaves one origin standing in for all of them.
+ *
+ * Every other format (and every non-octree route) yields exactly one element, so
+ * callers never branch on the extension.
+ */
+export async function parsePointCloudsFromPath(
+  path: string,
+  asciiFormat?: string | null,
+  columnPlan?: ColumnPlan | null,
+  categoricalAttributes?: string[],
+  worldShift?: [number, number, number] | null,
+  continuousAttributes?: string[],
+  missDistanceThreshold?: number | null,
+  origin?: [number, number, number] | null,
+  opts?: ImportProgressOptions,
+  droppedSlugs?: string[] | null,
+  roleOverrides?: Record<string, string> | null,
+): Promise<ImportedScanPosition[]> {
+  const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+
+  if (!OCTREE_PATH_EXTENSIONS.has(ext)) {
+    // Flat / in-renderer routes are inherently 1:1; reuse the singular path
+    // verbatim rather than duplicating its fallbacks.
+    const data = await parsePointCloudFromPath(
+      path, asciiFormat, columnPlan, categoricalAttributes, worldShift,
+      continuousAttributes, missDistanceThreshold, origin, opts, droppedSlugs,
+      roleOverrides,
+    );
+    return [{ data, name, scanIndex: 0 }];
+  }
+
+  const positions = await createCloudSessions(
+    path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
+    missDistanceThreshold ?? null, origin ?? null,
+    opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
+  );
+
+  const ok = positions.filter(p => p.session && !p.error);
+  if (ok.length === 0) {
+    // Every position failed. Surface the first real reason rather than a bare
+    // "no scans" — the backend already isolated and described each failure.
+    const first = positions.find(p => p.error)?.error;
+    throw new Error(first ?? `No scan positions could be imported from ${name}.`);
+  }
+
+  return ok.map(p => ({
+    data: buildPointCloudFromOctree(p.session!, path, p.name, {
+      asciiFormat,
+      columnPlan,
+      categoricalAttributes,
+      sessionId: p.session!.session_id,
+      worldShift: p.session!.world_shift ?? null,
+      continuousAttributes,
+    }),
+    name: p.name,
+    scanIndex: p.scan_index,
+  }));
 }
 
 /**
@@ -809,17 +915,38 @@ export async function parsePointCloudFromPath(
  * `sourceXyzPath` is preserved so M3's crop-apply can re-run the
  * converter against the original file with an AABB filter.
  */
+export interface BuildOctreeCloudOptions {
+  asciiFormat?: string | null;
+  columnPlan?: ColumnPlan | null;
+  /** Slugs the user marked categorical ("Label") in the import wizard. */
+  categoricalAttributes?: string[];
+  sessionId?: string | null;
+  worldShift?: [number, number, number] | null;
+  /** Slugs the user forced continuous ("Scalar") over a registered scheme. */
+  continuousAttributes?: string[];
+  /**
+   * User-defined class palettes, keyed by attribute slug. Must be threaded
+   * through every rebuild path or a cloud comes back with invented "Class N"
+   * names — see OctreeRef.classPalettes.
+   */
+  classPalettes?: Record<string, ClassPalette>;
+}
+
 export function buildPointCloudFromOctree(
   meta: OctreeMetadata,
   sourceXyzPath: string,
   fileName: string,
-  asciiFormat?: string | null,
-  columnPlan?: ColumnPlan | null,
-  categoricalAttributes?: string[],
-  sessionId?: string | null,
-  worldShift?: [number, number, number] | null,
-  continuousAttributes?: string[],
+  options: BuildOctreeCloudOptions = {},
 ): PointCloudData {
+  const {
+    asciiFormat,
+    columnPlan,
+    categoricalAttributes,
+    sessionId,
+    worldShift,
+    continuousAttributes,
+    classPalettes,
+  } = options;
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
   // the right-pane scan list all expect "where the data actually lives"
@@ -837,11 +964,20 @@ export function buildPointCloudFromOctree(
   const attributeRanges: Record<string, { min: number[]; max: number[] }> = {};
   const attributeLabels: Record<string, string> = {};
   for (const a of meta.attributes ?? []) {
+    // NOTE: the attribute name is kept EXACTLY as PotreeConverter wrote it
+    // ('gps-time', not the 'timestamp' slug). It is the key into the octree
+    // node's GPU buffer (`geometry.attributes[field]` in swapScalarIntoIntensity),
+    // so renaming it here silently breaks colour-by: the lookup misses, the swap
+    // no-ops, and the shader keeps the previous buffer — the legend reads the
+    // timestamp range while the points are still coloured by intensity.
+    // Display-name and slug normalisation belongs at the presentation layer
+    // (octreeAttributeSlug), never on the buffer key.
+    const name = a.name;
     if (Array.isArray(a.min) && Array.isArray(a.max)) {
-      attributeRanges[a.name] = { min: a.min, max: a.max };
+      attributeRanges[name] = { min: a.min, max: a.max };
     }
     if (a.label) {
-      attributeLabels[a.name] = a.label;
+      attributeLabels[name] = a.label;
     }
   }
 
@@ -858,6 +994,21 @@ export function buildPointCloudFromOctree(
     groundZ: typeof (meta as OctreeMetadata & { ground_z?: number | null }).ground_z === 'number'
       ? (meta as OctreeMetadata & { ground_z: number }).ground_z
       : undefined,
+    // Same provenance as groundZ: present on the cloud-session create response,
+    // undefined for plain OctreeMetadata callers (who fall back to the raw size).
+    robustExtent: (() => {
+      const e = (meta as OctreeMetadata & { robust_extent?: unknown }).robust_extent;
+      return Array.isArray(e) && e.length === 3 && e.every((v) => typeof v === 'number' && isFinite(v))
+        ? ([e[0], e[1], e[2]] as [number, number, number])
+        : undefined;
+    })(),
+    robustBounds: (() => {
+      const b = (meta as OctreeMetadata & { robust_bounds?: unknown }).robust_bounds as
+        | { min?: unknown; max?: unknown } | null | undefined;
+      const ok = (v: unknown): v is [number, number, number] =>
+        Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && isFinite(n));
+      return b && ok(b.min) && ok(b.max) ? { min: b.min, max: b.max } : undefined;
+    })(),
     fileName,
     octree: {
       cacheId: meta.cache_id,
@@ -873,6 +1024,9 @@ export function buildPointCloudFromOctree(
         : undefined,
       continuousAttributes: continuousAttributes && continuousAttributes.length
         ? continuousAttributes
+        : undefined,
+      classPalettes: classPalettes && Object.keys(classPalettes).length
+        ? classPalettes
         : undefined,
       // Sky/miss info comes from the cloud-session create response (a superset
       // of OctreeMetadata); plain OctreeMetadata callers leave these undefined.
@@ -946,6 +1100,82 @@ export function buildPointCloudFromBackend(
   return data;
 }
 
+// Scan formats we deliberately don't read, named so the rejection is instant
+// and says something useful. They have to be listed explicitly for two
+// reasons. The binary ones (RCS, FLS, …) would otherwise be handed to the XYZ
+// parser, which reads the WHOLE file into a string before it can fail. And
+// PTX used to head this list for the second reason — it is plain numeric ASCII,
+// so it sailed past the sniff and then parsed *wrongly* (header block as junk
+// points, RGB read one column left). It is now genuinely supported: the backend
+// reads its raster and recovers sky/miss points from it. PTG stays because it is
+// PTX's BINARY sibling and shares nothing but the name.
+const UNREADABLE_POINT_CLOUD_FORMATS: Record<string, string> = {
+  ptg: 'a PTG structured scan (Leica, binary)',
+  fls: 'a FARO scan (FLS)',
+  fws: 'a FARO workspace (FWS)',
+  zfs: 'a Z+F scan (ZFS)',
+  zfprj: 'a Z+F project (ZFPRJ)',
+  rcp: 'an Autodesk ReCap project (RCP)',
+  rcs: 'an Autodesk ReCap scan (RCS)',
+  lgs: 'a Leica Cyclone published scan (LGS)',
+  cl3: 'a Topcon scan (CL3)',
+};
+
+function unreadableFormatMessage(fileName: string, what: string): string {
+  return (
+    `"${fileName}" is ${what}, which Phytograph can't read directly. ` +
+    `Export it as E57, LAS/LAZ, or plain XYZ text from your scanner software ` +
+    `and import that instead.`
+  );
+}
+
+/** Bytes of an unknown-extension file inspected before committing to a parse. */
+const ASCII_SNIFF_BYTES = 64 * 1024;
+
+/**
+ * Cheap head-sniff deciding whether an unknown-extension file is worth handing
+ * to `parseXYZ`. Reads only the first {@link ASCII_SNIFF_BYTES} — matching the
+ * budget `plyHasFaces`/`isQsmCsvFile` use — because `parseXYZ` reads the
+ * ENTIRE file into a string, splits it into one string per line and
+ * accumulates a `number[][]`. On a multi-GB scan that is minutes of frozen
+ * renderer and several GB of heap spent to arrive at "unsupported format".
+ */
+export async function looksLikeAsciiPointCloud(file: File): Promise<boolean> {
+  let text: string;
+  try {
+    text = await file.slice(0, ASCII_SNIFF_BYTES).text();
+  } catch {
+    return false;
+  }
+
+  // A binary container decodes to NULs / replacement characters, usually well
+  // before the first newline. Bail without tokenising anything.
+  if (text.includes('\0') || text.includes('�')) return false;
+
+  const lines = text.split('\n');
+  // The last line is probably cut mid-number by the slice — drop it, unless
+  // the whole file fit inside the sniff window.
+  if (file.size > ASCII_SNIFF_BYTES) lines.pop();
+
+  let checked = 0;
+  let numeric = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+    checked++;
+    const parts = line.split(/[,;\t ]+/);
+    if (parts.length >= 3 && parts.slice(0, 3).every(p => p !== '' && Number.isFinite(Number(p)))) {
+      numeric++;
+    }
+    if (checked >= 200) break;
+  }
+
+  // One header row of column names is normal (parseXYZ handles it), so allow a
+  // few non-numeric lines — but demand a clear majority, otherwise prose, JSON
+  // or XML with a stray numeric line would earn itself a full parse.
+  return checked > 0 && numeric >= Math.ceil(checked * 0.8);
+}
+
 // Auto-detect format and parse
 export async function parsePointCloud(file: File): Promise<PointCloudData> {
   const ext = file.name.toLowerCase().split('.').pop();
@@ -971,6 +1201,20 @@ export async function parsePointCloud(file: File): Promise<PointCloudData> {
     case 'asc':
       return parseXYZ(file);
 
+    case 'ptx':
+      // PTX is octree-only: only the backend converter understands its raster
+      // and scanner pose, which is what makes the sky/miss recovery possible.
+      // It needs an explicit case rather than falling through to `default`,
+      // because PTX is plain numeric ASCII — the head sniff there accepts it and
+      // the XYZ parser then produces exactly the silently-wrong cloud this used
+      // to be rejected for (the header block as junk points near the origin, RGB
+      // read one column left).
+      throw new Error(
+        `"${file.name}" is a PTX structured scan, which has to be read from disk ` +
+        `so its scan grid and scanner pose can be recovered. Drag the file in, or ` +
+        `use File → Import — a PTX with no file path can't be imported.`,
+      );
+
     case 'xml':
       // Helios scan XML describes scan *parameters* and references a separate
       // point cloud file — it contains no coordinates itself. Importing it
@@ -982,13 +1226,25 @@ export async function parsePointCloud(file: File): Promise<PointCloudData> {
         `that reads the scan parameters and the point cloud file it references.`,
       );
 
-    default:
-      // Try XYZ parser as fallback
-      try {
-        return await parseXYZ(file);
-      } catch {
-        throw new Error(`Unsupported file format: .${ext}. Supported formats: LAS, PLY, PCD, XYZ, TXT, CSV, PTS, ASC`);
+    default: {
+      const unreadable = UNREADABLE_POINT_CLOUD_FORMATS[ext ?? ''];
+      if (unreadable) throw new Error(unreadableFormatMessage(file.name, unreadable));
+
+      // Unknown extension: it may still be a delimited ASCII cloud under a
+      // house extension (.pt, .dat, a bare `scan1`). Decide from the first
+      // 64 KB rather than committing to a full parse — see
+      // looksLikeAsciiPointCloud for why that matters on a large file.
+      if (!(await looksLikeAsciiPointCloud(file))) {
+        throw new Error(
+          `Unsupported file format: .${ext}. ` +
+          `Supported formats: ${POINT_CLOUD_FORMATS.map(f => f.name).join(', ')}`,
+        );
       }
+      // Let parseXYZ's own failure through: "No point coordinates found in …"
+      // names the real problem, which the old blanket catch here replaced with
+      // a misleading "unsupported format".
+      return parseXYZ(file);
+    }
   }
 }
 
@@ -997,6 +1253,7 @@ export const POINT_CLOUD_FORMATS = [
   { ext: '.las', name: 'LAS', desc: 'LiDAR Data Exchange' },
   { ext: '.laz', name: 'LAZ', desc: 'Compressed LiDAR' },
   { ext: '.e57', name: 'E57', desc: 'Structured scan (recovers sky/miss)' },
+  { ext: '.ptx', name: 'PTX', desc: 'Structured scan (recovers sky/miss)' },
   { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (ASCII)' },
   { ext: '.pcd', name: 'PCD', desc: 'Point Cloud Data (ASCII)' },
   { ext: '.xyz', name: 'XYZ', desc: 'X Y Z coordinates' },
@@ -1008,7 +1265,7 @@ export const POINT_CLOUD_FORMATS = [
 
 export const MESH_FORMATS = [
   { ext: '.obj', name: 'OBJ', desc: 'Wavefront mesh' },
-  { ext: '.stl', name: 'STL', desc: 'Stereolithography (ASCII)' },
+  { ext: '.stl', name: 'STL', desc: 'Stereolithography (ASCII + binary)' },
   { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (mesh)' },
 ];
 
@@ -1103,9 +1360,53 @@ export async function parseOBJMesh(file: File): Promise<ParsedMesh> {
   return result;
 }
 
-// Parse STL mesh format (ASCII)
-export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
-  const text = await file.text();
+// A corrupt/misread triangle count is a uint32, so it can ask for up to 4.29e9
+// triangles (~154 GB of typed arrays). Cap it so a bogus count becomes a clean
+// classification miss rather than an unhandled allocation RangeError. The cap is
+// a ceiling, not a policy — 50M triangles is already a 2.5 GB file.
+const MAX_STL_TRIANGLES = 50_000_000;
+
+export type StlKind = 'binary' | 'ascii';
+
+/**
+ * Decide whether an STL is binary or ASCII from its first 84 bytes and its size.
+ *
+ * The length test (84 + 50n vs size) is authoritative; the leading `solid` token
+ * is deliberately NOT consulted. That heuristic fails in both directions: plenty
+ * of binary writers put arbitrary text in the 80-byte header, and the file that
+ * motivated this code (a Blender-exported binary STL) has a header of 80 zero
+ * bytes — no `solid` prefix to key off at all. The arithmetic, by contrast, is
+ * self-validating: a real ASCII file whose bytes 80..83 happen to satisfy
+ * 84 + 50n == size is a coincidence we have never seen in practice.
+ *
+ * Anything not positively identified as binary falls through to 'ascii', so a
+ * misclassification degrades to the text parser (which reports its own error)
+ * rather than to a bogus read.
+ */
+export function detectStlKind(headerBytes: ArrayBuffer, fileSize: number): StlKind {
+  if (headerBytes.byteLength < 84 || fileSize < 84) return 'ascii';
+
+  const n = new DataView(headerBytes).getUint32(80, true);
+  // An empty binary STL is indistinguishable from a header-only ASCII one; let
+  // the ASCII path handle it so the "no mesh data" error stays the single voice
+  // for empty files.
+  if (n === 0) return 'ascii';
+  if (n > MAX_STL_TRIANGLES) return 'ascii';
+
+  const expected = 84 + 50 * n;
+  // Exact match, or trailing bytes (some writers pad or append metadata).
+  if (expected <= fileSize) return 'binary';
+  // expected > fileSize: truncated if it really is binary. Fall to ASCII, which
+  // either parses it (it was text) or raises the truncation error below.
+  return 'ascii';
+}
+
+/**
+ * Parse ASCII STL text. Output is unwelded — 3 fresh vertices per facet, with the
+ * facet normal replicated to each — which parseBinarySTL matches exactly so the
+ * two encodings behave identically downstream.
+ */
+function parseAsciiSTL(text: string, fileName: string): ParsedMesh {
   const lines = text.trim().split('\n');
 
   const vertices: number[] = [];
@@ -1122,10 +1423,17 @@ export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
       const ny = parseFloat(parts[3]);
       const nz = parseFloat(parts[4]);
 
-      // Read the three vertices
+      // Read this facet's vertices, bounded by its own `endfacet` (or the start
+      // of the next facet, for files missing the terminator). Scanning past the
+      // boundary would let a malformed facet with <3 vertices silently absorb the
+      // NEXT facet's vertices — producing a spliced triangle and shifting every
+      // facet after it, with no error raised.
       const triangleVertices: number[] = [];
-      for (let j = i + 1; j < lines.length && triangleVertices.length < 9; j++) {
+      let j = i + 1;
+      for (; j < lines.length; j++) {
         const vLine = lines[j].trim().toLowerCase();
+        if (vLine.startsWith('endfacet')) break;
+        if (vLine.startsWith('facet normal')) break;
         if (vLine.startsWith('vertex')) {
           const vParts = vLine.split(/\s+/);
           triangleVertices.push(parseFloat(vParts[1]), parseFloat(vParts[2]), parseFloat(vParts[3]));
@@ -1133,12 +1441,16 @@ export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
       }
 
       if (triangleVertices.length === 9) {
-        vertices.push(...triangleVertices);
+        for (let k = 0; k < 9; k++) vertices.push(triangleVertices[k]);
         // Same normal for all three vertices
         normals.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
         indices.push(vertexIndex, vertexIndex + 1, vertexIndex + 2);
         vertexIndex += 3;
       }
+
+      // Resume after the lines this facet consumed. `j` sits on the terminator or
+      // on the next `facet normal`; step back one so the loop's i++ lands on it.
+      i = j - 1;
     }
   }
 
@@ -1155,8 +1467,152 @@ export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
     normals: new Float32Array(normals),
     vertexCount,
     triangleCount,
-    fileName: file.name,
+    fileName,
   };
+}
+
+/**
+ * Parse a binary STL. Layout, little-endian throughout:
+ *   [0, 80)   header — ignored (may be zeros, may contain text including "solid")
+ *   [80, 84)  uint32 triangle count
+ *   then 50 bytes per triangle:
+ *     12 bytes  float32 nx ny nz   facet normal
+ *     36 bytes  float32 x y z ×3   the three vertices
+ *      2 bytes  uint16             attribute byte count (see color note below)
+ */
+function parseBinarySTL(buffer: ArrayBuffer, fileName: string): ParsedMesh {
+  const view = new DataView(buffer);
+  const triangleCount = view.getUint32(80, true);
+
+  // detectStlKind already guarantees this, but a future direct caller must not be
+  // able to walk off the end and get a raw "Offset is outside the bounds" error.
+  const needed = 84 + 50 * triangleCount;
+  if (triangleCount > MAX_STL_TRIANGLES || needed > buffer.byteLength) {
+    throw new Error(
+      `STL file appears to be binary but is truncated: header declares ${triangleCount} triangles ` +
+        `(expects ${needed} bytes), file is ${buffer.byteLength} bytes.`,
+    );
+  }
+
+  const vertexCount = triangleCount * 3;
+  const vertices = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const indices = new Uint32Array(triangleCount * 3);
+
+  // The 2-byte attribute word after each triangle is unstandardized. Two dialects
+  // pack RGB555 into it and disagree with each other: VisCAM reads bit 15 as "this
+  // facet carries a color", SolidWorks reads it as "ignore these bits, use the
+  // default" — inverted — and they order the RGB bits oppositely. So "attribute is
+  // nonzero" cannot mean color: under SolidWorks, 0x0000 would make every facet
+  // black. We follow VisCAM (bit 15 = valid) and require at least one facet in the
+  // file to set it before reading ANY color. A file that never opts in gets no
+  // vertexColors at all, which is what keeps ordinary binary STLs untinted.
+  let hasColor = false;
+  for (let i = 0; i < triangleCount; i++) {
+    if (view.getUint16(84 + i * 50 + 48, true) & 0x8000) {
+      hasColor = true;
+      break;
+    }
+  }
+  const colors = hasColor ? new Float32Array(vertexCount * 3) : undefined;
+
+  // Tracks whether every coordinate read was finite. A comparison-based min/max
+  // cannot detect this: NaN < min and NaN > max are both false, so a NaN sails
+  // through the extent untouched and only surfaces later as broken bounds.
+  let allFinite = true;
+
+  for (let i = 0; i < triangleCount; i++) {
+    const off = 84 + i * 50;
+    const nx = view.getFloat32(off, true);
+    const ny = view.getFloat32(off + 4, true);
+    const nz = view.getFloat32(off + 8, true);
+
+    let r = 1, g = 1, b = 1;
+    if (colors) {
+      const attr = view.getUint16(off + 48, true);
+      if (attr & 0x8000) {
+        r = ((attr >> 10) & 0x1f) / 31;
+        g = ((attr >> 5) & 0x1f) / 31;
+        b = (attr & 0x1f) / 31;
+      }
+    }
+
+    for (let v = 0; v < 3; v++) {
+      const src = off + 12 + v * 12;
+      const x = view.getFloat32(src, true);
+      const y = view.getFloat32(src + 4, true);
+      const z = view.getFloat32(src + 8, true);
+
+      if (allFinite && !(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) {
+        allFinite = false;
+      }
+
+      const dst = (i * 3 + v) * 3;
+      vertices[dst] = x;
+      vertices[dst + 1] = y;
+      vertices[dst + 2] = z;
+      normals[dst] = nx;
+      normals[dst + 1] = ny;
+      normals[dst + 2] = nz;
+      if (colors) {
+        colors[dst] = r;
+        colors[dst + 1] = g;
+        colors[dst + 2] = b;
+      }
+    }
+
+    // Unwelded, matching the ASCII path: every facet owns its three vertices.
+    indices[i * 3] = i * 3;
+    indices[i * 3 + 1] = i * 3 + 1;
+    indices[i * 3 + 2] = i * 3 + 2;
+  }
+
+  // A NaN/Inf coordinate is silent poison downstream — it breaks bounds and camera
+  // framing without ever raising. The flag is accumulated in the loop above, so
+  // this costs no extra pass.
+  if (!allFinite) {
+    throw new Error('STL file contains invalid (NaN or infinite) vertex coordinates');
+  }
+
+  const result: ParsedMesh = {
+    vertices,
+    indices,
+    normals,
+    vertexCount,
+    triangleCount,
+    fileName,
+  };
+  if (colors) result.vertexColors = colors;
+  return result;
+}
+
+// Parse STL mesh format — binary or ASCII, detected from the file's own bytes.
+export async function parseSTLMesh(file: File): Promise<ParsedMesh> {
+  // One read serves both branches: binary reads the buffer directly, ASCII decodes
+  // it as text (same shape as parsePLYMesh).
+  const buffer = await file.arrayBuffer();
+
+  if (detectStlKind(buffer, buffer.byteLength) === 'binary') {
+    return parseBinarySTL(buffer, file.name);
+  }
+
+  try {
+    return parseAsciiSTL(new TextDecoder().decode(buffer), file.name);
+  } catch (err) {
+    // Text parsing found nothing. If the header still looked like a plausible
+    // binary triangle count, the file is a truncated binary STL — say so, rather
+    // than leaving the user with the generic "no mesh data".
+    if (buffer.byteLength >= 84) {
+      const n = new DataView(buffer).getUint32(80, true);
+      if (n > 0 && n <= MAX_STL_TRIANGLES) {
+        throw new Error(
+          `STL file appears to be binary but is truncated: header declares ${n} triangles ` +
+            `(expects ${84 + 50 * n} bytes), file is ${buffer.byteLength} bytes.`,
+        );
+      }
+    }
+    throw err;
+  }
 }
 
 // Sniff a PLY file's header to decide whether it carries polygon-mesh data

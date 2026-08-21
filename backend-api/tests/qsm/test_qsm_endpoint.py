@@ -128,7 +128,7 @@ def _write_xyz(path, pts) -> str:
     return str(path)
 
 
-def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_path):
+def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_path, make_file_session):
     """Aggregate mode: two file `sources` (two halves of ONE tree, the multi-view
     case) fuse into a SINGLE QSM whose points_used equals the combined count and
     whose structure matches a single-cloud build (one trunk, scaffolds present).
@@ -140,7 +140,7 @@ def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_pa
     a = _write_xyz(tmp_path / "view_a.xyz", pts[:half])
     b = _write_xyz(tmp_path / "view_b.xyz", pts[half:])
 
-    body = build_qsm(client, {"sources": [{"source_path": a}, {"source_path": b}]})
+    body = build_qsm(client, {"sources": [{"session_id": make_file_session(a)}, {"session_id": make_file_session(b)}]})
     assert body["success"] is True, body.get("error")
     # Every point from BOTH files was used — nothing dropped.
     assert body["points_used"] == len(pts)
@@ -151,7 +151,7 @@ def test_build_qsm_aggregate_sources_fuses_one_tree(client, cloud_points, tmp_pa
     assert body["n_cylinders"] > 0
 
 
-def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tmp_path):
+def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tmp_path, make_file_session):
     """A mixed selection (one file `source` + one flat cloud's inline `points`)
     fuses both: points_used is the sum, proving inline points aren't dropped when
     `sources` is also present."""
@@ -160,7 +160,7 @@ def test_build_qsm_aggregate_sources_plus_inline_points(client, cloud_points, tm
     a = _write_xyz(tmp_path / "octree_view.xyz", pts[:half])
     inline = pts[half:].tolist()
 
-    body = build_qsm(client, {"sources": [{"source_path": a}], "points": inline})
+    body = build_qsm(client, {"sources": [{"session_id": make_file_session(a)}], "points": inline})
     assert body["success"] is True, body.get("error")
     assert body["points_used"] == len(pts)
 
@@ -356,3 +356,141 @@ def test_adjust_leaf_angles_requires_a_target(client, built_qsm):
     body = client.post("/api/qsm/adjust-leaf-angles", json=_leaf_request(built_qsm)).json()
     assert body["success"] is False
     assert "triangulation or precomputed cell_targets" in body["error"]
+
+
+# ==================== /api/qsm/import (CSV round trip) ====================
+# The inverse of the renderer's CSV export. The property under test is that a QSM
+# built by /api/qsm/build, exported to CSV, and re-imported comes back IDENTICAL --
+# same cylinders, same shoot topology, same metrics panel numbers.
+
+
+def _response_to_csv(body: dict) -> str:
+    """Serialize a QSMBuildResponse exactly as qsmToCylinderCsv does
+    (src/renderer/lib/qsmExport.ts) -- same header, column order, and null
+    handling, so this exercises the real on-disk contract."""
+    import math
+
+    header = (
+        "ID,parentID,branchID,branchOrder,segmentID,parentSegmentID,"
+        "startX,startY,startZ,endX,endY,endZ,"
+        "axisX,axisY,axisZ,radius,length,surfaceCoverage,meanAbsDeviation"
+    )
+    parent_of_shoot = {s["shoot_id"]: s["parent_shoot_id"] for s in body["shoots"]}
+    lines = [header]
+    for c in body["cylinders"]:
+        d = [c["end"][i] - c["start"][i] for i in range(3)]
+        n = math.sqrt(sum(v * v for v in d))
+        axis = [v / n for v in d] if n > 0 else [0.0, 0.0, 0.0]
+        lines.append(",".join([
+            str(c["cyl_id"]), str(c["parent_id"]), str(c["shoot_id"]), str(c["rank"]),
+            str(c["shoot_id"]), str(parent_of_shoot.get(c["shoot_id"], -1)),
+            *(repr(float(v)) for v in c["start"]),
+            *(repr(float(v)) for v in c["end"]),
+            *(repr(float(v)) for v in axis),
+            repr(float(c["radius"])), repr(n),
+            "" if c["surf_cov"] is None else repr(float(c["surf_cov"])),
+            "" if c["mad"] is None else repr(float(c["mad"])),
+        ]))
+    return "\n".join(lines) + "\n"
+
+
+@pytest.fixture(scope="module")
+def exported_csv(client, cloud_points, tmp_path_factory) -> tuple[dict, str]:
+    """Build a real QSM through the live pipeline and write its CSV export."""
+    body = build_qsm(client, {"points": cloud_points})
+    assert body["success"] is True, body.get("error")
+    path = tmp_path_factory.mktemp("qsm") / "tree.csv"
+    path.write_text(_response_to_csv(body), encoding="utf-8")
+    return body, str(path)
+
+
+def test_import_qsm_round_trips_a_built_qsm(client, exported_csv):
+    """Export -> import returns the same model, cylinder for cylinder."""
+    built, csv_path = exported_csv
+    body = client.post("/api/qsm/import", json={"path": csv_path}).json()
+
+    assert body["success"] is True
+    assert body["n_cylinders"] == built["n_cylinders"]
+    assert body["n_shoots"] == built["n_shoots"]
+
+    for got, want in zip(body["cylinders"], built["cylinders"]):
+        assert got["cyl_id"] == want["cyl_id"]
+        assert got["parent_id"] == want["parent_id"]
+        assert got["shoot_id"] == want["shoot_id"]
+        assert got["rank"] == want["rank"]
+        assert got["radius"] == pytest.approx(want["radius"], abs=1e-12)
+        for axis in range(3):
+            assert got["start"][axis] == pytest.approx(want["start"][axis], abs=1e-9)
+            assert got["end"][axis] == pytest.approx(want["end"][axis], abs=1e-9)
+
+
+def test_import_qsm_round_trips_shoot_topology(client, exported_csv):
+    """Shoot ids, ranks, base->tip ordering and parent links all survive."""
+    built, csv_path = exported_csv
+    body = client.post("/api/qsm/import", json={"path": csv_path}).json()
+
+    got_shoots = {s["shoot_id"]: s for s in body["shoots"]}
+    for want in built["shoots"]:
+        got = got_shoots[want["shoot_id"]]
+        assert got["rank"] == want["rank"]
+        assert got["cylinder_ids"] == want["cylinder_ids"]
+        assert got["parent_shoot_id"] == want["parent_shoot_id"]
+        assert got["parent_cyl_id"] == want["parent_cyl_id"]
+        assert sorted(got["child_shoot_ids"]) == sorted(want["child_shoot_ids"])
+
+
+def test_import_qsm_recomputes_identical_metrics(client, exported_csv):
+    """Metrics aren't in the CSV, but they're a pure function of the model, so the
+    results panel must show the same numbers after a re-import."""
+    built, csv_path = exported_csv
+    body = client.post("/api/qsm/import", json={"path": csv_path}).json()
+
+    want, got = built["metrics"], body["metrics"]
+    assert got is not None
+    for field, value in want.items():
+        if field == "per_rank":
+            continue
+        assert got[field] == pytest.approx(value, rel=1e-9), field
+
+    assert len(got["per_rank"]) == len(want["per_rank"])
+    for g, w in zip(got["per_rank"], want["per_rank"]):
+        for field, value in w.items():
+            if value is None:
+                assert g[field] is None
+            else:
+                assert g[field] == pytest.approx(value, rel=1e-9), field
+
+
+def test_import_qsm_missing_file_404(client, tmp_path):
+    resp = client.post("/api/qsm/import", json={"path": str(tmp_path / "nope.csv")})
+    assert resp.status_code == 404
+
+
+def test_import_qsm_wrong_extension_400(client, tmp_path):
+    path = tmp_path / "cloud.txt"
+    path.write_text("x,y,z\n1,2,3\n", encoding="utf-8")
+    resp = client.post("/api/qsm/import", json={"path": str(path)})
+    assert resp.status_code == 400
+    assert "csv" in resp.json()["detail"].lower()
+
+
+def test_import_qsm_point_cloud_csv_400(client, tmp_path):
+    """A point-cloud CSV is the realistic wrong-file case; it must fail with a
+    readable message rather than a 500."""
+    path = tmp_path / "cloud.csv"
+    path.write_text("x,y,z,intensity\n1.0,2.0,3.0,120\n", encoding="utf-8")
+    resp = client.post("/api/qsm/import", json={"path": str(path)})
+    assert resp.status_code == 400
+    assert "missing required column" in resp.json()["detail"]
+
+
+def test_import_qsm_malformed_csv_400(client, tmp_path):
+    path = tmp_path / "bad.csv"
+    path.write_text(
+        "ID,parentID,branchID,branchOrder,startX,startY,startZ,endX,endY,endZ,radius\n"
+        "0,-1,0,0,0,0,0,0,0,1,thick\n",
+        encoding="utf-8",
+    )
+    resp = client.post("/api/qsm/import", json={"path": str(path)})
+    assert resp.status_code == 400
+    assert "radius" in resp.json()["detail"]

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   createTag,
   deleteTag,
@@ -12,7 +12,13 @@ import {
   TAG_COLORS,
   updateSettings,
   updateTag,
+  getClassPalettes,
+  saveClassPalette,
+  deleteClassPalette,
+  exportClassPalettes,
+  importClassPalettes,
 } from './store';
+import type { ClassPalette } from './classPalettes';
 
 describe('store tags', () => {
   it('creates a tag and returns it from getTags', async () => {
@@ -61,6 +67,7 @@ describe('store settings', () => {
       scanMarkerScale: 1,
       missDistanceThreshold: 1001,
       syntheticScanMemoryBudgetMb: null,
+      rivlibPath: null,
     });
   });
 
@@ -156,6 +163,7 @@ describe('store export/import', () => {
       scanMarkerScale: 1,
       missDistanceThreshold: 1001,
       syntheticScanMemoryBudgetMb: null,
+      rivlibPath: null,
     });
   });
 });
@@ -177,5 +185,85 @@ describe('getTagColor', () => {
 describe('initStore', () => {
   it('resolves to undefined (kept for Tauri API parity)', async () => {
     await expect(initStore()).resolves.toBeUndefined();
+  });
+});
+
+describe('class palette library', () => {
+  // These tests reset their own key rather than relying on suite ordering, so
+  // they can be run in isolation. Seeding goes through the same electronAPI
+  // store the module uses (the suite runs with the electronAPI mock installed,
+  // so the localStorage fallback is not the live path).
+  const KEY = 'classPalettes';
+  const NOW = 1_700_000_000_000;
+  const pal = (id: string, name = id): ClassPalette => ({
+    id, name, slug: 'manual_class', updatedAt: 0,
+    classes: [{ value: 0, label: 'Unclassified', color: [0.5, 0.5, 0.5] }],
+  });
+  const seedRaw = (value: unknown) => window.electronAPI.store.set(KEY, value);
+
+  beforeEach(async () => { await seedRaw([]); });
+
+  it('starts empty and round-trips a saved palette', async () => {
+    expect(await getClassPalettes()).toEqual([]);
+    await saveClassPalette(pal('p1', 'Mine'), NOW);
+    const all = await getClassPalettes();
+    expect(all).toHaveLength(1);
+    expect(all[0].name).toBe('Mine');
+    expect(all[0].updatedAt).toBe(NOW);
+  });
+
+  it('replaces by id rather than appending a duplicate', async () => {
+    await saveClassPalette(pal('p1', 'First'), NOW);
+    await saveClassPalette(pal('p1', 'Renamed'), NOW + 1);
+    const all = await getClassPalettes();
+    expect(all).toHaveLength(1);
+    expect(all[0].name).toBe('Renamed');
+  });
+
+  it('preserves position when replacing, so the list does not reshuffle', async () => {
+    await saveClassPalette(pal('a'), NOW);
+    await saveClassPalette(pal('b'), NOW);
+    await saveClassPalette(pal('a', 'a-edited'), NOW + 1);
+    expect((await getClassPalettes()).map((p) => p.id)).toEqual(['a', 'b']);
+  });
+
+  it('deletes by id', async () => {
+    await saveClassPalette(pal('a'), NOW);
+    await saveClassPalette(pal('b'), NOW);
+    expect((await deleteClassPalette('a')).map((p) => p.id)).toEqual(['b']);
+  });
+
+  it('skips malformed records instead of failing the whole library', async () => {
+    // One bad entry (hand-edited store, older format) must not make every
+    // palette unreadable.
+    await seedRaw([pal('good'), { junk: true }, null]);
+    const all = await getClassPalettes();
+    expect(all).toHaveLength(1);
+    expect(all[0].id).toBe('good');
+  });
+
+  it('exports and re-imports, replacing same-id palettes', async () => {
+    await saveClassPalette(pal('shared', 'v1'), NOW);
+    const json = await exportClassPalettes();
+
+    await saveClassPalette(pal('shared', 'local-edit'), NOW);
+    expect(await importClassPalettes(json, NOW + 5)).toBe(1);
+    const all = await getClassPalettes();
+    expect(all).toHaveLength(1);
+    expect(all[0].name).toBe('v1');          // the imported copy wins
+    expect(all[0].updatedAt).toBe(NOW + 5);
+  });
+
+  it('import merges rather than replacing the whole library', async () => {
+    await saveClassPalette(pal('mine'), NOW);
+    await importClassPalettes(JSON.stringify([pal('theirs')]), NOW);
+    expect((await getClassPalettes()).map((p) => p.id).sort()).toEqual(['mine', 'theirs']);
+  });
+
+  it('importing junk entries is a no-op, and bad JSON throws', async () => {
+    await saveClassPalette(pal('mine'), NOW);
+    expect(await importClassPalettes(JSON.stringify([{ junk: true }]), NOW)).toBe(0);
+    expect((await getClassPalettes()).map((p) => p.id)).toEqual(['mine']);
+    await expect(importClassPalettes('{not json', NOW)).rejects.toThrow();
   });
 });

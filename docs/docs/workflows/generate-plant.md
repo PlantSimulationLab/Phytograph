@@ -11,11 +11,18 @@ background.
 
 2. **Species** — pick from the dropdown. Species are grouped:
 
-    - **Trees** — almond, apple, walnut, pistachio, olive, citrus, …
-    - **Vines** — grapevine
-    - **Cereals** — wheat, rice, maize
-    - **Vegetables** — tomato, lettuce, strawberry
-    - **Weeds** — various
+    - **Trees** — almond, apple, apple (fruiting wall), eastern redbud,
+      olive, pistachio, walnut
+    - **Vines** — bougainvillea, plus grapevine in seven training systems
+      (VSP, Wye, GDC, Geneva double curtain, vertical shoot positioned,
+      sprawl, unilateral cordon)
+    - **Cereals** — maize, rice, sorghum, wheat
+    - **Vegetables** — asparagus, bean, butter lettuce, capsicum, cherry
+      tomato, cowpea, soybean, strawberry, sugarbeet, tomato
+    - **Weeds** — bindweed, cheeseweed, ground cherry weed, puncturevine
+
+    A sixth **Other** group appears if the backend offers a model that isn't
+    in one of the groups above. The default selection is **bean**.
 
 3. **Age** — target age in days. Younger plants are smaller and have
    fewer branches; the same species at 30, 365, and 1825 days looks
@@ -29,9 +36,9 @@ background.
    grid of plants instead of one. See
    [Generate a canopy](#generate-a-canopy) below.
 
-6. **Advanced → Random seed** — Phytograph uses a default seed for
-   reproducibility. Toggle the override and set your own seed to
-   produce a different but reproducible variant.
+6. **Advanced Options → Use Random Seed** — off by default, meaning **no seed
+   is sent** and each run produces a different plant. Tick it and enter a seed
+   to pin the result so the same species/age/seed regenerates identically.
 
 7. Click **Generate Plant**.
 
@@ -46,15 +53,24 @@ running to completion in the background. When it finishes, the mesh
 appears in the **Meshes** list and the **Plant** panel opens at the
 right for further control.
 
-## Live age scrubbing
+## Changing a plant's age
 
-Once a plant is in the scene, the **Plant** panel shows an **Age
-slider**. Drag it to scrub through the plant's development; the mesh
-regenerates as you go. This is dramatically faster than re-running
-Generate at different ages.
+Once a plant is in the scene, open the **Plant Growth** panel (from the command
+palette, <kbd>⌘/Ctrl</kbd>+<kbd>K</kbd> → *Plant Growth Panel*) with the plant
+selected. It regrows the plant to a new age in place — much faster than
+re-running Generate:
 
-When you find an age you want to keep, click **Render** in the Plant
-panel to commit. The plant is now anchored at that age in the scene.
+- **Current Age** — the plant's age in days.
+- **Quick Adjust** — `-1` / `+1` day buttons.
+- **Custom Step** — step by an arbitrary number of days.
+- **Go to Age** — type a target age and click **Go**.
+
+The panel also has a **Growth Animation** section: set a start and end age,
+then **Start** to play the plant's development, or **Make GIF** to record it
+(with background and camera-view options). **Stop** ends it early.
+
+Changing a plant's age is **not undoable** — it recreates the backend session,
+so it clears the undo history for that plant.
 
 ## Generate a canopy
 
@@ -108,4 +124,4 @@ Reduce age or switch to a smaller species.
 The Helios species library is parameterized from published literature
 but defaults may not match your specific cultivar. Use
 [Morph a plant](morph-plant.md) to adjust. If you find consistently
-better parameters, save them via Morph → Export JSON and reuse.
+better parameters, save them via Morph → **Export parameters** and reuse.

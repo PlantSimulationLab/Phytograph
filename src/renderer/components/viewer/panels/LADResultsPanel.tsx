@@ -10,18 +10,24 @@ import { ColormapName, COLORMAP_NAMES, COLORMAP_LABELS } from '../../../lib/colo
 interface LADResultsPanelProps {
   ladResults: LADResultEntry[];
   selectedLadId: string | null;
-  colormap: ColormapName;
+  // This result's EFFECTIVE colormap (its own override, else the scene default).
+  colormapFor: (id: string) => ColormapName;
+  // Whether this result carries its own override, i.e. is no longer following
+  // the scene default. Drives the "Reset" affordance.
+  isOverridden: (id: string) => boolean;
   onSelect: (id: string) => void;
   onToggleVisible: (id: string) => void;
   onRemove: (id: string) => void;
   onUpdate: (id: string, patch: Partial<LADResultEntry>) => void;
-  onColormapChange: (name: ColormapName) => void;
+  // Sets this result's override; `undefined` clears it back to inheriting.
+  onColormapChange: (id: string, name: ColormapName | undefined) => void;
 }
 
 export function LADResultsPanel({
   ladResults,
   selectedLadId,
-  colormap,
+  colormapFor,
+  isOverridden,
   onSelect,
   onToggleVisible,
   onRemove,
@@ -153,11 +159,26 @@ export function LADResultsPanel({
                     Hide empty voxels
                   </label>
                   <div>
-                    <label className="text-[10px] text-neutral-400 block mb-1">Colormap</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-neutral-400">Colormap</label>
+                      {/* Only shown once this result stops following the scene
+                          default — otherwise there is nothing to reset. */}
+                      {isOverridden(result.id) && (
+                        <button
+                          data-testid="lad-colormap-reset"
+                          onClick={(e) => { e.stopPropagation(); onColormapChange(result.id, undefined); }}
+                          className="text-[10px] text-neutral-400 hover:text-green-400 transition-colors"
+                          title="Follow the scene default colormap"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
                     <select
                       data-testid="lad-colormap"
-                      value={colormap}
-                      onChange={(e) => onColormapChange(e.target.value as ColormapName)}
+                      data-overridden={isOverridden(result.id) ? 'true' : 'false'}
+                      value={colormapFor(result.id)}
+                      onChange={(e) => onColormapChange(result.id, e.target.value as ColormapName)}
                       className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-[10px] text-white focus:outline-none focus:ring-1 focus:ring-green-500/50"
                     >
                       {COLORMAP_NAMES.map(name => (

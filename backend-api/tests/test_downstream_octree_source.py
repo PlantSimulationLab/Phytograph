@@ -25,6 +25,19 @@ GRID_FORMAT = "x y z r255 g255 b255 reflectance"
 
 
 @pytest.fixture
+def tree_session(make_file_session, tree_xyz):
+    """The same cloud as `tree_xyz`, registered as a real in-RAM session.
+
+    Compute/export endpoints refuse a file-only `source` (a cloud's file is read
+    once at import; the session arrays are the source of truth thereafter), so
+    these tests send `session_id`. The fixture reads the SAME file through the
+    SAME loader, so the point set is identical to the inline path it is compared
+    against — which is what these tests exist to prove.
+    """
+    return make_file_session(tree_xyz, GRID_FORMAT)
+
+
+@pytest.fixture
 def tree_xyz(tmp_path):
     """A synthetic ~vertical 'stem + branches' cloud with enough structure and
     points (>50, connected) for skeleton extraction to succeed, plus RGB +
@@ -71,12 +84,12 @@ def tree_points(tree_xyz):
 # Triangulate
 # ---------------------------------------------------------------------------
 
-def test_triangulate_source_matches_inline(client, tree_xyz, tree_points):
+def test_triangulate_source_matches_inline(client, tree_session, tree_points):
     inline, _ = decode_bin_frame(client.post("/api/triangulate", json={
         "points": tree_points.tolist(), "method": "alpha_shape", "alpha": 0.2,
     }).content)
     src, _ = decode_bin_frame(client.post("/api/triangulate", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
+        "source": {"session_id": tree_session},
         "method": "alpha_shape", "alpha": 0.2,
     }).content)
 
@@ -89,11 +102,11 @@ def test_triangulate_source_matches_inline(client, tree_xyz, tree_points):
     assert src["points_used"] == len(tree_points)
 
 
-def test_triangulate_source_cap_downsamples(client, tree_xyz, tree_points):
+def test_triangulate_source_cap_downsamples(client, tree_session, tree_points):
     n = len(tree_points)
     cap = n // 4
     src, _ = decode_bin_frame(client.post("/api/triangulate", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT,
+        "source": {"session_id": tree_session,
                    "max_points": cap},
         "method": "alpha_shape", "alpha": 0.2,
     }).content)
@@ -106,14 +119,14 @@ def test_triangulate_source_cap_downsamples(client, tree_xyz, tree_points):
 # Skeleton
 # ---------------------------------------------------------------------------
 
-def test_skeleton_source_matches_inline(client, tree_xyz, tree_points):
+def test_skeleton_source_matches_inline(client, tree_session, tree_points):
     # Low threshold_filter so the synthetic cloud's small blocks survive into
     # the skeleton (the point is path equality, not skeleton quality).
     params = {"remove_outliers": False, "search_radius": 0.05, "threshold_filter": 3}
     inline = client.post("/api/skeleton/extract",
                          json={"points": tree_points.tolist(), **params}).json()
     src = client.post("/api/skeleton/extract", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
+        "source": {"session_id": tree_session},
         **params,
     }).json()
     assert inline["success"] and src["success"]
@@ -125,10 +138,10 @@ def test_skeleton_source_matches_inline(client, tree_xyz, tree_points):
     assert abs(src["num_nodes"] - inline["num_nodes"]) <= 2
 
 
-def test_skeleton_source_auto_radius(client, tree_xyz):
+def test_skeleton_source_auto_radius(client, tree_session):
     # search_radius=0 → backend auto-calculates from KD-tree NN.
     src = client.post("/api/skeleton/extract", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
+        "source": {"session_id": tree_session},
         "remove_outliers": False, "search_radius": 0, "threshold_filter": 3,
     }).json()
     assert src["success"]
@@ -163,7 +176,7 @@ def _box_mesh():
     return v, idx
 
 
-def test_c2m_distance_source_matches_inline(client, tree_xyz, tree_points):
+def test_c2m_distance_source_matches_inline(client, tree_session, tree_points):
     v, idx = _box_mesh()
     # These endpoints stream PHP1 progress markers ahead of their JSON result,
     # so the body needs the marker-skipping decoder rather than .json().
@@ -172,7 +185,7 @@ def test_c2m_distance_source_matches_inline(client, tree_xyz, tree_points):
         "mesh_vertices": v, "mesh_indices": idx,
     }).content)
     src = decode_streamed_json(client.post("/api/c2m/distance", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
+        "source": {"session_id": tree_session},
         "mesh_vertices": v, "mesh_indices": idx,
     }).content)
     assert inline["success"] and src["success"]
@@ -184,10 +197,10 @@ def test_c2m_distance_source_matches_inline(client, tree_xyz, tree_points):
 # ICP mesh-to-cloud
 # ---------------------------------------------------------------------------
 
-def test_icp_mesh_to_cloud_source_runs(client, tree_xyz):
+def test_icp_mesh_to_cloud_source_runs(client, tree_session):
     v, idx = _box_mesh()
     src = decode_streamed_json(client.post("/api/c2m/icp-register", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
+        "source": {"session_id": tree_session},
         "mesh_vertices": v, "mesh_indices": idx,
     }).content)
     assert src["success"]
@@ -199,12 +212,12 @@ def test_icp_mesh_to_cloud_source_runs(client, tree_xyz):
 # Cloud-to-cloud ICP (mixed source + inline)
 # ---------------------------------------------------------------------------
 
-def test_c2c_icp_mixed_source_and_inline(client, tree_xyz, tree_points):
+def test_c2c_icp_mixed_source_and_inline(client, tree_session, tree_points):
     # Target read from disk (octree), source inline (flat). Source is the same
     # points shifted, so ICP should recover roughly the inverse shift.
     shifted = (tree_points + np.array([0.1, 0.0, 0.0])).flatten().tolist()
     res = decode_streamed_json(client.post("/api/c2c/icp-register", json={
-        "target_source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
+        "target_source": {"session_id": tree_session},
         "source_points": shifted,
     }).content)
     assert res["success"]
@@ -217,11 +230,11 @@ def test_c2c_icp_mixed_source_and_inline(client, tree_xyz, tree_points):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("fmt", ["xyz", "txt", "csv", "ply", "las"])
-def test_export_source_all_formats(client, tree_xyz, tree_points, fmt):
-    res = client.post("/api/pointcloud/export", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT},
+def test_export_source_all_formats(client, tree_session, tree_points, fmt):
+    res = decode_streamed_json(client.post("/api/pointcloud/export", json={
+        "source": {"session_id": tree_session},
         "format": fmt,
-    }).json()
+    }).content)
     assert res["success"], res.get("error")
     assert res["point_count"] == len(tree_points)
     assert res["filename"].endswith("." + fmt)
@@ -270,9 +283,9 @@ def test_export_session_source_preserves_rgb_and_intensity(client):
     main._cloud_sessions[sess.session_id] = sess
     try:
         # LAS keeps a real colour dimension (format 2, not the colourless 0).
-        res = client.post("/api/pointcloud/export", json={
+        res = decode_streamed_json(client.post("/api/pointcloud/export", json={
             "source": {"session_id": sess.session_id}, "format": "las",
-        }).json()
+        }).content)
         assert res["success"], res.get("error")
         blob = base64.b64decode(res["data"])
         with tempfile.NamedTemporaryFile(suffix=".las", delete=False) as fh:
@@ -288,9 +301,9 @@ def test_export_session_source_preserves_rgb_and_intensity(client):
             os.unlink(las_path)
 
         # Text formats carry the 0-255 colour columns too.
-        res = client.post("/api/pointcloud/export", json={
+        res = decode_streamed_json(client.post("/api/pointcloud/export", json={
             "source": {"session_id": sess.session_id}, "format": "csv",
-        }).json()
+        }).content)
         assert res["success"], res.get("error")
         text = base64.b64decode(res["data"]).decode("utf-8")
         header = text.splitlines()[0].lower()
@@ -302,12 +315,12 @@ def test_export_session_source_preserves_rgb_and_intensity(client):
         main._cloud_sessions.pop(sess.session_id, None)
 
 
-def test_export_source_translation_shifts_output(client, tree_xyz, tree_points):
-    res = client.post("/api/pointcloud/export", json={
-        "source": {"source_path": str(tree_xyz), "ascii_format": GRID_FORMAT,
+def test_export_source_translation_shifts_output(client, tree_session, tree_points):
+    res = decode_streamed_json(client.post("/api/pointcloud/export", json={
+        "source": {"session_id": tree_session,
                    "translation": [10.0, 0.0, 0.0]},
         "format": "xyz",
-    }).json()
+    }).content)
     assert res["success"]
     text = base64.b64decode(res["data"]).decode("utf-8")
     first_x = float(text.splitlines()[0].split()[0])

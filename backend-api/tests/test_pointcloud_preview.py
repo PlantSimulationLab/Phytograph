@@ -408,6 +408,136 @@ def test_column_plan_renames_extra_dim_label_and_slug():
                       "label": "Tree ID", "categorical": True}]
 
 
+def test_column_plan_skip_drops_the_column():
+    # The wizard's Import checkbox maps an ASCII column to role='skip'. The plan
+    # must emit a placeholder name (so the column is consumed positionally) and
+    # contribute NOTHING to extra_dims — otherwise the field still lands in the
+    # octree and the user's untick did nothing.
+    cp = _plan([
+        {"index": 0, "role": "x"},
+        {"index": 1, "role": "y"},
+        {"index": 2, "role": "z"},
+        {"index": 3, "role": "skip"},
+        {"index": 4, "role": "extra", "slug": "keep_me", "label": "Keep Me"},
+    ])
+    names, extra = main._xyz_column_plan(None, None, cp)
+    assert main._is_skip_name(names[3]), names
+    assert names[0:3] == ["x", "y", "z"]
+    assert [e["slug"] for e in extra] == ["keep_me"]
+
+
+def test_column_plan_multiple_skips_get_unique_names():
+    # THE REGRESSION THIS GUARDS: pandas rejects a names= list with duplicates,
+    # so two skipped columns must not both be called 'skip'. This is exactly why
+    # _skip_name(pos) exists, and unticking several junk columns at once is the
+    # ordinary case once the checkbox makes skipping easy.
+    cp = _plan([
+        {"index": 0, "role": "x"},
+        {"index": 1, "role": "y"},
+        {"index": 2, "role": "z"},
+        {"index": 3, "role": "skip"},
+        {"index": 4, "role": "skip"},
+        {"index": 5, "role": "skip"},
+    ])
+    names, extra = main._xyz_column_plan(None, None, cp)
+    assert len(names) == len(set(names)), f"duplicate names would break pandas: {names}"
+    assert sum(1 for n in names if main._is_skip_name(n)) == 3
+    assert extra == []
+
+
+def test_skipped_ascii_column_is_absent_from_the_written_las(tmp_path: Path):
+    # End-to-end on the real converter: the skipped column must not survive as an
+    # extra dim, while its neighbours still do. A names-only assertion could pass
+    # while the writer still emitted the field.
+    f = tmp_path / "scan.xyz"
+    f.write_text("0 0 0 11 21\n1 1 1 12 22\n2 2 2 13 23\n")
+    cp = _plan([
+        {"index": 0, "role": "x"},
+        {"index": 1, "role": "y"},
+        {"index": 2, "role": "z"},
+        {"index": 3, "role": "skip"},
+        {"index": 4, "role": "extra", "slug": "kept", "label": "Kept"},
+    ])
+    out = tmp_path / "out.las"
+    n, extra, _, _ = main._xyz_to_las(main._Path(str(f)), None, main._Path(str(out)), cp)
+    assert n == 3
+    assert [e["slug"] for e in extra] == ["kept"]
+
+
+# --------------------------------------------------------------------------- #
+# drop_slugs: the IN-FILE (LAS/PLY/E57/PTX) equivalent of role='skip'
+# --------------------------------------------------------------------------- #
+
+def test_canonical_drop_slugs_normalises_case_order_and_duplicates():
+    # The filter and any cache identity must agree on what "the same drop list"
+    # means, so ordering/case/duplicates have to collapse to one canonical form.
+    assert main._canonical_drop_slugs(["B", "a", "b ", "A"]) == ("a", "b")
+    # Empty and None both mean "drop nothing".
+    assert main._canonical_drop_slugs(None) == ()
+    assert main._canonical_drop_slugs([]) == ()
+    assert main._canonical_drop_slugs(["", "   "]) == ()
+
+
+def test_apply_drop_slugs_removes_only_the_named_fields():
+    extras = {
+        "reflectance": np.array([1.0, 2.0], dtype=np.float32),
+        "deviation": np.array([3.0, 4.0], dtype=np.float32),
+        "is_miss": np.array([0.0, 1.0], dtype=np.float32),
+    }
+    meta = [{"slug": "reflectance", "label": "Reflectance"},
+            {"slug": "deviation", "label": "Deviation"},
+            {"slug": "is_miss", "label": "Miss"}]
+
+    # Case-insensitive: the wizard sends whatever the file called the field.
+    new_extras, new_meta = main._apply_drop_slugs(extras, meta, ["Deviation"])
+    assert set(new_extras) == {"reflectance", "is_miss"}
+    assert [m["slug"] for m in new_meta] == ["reflectance", "is_miss"]
+
+    # extras and extra_dims_meta must stay in lockstep — _session_to_las indexes
+    # extras by every declared slug, so a meta entry with no array would crash
+    # the export rather than just showing a stray menu item.
+    assert set(new_extras) == {m["slug"] for m in new_meta}
+
+
+def test_apply_drop_slugs_can_drop_a_load_bearing_field():
+    # The wizard warns about dropping is_miss but does not forbid it (an all-zero
+    # is_miss on a hits-only export is dead weight). The backend must honour it
+    # rather than silently keeping the field.
+    extras = {"is_miss": np.array([0.0], dtype=np.float32)}
+    meta = [{"slug": "is_miss", "label": "Miss"}]
+    new_extras, new_meta = main._apply_drop_slugs(extras, meta, ["is_miss"])
+    assert new_extras == {}
+    assert new_meta == []
+
+
+def test_drops_channel_covers_intensity_and_whole_rgb_triple():
+    # Intensity and colour are first-class session fields, NOT entries in
+    # `extras`, so the slug filter alone can't remove them — E57's intensity is
+    # exactly this case. They need their own check.
+    assert main._drops_channel(["intensity"], "intensity") is True
+    assert main._drops_channel(["Intensity"], "intensity") is True
+    assert main._drops_channel(["deviation"], "intensity") is False
+    assert main._drops_channel(None, "intensity") is False
+
+    # Colour goes only when the WHOLE triple is unticked — a cloud with two of
+    # three channels has no colour the renderer could show.
+    assert main._drops_channel(["r", "g", "b"], "colors") is True
+    assert main._drops_channel(["red", "green", "blue"], "colors") is True
+    assert main._drops_channel(["r", "g"], "colors") is False
+    assert main._drops_channel(["intensity"], "colors") is False
+
+
+def test_apply_drop_slugs_is_a_noop_without_a_list():
+    extras = {"reflectance": np.array([1.0], dtype=np.float32)}
+    meta = [{"slug": "reflectance", "label": "Reflectance"}]
+    for empty in (None, []):
+        e2, m2 = main._apply_drop_slugs(extras, meta, empty)
+        assert e2 is extras and m2 is meta
+    # A drop list naming a field the file doesn't have changes nothing.
+    e3, m3 = main._apply_drop_slugs(extras, meta, ["not_present"])
+    assert set(e3) == {"reflectance"} and len(m3) == 1
+
+
 def test_import_by_path_rgb_0_255_vs_0_1(client, tmp_path: Path):
     # Same RGB tokens, two scales. With rgb_is_255=False the loader treats r/g/b
     # as already 0-1; with True it divides by 255. The decoded colors must differ.

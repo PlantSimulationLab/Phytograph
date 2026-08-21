@@ -50,6 +50,9 @@ test('segments ground vs plant and colours by the ground_class attribute', async
 
   // Use a cloth resolution suited to this fixture's scale, enable split.
   await page.getByTestId('ground-cloth-resolution').fill('0.1');
+  // Measuring from the scan is the default; this test wants its own
+  // fixture-tuned tolerance, so turn the measurement off first.
+  await page.getByTestId('ground-auto-class-threshold').uncheck();
   await page.getByTestId('ground-class-threshold').fill('0.05');
   await page.getByTestId('ground-split-clouds').check();
 
@@ -99,7 +102,9 @@ test('measures the ground tolerance from the scan when asked', async () => {
   await page.getByTestId('tool-ground-segment').click();
   await page.getByTestId('ground-cloth-resolution').fill('0.1');
   // Seed a deliberately WRONG tolerance: 0.001 m would leave almost nothing as
-  // ground. Auto mode must override it and still split cleanly.
+  // ground. Auto mode must override it and still split cleanly. Measuring is on
+  // by default, so turn it off to reach the field, seed it, then turn it back on.
+  await page.getByTestId('ground-auto-class-threshold').uncheck();
   await page.getByTestId('ground-class-threshold').fill('0.001');
   await page.getByTestId('ground-auto-class-threshold').check();
   // With auto on, the manual field is not editable — the value comes from the scan.
@@ -154,6 +159,9 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
   // Segment in place (no split) so the single cloud carries ground_class.
   await page.getByTestId('tool-ground-segment').click();
   await page.getByTestId('ground-cloth-resolution').fill('0.1');
+  // Measuring from the scan is the default; this test wants its own
+  // fixture-tuned tolerance, so turn the measurement off first.
+  await page.getByTestId('ground-auto-class-threshold').uncheck();
   await page.getByTestId('ground-class-threshold').fill('0.05');
   await page.getByTestId('ground-segment-run-button').click();
   await expect(page.getByTestId('class-legend')).toBeVisible({ timeout: 60_000 });
@@ -200,6 +208,9 @@ test('hides the class legend after the segmented cloud is deleted', async () => 
 
   // Segment in place (no split) so exactly one cloud carries ground_class.
   await page.getByTestId('tool-ground-segment').click();
+  // Measuring from the scan is the default; this test wants its own
+  // fixture-tuned tolerance, so turn the measurement off first.
+  await page.getByTestId('ground-auto-class-threshold').uncheck();
   await page.getByTestId('ground-class-threshold').fill('0.05');
   await page.getByTestId('ground-segment-run-button').click();
 

@@ -20,9 +20,9 @@ its own bundled binary.
 
 ## What happens on mismatch
 
-1. The supervisor detects a backend on 8008 reports `BACKEND_VERSION = "0.1.9"`.
+1. The supervisor detects that the backend on its resolved port reports `BACKEND_VERSION = "0.1.9"`.
 2. The renderer build was compiled against `EXPECTED_BACKEND_VERSION = "0.2.0"`.
-3. The supervisor terminates the backend, removes the lock on port 8008, and spawns the version it shipped with.
+3. The supervisor terminates that backend and spawns the version it shipped with.
 4. The renderer retries and connects to the matching backend.
 
 This is the same code path that recovers from stale uvicorn processes left
@@ -34,7 +34,7 @@ The version lock is checked in two places, not one. Besides the supervisor
 (main process), the renderer's startup splash (`useBackendReady`) polls
 `/version` and only treats the backend as **ready** when the reported version
 equals `EXPECTED_BACKEND_VERSION`. A `200` carrying a *different* version (a
-stale or incompatible backend adopted on port 8008) is **not** accepted — the
+stale or incompatible backend adopted on the resolved port) is **not** accepted — the
 splash stays in its "Starting backend…" state while the supervisor kills and
 respawns the bundled binary, then flips to ready once the matching version
 answers. Without this, the UI could go live against a backend the supervisor
@@ -49,7 +49,8 @@ git push origin vX.Y.Z
 ```
 
 The `release.yml` workflow signs and notarizes the macOS app, builds for
-Windows and Linux, and publishes a draft GitHub Release. Both the bundled backend
+Windows and Linux, and publishes a GitHub Release (published, not a draft —
+electron-updater needs it that way to detect the update). Both the bundled backend
 and the renderer reference `vX.Y.Z`, so the supervisor's check passes by
 construction.
 

@@ -17,36 +17,37 @@ You need a generated plant already in the scene. See
 
 ## What you can change
 
-The popup is organized into sections. The exact parameters vary by
-species, but generally:
+The popup header reads `Morph: {Species} ({age}d)`. Parameters are scoped
+**per shoot type**, so the popup has a tab row across the top — edits apply to
+the selected shoot type only.
 
 ### Geometry parameters
 
-Per-organ scalar values that drive growth:
+Five editable parameters drive growth (the same five for every species):
 
-- **Internode length** — segment length between leaves
-- **Insertion angle** — angle at which a side branch leaves its parent
-- **Girth factor** — taper rate from trunk to twig
-- … and species-specific parameters (leaf width, fruit position, …)
+- **Internode Length** — segment length between leaves
+- **Insertion Angle** — angle at which a side branch leaves its parent
+- **Girth Factor** — taper rate from trunk to twig
+- **Curvature** — gravitropic curvature of the shoot
+- **Tortuosity** — how much the shoot wanders as it grows
 
-Each parameter shows:
+Each row shows the parameter's **distribution** as a read-only pill
+(`constant`, `uniform`, `normal`, …). This is informational — you can't switch
+a parameter to a different distribution. What you can edit depends on it:
 
-- A slider for the current value
-- The parameter's distribution type — **Constant**, **Uniform**, or
-  **Normal**
-- The distribution's own parameters (min/max for Uniform; mean/stddev
-  for Normal)
+- **constant** — a slider plus a value box.
+- **uniform** / **normal** — two number boxes joined by a `-`, for the
+  distribution's own bounds.
 
-Switching distribution type changes what the parameter draws from
-during regrowth. Use **Normal** to introduce realistic variability;
-use **Constant** to lock a parameter exactly.
+Anything the backend exposes outside these five is shown read-only under
+**Growth & Structural (read-only)**.
 
-### Geometry scale
+### Geometry Scale
 
 Multiplicative scales applied after generation:
 
 - **Leaf scale** — multiplier on leaf size
-- **Petiole length / radius** — petiole dimensions
+- **Petiole Length** / **Petiole Radius** — petiole dimensions
 - **Internode radius** — branch thickness
 
 Useful when the structure is right but the absolute dimensions need
@@ -65,17 +66,24 @@ After editing, click **Regrow**. Phytograph rebuilds the plant at its
 current age using the new parameters. The mesh updates in place.
 
 If you don't like the result, **Reset** restores the species defaults.
-Undo (<kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd>) restores the previous parameter
-set.
 
-Modified parameters are marked with a yellow accent and an "×" scale
-factor relative to the default, so you can see at a glance what you've
+!!! warning "Morphing is not undoable"
+    Regrowing replaces the mesh geometry and recreates the backend plant
+    session, so it **clears the undo history** for that plant.
+    <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> will not bring back the previous parameter
+    set — export your parameters first if you want to return to them.
+
+Modified parameters are marked with an amber accent and an `x` scale factor
+relative to the default (e.g. `1.25x`), so you can see at a glance what you've
 changed.
 
 ## Save and reuse presets
 
-- **Export JSON** — save the current parameter set to a file.
-- **Import JSON** — load a previously saved set.
+- **Export parameters** (download icon) — save the current parameter set to a
+  file.
+- **Import parameters** (upload icon) — load a previously saved set.
+
+Both are icon-only buttons in the popup header; hover to see the tooltip.
 
 This is the easiest way to build up a per-cultivar library. Name files
 descriptively (e.g., `apple_fuji_high-density.json`) and check them
@@ -88,11 +96,11 @@ procedural model:
 
 1. **Generate** at the right species and age.
 2. **Align** the generated mesh to the scan via
-   [Register & compare](register-compare.md#cloud-to-mesh).
+   [Register & compare](register-compare.md#cloud-to-mesh-distance).
 3. **Morph** to reduce the RMSE — try girth and insertion angle first;
    these have the biggest visual effect.
 4. Repeat alignment + morph until the fit is satisfactory.
-5. **Export JSON** to lock in the cultivar parameters.
+5. **Export parameters** to lock in the cultivar parameters.
 
 For a rigorous fit, scriptable parameter sweeps via the backend API
 will be more efficient than manual iteration. See the

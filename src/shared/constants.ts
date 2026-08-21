@@ -1,6 +1,6 @@
 // Keep BACKEND_VERSION in sync with backend-api/main.py BACKEND_VERSION.
 // Bump when backend changes require users to receive a new build.
-export const EXPECTED_BACKEND_VERSION = '0.61.0';
+export const EXPECTED_BACKEND_VERSION = '0.71.0';
 
 // Backend port. Historically fixed; now chosen dynamically per app instance by
 // the main process (src/main/backend.ts findFreePort/resolvePort) so concurrent
@@ -17,6 +17,10 @@ export const RENDERER_DEV_PORT = 1427;
 // pre-filled new-issue URL used by the in-app feedback dialog.
 export const REPO_URL = 'https://github.com/PlantSimulationLab/phytograph';
 
+// Published MkDocs site (docs/ → GitHub Pages via .github/workflows/docs.yml).
+// Base for the "Phytograph Documentation" Help-menu link.
+export const DOCS_URL = 'https://plantsimulationlab.github.io/Phytograph/';
+
 // Destination for the "Continue without a GitHub account" feedback path.
 export const FEEDBACK_EMAIL = 'baileylabshared@gmail.com';
 
@@ -28,7 +32,7 @@ export const FEEDBACK_EMAIL = 'baileylabshared@gmail.com';
 // src/renderer/lib/pointCloudParsers.ts (plus Helios scan 'xml').
 export const IMPORTABLE_EXTENSIONS = [
   // point clouds
-  'las', 'laz', 'e57', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc',
+  'las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc',
   // meshes (ply already listed)
   'obj', 'stl',
   // skeletons

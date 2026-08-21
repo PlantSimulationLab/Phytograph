@@ -18,6 +18,7 @@ import re
 import pytest
 
 import main
+from tests.binframe import decode_streamed_json
 
 
 def _decode(files, suffix):
@@ -64,10 +65,12 @@ class TestScanExportShape:
             base_name="/some/dir/myscan.las", include_misses=True))
         assert res["success"] is True, res.get("error")
         names = sorted(f["name"] for f in res["files"])
-        assert names == ["myscan.xml", "myscan_0.xyz"]
+        # A lone scan is written under exactly the typed base name — no index, no
+        # label suffix (see TestScanExportNaming).
+        assert names == ["myscan.xml", "myscan.xyz"]
         # Every non-XML data file is .xyz, and the XML references the .xyz file.
         assert all(f["name"].endswith(".xyz") for f in res["files"] if not f["is_xml"])
-        assert "myscan_0.xyz" in _decode(res["files"], ".xml")
+        assert "myscan.xyz" in _decode(res["files"], ".xml")
         assert ".las" not in _decode(res["files"], ".xml")
 
     def test_includes_misses_and_is_miss_column(self):
@@ -310,7 +313,9 @@ class TestMultibeamExport:
         # PyHelios v0.1.24's addScanSpinning round-trip emits a trajectory sidecar
         # CSV per spinning scan (the "spin in place" trajectory), referenced by the
         # XML's <trajectoryFile>; it must be in the bundle or loadXML can't reload.
-        assert "mbrt_0_traj.csv" in names, names
+        # (One scan, so the sidecars carry the base name itself — see
+        # TestScanExportNaming.)
+        assert "mbrt_traj.csv" in names, names
         for f in res["files"]:
             (tmp_path / f["name"]).write_bytes(base64.b64decode(f["data"]))
         cwd = os.getcwd()
@@ -585,6 +590,236 @@ class TestScanExportErrors:
 
     def test_endpoint_registered(self, client):
         # The route exists and accepts the request shape (empty scans → success:false).
+        # It streams PHP1 progress markers ahead of its JSON tail (see
+        # scan_export_xml), so the body needs the marker-aware decoder — a plain
+        # resp.json() chokes on the markers.
         resp = client.post("/api/scan/export-xml", json={"scans": [], "include_misses": True})
         assert resp.status_code == 200
-        assert resp.json()["success"] is False
+        assert decode_streamed_json(resp.content)["success"] is False
+
+
+class TestScanExportStaleSession:
+    """A stale `session_id` must FAIL — never fall back to re-reading the file.
+
+    The reported bug: a `.riproject` was imported, the dev backend hot-reloaded
+    (which drops all in-memory sessions), and the export fell through to the
+    `file_path` branch. That path was the .riproject DIRECTORY — provenance only,
+    never a readable point-cloud file — so the user got "Scan file not found:
+    /…/2018-02-23.002.riproject" for a file that was never the data source.
+
+    The deeper problem is not the confusing message. Once a file is imported it
+    must be treated as if it does not exist: the session arrays carry every edit
+    AND every import-wizard choice (column roles, dropped columns, global shift),
+    so a file fallback exports a DIFFERENT cloud and calls it success.
+    """
+
+    def _entry(self, **kw):
+        e = main.ScanExportEntry(
+            origin=[0.0, 0.0, 3.0], n_theta=20, n_phi=20,
+            theta_min=0, theta_max=180, phi_min=0, phi_max=360,
+            session_id="gone-after-restart", **kw)
+        return e
+
+    def test_riproject_directory_source_reports_the_real_cause(self, tmp_path):
+        # A .riproject "source path" is a directory, exactly as the importer
+        # records it for provenance.
+        proj = tmp_path / "2018-02-23.002.riproject"
+        proj.mkdir()
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._entry(file_path=str(proj))],
+            base_name="riegl", include_misses=True))
+        assert res["success"] is False
+        err = res["error"]
+        # The OLD failure blamed a missing file; the honest error names the
+        # stale session and tells the user what to actually do.
+        assert "Scan file not found" not in err
+        assert "gone-after-restart" in err
+        assert "Re-import" in err
+
+    def test_readable_source_file_is_still_not_used(self, tmp_path):
+        # The sharper case: the file EXISTS and would parse fine, so the old code
+        # exported it happily — silently shipping pre-edit points. Must still fail.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._entry(file_path=str(f), ascii_format="x y z")],
+            base_name="stale", include_misses=True))
+        assert res["success"] is False
+        assert "gone-after-restart" in res["error"]
+        assert not res.get("files")
+
+    def test_data_only_export_path_also_refuses(self, tmp_path):
+        # The data-only (write_xml=False) resolver is a SEPARATE function with its
+        # own copy of the source precedence, and had the same fall-through.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[self._entry(file_path=str(f), ascii_format="x y z")],
+            base_name="stale", include_misses=True,
+            write_xml=False, data_format="laz"))
+        assert res["success"] is False
+        assert "gone-after-restart" in res["error"]
+
+    def test_file_backed_scan_with_no_session_still_exports(self, tmp_path):
+        # The rule targets STALE SESSIONS, not file sources as such: a scan that
+        # never had a session (no session_id) still exports from its file.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5\n-0.1 0.0 0.6\n0.2 -0.1 0.4\n")
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[main.ScanExportEntry(
+                origin=[0.0, 0.0, 3.0], n_theta=20, n_phi=20,
+                theta_min=0, theta_max=180, phi_min=0, phi_max=360,
+                file_path=str(f), ascii_format="x y z")],
+            base_name="filebacked", include_misses=True))
+        assert res["success"] is True, res.get("error")
+
+
+def _labeled(label, points=None):
+    """An inline entry carrying the viewer label that now names its file."""
+    e = _inline_entry(points or _PTS)
+    e.label = label
+    return e
+
+
+# The label -> file-name-fragment cases, shared with the renderer's mirror of the
+# rule (src/renderer/lib/exportObjects.test.ts, `objectFileSlug`): the Export
+# window shows the user an example file name before they pick a destination, and
+# an example that doesn't match what gets written is worse than none.
+_SLUG_CASES = [
+    ("ScanPos001", 0, "ScanPos001"),          # a plain label is left alone
+    ("plot A/B: north", 0, "plot_A_B_north"),  # unsafe runs collapse to one "_"
+    ("east*plot?", 1, "east_plot"),
+    ("ScanPos001.las", 0, "ScanPos001"),      # a filename-ish tail is dropped
+    ("plot.2024.10.03", 0, "plot.2024.10"),   # ... but only the last one
+    ("  ...  ", 3, "3"),                      # nothing usable -> the index
+    ("", 0, "0"),
+    ("x" * 200, 0, "x" * 64),                 # a runaway label is capped
+]
+
+
+class TestScanLabelSlug:
+    @pytest.mark.parametrize("label,index,expected", _SLUG_CASES)
+    def test_slug(self, label, index, expected):
+        entry = _labeled(label)
+        assert main._scan_label_slug(entry, index) == expected
+
+
+class TestScanExportNaming:
+    """Per-scan file NAMES.
+
+    The export used to number the files `<base>_0`, `_1`, … in the order the
+    Scans panel held them — so scans added as ScanPos002 then ScanPos001 came out
+    as `scan_0` / `scan_1` and the mapping back to the instrument's own names was
+    gone. The label names the file now; a single scan keeps exactly the name the
+    user typed in the save dialog.
+    """
+
+    def test_single_scan_keeps_the_typed_name(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("ScanPos001")], base_name="myscan",
+            write_xml=False, data_format="xyz"))
+        assert res["success"] is True, res.get("error")
+        assert [f["name"] for f in res["files"]] == ["myscan.xyz"]
+
+    def test_several_scans_are_named_by_label_not_order(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("ScanPos002"), _labeled("ScanPos001")],
+            base_name="myscan", write_xml=False, data_format="xyz"))
+        assert res["success"] is True, res.get("error")
+        # Order follows the request (add-order), the NAMES follow the labels.
+        assert [f["name"] for f in res["files"]] == [
+            "myscan_ScanPos002.xyz", "myscan_ScanPos001.xyz"]
+
+    def test_labels_are_made_filesystem_safe(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("plot A/B: north"), _labeled("east*plot?")],
+            base_name="out", write_xml=False, data_format="xyz"))
+        assert res["success"] is True, res.get("error")
+        assert [f["name"] for f in res["files"]] == [
+            "out_plot_A_B_north.xyz", "out_east_plot.xyz"]
+
+    def test_duplicate_labels_do_not_overwrite_each_other(self):
+        # Two clouds can carry the same label, and on macOS/Windows two names
+        # differing only in case are the SAME file — either way the second export
+        # must not clobber the first.
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("tree"), _labeled("tree"), _labeled("TREE")],
+            base_name="out", write_xml=False, data_format="xyz"))
+        assert res["success"] is True, res.get("error")
+        names = [f["name"] for f in res["files"]]
+        assert names == ["out_tree.xyz", "out_tree_2.xyz", "out_TREE_3.xyz"]
+        assert len({n.lower() for n in names}) == 3
+
+    def test_label_extension_is_not_doubled_up(self):
+        # Labels are often the imported file's name; keeping the old extension
+        # would write "out_ScanPos001.las.laz".
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("ScanPos001.las"), _labeled("ScanPos002.las")],
+            base_name="out", write_xml=False, data_format="laz"))
+        assert res["success"] is True, res.get("error")
+        assert [f["name"] for f in res["files"]] == [
+            "out_ScanPos001.laz", "out_ScanPos002.laz"]
+
+    def test_unusable_label_falls_back_to_the_index(self):
+        pytest.importorskip("pyhelios")
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("  ...  "), _labeled("")],
+            base_name="out", write_xml=False, data_format="xyz"))
+        assert res["success"] is True, res.get("error")
+        assert [f["name"] for f in res["files"]] == ["out_0.xyz", "out_1.xyz"]
+
+    def test_xml_bundle_renames_sidecars_and_its_references(self, tmp_path):
+        # PyHelios names the sidecars <base>_<i>.xyz in C++ and writes those names
+        # into the XML, so the rename has to carry the <filename> tags with it or
+        # the bundle stops re-loading.
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("ScanPos002"), _labeled("ScanPos001")],
+            base_name="bundle", include_misses=True))
+        assert res["success"] is True, res.get("error")
+        names = sorted(f["name"] for f in res["files"])
+        assert names == ["bundle.xml", "bundle_ScanPos001.xyz",
+                         "bundle_ScanPos002.xyz"]
+        xml = _decode(res["files"], ".xml")
+        assert "bundle_ScanPos002.xyz" in xml and "bundle_ScanPos001.xyz" in xml
+        assert "bundle_0.xyz" not in xml and "bundle_1.xyz" not in xml
+        # And it still loads: the references point at files that exist.
+        for f in res["files"]:
+            (tmp_path / f["name"]).write_bytes(base64.b64decode(f["data"]))
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            cloud = LiDARCloud()
+            cloud.disableMessages()
+            cloud.loadXML("bundle.xml")
+            assert cloud.getScanCount() == 2
+        finally:
+            os.chdir(cwd)
+
+    def test_xml_rename_survives_a_label_that_collides_with_an_index(self, tmp_path):
+        # The nasty case the two-phase rename exists for: scan 0 is labeled "1",
+        # so its NEW name is the OLD name of scan 1. A single-pass rename would
+        # overwrite scan 1's data with scan 0's.
+        pytest.importorskip("pyhelios")
+        a = [[0.1, 0.1, 0.5]]
+        b = [[5.0, 5.0, 5.0], [5.1, 5.0, 5.0]]
+        res = main._do_scan_export(main.ScanExportRequest(
+            scans=[_labeled("1", a), _labeled("two", b)],
+            base_name="bundle", include_misses=False))
+        assert res["success"] is True, res.get("error")
+        names = sorted(f["name"] for f in res["files"])
+        assert names == ["bundle.xml", "bundle_1.xyz", "bundle_two.xyz"]
+        rows = [l for l in _decode(res["files"], "bundle_1.xyz").splitlines()
+                if l and l[0] != "#"]
+        assert len(rows) == 1, rows           # scan 0's single point, not scan 1's two
+        rows = [l for l in _decode(res["files"], "bundle_two.xyz").splitlines()
+                if l and l[0] != "#"]
+        assert len(rows) == 2, rows

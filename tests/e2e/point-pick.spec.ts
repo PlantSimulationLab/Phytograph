@@ -170,6 +170,104 @@ test.describe('point picker', () => {
     });
   });
 
+  test('picks a point clicked NEAR rather than dead-on, in a sparse region', async () => {
+    // The density regression. `Potree.pick` re-renders the visible nodes into
+    // an index buffer and `findHit` only accepts a pixel that was actually
+    // written, so a point is pickable exactly where its splat rasterised. The
+    // pick material used to inherit the DISPLAY point size (FIXED, default 1),
+    // which meant 1-pixel targets: in a solid-looking region every pixel is
+    // covered so any click lands, but wherever background showed through you
+    // had to hit a dot dead-on. Users reported 5-10 clicks per pick in
+    // moderately sparse areas and near-impossibility in genuinely sparse ones.
+    //
+    // scalars.xyz draws as well-separated dots at the default framing, so an
+    // offset click reproduces that: every other test here clicks the projected
+    // centre exactly, which is precisely the case that always worked.
+    await importScalars();
+    await armPicker();
+
+    const target: [number, number, number] = [0.4, 0.0, 0.3];
+    const px = await worldToScreenPx(target);
+
+    // Far enough off-centre that a 1 px splat cannot be hit, comfortably
+    // inside the inflated pick target. Offset diagonally so neither axis
+    // alone explains a pass.
+    const OFFSET_PX = 4;
+    await clickViewport(px.x + OFFSET_PX, px.y - OFFSET_PX);
+
+    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    // It must resolve to the point actually under the cursor's neighbourhood —
+    // "a label appeared" would also pass if the pick grabbed some other point,
+    // which is the failure mode an over-large splat would introduce.
+    expect(await worldCoordsOf(labels().first())).toEqual(['0.400', '0.000', '0.300']);
+  });
+
+  test('an offset click still resolves to the NEAREST point, not a neighbour', async () => {
+    // Guard on the other side of the same fix: inflating the pick splat trades
+    // away precision if taken too far, because potree's `findHit` breaks ties
+    // by 2D distance-to-centre with no depth test. A click nudged toward one
+    // point must not be won by the adjacent one.
+    await importScalars();
+    await armPicker();
+
+    const a: [number, number, number] = [0.4, 0.0, 0.3];
+    const b: [number, number, number] = [0.6, 0.0, 0.45];
+    const pxA = await worldToScreenPx(a);
+    const pxB = await worldToScreenPx(b);
+
+    // Nudge a few pixels from A *along the direction of B* — still nearer A.
+    const len = Math.hypot(pxB.x - pxA.x, pxB.y - pxA.y);
+    expect(len).toBeGreaterThan(12); // otherwise the two dots overlap and the assert is meaningless
+    const step = 3;
+    await clickViewport(
+      pxA.x + ((pxB.x - pxA.x) / len) * step,
+      pxA.y + ((pxB.y - pxA.y) / len) * step,
+    );
+
+    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    expect(await worldCoordsOf(labels().first())).toEqual(['0.400', '0.000', '0.300']);
+  });
+
+  test('a near-miss click takes the FOREGROUND point, not the closer-on-screen background', async () => {
+    // Depth-aware tie-breaking. potree's pick pass depth-tests correctly WITHIN
+    // a pixel, but its `findHit` ranks the pixels of the readback window purely
+    // by 2D distance to the cursor — and the readback is all index bytes, so
+    // there is no depth available to rank by and `findHit` is private anyway.
+    //
+    // depth-layers.xyz is built for exactly this: a SPARSE near plane (y=0, a
+    // 0.5 lattice) in front of a DENSE far plane (y=8, a 0.05 lattice). Viewed
+    // from the front, a click that just misses a near dot always has a far-plane
+    // dot within a pixel or two. Ranking by screen distance therefore reaches
+    // straight through the foreground and labels the background 8 m behind it.
+    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'depth-layers.xyz'));
+    await completeImportWizard(session.page);
+    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="depth-layers.xyz"]');
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row).toHaveAttribute('data-point-count', '1706');
+
+    // Look down +Y so the two planes stack in depth rather than side by side.
+    await session.page.evaluate(() => (window as any).__orientToAxis?.({ x: 0, y: -1, z: 0 }));
+    await waitForCameraSettled();
+    await armPicker();
+
+    // A near-plane point and, directly behind it, the far plane.
+    const near: [number, number, number] = [0.5, 0.0, 0.5];
+    const px = await worldToScreenPx(near);
+
+    // Offset far enough to miss the near dot's own splat outright, so the pick
+    // has to arbitrate between a foreground and a background candidate. Both
+    // planes cover this pixel, and the far one is denser — under screen-distance
+    // ranking the background wins.
+    await clickViewport(px.x + 6, px.y + 6);
+
+    await expect(labels()).toHaveCount(1, { timeout: 10_000 });
+    const coords = await worldCoordsOf(labels().first());
+    // Y is the depth axis: 0 is the near plane, 8 the far one. This is the whole
+    // assertion — picking ANY near-plane point is correct, picking the far plane
+    // is the bug.
+    expect(coords[1]).toBe('0.000');
+  });
+
   test('reports true intensity while a scalar colour mode is active', async () => {
     // Colouring by a scalar ALIASES that scalar's buffer into each tile's
     // `intensity` attribute (that's how the potree gradient shader reaches it).
@@ -319,6 +417,18 @@ test.describe('point picker', () => {
     // The label must also be anchored where the point is DRAWN, not at the
     // file coordinate: its leader-line dot has to land on the clicked pixel.
     // (Projecting `world` instead of `local` puts it millions of units away.)
+    //
+    // Wait for the anchor to be POSITIONED, not merely present. The dot is
+    // rendered with no cx/cy and `display: none`; a useFrame pass projects the
+    // anchor and writes them. The label element therefore exists — and every
+    // coordinate assertion above already passes — one or more frames before the
+    // dot has a position. Reading straight through gives `cx: null` → NaN.
+    // On macOS a frame has always landed by now; headless Linux renders slower
+    // and it has not, which is why this failed only on CI.
+    await expect.poll(async () => session.page.evaluate(() => {
+      const c = document.querySelector('[data-testid="picked-point-leaders"] circle');
+      return c?.getAttribute('cx') ?? null;
+    }), { timeout: 10_000, intervals: [50, 100, 250] }).not.toBeNull();
     const dot = await session.page.evaluate(() => {
       const c = document.querySelector('[data-testid="picked-point-leaders"] circle') as SVGCircleElement;
       return { cx: parseFloat(c.getAttribute('cx') ?? 'NaN'), cy: parseFloat(c.getAttribute('cy') ?? 'NaN') };

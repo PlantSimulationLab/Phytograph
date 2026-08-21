@@ -14,6 +14,13 @@ with the result.
 | Concave shapes you want to wrap tightly | **Alpha Shape** |
 | Multi-scan TLS data with scanner positions | **Helios** |
 
+This page uses the short names above. In the **Method** dropdown they appear
+in full as *Bailey & Mahaffee / Helios (recommended)*, *Ball Pivoting*,
+*Poisson (not recommended for leaf angle)*, *Alpha Shape (not recommended for
+leaf angle)*, and *Delaunay (2D) (not recommended for leaf angle)* — the
+"not recommended for leaf angle" tags flag methods that resample or smooth the
+surface, which distorts the leaf-orientation statistics.
+
 ## The Triangulation modal
 
 All five methods live in one **Triangulation Setup** modal:
@@ -356,7 +363,9 @@ color** to go back to the flat mesh color.
 For a **Helios mesh**, you can go beyond per-triangle coloring and plot the
 mesh's **leaf angle distribution function** — the statistical distribution of
 leaf orientations across the canopy. Expand the mesh's row in the **Meshes**
-panel and click **Leaf angles…** (offered on Helios meshes only). A plot
+panel and click **Leaf angles…**. It's offered for any triangulated mesh
+(DEM surfaces and fitted crowns excepted), though the Helios method gives the
+most faithful distribution. A plot
 window opens with:
 
 - **Inclination PDF** — the probability density of the leaf inclination
@@ -400,10 +409,10 @@ just the visible ones.
 !!! tip "Same distributions feed the LAD G(θ) override"
     These de Wit families and the Beta (Goel–Strebel) fit below are exactly the
     distributions you can prescribe in the
-    [LAD tool's *Supply G(θ) directly* option](estimate-leaf-area-density.md#override-gθ-directly)
+    [LAD tool's *Supply G(θ) directly* option](estimate-leaf-area-density.md#override-g-directly)
     to derive `G(θ)` without triangulating — useful when you know (or measured)
     the canopy's leaf-angle distribution. See
-    [Leaf-angle distributions and G(θ)](../concepts/leaf-area-density.md#leaf-angle-distributions-and-gθ).
+    [Leaf-angle distributions and G(θ)](../concepts/leaf-area-density.md#leaf-angle-distributions-and-g).
 
 ### Beta-distribution fit (Goel–Strebel)
 

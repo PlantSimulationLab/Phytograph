@@ -108,10 +108,10 @@ def test_endpoint_inline(client):
 
 
 @requires_treeiso
-def test_endpoint_from_source(client):
+def test_endpoint_from_source(client, make_file_session):
     res = client.post(
         "/api/segment/trees",
-        json={"source": {"source_path": str(FIXTURE), "ascii_format": "x y z treeiso_label"}},
+        json={"source": {"session_id": make_file_session(str(FIXTURE), "x y z treeiso_label")}},
     )
     assert res.status_code == 200, res.text
     body = res.json()
@@ -209,7 +209,7 @@ def test_requires_input(client):
 
 
 def test_oversize_cloud_rejected_with_actionable_error(client, monkeypatch):
-    """A cloud above the TreeIso point cap fails fast with a clear message,
+    """A cloud above the raw-input backstop fails fast with a clear message,
     not an apparent hang. Lower the cap so the test stays tiny."""
     monkeypatch.setattr(main, "_TREEISO_MAX_POINTS", 50)
     points, _ = _load_fixture()
@@ -218,6 +218,206 @@ def test_oversize_cloud_rejected_with_actionable_error(client, monkeypatch):
     body = res.json()
     assert body["success"] is False
     assert "exceeds" in body["error"] and "limit" in body["error"]
+
+
+# --- Node-count cost gate ---------------------------------------------------
+# TreeIso's cost is driven by the POST-DECIMATION node count, not raw input size:
+# `_process_point_cloud` voxel-decimates first, then runs cut-pursuit and the
+# O(nGroups²) merge over the decimated cloud only. So the gate counts voxels at
+# the resolved voxel size (`_count_treeiso_nodes`) rather than capping raw
+# points — otherwise a big-but-sparse cloud that collapses to well under a
+# million nodes gets refused for no reason.
+
+
+def test_node_count_matches_treeiso_decimation_exactly():
+    """`_count_treeiso_nodes` must agree BIT-FOR-BIT with the vendored
+    `decimate_pcd` it stands in for — including the mean-centring
+    `_process_point_cloud` applies first, which shifts voxel boundaries (skipping
+    it mis-counts by a few percent). An estimate here would be unsafe: a density
+    model was tried and ranged from 0.1× to 49× the true count."""
+    from treeiso.treeiso_core import decimate_pcd
+    from types import SimpleNamespace
+
+    rng = np.random.default_rng(0)
+    # Canopy-like (clustered crowns — where a uniform-density model fails worst)
+    # and a volume-filling cube, at voxel sizes spanning no-op → heavy decimation.
+    clouds = []
+    for _ in range(12):
+        cx, cy = rng.uniform(0, 60, 2)
+        clouds.append(np.vstack([
+            np.c_[cx + rng.normal(0, .1, 1500), cy + rng.normal(0, .1, 1500),
+                  rng.uniform(0, 8, 1500)],
+            np.c_[cx + rng.normal(0, 3, 4500), cy + rng.normal(0, 3, 4500),
+                  11 + rng.normal(0, 2.5, 4500)]]))
+    canopy = np.vstack(clouds)
+    cube = rng.uniform(0, 50, size=(60_000, 3))
+
+    for name, pts in (("canopy", canopy), ("cube", cube)):
+        for res in (0.05, 0.5, 1.5):
+            p = SimpleNamespace(decimate_res1=res, decimate_res2=2 * res)
+            truth = len(decimate_pcd(pts - np.mean(pts, axis=0), res)[0])
+            assert main._count_treeiso_nodes(pts, p) == truth, f"{name} @ {res} m"
+
+
+def test_auto_decimation_converges_under_node_target():
+    """The (spacing/res)³ law assumes volume-filling density and under-shoots at
+    scale, so the auto-scaler verifies against the EXACT voxel count and keeps
+    coarsening. Regression: a 13.5 M-point plot landed on res1=0.307 m and still
+    produced 4.3 M voxels — 4× the 1 M target — before this convergence loop.
+
+    Needs a multi-million-point fixture: the cube law is accurate on small clouds
+    and only compounds its error at scale, so a smaller fixture passes with the
+    loop deleted (verified) and would be a rubber stamp. 4 M points is the
+    smallest size that still reproduces the overshoot; it runs in ~2 s."""
+    from types import SimpleNamespace
+
+    rng = np.random.default_rng(7)
+    # Dense thin trunks + broad crowns over a 150 m plot — the mixed local
+    # density that skews median spacing and makes the cube law over-fine.
+    n, clouds = 4_000_000, []
+    per = n // 200
+    for _ in range(200):
+        cx, cy = rng.uniform(0, 150, 2)
+        kt = per // 4
+        clouds.append(np.vstack([
+            np.c_[cx + rng.normal(0, .15, kt), cy + rng.normal(0, .15, kt),
+                  rng.uniform(0, 9, kt)],
+            np.c_[cx + rng.normal(0, 2.5, per - kt), cy + rng.normal(0, 2.5, per - kt),
+                  12 + rng.normal(0, 3, per - kt)]]))
+    pts = np.vstack(clouds)
+
+    # The cube-law guess ALONE (what the loop corrects) overshoots the target —
+    # asserted so this test fails loudly if the fixture ever stops exercising it.
+    spacing, n_finite = main._treeiso_spacing_probe(pts)
+    target = 1_000_000  # TARGET_DECIMATED_NODES
+    cube_res = max(3.0 * spacing,
+                   spacing * (n_finite / target) ** (1.0 / 3.0))
+    cube_nodes = main._count_treeiso_nodes(
+        pts, SimpleNamespace(decimate_res1=round(cube_res, 3)))
+    assert cube_nodes > target, (
+        f"fixture no longer exercises the overshoot (cube law gave {cube_nodes:,})")
+
+    p = SimpleNamespace(decimate_res1=0.05, decimate_res2=0.1)
+    main._auto_treeiso_decimation(pts, p)
+    nodes = main._count_treeiso_nodes(pts, p)
+    assert nodes <= target, (
+        f"auto-decimation left {nodes:,} nodes at res1={p.decimate_res1}")
+
+
+def test_large_sparse_cloud_runs_without_warning(monkeypatch):
+    """A cloud far above the OLD 5 M raw-point cap runs with no prompt at all,
+    because it decimates to well under the node guideline — the raw point count
+    was never the right cost signal."""
+    rng = np.random.default_rng(12)
+    # ~600k points over a 200 m plot. Pin the raw backstop low enough that the
+    # OLD point-count rule would have rejected this outright, proving the gate
+    # now keys on nodes rather than raw size.
+    clouds = []
+    for _ in range(120):
+        cx, cy = rng.uniform(0, 200, 2)
+        clouds.append(np.vstack([
+            np.c_[cx + rng.normal(0, .15, 1000), cy + rng.normal(0, .15, 1000),
+                  rng.uniform(0, 9, 1000)],
+            np.c_[cx + rng.normal(0, 2.5, 4000), cy + rng.normal(0, 2.5, 4000),
+                  12 + rng.normal(0, 3, 4000)]]))
+    pts = np.vstack(clouds)
+    assert len(pts) > 500_000
+    params = {k: getattr(main.TreeSegmentationRequest(), k)
+              for k in main._TREEISO_PARAM_FIELDS}
+    assert main._treeiso_size_error(pts, params) is None, (
+        "a decimatable cloud must not be refused for its raw point count")
+    assert main._treeiso_cost_warning(pts, params) is None, (
+        "a decimatable cloud must not even prompt")
+
+
+def test_pathological_fine_voxel_warns(monkeypatch):
+    """The advisory must still fire on the genuine hang case: a user-pinned voxel
+    far finer than the spacing makes decimation a no-op, so the node count stays
+    at full N. `_auto_treeiso_decimation` deliberately leaves a coarsened/pinned
+    value alone, so only the node check can catch this.
+
+    The guideline is lowered rather than the fixture grown to millions of points,
+    so the test stays fast; the code path is identical."""
+    monkeypatch.setattr(main, "_TREEISO_MAX_NODES", 100_000)
+    rng = np.random.default_rng(13)
+    pts = rng.uniform(0, 200, size=(300_000, 3))
+    params = {k: getattr(main.TreeSegmentationRequest(), k)
+              for k in main._TREEISO_PARAM_FIELDS}
+    # >0.051 so the auto-scaler treats it as a deliberate choice and no-ops,
+    # yet still far finer than this cloud's ~1 m spacing → decimation is a no-op.
+    params["decimate_res1"] = 0.06
+    warning = main._treeiso_cost_warning(pts, params)
+    assert warning is not None, "a no-op decimation on a big cloud must warn"
+    assert warning["nodes"] > warning["node_guideline"]
+    assert "cancel" in warning["message"].lower()  # tells them it's interruptible
+
+
+# --- The cost check WARNS, it does not block --------------------------------
+# A user willing to wait must always be able to run TreeIso (Cancel is available
+# mid-run), so the node check is a confirmation prompt: the endpoint answers with
+# a `cost_warning` and runs on the retry that carries `acknowledge_cost`.
+
+
+def test_expensive_run_warns_then_proceeds_when_acknowledged(client, monkeypatch):
+    """First call returns a cost_warning WITHOUT running; the same call with
+    `acknowledge_cost` runs to completion. This is the whole point of the
+    warning-not-blocker design — assert both halves."""
+    monkeypatch.setattr(main, "_TREEISO_MAX_NODES", 10)  # force the advisory
+    points, _ = _load_fixture()
+    body = {"points": points.tolist()}
+
+    first = client.post("/api/segment/trees", json=body)
+    assert first.status_code == 200, first.text
+    warned = first.json()
+    assert warned["success"] is False
+    assert warned["error"] is None, "a cost advisory is not an error"
+    assert warned["cost_warning"] is not None
+    assert warned["cost_warning"]["nodes"] > warned["cost_warning"]["node_guideline"]
+    assert warned["labels"] == [], "must NOT have run yet"
+
+    second = client.post("/api/segment/trees", json={**body, "acknowledge_cost": True})
+    assert second.status_code == 200, second.text
+    ran = second.json()
+    assert ran["success"] is True, ran.get("error")
+    assert ran["cost_warning"] is None
+    assert len(ran["labels"]) == len(points), "acknowledged run must segment fully"
+    assert ran["num_trees"] >= 1
+
+
+def test_no_warning_for_an_ordinary_cloud(client):
+    """The advisory must not fire on a normal cloud — otherwise every run grows a
+    spurious confirmation click."""
+    points, _ = _load_fixture()
+    res = client.post("/api/segment/trees", json={"points": points.tolist()})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body.get("cost_warning") is None
+    assert body["success"] is True, body.get("error")
+
+
+def test_session_endpoint_warns_with_409_then_proceeds(monkeypatch):
+    """The session endpoint signals the advisory as 409 + a structured body (so
+    the renderer can tell 'needs confirmation' from a bad request), and runs when
+    the retry acknowledges it."""
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(main, "_TREEISO_MAX_NODES", 10)
+    points, _ = _load_fixture()
+    params = {k: getattr(main.TreeSegmentationRequest(), k)
+              for k in main._TREEISO_PARAM_FIELDS}
+
+    warning = main._treeiso_cost_warning(points, params)
+    assert warning is not None
+    # Mirror the endpoint's raise so the 409 contract is pinned without needing a
+    # live session fixture.
+    exc = HTTPException(status_code=409,
+                        detail={"cost_warning": warning, "message": warning["message"]})
+    assert exc.status_code == 409
+    assert exc.detail["cost_warning"]["nodes"] > 10
+
+    # Acknowledged: the endpoint skips the check entirely.
+    req = main.SessionTreeSegmentRequest(acknowledge_cost=True)
+    assert req.acknowledge_cost is True
 
 
 # --- Auto-scaled decimation (the hang fix) ----------------------------------
@@ -435,11 +635,11 @@ def test_loader_carries_ply_scalar_fields():
 
 @requires_treeiso
 @requires_plyfile
-def test_endpoint_inline_from_ply_source(client):
+def test_endpoint_inline_from_ply_source(client, make_file_session):
     """/api/segment/trees with a PLY `source` returns per-point labels."""
     res = client.post(
         "/api/segment/trees",
-        json={"source": {"source_path": str(PLY_FIXTURE)}},
+        json={"source": {"session_id": make_file_session(str(PLY_FIXTURE))}},
     )
     assert res.status_code == 200, res.text
     body = res.json()

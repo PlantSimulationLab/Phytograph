@@ -20,6 +20,11 @@ Design notes
 * **Volume** uses analytic formulas for the parametric shapes (reliable) and
   ConvexHull as the alpha-shape fallback when the mesh isn't watertight — never a
   negative/NaN volume.
+* **Params** — each fit also reports the parameters that DEFINE it (see `params`
+  in `fit_crown`), so an exported crown table records the shape itself rather
+  than only summary statistics. The alpha shape is the exception that proves the
+  rule: a concave hull has no analytic parameters beyond its alpha radius, so
+  reproducing it means carrying the mesh.
 """
 from __future__ import annotations
 
@@ -227,7 +232,10 @@ def _alpha_concave_hull(points: np.ndarray, alpha: "float | None"):
          search and is used as-is (still largest-component-cleaned).
       4. Light Taubin smoothing (shrink-free) for a smooth surface.
 
-    Returns an open3d TriangleMesh with vertex normals. Raises ValueError if no
+    Returns `(mesh, alpha_used)` — an open3d TriangleMesh with vertex normals,
+    and the alpha radius (m) that actually produced it, so the caller can report
+    the fit parameter (for an auto-grown alpha the user never chose it, and it's
+    the ONLY scalar that characterises the hull). Raises ValueError if no
     triangles could be built at all.
     """
     import open3d as o3d
@@ -250,15 +258,20 @@ def _alpha_concave_hull(points: np.ndarray, alpha: "float | None"):
         return _largest_watertight_component(m)
 
     chosen = None
+    # The alpha that produced `chosen` — reported back as the fit parameter.
+    chosen_alpha = 0.0
     if alpha is not None:
-        chosen = _build(float(alpha))
+        chosen_alpha = float(alpha)
+        chosen = _build(chosen_alpha)
     else:
         # Grow alpha until the largest component closes; keep the last as fallback.
         for mult in _ALPHA_MULTIPLIERS:
-            cand = _build(mean_nn * mult)
+            a = mean_nn * mult
+            cand = _build(a)
             if len(cand.triangles) == 0:
                 continue
             chosen = cand
+            chosen_alpha = a
             if cand.is_watertight():
                 break
 
@@ -273,7 +286,7 @@ def _alpha_concave_hull(points: np.ndarray, alpha: "float | None"):
     smoothed.remove_degenerate_triangles()
     smoothed.remove_duplicated_triangles()
     smoothed.compute_vertex_normals()
-    return smoothed
+    return smoothed, chosen_alpha
 
 
 def fit_crown(
@@ -311,6 +324,16 @@ def fit_crown(
 
     verts = tris = normals = None
     volume = 0.0
+    # The shape's DEFINING parameters — what it takes to rebuild the solid.
+    # Reported per shape so an exported table is a record of the fit, not just
+    # summary statistics. `a_m`/`b_m`/`c_m` are the semi-extent along x/y/z for
+    # both box-like shapes (ellipsoid semi-axes, prism half-extents) so the same
+    # three columns mean the same thing in both cases. The shape's CENTER is not
+    # repeated here: for all three parametric shapes it is exactly the reported
+    # `crown_center` (the fitted mesh's AABB center) — the ellipsoid is symmetric
+    # about the centroid, the prism IS the AABB, and the cone's AABB center is
+    # (centroid_x, centroid_y, z_base + h/2).
+    params: dict = {}
 
     if shape == "ellipsoid":
         # Axis-aligned upright ellipsoid that ENCLOSES the crown points. Sizing
@@ -335,6 +358,7 @@ def fit_crown(
         uv, tris = _uv_sphere()
         verts = uv * np.array([cx, cy, cz]) + centroid
         volume = 4.0 / 3.0 * math.pi * cx * cy * cz
+        params = {"a_m": float(cx), "b_m": float(cy), "c_m": float(cz)}
 
     elif shape == "prism":
         # Axis-aligned bounding box of the trimmed crown points.
@@ -344,6 +368,12 @@ def fit_crown(
         extent = mx - mn
         verts, tris = _box_mesh(center, np.eye(3), extent)
         volume = float(extent[0] * extent[1] * extent[2])
+        # Half-extents, so a/b/c carry the same meaning as the ellipsoid's semi-axes.
+        params = {
+            "a_m": float(extent[0]) / 2.0,
+            "b_m": float(extent[1]) / 2.0,
+            "c_m": float(extent[2]) / 2.0,
+        }
 
     elif shape == "cone":
         # Upright cone that ENCLOSES the crown: apex at the crown top, circular
@@ -379,15 +409,28 @@ def fit_crown(
         base_center = np.array([centroid[0], centroid[1], z_base])
         verts, tris = _cone_mesh(base_center, radius, height)
         volume = 1.0 / 3.0 * math.pi * radius * radius * height
+        params = {"base_radius_m": float(radius), "height_m": float(height)}
 
     elif shape == "alpha":
-        mesh = _alpha_concave_hull(kept, alpha)
+        mesh, alpha_used = _alpha_concave_hull(kept, alpha)
         verts = np.asarray(mesh.vertices, dtype=np.float64)
         tris = np.asarray(mesh.triangles, dtype=np.int32)
         normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
+        # A concave hull has no analytic parameters — the MESH is the model. The
+        # alpha radius is the one scalar that characterises it, so report it (plus
+        # whether it was auto-grown); the geometry itself has to travel as a mesh.
+        try:
+            watertight = bool(mesh.is_watertight())
+        except Exception:
+            watertight = False
+        params = {
+            "alpha_m": float(alpha_used),
+            "alpha_auto": alpha is None,
+            "watertight": watertight,
+        }
         # Watertight mesh volume, else convex-hull fallback (never NaN/negative).
         try:
-            volume = abs(float(mesh.get_volume())) if mesh.is_watertight() else 0.0
+            volume = abs(float(mesh.get_volume())) if watertight else 0.0
         except Exception:
             volume = 0.0
         if volume <= 0.0:
@@ -418,10 +461,13 @@ def fit_crown(
     mesh_center = (mesh_min + mesh_max) / 2.0
     dims = mesh_max - mesh_min
 
+    tri_arr = np.asarray(tris, dtype=np.int32)
+
     return {
         "vertices": verts,
-        "triangles": np.asarray(tris, dtype=np.int32),
+        "triangles": tri_arr,
         "normals": np.asarray(normals, dtype=np.float32),
+        "params": params,
         "metrics": {
             "tree_height_m": float(tree_height),
             "crown_volume_m3": float(volume),
@@ -431,5 +477,10 @@ def fit_crown(
             "crown_top_z": float(mesh_max[2]),
             "surface_area_m2": surface_area,
             "num_points_used": int(n_used),
+            # Mesh size. Fixed for the parametric shapes; for an alpha hull it's
+            # data-dependent and the only honest measure of how big the exported
+            # mesh is.
+            "num_vertices": int(len(verts)),
+            "num_triangles": int(len(tri_arr)),
         },
     }

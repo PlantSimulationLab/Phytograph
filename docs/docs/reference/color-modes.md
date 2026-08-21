@@ -1,25 +1,76 @@
 # Color modes
 
-Point-cloud color mode is **global** — it applies to every loaded cloud
-at once. Change it from the **Color by** dropdown in the Display panel
-(lower-right corner of the viewer).
+Set a point cloud's color mode from the **Color by** dropdown in the
+Display panel (lower-right corner of the viewer). What it applies to
+depends on your selection:
+
+- **Nothing selected** — the dropdown reads *Color by (all scans)* and
+  sets the scene default. Every cloud follows it.
+- **One or more scans selected** — the dropdown reads *Color by (N
+  selected)* and changes only those scans, leaving the rest alone.
+
+That means two clouds can sit in different modes at once — a segmented
+scan showing its wood/leaf classes beside a raw scan colored by height.
 
 ## Per-cloud color modes
 
 | Mode | What it shows | When to use |
 |---|---|---|
 | **Per-scan color** | Each cloud drawn flat in its identifier swatch color (click a scan's color dot in the **Scans** panel to change it) | Default. Best at-a-glance read of which points came from which scanner. |
-| **Height** (Z) | Color by Z-axis position via colormap | Good for any vertical structure — plant scans, terrain. |
-| **X** | Color by X position | Inspecting horizontal stripes or registration along X. |
-| **Y** | Color by Y position | Same, for Y. |
+| **Z Axis (Height)** | Color by Z-axis position via colormap | Good for any vertical structure — plant scans, terrain. |
+| **X Axis** | Color by X position | Inspecting horizontal stripes or registration along X. Not offered for octree-streamed clouds. |
+| **Y Axis** | Color by Y position | Same, for Y. Not offered for octree-streamed clouds. |
 | **Intensity** | Color by LiDAR intensity scalar | Distinguishing reflective leaves from less reflective wood (species-dependent). |
 | **RGB** | Original per-point color from the file | Scans co-registered with photography. |
-| **Solid Color** | A single flat color applied to every cloud | When you want the data out of the way to focus on a mesh or skeleton overlay. |
+| **Solid Color** | A single flat color | When you want the data out of the way to focus on a mesh or skeleton overlay. |
 | **Scalar Field** | Color by any custom per-point scalar carried in the source file | Imported clouds with extra columns — reflectance, deviation, timestamp, target index, custom metrics. |
 
 When a scalar mode is active, a colormap selector becomes available in
-the right panel: viridis (default), plasma, magma, inferno, turbo,
-grayscale.
+the right panel: viridis (default), plasma, inferno, magma, turbo, jet,
+coolwarm, grayscale.
+
+## The legend stack
+
+Every pseudocolored object contributes one entry to a single legend stack
+in the lower-right corner of the viewer. Each entry names **the geometry
+it describes** on the first line and the **variable** on the second, so a
+scene holding a segmented scan, a DEM mesh and an LAD grid reads
+unambiguously instead of stacking anonymous colorbars.
+
+- **Objects sharing a mapping merge.** Five scans all colored by height
+  produce one entry captioned *5 scans*, not five identical colorbars.
+  Give one of them its own colormap and it splits out into its own entry,
+  captioned by name.
+- **The stack stops growing at three.** Beyond that, the remaining
+  entries collapse into a compact list of one-line rows; click a row to
+  expand it. The selected object keeps a full-size entry, outlined in
+  blue.
+- **Click an entry's caption to edit it.** An inline **Colormap** picker
+  appears, applying to every object that entry covers — including all
+  members of a merged group. Categorical entries have no picker, since
+  their colors come from the classification scheme rather than a ramp.
+
+Colouring by `tree_instance` deliberately shows no legend: tree ids are
+arbitrary labels and a scene routinely holds 100+ of them, so neither a
+gradient nor a class list would be readable. The points stay colored.
+
+## Colormaps: one default, per-object overrides
+
+The **Default colormap** picker in the Display panel sets the palette for
+the whole scene. Individual objects can then override it, either from
+their own row — a mesh's **Color by** section, or a Leaf Area Density
+result's **Colormap** field — or straight from the legend entry (click
+its caption). Both surfaces edit the same setting. An overridden object
+stops following the default and shows a **Reset** link that puts it back.
+
+Changing the default repaints everything still inheriting it, leaving
+overridden objects alone. This lets you compare two objects under
+different palettes — say a DEM mesh in plasma against an LAD grid in
+turbo — without one picker dragging the other along.
+
+A scalar field selection belongs to the cloud that carries it, so
+deleting a segmented scan removes its mode with it; other clouds are
+unaffected.
 
 ### Scalar fields on imported clouds
 
@@ -108,29 +159,32 @@ gradient.
 
 | Mode | What it shows | When to use |
 |---|---|---|
-| **Single Color** | Flat color | Default. |
-| **Height** | Color by vertex Z | Inspecting elevation in terrain meshes or plant verticality. |
-| **Vertex Color** | Per-vertex colors from the file | If the mesh has them. |
-| **Branch Order** | Color by branch order (Helios-generated plants) | Comparing trunk vs. side branches in procedural plants. |
+| **Solid Color** | Flat color | Default. |
 | **Inclination** | Per-triangle zenith of the face normal, folded to 0–90° | Reading surface tilt — flat vs. steep facets on a reconstruction. |
 | **Azimuth** | Per-triangle compass bearing of the face normal, 0–360° | Seeing which way facets face. |
 | **Triangle Area** | Per-triangle surface area | Spotting over-large bridging triangles or uneven tessellation. |
 | **Source Scan** | Each triangle in the color of the scan it came from (Helios multi-scan meshes) | Seeing scan coverage / overlap on a Helios reconstruction. |
+| **Layers** | One of a DEM surface's stored scalar layers — elevation, density, intensity, hillshade, slope, or aspect | Reading a generated DTM/DSM/CHM. |
 
-Inclination / Azimuth / Triangle Area are set from the **Color by**
-control that expands from a triangulation-generated mesh's row in the
-**Meshes** panel (click the row's chevron). They share the scalar
+Meshes render per-vertex colors when the file carries them, but that is
+automatic — it isn't a selectable mode.
+
+These modes are set from the **Color by** control that expands from a mesh's
+row in the **Meshes** panel (click the row's chevron). The control appears for
+triangulated meshes and DEM surfaces; fitted crowns don't have it. They share the scalar
 colormap selector and bottom-right colorbar. **Source Scan** is offered
 there too for Helios meshes built from more than one scan; it uses each
 scan's swatch color and shows a per-scan legend instead of a colorbar.
 
-## Per-skeleton color modes
+## Skeleton coloring
 
-| Mode | What it shows | When to use |
-|---|---|---|
-| **Branch Order** | Strahler number — trunk in deep green, twigs in mustard | Default for woody plants. Best topological readout. |
-| **Length** | Color edges by their length | Spotting unusually short or long segments. |
-| **Single Color** | Flat color | When you want the skeleton out of the way visually. |
+Skeletons have a single toggle rather than a mode list: **Color by branch
+order**, in the **Skeletons** panel.
+
+| State | What it shows |
+|---|---|
+| **On** | Branch order, as an 8-step ramp indexed from the tips: order 1 red → orange → yellow → green → cyan → blue → violet → order 8+ (trunk) pink. Orders above 8 clamp to pink. |
+| **Off** (default) | The skeleton's flat color (amber by default), which you can change per skeleton. |
 
 ## QSM color modes
 
@@ -142,6 +196,13 @@ scene.
 |---|---|---|
 | **Shoot rank** | Color by branching order (trunk = 0, scaffolds = 1, …) | Default. Reading structure — which axis is the trunk vs. a scaffold. |
 | **Shoot id** | A distinct color per shoot, so each continuous axis reads as one object | Seeing the shoots themselves, independent of rank. |
+| **Color** | One flat color for the whole tree, from a swatch or hex field | Figures where the QSM is context, or to match a house style. |
+| **Texture** | A bark image wrapped around every branch | Presentation-ready renders. |
+
+The first two modes encode *data* as color and get a slight self-glow so
+the hues stay legible against the dark viewport. **Color** and
+**Texture** are *appearance* modes and light normally, so a picked color
+renders as exactly that color and a bark photo keeps its true tones.
 
 The **Shoot rank** palette is fixed and chosen so adjacent ranks stay
 clearly distinguishable:
@@ -160,15 +221,24 @@ hue rotation, so neighbouring shoots don't collide. In either mode,
 clicking a shoot in the results list **highlights that whole axis** and
 dims the rest.
 
+**Texture** mode adds a **Bark** picker — the five bark images from the
+Helios plant-architecture library, or your own uploaded JPEG/PNG — and a
+**Tile (m)** size that sets how large one bark tile is in the real
+world (default `0.25` m; smaller = finer pattern). Because the tile is
+measured in world units rather than as a fixed number of wraps, the bark
+holds a consistent physical scale from trunk to twig instead of
+stretching wider as a branch thickens. See
+[Build a QSM](../workflows/build-qsm.md#switch-the-coloring).
+
 ## Leaf area density voxels
 
 A [leaf area density](../concepts/leaf-area-density.md) result is a grid
-of voxel cells, each colored by its LAD value (m²/m³) through the shared
-scalar colormap. A colorbar labelled **LAD [m²/m³]** shows the range.
+of voxel cells, each colored by its LAD value (m²/m³). A colorbar
+labelled **LAD [m²/m³]** shows the range.
 
 | Control | What it does |
 |---|---|
-| **Colormap** | Same palette set as scalar fields (viridis default). Shared with the other scalar colorbars. |
+| **Colormap** | Same palette set as scalar fields. Follows the scene default until you change it here, which overrides it for this result only (**Reset** restores the default). |
 | **Opacity** | Cell translucency, so you can see through the grid into the canopy. |
 | **Hide empty voxels** | On by default — voxels with no returns (LAD ≤ 0) are hidden so only foliage-bearing cells draw. Turn off to see the full grid faintly. |
 

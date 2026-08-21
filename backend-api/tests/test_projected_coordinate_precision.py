@@ -80,8 +80,11 @@ def test_centimetre_detail_is_resolvable(utm_cloud):
 def test_precision_holds_through_the_compute_chokepoint(utm_cloud):
     """`_read_points_from_source` is what every compute tool reads through."""
     path, xyz = utm_cloud
+    # Direct loader test: allow_file_source is the deliberate opt-in for reading
+    # a file with no session (compute paths must send session_id instead).
     pos, _, _ = _read_points_from_source(
-        PointSource(source_path=str(path), ascii_format="x y z"))
+        PointSource(source_path=str(path), ascii_format="x y z",
+                    allow_file_source=True))
 
     assert pos.dtype == np.float64
     assert np.abs(pos - xyz).max() < 1e-3

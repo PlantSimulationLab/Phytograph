@@ -290,8 +290,14 @@ export function CropPanel({
           {cropDrawState === 'drawing-polygon' ? (
             <>
               <div className="font-medium text-neutral-200 mb-1">Drawing polygon</div>
-              Click in the viewport to add vertices. Right-click or Backspace removes the last. Press Enter to close, Esc to cancel.
+              Click in the viewport to add vertices. Right-click or Backspace removes the last. Double-click or press Enter to close, Esc to cancel.
               <div className="mt-2 text-neutral-400">Vertices: {polygonVertexCount}</div>
+              <div data-testid="crop-blocked-hint" className="mt-2 text-amber-400/90 leading-tight">
+                ⊘ These panels sit over the viewport and take the click
+                themselves — vertices can&apos;t land on them, and the preview
+                line stops at their edge. Collapse a panel or orbit the view to
+                reach what&apos;s behind them.
+              </div>
             </>
           ) : hasCropPolygon ? (
             <>
@@ -324,6 +330,11 @@ export function CropPanel({
             <>
               <div className="font-medium text-neutral-200 mb-1">Drawing rectangle</div>
               Drag in the viewport to draw a rectangle from any angle. Esc to cancel.
+              <div data-testid="crop-blocked-hint" className="mt-2 text-amber-400/90 leading-tight">
+                ⊘ These panels sit over the viewport, so a drag can&apos;t start
+                on them — it clamps at their edge. Collapse a panel or orbit
+                the view to reach what&apos;s behind them.
+              </div>
             </>
           ) : hasCropPolygon ? (
             <>

@@ -4,8 +4,11 @@ import {
   buildShootPolylines,
   appendTube,
   rankColor,
+  shootColor,
+  shootNodeColor,
   RANK_COLORS,
   type MeshArrays,
+  type ShootPolyline,
 } from './QSM3D';
 import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
 
@@ -55,7 +58,7 @@ function shoot(shoot_id: number, rank: number, cylinder_ids: number[]): QSMShoot
   };
 }
 function emptyArrays(): MeshArrays {
-  return { positions: [], normals: [], colors: [], indices: [], indexOffset: { value: 0 } };
+  return { positions: [], normals: [], colors: [], uvs: [], indices: [], indexOffset: { value: 0 } };
 }
 
 describe('buildShootPolylines', () => {
@@ -347,5 +350,81 @@ describe('whole-tree rendered geometry stays bounded (regression)', () => {
     );
     expect(worst).toBeLessThanOrEqual(maxCylLen * 3);
     expect(byId.size).toBe(cylinders.length);
+  });
+});
+
+// The four color modes. 'color'/'texture' are APPEARANCE modes and must not be
+// tinted by the categorical palettes -- and 'texture' in particular must stay pure
+// white, because the vertex color multiplies the bark map in the shader.
+describe('shootNodeColor dispatch', () => {
+  const poly: ShootPolyline = {
+    shootId: 3,
+    rank: 2,
+    nodes: [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1)],
+    radii: [0.05, 0.04],
+  };
+
+  it("'rank' uses the rank palette", () => {
+    expect(shootNodeColor(poly, 'rank', '#ff0000').getHex()).toBe(rankColor(2).getHex());
+  });
+
+  it("'shoot' uses the per-shoot hue", () => {
+    expect(shootNodeColor(poly, 'shoot', '#ff0000').getHex()).toBe(shootColor(3).getHex());
+  });
+
+  it("'color' returns exactly the picked RGB, ignoring rank and shoot id", () => {
+    const c = shootNodeColor(poly, 'color', '#3366cc');
+    expect(c.getHexString()).toBe('3366cc');
+    // Two shoots differing in rank and id must still come out identical.
+    const other: ShootPolyline = { ...poly, shootId: 99, rank: 5 };
+    expect(shootNodeColor(other, 'color', '#3366cc').getHex()).toBe(c.getHex());
+  });
+
+  it("'texture' returns white so the bark map isn't tinted", () => {
+    const c = shootNodeColor(poly, 'texture', '#3366cc');
+    expect(c.r).toBe(1);
+    expect(c.g).toBe(1);
+    expect(c.b).toBe(1);
+  });
+});
+
+describe('appendTube UV plumbing', () => {
+  const WHITE = new THREE.Color(1, 1, 1);
+
+  it('fills uvs parallel to positions across multiple tubes', () => {
+    const arr = emptyArrays();
+    const nodes = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1)];
+    const radii = [0.05, 0.05];
+    const n = 8;
+    appendTube(arr, nodes, radii, nodes.map(() => WHITE), n);
+    appendTube(arr, nodes, radii, nodes.map(() => WHITE), n);
+    expect(arr.uvs.length / 2).toBe(arr.positions.length / 3);
+    expect(arr.uvs.every(Number.isFinite)).toBe(true);
+  });
+
+  it('passes the tile size through to the UVs', () => {
+    const nodes = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1)];
+    const radii = [0.05, 0.05];
+    const n = 8;
+    const build = (tile: number) => {
+      const arr = emptyArrays();
+      appendTube(arr, nodes, radii, nodes.map(() => WHITE), n, { x: 0, y: 0, z: 0 }, tile);
+      return arr;
+    };
+    // v at the far ring == arc length / tile, so a smaller tile => more repeats.
+    const vFar = (a: MeshArrays) => a.uvs[(n + 1) * 2 + 1];
+    expect(vFar(build(0.25))).toBeCloseTo(1 / 0.25, 10);
+    expect(vFar(build(0.5))).toBeCloseTo(1 / 0.5, 10);
+  });
+
+  it('leaves UVs unaffected by the render-only display offset', () => {
+    const nodes = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1)];
+    const radii = [0.05, 0.05];
+    const n = 8;
+    const a = emptyArrays();
+    const b = emptyArrays();
+    appendTube(a, nodes, radii, nodes.map(() => WHITE), n);
+    appendTube(b, nodes, radii, nodes.map(() => WHITE), n, { x: 1e6, y: 2e6, z: 3e6 });
+    expect(b.uvs).toEqual(a.uvs);
   });
 });

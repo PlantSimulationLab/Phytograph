@@ -1,13 +1,23 @@
-import { useEffect, useRef, useState } from 'react';
-import { useThree, useFrame } from '@react-three/fiber';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useThree } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
-import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
+import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
 import { applyOctreePose } from './octreePose';
+import {
+  applyCropMaskToVisibleNodes,
+  clearCropMaskFromVisibleNodes,
+  publishCropMaskStats,
+} from './octreeCropMask';
+import {
+  applyLabelOverlayToVisibleNodes,
+  clearLabelOverlayFromVisibleNodes,
+  type LabelOverlayState,
+} from './octreeLabelOverlay';
 
 // =====================================================================
 // Octree streaming (0.3.0+)
@@ -80,10 +90,60 @@ export interface OctreePointCloudProps {
   // "inside" if it falls within ANY box); under CLIP_INSIDE it culls them on the
   // GPU at frame rate, matching the screen-space squares the strokes commit on
   // Apply (crop_octree squares_union region). Mutually exclusive with `clipBox`
-  // in practice — crop and erase are different edit modes — so they never fight
-  // over `clipMode`. We take the box transform matrix and derive the inverse the
-  // shader needs here, keeping potree-core's IClipBox detail out of the parent.
+  // — the material has one `clipMode`, so the two are resolved into a single
+  // `clipState` (crop box wins) by the clip-arbitration memo below, which is
+  // the ONLY place clipMode is written. We take the box transform matrix and
+  // derive the inverse the shader needs there, keeping potree-core's IClipBox
+  // detail out of the parent.
   clipBoxes?: Array<{ matrix: THREE.Matrix4 }> | null;
+  // Exact per-point crop preview for a SCREEN-SPACE region (freeform polygon,
+  // or a rect drawn from an arbitrary camera). Those regions aren't boxes, so
+  // the GPU clip volume above can't express them and potree's material has no
+  // per-point discard to drive — the predicate runs on the CPU over the loaded
+  // tiles instead, and rejected points are hidden with an index buffer (see
+  // octreeCropMask.ts). Box crops keep using `clipBox`: it's exact for an AABB
+  // and runs on the GPU at frame rate, which matters while the gizmo drags.
+  //
+  // `predicate` takes WORLD coordinates and returns "inside the region";
+  // `invert` flips it for Keep-Outside. `key` changes whenever the region
+  // changes and is what triggers a re-mask — pass a stable string.
+  cropMask?: {
+    predicate: (wx: number, wy: number, wz: number) => boolean;
+    invert: boolean;
+    key: string;
+  } | null;
+  /**
+   * Live manual-labelling preview, read through a REF.
+   *
+   * A label change cannot be shown the way a deletion can: deletions are a GPU
+   * clip volume, but class values are baked into octree.bin at conversion time,
+   * so a repaint is invisible until a rebuild (minutes). The overlay paints a
+   * per-tile label column client-side instead — see octreeLabelOverlay.ts.
+   *
+   * A ref, not a prop value, because the hover/stroke list changes far more
+   * often than this 900-line component should re-render — the same reason
+   * `frameStateRef` exists.
+   */
+  labelOverlayRef?: React.MutableRefObject<LabelOverlayState | null> | null;
+  /** Octree attribute holding COMMITTED labels, so a post-commit tile starts
+   *  from the baked values rather than blank. */
+  labelCommittedSlug?: string | null;
+  /** Categorical scheme for the overlay's dense INDEX values, so the points and
+   *  the legend agree while previewing. Null when not labelling. */
+  labelIndexScheme?: { attribute: string; classes: Array<{ value: number; label: string; color: [number, number, number] }> } | null;
+  /**
+   * Cross-section slab, as world-space half-space planes (see
+   * lib/crossSection.ts `slabToPlanes`). When set, points outside the slab are
+   * culled on the GPU so the user works in a thin, unoccluded section.
+   *
+   * Planes rather than a clip BOX on purpose: they AND-intersect and can only
+   * clear `insideAny`, so they compose with the rest of the clip system instead
+   * of fighting it — and, unlike a box, they do not trip the crop preview's
+   * LOD/point-budget reduction. A section must render at FULL resolution: the
+   * whole argument for the workflow is that the slab already bounds the point
+   * count (this is what ArcGIS does), so degrading it would defeat the purpose.
+   */
+  slabBoxMatrix?: THREE.Matrix4 | null;
   // World-space translation for this cloud (the Translate tool / T-modal value).
   // The PointCloudOctree is attached directly to the scene root (not inside the
   // parent's React `<group position>`), so the group transform does NOT reach it
@@ -148,6 +208,23 @@ function swapScalarIntoIntensity(geometry: any, field: string): boolean {
     geometry.setAttribute('intensity', src);
   }
   return true;
+}
+
+// True when the octree attribute is WIDER than a float32 (a `double` gps-time,
+// an int64 …), which is exactly the condition under which potree's decoder
+// pre-normalises the values into 0..1 before they reach the GPU buffer. See the
+// long note at the intensityRange assignment for why that matters.
+//
+// Read from potree's OWN parsed attribute table rather than the backend
+// metadata: it is the same object the decoder branched on, so the two can never
+// disagree, and it needs no extra plumbing through the octree ref.
+function isWideOctreeAttribute(octree: any, field: string): boolean {
+  const attrs = octree?.pcoGeometry?.pointAttributes?.attributes
+    ?? octree?.geometry?.pointAttributes?.attributes
+    ?? octree?.octreeGeometry?.pointAttributes?.attributes;
+  if (!Array.isArray(attrs)) return false;
+  const a = attrs.find((x: any) => x?.name === field);
+  return typeof a?.type?.size === 'number' && a.type.size > 4;
 }
 
 // Walk an octree's currently-loaded tiles and apply the scalar→intensity
@@ -219,6 +296,11 @@ export function OctreePointCloud({
   rangeMax,
   clipBox = null,
   clipBoxes = null,
+  labelOverlayRef = null,
+  labelCommittedSlug = null,
+  labelIndexScheme = null,
+  slabBoxMatrix = null,
+  cropMask = null,
   translation,
   rotation,
   pivot,
@@ -238,7 +320,7 @@ export function OctreePointCloud({
   // crop preview is active would drop the ClipBox.
   const [materialVersion, setMaterialVersion] = useState(0);
   const manager = getPotreeManager();
-  const { gl, camera, scene } = useThree();
+  const { scene } = useThree();
 
   // Keep the latest onOctreeReady in a ref so the load effect (keyed on
   // cacheId) doesn't re-run when the parent passes a new callback identity.
@@ -456,7 +538,12 @@ export function OctreePointCloud({
       colorMode === 'scalar' && selectedScalarField
         ? data.octree?.attributeRanges?.[selectedScalarField]
         : undefined;
-    const scalarActive = !!scalarRange;
+    // The labelling overlay supplies its own range (dense palette indices), and
+    // it must work BEFORE the first commit — at which point the octree carries
+    // no `manual_class` attribute at all, so attributeRanges has no entry and
+    // the check above would leave scalar mode inactive, silently falling back to
+    // a solid colour with the painted classes invisible.
+    const scalarActive = !!scalarRange || !!labelIndexScheme;
     const m = octree.material;
 
     // Mutate newFormat directly. potree-core doesn't expose a setter for
@@ -553,6 +640,46 @@ export function OctreePointCloud({
       (m as any).intensityRange = effectiveRange;
     }
 
+    // WIDE (>4-byte) ATTRIBUTES ARRIVE PRE-NORMALISED TO 0..1.
+    //
+    // potree's binary decoder special-cases any attribute whose type is larger
+    // than a float32, because the GPU buffer it fills is always a Float32Array
+    // and a float64 (or int64) value would lose precision on the way in:
+    //
+    //     if (attribute.type.size > 4) {
+    //       const [lo, hi] = attribute.range;
+    //       offset = lo; scale = 1 / (hi - lo);
+    //     }
+    //     buffer[i] = (value - offset) * scale;     // → 0..1
+    //
+    // So for a `double` column the shader's `intensity` attribute holds 0..1,
+    // NOT the raw values — while `effectiveRange` above was taken from the
+    // metadata's raw extrema. getIntensity() then computes
+    // (0..1 − 85.15) / 148.4 ≈ −0.57 for EVERY point, which clamps to the
+    // gradient's low texel: the cloud renders as one flat colour while the
+    // legend correctly reads 85–233. (4-byte columns skip potree's branch
+    // entirely, which is why the same data exported as a float32 extra dim
+    // colours correctly — the bug is the width, not the column.)
+    //
+    // The gradient stops are laid out on `effectiveRange`/`bandRange` below, so
+    // only the shader's value space is corrected here; the legend and the
+    // categorical band layout keep speaking in real units.
+    if (scalarActive && selectedScalarField && !labelIndexScheme
+        && isWideOctreeAttribute(octree, selectedScalarField)) {
+      (m as any).intensityRange = [0, 1];
+    }
+    // The labelling overlay writes DENSE PALETTE INDICES into the intensity
+    // slot, so the shader's value space must be [0, n-1] to match. Without this
+    // the stops are laid out over the palette's index range while the shader
+    // maps each index against the OCTREE attribute's range — every point then
+    // samples the wrong part of the gradient (in practice: the whole cloud
+    // renders as one flat colour, usually the unclassified grey, no matter what
+    // was painted).
+    if (labelIndexScheme) {
+      const n = Math.max(1, labelIndexScheme.classes.length - 1);
+      (m as any).intensityRange = [0, n];
+    }
+
     switch (colorMode) {
       case 'rgb': m.pointColorType = PointColorType.RGB; break;
       case 'intensity':
@@ -613,10 +740,17 @@ export function OctreePointCloud({
       // against `effectiveRange` (the shader's actual t-mapping). They differ
       // only for a constant column, where effectiveRange is widened to avoid a
       // zero divisor; using it here keeps the sampled t inside the right band.
-      const bandRange = effectiveRange ?? (scalarRange ? [scalarRange.min[0], scalarRange.max[0]] : null);
-      const categorical = scalarActive && scalarRange
+      // While the labelling overlay is active it OWNS the intensity slot and
+      // writes dense palette indices, so the gradient must be built from the
+      // palette's index scheme over [0, n-1] — not from the octree attribute's
+      // own range, which describes the (stale) committed column.
+      const labelScheme = labelIndexScheme ?? null;
+      const bandRange = labelScheme
+        ? [0, Math.max(0, labelScheme.classes.length - 1)] as [number, number]
+        : effectiveRange ?? (scalarRange ? [scalarRange.min[0], scalarRange.max[0]] : null);
+      const categorical = labelScheme ?? (scalarActive && scalarRange
         ? categoricalSchemeForRange(selectedScalarField, [scalarRange.min[0], scalarRange.max[0]])
-        : null;
+        : null);
       if (categorical && bandRange) {
         const stops = buildCategoricalGradientStops(categorical, [bandRange[0], bandRange[1]]);
         (m as any).gradient = stops.map(([t, [r, g, b]]) => [t, new THREE.Color(r, g, b)]);
@@ -647,29 +781,89 @@ export function OctreePointCloud({
     }
     m.needsUpdate = true;
 
-    setMaterialVersion(v => v + 1);
-  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax]);
+    // E2E seam: what the material was ACTUALLY configured with. Published here,
+    // from inside the material effect, rather than by the parent — a seam that
+    // echoes the parent's intent is self-confirming and cannot detect the very
+    // bug it exists for (labels written into the intensity slot while the
+    // shader is in an RGB mode that never samples it).
+    if (data.octree?.cacheId) {
+      ((globalThis as any).__octreeRenderMode ??= {})[data.octree.cacheId] = {
+        colorMode,
+        pointColorType: (m as any).pointColorType,
+        scalarField: scalarActive ? (selectedScalarField ?? null) : null,
+      };
+    }
 
-  // Live crop preview: attach an IClipBox to the cloud's material when a
-  // crop region is being drawn. The shader discards points outside the
-  // box at GPU level — no tile re-fetch, no JS-side iteration, runs at
-  // frame rate even on 100M-point clouds. When `clipBox` is null, clear
-  // the clip volume and put the material back into DISABLED clip mode so
-  // the cloud renders fully.
+    setMaterialVersion(v => v + 1);
+  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme]);
+
+  // ── Clip arbitration ──────────────────────────────────────────────────────
   //
-  // `createClipBox(size, position)` takes a SIZE vector (not min/max) and
-  // a CENTER position; the box is rendered as a unit cube transformed by
-  // (scale=size, translate=position). The min/max-to-size+center
-  // conversion is done here to keep the prop API symmetric with the rest
-  // of the codebase's crop-box state.
+  // ONE effect owns the material's clip state. This is not tidiness: the
+  // material has exactly ONE `clipMode` uniform, and its volume lists combine
+  // as (boxes ∪ spheres) ∩ planes. Two independent effects writing `clipMode`
+  // can only ever race, and each has to defensively guess what the other is
+  // doing (the old erase effect literally checked `!clipBox` before clearing).
   //
-  // `invert` flips ClipMode.CLIP_OUTSIDE (keep inside) → CLIP_INSIDE
-  // (keep outside) so the preview matches the "remove points inside the
-  // box" UX when the user enables invert.
-  useEffect(() => {
-    if (!octree) return;
-    const m = octree.material;
+  // So the props are resolved into a single discriminated `clipState` here, and
+  // the effect below is the only place that calls setClipBoxes / writes
+  // clipMode. Adding a new clip volume kind (e.g. a cross-section slab on clip
+  // PLANES) means adding a variant here — a type error if you forget a case —
+  // rather than bolting on a fourth effect that fights the other three.
+  //
+  // Precedence: crop box wins over the erase/delete union. They belong to
+  // different edit modes and never legitimately coexist, but a stale prop
+  // during a mode switch must resolve deterministically rather than by
+  // whichever effect happened to run last.
+  type ClipState =
+    | { mode: 'none' }
+    | { mode: 'crop-box'; boxes: any[]; invert: boolean }
+    | { mode: 'delete-union'; boxes: any[] }
+    | { mode: 'slab'; boxes: any[] };
+
+  // Identity key for the oriented-box union, so the effect re-runs only when
+  // the boxes actually move (matrices are new objects every parent render).
+  const clipBoxesKey = (clipBoxes ?? [])
+    .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
+    .join('|');
+  // Same idea for the slab: planes are new objects each render, so key on value.
+  const slabPlanesKey = slabBoxMatrix
+    ? slabBoxMatrix.elements.map(e => e.toFixed(4)).join(',')
+    : '';
+
+  const clipState = useMemo<ClipState>(() => {
+    if (slabBoxMatrix) {
+      // A slab as an oriented clip BOX, not clip planes.
+      //
+      // potree declares `uniform vec4 clipPlanes[max_clip_planes]` and the
+      // shader logic is correct, but the plane path could not be made to cull in
+      // practice: define set, clipPlaneCount=4, correct normals uploaded, and
+      // points still drew. Clip BOXES are the path crop and erase already use
+      // successfully every day, and a slab is exactly an oriented box — so use
+      // the mechanism that is known to work rather than keep pushing on one
+      // that is not exercised anywhere else in the codebase.
+      const matrix = slabBoxMatrix.clone();
+      // World → display frame, matching the crop box above.
+      matrix.premultiply(new THREE.Matrix4().makeTranslation(
+        -(displayOffset?.x ?? 0), -(displayOffset?.y ?? 0), -(displayOffset?.z ?? 0),
+      ));
+      const inverse = matrix.clone().invert();
+      const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+      return {
+        mode: 'slab',
+        boxes: [{
+          box: new THREE.Box3(
+            new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
+          ),
+          inverse, matrix, position,
+        }],
+      };
+    }
     if (clipBox) {
+      // `createClipBox(size, position)` takes a SIZE vector (not min/max) and a
+      // CENTER; the box renders as a unit cube transformed by (scale=size,
+      // translate=position). Converting here keeps the prop API symmetric with
+      // the rest of the codebase's crop-box state.
       const size = new THREE.Vector3(
         clipBox.max.x - clipBox.min.x,
         clipBox.max.y - clipBox.min.y,
@@ -683,61 +877,99 @@ export function OctreePointCloud({
         (clipBox.min.y + clipBox.max.y) / 2 - (displayOffset?.y ?? 0),
         (clipBox.min.z + clipBox.max.z) / 2 - (displayOffset?.z ?? 0),
       );
-      const box = createClipBox(size, center);
-      (m as any).setClipBoxes([box]);
-      (m as any).clipMode = clipBox.invert
-        ? ClipMode.CLIP_INSIDE
-        : ClipMode.CLIP_OUTSIDE;
-    } else if ((m as any).numClipBoxes > 0 || (m as any).clipMode !== ClipMode.DISABLED) {
-      // Only clear when there's actually a clip volume to clear. Calling
-      // setClipBoxes([]) on a material that already has zero clip boxes
-      // unconditionally triggers updateShaderSource() (the `t` flag in
-      // its body fires when going 0↔non-zero), which thrashes the
-      // shader cache for no reason and can leave the per-tile draw
-      // calls in a state where they bind a freshly-recompiling program
-      // that hasn't finished — symptom: the cloud disappears entirely.
-      (m as any).setClipBoxes([]);
-      (m as any).clipMode = ClipMode.DISABLED;
+      return {
+        mode: 'crop-box',
+        boxes: [createClipBox(size, center)],
+        invert: !!clipBox.invert,
+      };
     }
-  }, [octree, materialVersion, clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
-       clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert,
-       displayOffset?.x, displayOffset?.y, displayOffset?.z]);
-
-  // Live erase-brush preview. The brush paints camera-aligned, view-extruded
-  // boxes (square cross-section); we hand their world→box transforms to the
-  // material as clip boxes and set CLIP_INSIDE so any point inside ANY box is
-  // culled on the GPU (the shader ORs them). The shader uses each box's inverse
-  // matrix to map a world point into the unit cube [-0.5, 0.5]^3, so we derive
-  // the inverse from the transform here. When the list is empty, clear and
-  // restore DISABLED, with the same "only clear if non-empty" guard the crop
-  // box effect uses to avoid thrashing the shader cache.
-  const clipBoxesKey = (clipBoxes ?? [])
-    .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
-    .join('|');
-  useEffect(() => {
-    if (!octree) return;
-    const m = octree.material;
     if (clipBoxes && clipBoxes.length > 0) {
-      const boxes = clipBoxes.map(b => {
+      // Erase-brush / committed-delete preview: camera-aligned, view-extruded
+      // boxes. The shader maps a world point into each box's unit cube via the
+      // box's INVERSE matrix, so derive it here and keep potree-core's IClipBox
+      // shape out of the parent. Only `inverse.elements` is read by
+      // setClipBoxes; the rest is bookkeeping.
+      const boxes = (clipBoxes ?? []).map(b => {
         const matrix = b.matrix.clone();
         const inverse = matrix.clone().invert();
         const position = new THREE.Vector3().setFromMatrixPosition(matrix);
-        // Shape matches potree-core's IClipBox; only `inverse.elements` is read
-        // by setClipBoxes, the rest are bookkeeping.
-        return { box: new THREE.Box3(
-          new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
-        ), inverse, matrix, position };
+        return {
+          box: new THREE.Box3(
+            new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
+          ),
+          inverse, matrix, position,
+        };
       });
-      (m as any).setClipBoxes(boxes);
-      (m as any).clipMode = ClipMode.CLIP_INSIDE;
-    } else if ((m as any).numClipBoxes > 0 && !clipBox) {
-      // Don't clobber an active crop clip box; only clear when erase owns the
-      // boxes (crop and erase never run together, but be defensive).
-      (m as any).setClipBoxes([]);
-      (m as any).clipMode = ClipMode.DISABLED;
+      return { mode: 'delete-union', boxes };
     }
+    return { mode: 'none' };
+    // clipBoxesKey stands in for the clipBoxes array identity; the individual
+    // clipBox scalars are listed so a gizmo drag re-derives the volume.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [octree, materialVersion, clipBoxesKey]);
+  }, [clipBox?.min.x, clipBox?.min.y, clipBox?.min.z,
+      clipBox?.max.x, clipBox?.max.y, clipBox?.max.z, clipBox?.invert,
+      clipBoxesKey, slabPlanesKey,
+      displayOffset?.x, displayOffset?.y, displayOffset?.z]);
+
+  useEffect(() => {
+    if (!octree) return;
+    const m = octree.material as any;
+    if (clipState.mode === 'none') {
+      // Only clear when there's actually something to clear. Calling
+      // setClipBoxes([]) on a material that already has zero clip boxes
+      // unconditionally triggers updateShaderSource() (the `t` flag in its body
+      // fires when going 0↔non-zero), which thrashes the shader cache for no
+      // reason and can leave per-tile draw calls binding a freshly-recompiling
+      // program that hasn't finished — symptom: the cloud disappears entirely.
+      if (m.numClipBoxes > 0 || m.clipMode !== ClipMode.DISABLED) {
+        m.setClipBoxes([]);
+        m.clipMode = ClipMode.DISABLED;
+      }
+      return;
+    }
+    if (clipState.mode === 'slab') {
+      // CLIP_OUTSIDE with the slab box: keep what is inside, cull the rest.
+      m.setClipBoxes(clipState.boxes);
+      m.clipMode = ClipMode.CLIP_OUTSIDE;
+      if (data.octree?.cacheId) {
+        ((globalThis as any).__octreeClipState ??= {})[data.octree.cacheId] = {
+          mode: 'slab', numClipBoxes: m.numClipBoxes ?? null, clipMode: m.clipMode,
+        };
+      }
+      return;
+    }
+    m.setClipBoxes(clipState.boxes);
+    // crop-box: CLIP_OUTSIDE keeps what's inside the box; `invert` flips it to
+    // "discard what's inside", matching the Crop tool's Keep-Outside checkbox.
+    // delete-union: always CLIP_INSIDE — a point inside ANY painted box is
+    // culled (the shader ORs the volumes).
+    m.clipMode = clipState.mode === 'crop-box'
+      ? (clipState.invert ? ClipMode.CLIP_INSIDE : ClipMode.CLIP_OUTSIDE)
+      : ClipMode.CLIP_INSIDE;
+    // materialVersion: the material is recreated on colour/size changes, so the
+    // clip state has to be re-applied to the new one.
+  }, [octree, materialVersion, clipState]);
+
+  // Exact per-point preview for a screen-space crop region. Masks the tiles
+  // that are already loaded; tiles that stream in afterwards are caught by the
+  // per-frame afterUpdate below (same pattern as the scalar→intensity swap).
+  // Keyed on cropMask.key so redrawing the polygon re-masks and clearing it
+  // restores full density. The cleanup runs on unmount and on every key change,
+  // which is what un-hides points when the region changes rather than leaving
+  // an earlier polygon's mask behind.
+  const cropMaskKey = cropMask ? `${cropMask.key}|${cropMask.invert}` : '';
+  useEffect(() => {
+    if (!octree) return;
+    if (!cropMask) {
+      clearCropMaskFromVisibleNodes(octree);
+      return;
+    }
+    applyCropMaskToVisibleNodes(
+      octree, displayOffset, cropMask.predicate, cropMask.invert, cropMaskKey,
+    );
+    return () => clearCropMaskFromVisibleNodes(octree);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [octree, cropMaskKey, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
 
   // Cap the octree LOD level while a crop box is previewing so potree spreads
   // the (reduced) budget across a shallower, cheaper, more even part of the tree
@@ -747,60 +979,140 @@ export function OctreePointCloud({
   // re-renders at full resolution. `cropPreviewActive` is a stable boolean so
   // this fires only on enter/exit, not on every box move. Restored to unlimited
   // (Infinity) when the box clears.
+  // Deliberately keyed on `clipBox` ALONE, not on `cropMask`. The cap pays for
+  // itself when the BOX gizmo is dragging: the volume changes every frame, so
+  // potree is re-deciding visibility continuously and a shallower tree keeps
+  // that responsive. A screen-space region is closed and frozen — it re-masks
+  // once, not per frame — so the cap buys nothing there and costs a lot: it
+  // dropped this cloud from 42 loaded tiles to 3 (722k points to 143k), which
+  // reads as the crop having eaten ~80% of the cloud that it never touched.
+  // The masking work is bounded by the point budget regardless of depth.
+  // Keyed on `clipBox` ONLY — deliberately not on the slab.
+  //
+  // A crop preview trades detail for responsiveness while a gizmo drags. A
+  // cross-section must NOT: the entire argument for the workflow (and what
+  // ArcGIS does) is that the slab already bounds the point count, so the
+  // section renders at full resolution. Implementing the slab as a clip BOX
+  // would have silently inherited this cap and rendered every section sparse.
   const cropPreviewActive = !!clipBox;
   useEffect(() => {
     if (!octree) return;
     (octree as any).maxLevel = cropPreviewActive ? CROP_PREVIEW_MAX_LEVEL : Infinity;
   }, [octree, cropPreviewActive]);
 
-  // Per-frame LOD update. Potree decides which nodes to fetch / drop
-  // based on the camera's view of the octree's bounding boxes. Also
-  // keeps per-tile sceneNode.material in sync with the cloud's current
-  // material — tiles loaded between material-effect runs get their
-  // ref synced here on the next frame.
-  useFrame(() => {
-    if (!octree) return;
-    // When the crop clip box makes this cloud empty (it left the points, or a
-    // keep-outside box swallowed them), skip potree's LOD update — an under-
-    // filled point budget otherwise makes it stream the whole region (ultra-lag
-    // on large clouds). Hide the cloud while empty; restore on the next frame
-    // the box overlaps again.
-    const cropEmpty = !!clipBox && cropClipsEverything(clipBox, data.bounds, translation ?? { x: 0, y: 0, z: 0 });
-    if (cropEmpty !== cropHiddenRef.current) {
-      cropHiddenRef.current = cropEmpty;
-      const cacheId = data.octree?.cacheId;
-      if (cacheId) ((window as any).__octreeCropHidden ??= {})[cacheId] = cropEmpty;
-    }
-    if (cropEmpty) {
-      if (octree.visible) octree.visible = false;
-      return;
-    }
-    if (!octree.visible) octree.visible = true;
-    manager.updatePointClouds([octree], camera, gl);
-    const cur = octree.material;
-    const visible = (octree as any).visibleNodes;
-    if (Array.isArray(visible)) {
-      // Notify the parent the first time geometry is actually present, so it
-      // can force the one-shot recompile remount (mount-into-gradient-mode fix).
-      if (!firstTilesFiredRef.current && visible.length > 0) {
-        firstTilesFiredRef.current = true;
-        onFirstTilesReady?.();
-      }
-      const scalarActive =
-        colorMode === 'scalar' && !!selectedScalarField &&
-        !!data.octree?.attributeRanges?.[selectedScalarField];
-      for (const node of visible) {
-        const sn = (node as any).sceneNode;
-        if (sn && sn.material !== cur) sn.material = cur;
-        // Re-apply the scalar→intensity buffer swap to tiles that streamed
-        // in since the last material effect. Cheap and idempotent (a
-        // reference compare short-circuits already-swapped geometries).
-        if (scalarActive && sn?.geometry) {
-          swapScalarIntoIntensity(sn.geometry, selectedScalarField!);
-        }
-      }
-    }
+  // Per-frame LOD work. The potree update itself is NOT driven here — the point
+  // budget and node LRU are global to the shared manager, so one cloud updating
+  // alone claims the whole budget and evicts the other clouds' nodes (see
+  // potreeManager). Instead we register this octree's skip test and its
+  // post-update sync with the registry, and a single useFrame in the viewer
+  // updates every registered cloud in one call.
+  //
+  // The hooks close over props that change on most renders (clipBox, colorMode,
+  // …), so they read through a ref — the registration itself stays keyed on the
+  // octree alone and doesn't churn every render.
+  // Tracks whether the overlay was active last frame, so it is torn down
+  // exactly once when the tool closes rather than every frame after.
+  const labelOverlayWasActiveRef = useRef(false);
+  const frameStateRef = useRef({
+    clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
   });
+  frameStateRef.current = {
+    clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
+  };
+
+  useEffect(() => {
+    if (!octree) return;
+    return registerOctreeForFrame({
+      octree,
+      // When the crop clip box makes this cloud empty (it left the points, or a
+      // keep-outside box swallowed them), skip potree's LOD update — an under-
+      // filled point budget otherwise makes it stream the whole region (ultra-lag
+      // on large clouds). Hide the cloud while empty; restore on the next frame
+      // the box overlaps again.
+      shouldSkip: () => {
+        const { clipBox: cb, data: d, translation: t } = frameStateRef.current;
+        const cropEmpty = !!cb && cropClipsEverything(cb, d.bounds, t ?? { x: 0, y: 0, z: 0 });
+        if (cropEmpty !== cropHiddenRef.current) {
+          cropHiddenRef.current = cropEmpty;
+          const cacheId = d.octree?.cacheId;
+          if (cacheId) ((window as any).__octreeCropHidden ??= {})[cacheId] = cropEmpty;
+        }
+        if (cropEmpty) {
+          if (octree.visible) octree.visible = false;
+          return true;
+        }
+        if (!octree.visible) octree.visible = true;
+        return false;
+      },
+      // Keeps per-tile sceneNode.material in sync with the cloud's current
+      // material — tiles loaded between material-effect runs get their ref
+      // synced here on the next frame.
+      afterUpdate: () => {
+        const {
+          data: d, colorMode: cm, selectedScalarField: field,
+          onFirstTilesReady: onReady,
+          cropMask: mask, cropMaskKey: maskKey, displayOffset: offset,
+        } = frameStateRef.current;
+        const cur = octree.material;
+        const visible = (octree as any).visibleNodes;
+        if (!Array.isArray(visible)) return;
+        // Notify the parent the first time geometry is actually present, so it
+        // can force the one-shot recompile remount (mount-into-gradient-mode fix).
+        if (!firstTilesFiredRef.current && visible.length > 0) {
+          firstTilesFiredRef.current = true;
+          onReady?.();
+        }
+        const scalarActive =
+          cm === 'scalar' && !!field && !!d.octree?.attributeRanges?.[field];
+        // Manual-labelling overlay. Runs BEFORE the scalar swap decision below
+        // because while the tool is open the label column OWNS the intensity
+        // slot — you cannot paint classes while colouring by reflectance and
+        // have any idea what you painted. Tiles already built for this stroke
+        // key are skipped, so steady state is a string compare per node.
+        // Through frameStateRef: this callback is registered ONCE (deps are
+        // [octree]), so a prop read from the closure is frozen at its mount
+        // value — labelOverlayRef was null then, and the overlay never ran.
+        const overlay = frameStateRef.current.labelOverlayRef?.current ?? null;
+        if (overlay) {
+          applyLabelOverlayToVisibleNodes(
+            octree, offset, overlay, frameStateRef.current.labelCommittedSlug ?? null,
+          );
+        } else if (labelOverlayWasActiveRef.current) {
+          // Tool closed / committed: drop the overlay so the octree's own
+          // attribute (or whatever scalar the user picked) colours again.
+          clearLabelOverlayFromVisibleNodes(octree);
+        }
+        labelOverlayWasActiveRef.current = !!overlay;
+
+        for (const node of visible) {
+          const sn = (node as any).sceneNode;
+          if (sn && sn.material !== cur) sn.material = cur;
+          // Re-apply the scalar→intensity buffer swap to tiles that streamed
+          // in since the last material effect. Cheap and idempotent (a
+          // reference compare short-circuits already-swapped geometries).
+          // Suppressed while the label overlay owns the intensity slot.
+          if (!overlay && scalarActive && sn?.geometry) {
+            swapScalarIntoIntensity(sn.geometry, field!);
+          }
+        }
+        // Mask tiles that streamed in (or were evicted and reloaded) since the
+        // crop effect ran — without this they render their cropped-away points
+        // as the LOD fills in. Skips any tile already masked under this key, so
+        // the steady-state cost is one string compare per visible node.
+        if (mask) {
+          applyCropMaskToVisibleNodes(
+            octree, offset, mask.predicate, mask.invert, maskKey,
+          );
+        } else {
+          // Keep the E2E stats hook truthful while no mask is active, so a test
+          // can read a real "nothing hidden" baseline before drawing.
+          publishCropMaskStats(octree);
+        }
+      },
+    });
+  }, [octree]);
 
   // Scene attach/detach is handled in the loader effect above. This
   // component returns null because the cloud lives directly on the scene

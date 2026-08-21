@@ -137,9 +137,12 @@ describe('buildLADRequest', () => {
     expect(multi.beam_divergence).toBe(0.7);
   });
 
-  it('sends both session_id and file_path when a cloud has both (fallback)', () => {
-    // The backend prefers the session but falls back to the file if the session
-    // is gone (e.g. after a backend restart), so we send both.
+  it('sends session_id ALONE when a session cloud also has a source path', () => {
+    // Regression: file_path used to ride along so the backend could fall back to
+    // the file when the session was gone. That fallback inverts a DIFFERENT cloud
+    // — the file predates every edit and every import-wizard choice (column
+    // roles, dropped columns, global shift) — and reports a confident LAD for
+    // data the user never saw. A stale session must be a hard error instead.
     const scan = makeScan({ sourcePath: '/data/a.xyz', asciiFormat: 'x y z' });
     scan.data!.octree = {
       cacheId: 'c1',
@@ -149,8 +152,8 @@ describe('buildLADRequest', () => {
     } as any;
     const s = buildLADRequest([scan], GRID, PARAMS).scans[0];
     expect(s.session_id).toBe('sess-123');
-    expect(s.file_path).toBe('/data/a.xyz');
-    expect(s.ascii_format).toBe('x y z');
+    expect(s.file_path).toBeUndefined();
+    expect(s.ascii_format).toBeUndefined();
     expect(s.points).toBeUndefined();
   });
 

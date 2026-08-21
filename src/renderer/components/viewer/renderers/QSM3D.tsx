@@ -1,6 +1,13 @@
 import { useMemo, useEffect } from 'react';
 import * as THREE from 'three';
 import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
+import {
+  buildShootPolylines as buildShootPolylinesPlain,
+  sweepTube,
+  DEFAULT_TEXTURE_TILE_SIZE,
+} from '../../../lib/qsmTube';
+import type { ShootPolyline as PlainShootPolyline } from '../../../lib/qsmTube';
+import { useImageTexture } from './useImageTexture';
 
 // QSM (Quantitative Structure Model) visualization. Each SHOOT is drawn as ONE
 // CONTINUOUS TUBE: a single shared ring of vertices per node, swept along the
@@ -10,14 +17,35 @@ import type { QSMCylinder, QSMShoot } from '../../../utils/backendApi';
 // forks; no miter geometry). This replaces the older per-cylinder capped-frustum
 // rendering, which showed seams + radius steps at every joint.
 //
-// Two color modes make the headline feature legible:
-//   - 'rank'  : color by shoot rank (trunk=0, scaffolds=1, ...) -- the structure.
-//   - 'shoot' : a distinct color per shoot id, so each continuous shoot reads as
-//               ONE object -- directly demonstrates the continuous-shoot output.
+// The geometry itself lives in `lib/qsmTube` (three.js-free) so the OBJ/PLY
+// exporters produce the SAME surface the user sees here. This module keeps the
+// three.js-flavored wrappers (THREE.Vector3 nodes, merged BufferGeometry, color) --
+// don't reimplement sweeping/framing here, or the viewport and the exports drift
+// apart again.
+//
+// Four color modes:
+//   - 'rank'    : color by shoot rank (trunk=0, scaffolds=1, ...) -- the structure.
+//   - 'shoot'   : a distinct color per shoot id, so each continuous shoot reads as
+//                 ONE object -- directly demonstrates the continuous-shoot output.
+//   - 'color'   : one flat user-picked RGB for the whole tree.
+//   - 'texture' : a tiled bark image (Helios library or user upload). See qsmTube's
+//                 `wrapsForRadius` for the UV scheme that keeps bark from stretching.
 // A selected shoot is highlighted (brightened) and the others dimmed so clicking a
 // shoot shows the whole continuous axis.
 
-export type QSMColorMode = 'rank' | 'shoot';
+export type QSMColorMode = 'rank' | 'shoot' | 'color' | 'texture';
+
+// 'rank' and 'shoot' encode DATA as hue, so they get the emissive lift that keeps
+// categorical colors legible against the dark viewport. 'color' and 'texture' are
+// APPEARANCE modes -- the lift would wash a bark photo out into milky pastel -- so
+// they render under normal lighting instead.
+function isCategoricalMode(mode: QSMColorMode): boolean {
+  return mode === 'rank' || mode === 'shoot';
+}
+
+// Fallback when texture mode is selected but no image has loaded yet (or it failed):
+// a neutral bark brown, so the tree never flashes white or black mid-load.
+const BARK_FALLBACK = '#8b6f47';
 
 export interface QSM3DProps {
   cylinders: QSMCylinder[];
@@ -25,8 +53,18 @@ export interface QSM3DProps {
   shoots: QSMShoot[];
   colorMode?: QSMColorMode;
   opacity?: number;
-  /** number of sides of each cross-section ring (more = rounder, costlier). */
+  /**
+   * number of sides of each cross-section ring (more = rounder, costlier).
+   * Defaults to 8 for the categorical modes; texture mode overrides to
+   * TEXTURE_RADIAL_SEGMENTS, where facets are far more obvious.
+   */
   radialSegments?: number;
+  /** Flat tree color for colorMode='color' (hex, e.g. '#8b6f47'). */
+  solidColor?: string;
+  /** Base64 bark image + its MIME type, for colorMode='texture'. */
+  barkTexture?: { data: string; mime: string } | null;
+  /** World-space edge length (m) of one bark tile. Defaults to 0.25 m (Helios' value). */
+  textureTileSize?: number;
   /**
    * Render-only display offset (Layer 2 precision safety net). Subtracted from
    * tube vertices at build time (float64) so large UTM coordinates render near
@@ -80,8 +118,6 @@ export function shootColor(shootId: number): THREE.Color {
   return new THREE.Color().setHSL(hue, 0.7, lightness);
 }
 
-const MIN_RADIUS = 1e-5;
-
 // One shoot reduced to a continuous polyline: M = (cylinders + 1) nodes, each with
 // a radius. The headline color (rank/shoot) is constant per shoot, but radius (and
 // later, per-node fields like surf_cov) is carried per node.
@@ -92,69 +128,60 @@ export interface ShootPolyline {
   radii: number[]; // length === nodes.length
 }
 
-function midpoint(
-  a: readonly [number, number, number],
-  b: readonly [number, number, number]
-): THREE.Vector3 {
-  return new THREE.Vector3(
-    (a[0] + b[0]) * 0.5,
-    (a[1] + b[1]) * 0.5,
-    (a[2] + b[2]) * 0.5
-  );
-}
-
-// Reduce each shoot's ordered cylinder chain to a single node polyline. Consecutive
-// cylinders are MEANT to share a node, but after the backend's per-cylinder axis fit
-// the shared point can drift apart by ~1cm; we reconcile by averaging the two sides
-// into one node so the tube meets exactly. A K-cylinder shoot -> K+1 nodes. Each
-// interior node's radius is the mean of its two adjoining cylinders (single shared
-// ring => continuous radius); endpoints take their one adjoining cylinder's radius.
+// Shared polyline reduction (see lib/qsmTube), lifted into THREE.Vector3 nodes for
+// the renderer's convenience. The reconciliation rules -- averaging a drifted joint
+// into one shared node, meaning each interior radius -- live in the shared module so
+// the exports get exactly the same centerline.
 export function buildShootPolylines(
   cylinders: QSMCylinder[],
   shoots: QSMShoot[]
 ): ShootPolyline[] {
-  const byId = new Map<number, QSMCylinder>();
-  for (const c of cylinders) byId.set(c.cyl_id, c);
-
-  const out: ShootPolyline[] = [];
-  for (const s of shoots) {
-    // Resolve the ordered (base->tip) cylinders; defensively skip missing ids.
-    const cyls = s.cylinder_ids
-      .map((id) => byId.get(id))
-      .filter((c): c is QSMCylinder => c != null);
-    if (cyls.length === 0) continue;
-
-    const nodes: THREE.Vector3[] = [];
-    const radii: number[] = [];
-
-    nodes.push(new THREE.Vector3(cyls[0].start[0], cyls[0].start[1], cyls[0].start[2]));
-    radii.push(Math.max(cyls[0].radius, MIN_RADIUS));
-
-    for (let i = 1; i < cyls.length; i++) {
-      // Interior shared node: average the (possibly drifted) joint position + radius.
-      nodes.push(midpoint(cyls[i - 1].end, cyls[i].start));
-      radii.push(Math.max(0.5 * (cyls[i - 1].radius + cyls[i].radius), MIN_RADIUS));
-    }
-
-    const last = cyls[cyls.length - 1];
-    nodes.push(new THREE.Vector3(last.end[0], last.end[1], last.end[2]));
-    radii.push(Math.max(last.radius, MIN_RADIUS));
-
-    out.push({ shootId: s.shoot_id, rank: s.rank, nodes, radii });
-  }
-  return out;
+  return buildShootPolylinesPlain(cylinders, shoots).map((p: PlainShootPolyline) => ({
+    shootId: p.shootId,
+    rank: p.rank,
+    nodes: p.nodes.map((n) => new THREE.Vector3(n[0], n[1], n[2])),
+    radii: p.radii,
+  }));
 }
 
 // The per-node color for one shoot. Color is constant along the shoot (rank or
 // shoot-id hue). Returned as a length-M array so future per-node coloring is a
 // drop-in.
+//
+// Exhaustive switch, not a ternary: the `never` check makes the compiler reject a
+// newly-added QSMColorMode that forgets a case here, rather than silently falling
+// through to rank coloring.
+export function shootNodeColor(
+  poly: ShootPolyline,
+  colorMode: QSMColorMode,
+  solidColor: string
+): THREE.Color {
+  switch (colorMode) {
+    case 'rank':
+      return rankColor(poly.rank);
+    case 'shoot':
+      return shootColor(poly.shootId);
+    case 'color':
+      return new THREE.Color(solidColor);
+    case 'texture':
+      // White so the diffuse map shows its true colors -- the vertex color
+      // multiplies the map, and anything but white would tint the bark.
+      return new THREE.Color(1, 1, 1);
+    default: {
+      const _exhaustive: never = colorMode;
+      void _exhaustive;
+      return rankColor(poly.rank);
+    }
+  }
+}
+
 function shootNodeColors(
   poly: ShootPolyline,
   colorMode: QSMColorMode,
-  m: number
+  m: number,
+  solidColor: string
 ): THREE.Color[] {
-  const col =
-    colorMode === 'shoot' ? shootColor(poly.shootId) : rankColor(poly.rank);
+  const col = shootNodeColor(poly, colorMode, solidColor);
   return Array.from({ length: m }, () => col);
 }
 
@@ -164,6 +191,8 @@ export interface MeshArrays {
   positions: number[];
   normals: number[];
   colors: number[];
+  /** Texture coordinates (2 per vertex), parallel to `positions`. */
+  uvs: number[];
   indices: number[];
   indexOffset: { value: number };
 }
@@ -187,116 +216,75 @@ export function appendTube(
   // float32). Defaults to origin (small-coord scenes unaffected). The frame
   // (axial/radial directions) is offset-invariant — only the emitted vertex
   // positions shift.
-  offset: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 }
+  offset: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 },
+  // World-space edge length (m) of one texture tile. Only affects `arrays.uvs`.
+  tileSize: number = DEFAULT_TEXTURE_TILE_SIZE
 ): void {
-  const m = nodes.length;
-  if (m < 2) return;
+  const swept = sweepTube(
+    nodes.map((v) => [v.x, v.y, v.z] as [number, number, number]),
+    radii,
+    n,
+    [offset.x, offset.y, offset.z],
+    tileSize
+  );
+  if (!swept) return;
 
-  // 1) Per-node axial direction (central difference at interior nodes), with a
-  //    fallback to the previous valid axial when a segment is degenerate.
-  const axial: THREE.Vector3[] = new Array(m);
-  let prevValid = new THREE.Vector3(0, 0, 1);
-  for (let i = 0; i < m; i++) {
-    const a = new THREE.Vector3();
-    if (i === 0) {
-      a.subVectors(nodes[1], nodes[0]);
-    } else if (i === m - 1) {
-      a.subVectors(nodes[m - 1], nodes[m - 2]);
-    } else {
-      const f = new THREE.Vector3().subVectors(nodes[i], nodes[i - 1]);
-      const g = new THREE.Vector3().subVectors(nodes[i + 1], nodes[i]);
-      a.addVectors(f, g).multiplyScalar(0.5);
-    }
-    if (a.length() < 1e-8) a.copy(prevValid);
-    else {
-      a.normalize();
-      prevValid = a;
-    }
-    axial[i] = a;
-  }
-
-  // Pick an initial radial direction at node 0 not parallel to the axis.
-  const pickInitial = (ax: THREE.Vector3): THREE.Vector3 => {
-    let init = new THREE.Vector3(1, 0, 0);
-    if (Math.abs(ax.dot(init)) > 0.95) init = new THREE.Vector3(0, 1, 0);
-    if (Math.abs(ax.z) > 0.95) init = new THREE.Vector3(1, 0, 0);
-    return new THREE.Vector3().crossVectors(ax, init).normalize();
-  };
-
-  // 2) Parallel-transport the radial frame node to node.
-  const radial: THREE.Vector3[] = new Array(m);
-  radial[0] = pickInitial(axial[0]);
-  for (let i = 1; i < m; i++) {
-    const r = radial[i - 1].clone();
-    const rotAxis = new THREE.Vector3().crossVectors(axial[i - 1], axial[i]);
-    if (rotAxis.length() > 1e-5) {
-      const angle = Math.acos(Math.max(-1, Math.min(1, axial[i - 1].dot(axial[i]))));
-      r.applyAxisAngle(rotAxis.normalize(), angle);
-    }
-    // Re-orthogonalize against the new axial to kill drift / the parallel case.
-    r.addScaledVector(axial[i], -r.dot(axial[i]));
-    if (r.length() < 1e-6) r.copy(pickInitial(axial[i])); // collapsed (180deg kink)
-    radial[i] = r.normalize();
-  }
-
-  // 3) Emit rings (N+1 verts each) + 4) connect consecutive rings.
   const base = arrays.indexOffset.value;
-  const orthogonal = new THREE.Vector3();
-  for (let i = 0; i < m; i++) {
-    orthogonal.crossVectors(radial[i], axial[i]).normalize();
-    const col = colorPerNode[i];
-    const r = radii[i];
-    for (let j = 0; j <= n; j++) {
-      const theta = (2 * Math.PI * j) / n;
-      const c = Math.cos(theta);
-      const s = Math.sin(theta);
-      const nx = c * radial[i].x + s * orthogonal.x;
-      const ny = c * radial[i].y + s * orthogonal.y;
-      const nz = c * radial[i].z + s * orthogonal.z;
-      arrays.positions.push(
-        nodes[i].x + r * nx - offset.x,
-        nodes[i].y + r * ny - offset.y,
-        nodes[i].z + r * nz - offset.z
-      );
-      arrays.normals.push(nx, ny, nz);
-      arrays.colors.push(col.r, col.g, col.b);
-    }
+  for (let i = 0; i < swept.positions.length; i++) {
+    const p = swept.positions[i];
+    const nrm = swept.normals[i];
+    arrays.positions.push(p[0], p[1], p[2]);
+    arrays.normals.push(nrm[0], nrm[1], nrm[2]);
+    const uv = swept.uvs[i];
+    arrays.uvs.push(uv[0], uv[1]);
+    // Color is per-NODE, and each node owns one ring of `ringStride` vertices.
+    const col = colorPerNode[Math.floor(i / swept.ringStride)];
+    arrays.colors.push(col.r, col.g, col.b);
   }
-  for (let i = 0; i < m - 1; i++) {
-    const ringA = base + i * (n + 1);
-    const ringB = base + (i + 1) * (n + 1);
-    for (let j = 0; j < n; j++) {
-      const a = ringA + j;
-      const b = ringA + j + 1;
-      const cc = ringB + j;
-      const d = ringB + j + 1;
-      arrays.indices.push(a, cc, b);
-      arrays.indices.push(b, cc, d);
-    }
+  // sweepTube's face indices are local to this tube; rebase into the merged buffer.
+  for (const f of swept.faces) {
+    arrays.indices.push(base + f[0], base + f[1], base + f[2]);
   }
-  arrays.indexOffset.value += m * (n + 1);
+  arrays.indexOffset.value += swept.positions.length;
 }
+
+// Cross-section sides in texture mode. The categorical modes get away with 8 (flat
+// color hides facets), but a tiled bark image makes an octagonal trunk obvious.
+const TEXTURE_RADIAL_SEGMENTS = 16;
 
 export function QSM3D({
   cylinders,
   shoots,
   colorMode = 'rank',
   opacity = 1.0,
-  radialSegments = 8,
+  radialSegments,
   displayOffset,
+  solidColor = BARK_FALLBACK,
+  barkTexture,
+  textureTileSize = DEFAULT_TEXTURE_TILE_SIZE,
 }: QSM3DProps) {
   const offX = displayOffset?.x ?? 0;
   const offY = displayOffset?.y ?? 0;
   const offZ = displayOffset?.z ?? 0;
+  const textured = colorMode === 'texture';
+  // Explicit prop wins; otherwise texture mode buys extra roundness.
+  const segments = radialSegments ?? (textured ? TEXTURE_RADIAL_SEGMENTS : 8);
+
+  const texture = useImageTexture(
+    textured ? barkTexture?.data : undefined,
+    barkTexture?.mime ?? 'image/jpeg'
+  );
+
   const geometry = useMemo(() => {
     if (!cylinders || cylinders.length === 0) return null;
     if (!shoots || shoots.length === 0) return null;
 
-    const n = Math.max(3, radialSegments); // a tube needs >= 3 sides
+    const n = Math.max(3, segments); // a tube needs >= 3 sides
     const arrays: MeshArrays = {
       positions: [],
       normals: [],
       colors: [],
+      uvs: [],
       indices: [],
       indexOffset: { value: 0 },
     };
@@ -308,8 +296,11 @@ export function QSM3D({
     for (const poly of polylines) {
       const m = poly.nodes.length;
       if (m < 2) continue; // a 1-cylinder shoot still yields M=2
-      const colorPerNode = shootNodeColors(poly, colorMode, m);
-      appendTube(arrays, poly.nodes, poly.radii, colorPerNode, n, { x: offX, y: offY, z: offZ });
+      const colorPerNode = shootNodeColors(poly, colorMode, m, solidColor);
+      appendTube(
+        arrays, poly.nodes, poly.radii, colorPerNode, n,
+        { x: offX, y: offY, z: offZ }, textureTileSize
+      );
     }
 
     if (arrays.positions.length === 0) return null;
@@ -318,34 +309,48 @@ export function QSM3D({
     geo.setAttribute('position', new THREE.Float32BufferAttribute(arrays.positions, 3));
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(arrays.normals, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(arrays.colors, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(arrays.uvs, 2));
     geo.setIndex(arrays.indices);
     return geo;
     // opacity is intentionally NOT a dep: it affects only the material (its own
     // useMemo), so including it would force a needless geometry rebuild.
-  }, [cylinders, shoots, colorMode, radialSegments, offX, offY, offZ]);
+  }, [cylinders, shoots, colorMode, segments, offX, offY, offZ, solidColor, textureTileSize]);
 
   const material = useMemo(() => {
     const mat = new THREE.MeshStandardMaterial({
       vertexColors: true,
       transparent: opacity < 1,
       opacity,
-      roughness: 0.6,
-      metalness: 0.05,
+      // Bark is matte; the categorical modes keep their slightly glossier look.
+      roughness: textured ? 0.9 : 0.6,
+      metalness: textured ? 0.0 : 0.05,
     });
+
+    if (textured && texture) {
+      mat.map = texture;
+    }
+
     // Self-illuminate the tubes a bit so they don't render dark when the scene
     // lights are dimmed (the QSM has no dedicated light). three's flat `emissive`
     // is a single color and would wash out the per-shoot/rank hues, so instead we
     // inject a fraction of the per-vertex color into the emissive term via a tiny
     // shader patch -- each tube keeps its own color but gets a baseline glow that
     // lifts it off the dark background regardless of scene lighting.
-    mat.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\n  totalEmissiveRadiance += vColor.rgb * 0.25;'
-      );
-    };
+    //
+    // ONLY for the categorical modes. In 'texture' mode vColor is white, so this
+    // would add a flat 25% white glow that washes the bark out to milky pastel; in
+    // 'color' mode it visibly lightens the exact RGB the user picked. Both are
+    // appearance modes where fidelity beats legibility, so they light normally.
+    if (isCategoricalMode(colorMode)) {
+      mat.onBeforeCompile = (shader) => {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <emissivemap_fragment>',
+          '#include <emissivemap_fragment>\n  totalEmissiveRadiance += vColor.rgb * 0.25;'
+        );
+      };
+    }
     return mat;
-  }, [opacity]);
+  }, [opacity, colorMode, textured, texture]);
 
   useEffect(() => () => geometry?.dispose(), [geometry]);
   useEffect(() => () => material.dispose(), [material]);

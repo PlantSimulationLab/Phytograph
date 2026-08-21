@@ -1,10 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 import { stubOpenDialog } from './helpers/stubOpenDialog';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // A Helios scan XML that carries a defined scanner origin (0.5, -1.0, 0.25) and
@@ -45,6 +48,27 @@ test.describe('translate cloud', () => {
   test.beforeEach(async () => {
     await resetToFreshScene(session.app, session.page);
   });
+
+  // Export the selected mesh to OBJ through the real Export dialog and return
+  // the file's text. Mesh export writes through the native Save dialog + the
+  // real fs IPC, so we redirect the dialog to a tmp file (an OS-native window
+  // can't be clicked) and read back the bytes actually written.
+  async function exportMeshObj(stem: string): Promise<string> {
+    const { app, page } = session;
+    const dir = mkdtempSync(join(tmpdir(), 'translate-export-'));
+    try {
+      const objPath = join(dir, `${stem}.obj`);
+      await stubSaveDialog(app, objPath);
+      await page.evaluate(() => (window as any).__openExportPanel?.());
+      await expect(page.getByTestId('export-modal')).toBeVisible();
+      await page.getByTestId('export-mesh-obj').click();
+      await expect(page.getByTestId('toast-title').filter({ hasText: 'Export Complete' }))
+        .toBeVisible({ timeout: 20_000 });
+      return readFileSync(objPath, 'utf8');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 
   // Import the fixture and wait for its octree to stream in.
   async function importTiny() {
@@ -315,30 +339,6 @@ test.describe('translate cloud', () => {
   test('a translated cloud triangulates at its translated position', async () => {
     const { page } = session;
 
-    // Capture the export blob (mesh OBJ export goes through a blob + anchor
-    // click, not the Electron save dialog). Same interception as export-mesh.spec.
-    await page.evaluate(() => {
-      const textByUrl = new Map<string, Promise<string>>();
-      const captured: { name: string; text: string }[] = [];
-      (window as unknown as { __exportedBlobs: typeof captured }).__exportedBlobs = captured;
-
-      const origCreate = URL.createObjectURL;
-      URL.createObjectURL = function (obj: Blob | MediaSource): string {
-        const url = origCreate.call(URL, obj);
-        if (obj instanceof Blob) textByUrl.set(url, obj.text());
-        return url;
-      };
-      const origAnchorClick = HTMLAnchorElement.prototype.click;
-      HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-        if (this.download) {
-          const textPromise = textByUrl.get(this.href);
-          if (textPromise) textPromise.then((text) => { captured.push({ name: this.download, text }); });
-          return;  // suppress the real download
-        }
-        return origAnchorClick.call(this);
-      };
-    });
-
     const cloudRow = await importTiny();
 
     const before = await readEntryWhenReady();
@@ -369,21 +369,10 @@ test.describe('translate cloud', () => {
     const meshRow = page.getByTestId('mesh-row').first();
     await expect(meshRow).toBeVisible({ timeout: 60_000 });
 
-    // Export the mesh to OBJ and read its real vertex coordinates.
+    // Export the mesh to OBJ and read its real vertex coordinates off disk.
     await meshRow.click();
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
-    await page.evaluate(() => (window as any).__openExportPanel?.());
-    await expect(page.getByTestId('export-modal')).toBeVisible();
-    await page.getByTestId('export-mesh-obj').click();
-
-    await expect.poll(async () => page.evaluate(
-      () => ((window as unknown as { __exportedBlobs?: unknown[] }).__exportedBlobs ?? []).length,
-    ), { timeout: 15_000, intervals: [100, 250, 500] }).toBeGreaterThan(0);
-
-    const obj = await page.evaluate(
-      () => (window as unknown as { __exportedBlobs: { name: string; text: string }[] })
-        .__exportedBlobs[0].text,
-    );
+    const obj = await exportMeshObj('translated');
 
     const xs = obj.split('\n')
       .filter((l) => l.startsWith('v '))
@@ -531,28 +520,6 @@ test.describe('translate cloud', () => {
   test('a rotated cloud (about a scene origin) triangulates at its rotated pose', async () => {
     const { page } = session;
 
-    // Capture the mesh OBJ export blob (same interception as the translate test).
-    await page.evaluate(() => {
-      const textByUrl = new Map<string, Promise<string>>();
-      const captured: { name: string; text: string }[] = [];
-      (window as unknown as { __exportedBlobs: typeof captured }).__exportedBlobs = captured;
-      const origCreate = URL.createObjectURL;
-      URL.createObjectURL = function (obj: Blob | MediaSource): string {
-        const url = origCreate.call(URL, obj);
-        if (obj instanceof Blob) textByUrl.set(url, obj.text());
-        return url;
-      };
-      const origAnchorClick = HTMLAnchorElement.prototype.click;
-      HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-        if (this.download) {
-          const textPromise = textByUrl.get(this.href);
-          if (textPromise) textPromise.then((text) => { captured.push({ name: this.download, text }); });
-          return;
-        }
-        return origAnchorClick.call(this);
-      };
-    });
-
     const cloudRow = await importTiny();
 
     // Set a scene origin at (2, 0, 0) — well off the cylinder (centered at origin,
@@ -584,18 +551,7 @@ test.describe('translate cloud', () => {
 
     await meshRow.click();
     await expect(meshRow).toHaveAttribute('data-selected', 'true');
-    await page.evaluate(() => (window as any).__openExportPanel?.());
-    await expect(page.getByTestId('export-modal')).toBeVisible();
-    await page.getByTestId('export-mesh-obj').click();
-
-    await expect.poll(async () => page.evaluate(
-      () => ((window as unknown as { __exportedBlobs?: unknown[] }).__exportedBlobs ?? []).length,
-    ), { timeout: 15_000, intervals: [100, 250, 500] }).toBeGreaterThan(0);
-
-    const obj = await page.evaluate(
-      () => (window as unknown as { __exportedBlobs: { name: string; text: string }[] })
-        .__exportedBlobs[0].text,
-    );
+    const obj = await exportMeshObj('rotated');
     const verts = obj.split('\n')
       .filter((l) => l.startsWith('v '))
       .map((l) => l.slice(2).trim().split(/\s+/).map(Number))
@@ -647,25 +603,32 @@ test.describe('translate cloud', () => {
     await expect(page.getByTestId('scene-origin-panel')).toBeHidden();
   });
 
-  // Click-to-place: arming pick mode and clicking the viewport sets the origin
-  // and populates the panel's X/Y/Z fields (surface-snap or ground-plane).
+  // Click-to-place: opening the panel arms pick mode, and clicking the viewport
+  // sets the origin and populates the panel's X/Y/Z fields (surface-snap or
+  // ground-plane).
   test('Set Scene Origin — click-to-place sets the origin from a viewport click', async () => {
     const { page } = session;
     await importTiny();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
-    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'false');
+    // Opening the panel ARMS click-to-place on its own — no second click on the
+    // Pick button needed. Arming is not placing, so there is still no override.
+    const panel = await openSceneOriginPanel();
+    await expect(panel).toHaveAttribute('data-has-origin', 'false');
+
+    // The Pick button is still a real toggle: off and back on again.
+    await page.getByTestId('scene-origin-pick').click();
+    await expect(panel).toHaveAttribute('data-place-mode', 'false');
+    await page.getByTestId('scene-origin-pick').click();
+    await expect(panel).toHaveAttribute('data-place-mode', 'true');
+    await expect(panel).toHaveAttribute('data-has-origin', 'false');
 
     // Snapshot the camera BEFORE picking: placing an origin must NOT move the
     // view (it's the rotation pivot only, not an orbit re-target).
     const camState = () => page.evaluate(() => (window as any).__getCameraState?.());
     const camBefore = await camState();
 
-    // Arm pick mode, then click OFF-center (so a would-be orbit re-target would be
-    // clearly visible) — the cylinder still fills enough of the view to hit it.
-    await page.getByTestId('scene-origin-pick').click();
-    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-place-mode', 'true');
+    // Click OFF-center (so a would-be orbit re-target would be clearly visible)
+    // — the cylinder still fills enough of the view to hit it.
     const canvas = page.locator('canvas').first();
     const box = await canvas.boundingBox();
     if (!box) throw new Error('canvas has no bounding box');
@@ -686,6 +649,38 @@ test.describe('translate cloud', () => {
     expect(dist(camBefore.position, camAfter.position)).toBeLessThan(1e-3);
     expect(dist(camBefore.target, camAfter.target)).toBeLessThan(1e-3);
   });
+
+  // Open the Scene Origin panel. Opening AUTO-ARMS click-to-place (placing the
+  // pivot by clicking is the common reason to open it), which mounts a
+  // full-viewport picker plane that swallows every canvas click and makes the
+  // marker itself non-interactive. Tests about the marker/gizmo therefore pass
+  // `armed: false` to toggle it back off first — otherwise their very first
+  // viewport click would be eaten by the picker.
+  async function openSceneOriginPanel({ armed = true }: { armed?: boolean } = {}) {
+    const { page } = session;
+    await page.getByTestId('tool-set-scene-origin').click();
+    const panel = page.getByTestId('scene-origin-panel');
+    await expect(panel).toBeVisible();
+    await expect(panel).toHaveAttribute('data-place-mode', 'true');
+    if (!armed) {
+      await page.getByTestId('scene-origin-pick').click();
+      await expect(panel).toHaveAttribute('data-place-mode', 'false');
+    }
+    return panel;
+  }
+
+  // The "Origin marker" checkbox now lives with Grid/Axes in the Display panel
+  // (it's a viewport display setting, not an origin setting), which starts
+  // collapsed — so open it once and hand back the checkbox.
+  async function originMarkerCheckbox() {
+    const { page } = session;
+    const box = page.getByTestId('display-origin-marker');
+    if (!(await box.isVisible())) {
+      await page.getByRole('button', { name: 'Display' }).click();
+      await expect(box).toBeVisible();
+    }
+    return box;
+  }
 
   // Read the three origin inputs as numbers. Requires the panel to be open.
   async function readOriginFields(): Promise<[number, number, number]> {
@@ -735,6 +730,31 @@ test.describe('translate cloud', () => {
   // center, not on it.
   const RING_PX = 12;
 
+  // Click the marker the way a HAND does: move onto it, let the pointer settle,
+  // then press and release without travelling.
+  //
+  // `page.mouse.click()` teleports the pointer from wherever it last was (here,
+  // a panel button hundreds of px away) and fires down/up with no intervening
+  // move. r3f then reports that jump as the event's `delta`, and the marker's
+  // own handler drops any click with `delta > 4` — the guard that stops the tail
+  // of a camera orbit from selecting whatever it lands on. So a teleported click
+  // is discarded even though the raycast hit the marker (the cursor does turn to
+  // 'pointer'), and the test fails while the feature works.
+  //
+  // Whether the teleport is coalesced into a move first is timing-dependent,
+  // which is why this passed on macOS and failed on CI's headless Linux for
+  // MONTHS of green runs before it started failing — nothing about the marker
+  // changed. Real users always generate the moves; only a synthetic click skips
+  // them.
+  async function clickMarkerAt(x: number, y: number) {
+    const { page } = session;
+    await page.mouse.move(x, y);
+    // A second move at rest zeroes the accumulated travel r3f reports as delta.
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.up();
+  }
+
   // The origin now always exists — with no user placement it sits at the scene
   // center, and its marker is up from the moment content loads. Guards against a
   // regression to "invisible until you set one", and against the default drifting
@@ -748,7 +768,8 @@ test.describe('translate cloud', () => {
     await expect(panel).toBeVisible();
     // No override yet, but the fields are populated and the marker is drawn.
     await expect(panel).toHaveAttribute('data-has-origin', 'false');
-    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    await expect(page.locator('[data-scene-bounds-size]'))
+      .toHaveAttribute('data-origin-marker-visible', 'true');
 
     const origin = await readOriginFields();
     const viewerEl = page.locator('[data-scene-bounds-size]');
@@ -791,12 +812,12 @@ test.describe('translate cloud', () => {
     // beforeEach reset to a fresh (empty) scene; do NOT import yet.
     await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    const panel = page.getByTestId('scene-origin-panel');
-    await expect(panel).toBeVisible();
-    // The origin still exists and is editable — only its marker is suppressed.
-    await expect(panel).toHaveAttribute('data-marker-visible', 'false');
+    // Disarm click-to-place: this test's viewport clicks are about marker
+    // selection, and an armed picker would swallow them.
+    await openSceneOriginPanel({ armed: false });
     const viewer = page.locator('[data-scene-bounds-size]');
+    // The origin still exists and is editable — only its marker is suppressed.
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'false');
     // Empty scene: bounds fall back to a ±5 box at the world origin, so the
     // ground-anchored default origin is laterally (0,0) and vertically that
     // box's floor.
@@ -814,10 +835,10 @@ test.describe('translate cloud', () => {
     await page.getByTestId('scene-origin-close').click();
     await importTiny();
     await expect(page.getByTestId('empty-viewer-hint')).toBeHidden();
-    await page.getByTestId('tool-set-scene-origin').click();
-    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    await openSceneOriginPanel({ armed: false });
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'true');
     const loaded = await worldToScreen(await readOriginFields());
-    await page.mouse.click(loaded.x + RING_PX, loaded.y);
+    await clickMarkerAt(loaded.x + RING_PX, loaded.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
 
     await page.getByTestId('scene-origin-close').click();
@@ -901,29 +922,29 @@ test.describe('translate cloud', () => {
     const { page } = session;
     await importTiny();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    const panel = page.getByTestId('scene-origin-panel');
-    await expect(panel).toBeVisible();
+    // Disarm click-to-place — this test clicks the marker, not the picker.
+    await openSceneOriginPanel({ armed: false });
     const origin = await readOriginFields();
     const viewer = page.locator('[data-scene-bounds-size]');
 
     // Visible: clicking the ring selects the origin (raises its gizmo).
     const p = await worldToScreen(origin);
-    await page.mouse.click(p.x + RING_PX, p.y);
+    await clickMarkerAt(p.x + RING_PX, p.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
 
     // Hiding the marker drops the selection AND the hit target...
-    await page.getByTestId('scene-origin-show-marker').uncheck();
-    await expect(panel).toHaveAttribute('data-marker-visible', 'false');
+    const markerBox = await originMarkerCheckbox();
+    await markerBox.uncheck();
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'false');
     await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
-    await page.mouse.click(p.x + RING_PX, p.y);
+    await clickMarkerAt(p.x + RING_PX, p.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'false');
 
     // ...while the origin itself is untouched.
     expect(await readOriginFields()).toEqual(origin);
 
-    await page.getByTestId('scene-origin-show-marker').check();
-    await expect(panel).toHaveAttribute('data-marker-visible', 'true');
+    await markerBox.check();
+    await expect(viewer).toHaveAttribute('data-origin-marker-visible', 'true');
     await page.getByTestId('scene-origin-close').click();
   });
 
@@ -935,14 +956,15 @@ test.describe('translate cloud', () => {
     const { page } = session;
     await importTiny();
 
-    await page.getByTestId('tool-set-scene-origin').click();
-    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    // Disarm click-to-place — this test drags the marker's gizmo, and an armed
+    // picker would eat the selecting click.
+    await openSceneOriginPanel({ armed: false });
     const before = await readOriginFields();
     const viewer = page.locator('[data-scene-bounds-size]');
 
     // Select the marker by clicking its ring band.
     const center = await worldToScreen(before);
-    await page.mouse.click(center.x + RING_PX, center.y);
+    await clickMarkerAt(center.x + RING_PX, center.y);
     await expect(viewer).toHaveAttribute('data-origin-selected', 'true');
 
     // Pick whichever axis projects longest on screen — the camera's default

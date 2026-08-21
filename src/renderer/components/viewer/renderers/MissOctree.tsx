@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { useThree, useFrame } from '@react-three/fiber';
+import { useThree } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType } from 'potree-core';
 import * as THREE from 'three';
 import { MISS_COLOR } from '../../../lib/classification';
-import { getPotreeManager, OctreeRequestManager } from '../potreeManager';
+import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
 import { applyOctreePose } from './octreePose';
 
 // =====================================================================
@@ -51,7 +51,7 @@ export function MissOctree({
   pivot = null,
   displayOffset,
 }: MissOctreeProps) {
-  const { scene, camera, gl } = useThree();
+  const { scene } = useThree();
   const manager = getPotreeManager();
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
 
@@ -157,26 +157,32 @@ export function MissOctree({
     applyOctreePose(octree, basePositionRef.current, translation, rotation, pivot, displayOffset);
   }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
 
-  // Per-frame LOD/budget streaming — the whole point of the octree path.
-  useFrame(() => {
+  // Per-frame LOD/budget streaming — the whole point of the octree path. The
+  // potree update is driven by the viewer's single shared useFrame, not here:
+  // the budget and node LRU are global, so updating this shell on its own would
+  // claim the whole budget and evict the hit clouds' nodes (see potreeManager).
+  useEffect(() => {
     if (!octree) return;
-    manager.updatePointClouds([octree], camera, gl);
-    // Keep newly-streamed tiles on the cloud's current (flat) material.
-    const cur = octree.material;
-    const visible = (octree as unknown as { visibleNodes?: unknown[] }).visibleNodes;
-    if (Array.isArray(visible)) {
-      for (const node of visible) {
-        const sn = (node as { sceneNode?: { material?: unknown } }).sceneNode;
-        if (sn && sn.material !== cur) sn.material = cur;
-      }
-      // Register the E2E hook the first frame tiles are actually visible, so the
-      // hook means "the shell rendered", not "the metadata loaded".
-      if (visible.length > 0) {
-        const reg = ((window as unknown as { __missOctrees?: Record<string, boolean> }).__missOctrees ??= {});
-        reg[missCacheId] = true;
-      }
-    }
-  });
+    return registerOctreeForFrame({
+      octree,
+      // Keep newly-streamed tiles on the cloud's current (flat) material.
+      afterUpdate: () => {
+        const cur = octree.material;
+        const visible = (octree as unknown as { visibleNodes?: unknown[] }).visibleNodes;
+        if (!Array.isArray(visible)) return;
+        for (const node of visible) {
+          const sn = (node as { sceneNode?: { material?: unknown } }).sceneNode;
+          if (sn && sn.material !== cur) sn.material = cur;
+        }
+        // Register the E2E hook the first frame tiles are actually visible, so the
+        // hook means "the shell rendered", not "the metadata loaded".
+        if (visible.length > 0) {
+          const reg = ((window as unknown as { __missOctrees?: Record<string, boolean> }).__missOctrees ??= {});
+          reg[missCacheId] = true;
+        }
+      },
+    });
+  }, [octree, missCacheId]);
 
   // The cloud lives on the scene root, not a React `<primitive>`, so render
   // nothing — but stay mounted so useFrame runs.

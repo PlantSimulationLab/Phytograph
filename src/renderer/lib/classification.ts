@@ -37,12 +37,16 @@ export const GROUND_CLASS_ATTRIBUTE = 'ground_class';
 // (register it via registerContinuousSlug, the opposite of ground_class).
 export const HEIGHT_ABOVE_GROUND_ATTRIBUTE = 'height_above_ground';
 
+// Exported so the labelling tool's ground preset is the same class list the
+// segmentation writes — one vocabulary for machine and hand classification.
+export const GROUND_SCHEME_CLASSES: ClassDef[] = [
+  { value: 1, label: 'Ground', color: [0.55, 0.40, 0.26] },
+  { value: 2, label: 'Non-ground', color: [0.30, 0.69, 0.31] },
+];
+
 const GROUND_SCHEME: CategoricalScheme = {
   attribute: GROUND_CLASS_ATTRIBUTE,
-  classes: [
-    { value: 1, label: 'Ground', color: [0.55, 0.40, 0.26] },
-    { value: 2, label: 'Non-ground', color: [0.30, 0.69, 0.31] },
-  ],
+  classes: GROUND_SCHEME_CLASSES,
 };
 
 // Wood/leaf classification (segment_wood writes `wood_class`): 1 = wood
@@ -51,12 +55,18 @@ const GROUND_SCHEME: CategoricalScheme = {
 // confused when both are present.
 export const WOOD_CLASS_ATTRIBUTE = 'wood_class';
 
+// Exported so the manual-labelling tool's "Wood / leaf" preset palette is
+// literally the same class list the automatic segmentation writes — a user
+// correcting segment_wood's output by hand works in one vocabulary, and a
+// colour tweak here can never leave the two out of sync.
+export const WOOD_SCHEME_CLASSES: ClassDef[] = [
+  { value: 1, label: 'Wood', color: [0.40, 0.26, 0.13] },
+  { value: 2, label: 'Leaf', color: [0.30, 0.69, 0.31] },
+];
+
 const WOOD_SCHEME: CategoricalScheme = {
   attribute: WOOD_CLASS_ATTRIBUTE,
-  classes: [
-    { value: 1, label: 'Wood', color: [0.40, 0.26, 0.13] },
-    { value: 2, label: 'Leaf', color: [0.30, 0.69, 0.31] },
-  ],
+  classes: WOOD_SCHEME_CLASSES,
 };
 
 // Tree instance segmentation (TreeIso) writes a `tree_instance` attribute:
@@ -170,17 +180,66 @@ const MISS_SCHEME: CategoricalScheme = {
 // fruit, gray for unlabeled.
 export const ORGAN_ATTRIBUTE = 'organ';
 
+// Exported so the labelling tool's "Plant organs" preset reuses these exact
+// values and colours. That makes hand labels directly comparable with the
+// organ tags a Helios synthetic scan carries — one vocabulary for measured and
+// simulated ground truth.
+export const ORGAN_SCHEME_CLASSES: ClassDef[] = [
+  { value: 0, label: 'Unknown', color: [0.55, 0.55, 0.55] },
+  { value: 1, label: 'Leaf', color: [0.30, 0.69, 0.31] },
+  { value: 2, label: 'Petiole', color: [0.65, 0.72, 0.30] },
+  { value: 3, label: 'Shoot', color: [0.45, 0.30, 0.15] },
+  { value: 4, label: 'Peduncle', color: [0.78, 0.60, 0.32] },
+  { value: 5, label: 'Fruit', color: [0.82, 0.26, 0.24] },
+  { value: 6, label: 'Petiolule', color: [0.40, 0.60, 0.45] },
+];
+
 const ORGAN_SCHEME: CategoricalScheme = {
   attribute: ORGAN_ATTRIBUTE,
-  classes: [
-    { value: 0, label: 'Unknown', color: [0.55, 0.55, 0.55] },
-    { value: 1, label: 'Leaf', color: [0.30, 0.69, 0.31] },
-    { value: 2, label: 'Petiole', color: [0.65, 0.72, 0.30] },
-    { value: 3, label: 'Shoot', color: [0.45, 0.30, 0.15] },
-    { value: 4, label: 'Peduncle', color: [0.78, 0.60, 0.32] },
-    { value: 5, label: 'Fruit', color: [0.82, 0.26, 0.24] },
-    { value: 6, label: 'Petiolule', color: [0.40, 0.60, 0.45] },
-  ],
+  classes: ORGAN_SCHEME_CLASSES,
+};
+
+// A LAS file's own `classification` byte, carried in by the importer under the
+// `las_` prefix (the bare name would collide with a reserved LAS dimension and
+// crash laspy on export — see main.py's _LAS_STD_DIMS note).
+//
+// Registering the ASPRS 1.4 standard classes here is what turns an imported
+// file's classes from "Class 5" into "High Vegetation" in the legend and the
+// class-filter checkboxes. Colours follow Potree's ClassificationScheme, which
+// is the convention users will recognise from other LiDAR tools — brown ground,
+// a three-shade green vegetation ramp.
+//
+// Codes 8 and 12 are Reserved in LAS 1.4: their old meanings (Model Key-point,
+// Overlap) moved to per-point FLAGS, which are orthogonal to the class code.
+// The class list is shared with the labelling tool's ASPRS preset palette
+// (lib/classPalettes.ts) so the two can never drift apart.
+export const LAS_CLASSIFICATION_ATTRIBUTE = 'las_classification';
+
+export const ASPRS_CLASS_LIST: ClassDef[] = [
+  { value: 0, label: 'Never Classified', color: [0.50, 0.50, 0.50] },
+  { value: 1, label: 'Unassigned', color: [0.60, 0.60, 0.60] },
+  { value: 2, label: 'Ground', color: [0.63, 0.32, 0.18] },
+  { value: 3, label: 'Low Vegetation', color: [0.00, 1.00, 0.00] },
+  { value: 4, label: 'Medium Vegetation', color: [0.00, 0.80, 0.00] },
+  { value: 5, label: 'High Vegetation', color: [0.00, 0.60, 0.00] },
+  { value: 6, label: 'Building', color: [1.00, 0.66, 0.00] },
+  { value: 7, label: 'Low Point (Noise)', color: [1.00, 0.00, 1.00] },
+  { value: 8, label: 'Reserved', color: [0.55, 0.55, 0.55] },
+  { value: 9, label: 'Water', color: [0.00, 0.00, 1.00] },
+  { value: 10, label: 'Rail', color: [0.40, 0.20, 0.60] },
+  { value: 11, label: 'Road Surface', color: [0.35, 0.35, 0.35] },
+  { value: 12, label: 'Reserved', color: [0.55, 0.55, 0.55] },
+  { value: 13, label: 'Wire — Guard', color: [0.90, 0.90, 0.20] },
+  { value: 14, label: 'Wire — Conductor', color: [0.90, 0.70, 0.20] },
+  { value: 15, label: 'Transmission Tower', color: [0.70, 0.50, 0.30] },
+  { value: 16, label: 'Wire Connector', color: [0.80, 0.80, 0.50] },
+  { value: 17, label: 'Bridge Deck', color: [0.50, 0.30, 0.70] },
+  { value: 18, label: 'High Noise', color: [1.00, 0.20, 0.60] },
+];
+
+const LAS_CLASSIFICATION_SCHEME: CategoricalScheme = {
+  attribute: LAS_CLASSIFICATION_ATTRIBUTE,
+  classes: ASPRS_CLASS_LIST,
 };
 
 // Registry of known categorical schemes, keyed by attribute slug. Future
@@ -191,6 +250,7 @@ const SCHEMES: Record<string, CategoricalScheme> = {
   [WOOD_CLASS_ATTRIBUTE]: WOOD_SCHEME,
   [MISS_ATTRIBUTE]: MISS_SCHEME,
   [ORGAN_ATTRIBUTE]: ORGAN_SCHEME,
+  [LAS_CLASSIFICATION_ATTRIBUTE]: LAS_CLASSIFICATION_SCHEME,
 };
 
 // True when `slug` has a STATIC registered scheme (is_miss, ground_class, …) —
@@ -314,6 +374,54 @@ export function isCategoricalAttribute(attribute: string | undefined | null): bo
   return categoricalSchemeFor(attribute) !== null || isDynamicCategoricalAttribute(attribute);
 }
 
+// The manual labelling tool's column. Declared here (rather than only in
+// classPalettes.ts) so the resolution helpers can special-case it, and MIRRORED
+// from MANUAL_CLASS_SLUG in backend-api/main.py — keep them in sync.
+export const MANUAL_CLASS_ATTRIBUTE = 'manual_class';
+
+/**
+ * Resolve a categorical scheme for an attribute ON A SPECIFIC CLOUD, honouring
+ * that cloud's user-defined palette.
+ *
+ * Why this exists as a separate, additive function rather than a change to
+ * `categoricalSchemeForRange`: the three registries above (`SCHEMES`,
+ * `DYNAMIC_CATEGORICAL`, `FORCE_CONTINUOUS`) are module-level and therefore
+ * PROCESS-WIDE. That is fine for by-name defaults and even for the import
+ * wizard's flags — the file already documents its global-winner tie-break for
+ * those ("if two clouds disagree on the same slug, continuous wins").
+ *
+ * It is NOT fine for user palettes. Two clouds with different palettes bound to
+ * `manual_class` is the normal case, not an edge case: a rose labelled with
+ * organ classes and a plot labelled with ASPRS classes, both open at once. A
+ * process-wide Set can only pick one winner and would silently mis-colour the
+ * other cloud's points and legend. So the palette is threaded explicitly from
+ * the cloud that owns it.
+ *
+ * Resolution order — the palette sits immediately after the explicit
+ * "show me a gradient" override and before every by-name default, because a
+ * palette the user attached to THIS cloud is a more explicit statement than any
+ * default keyed on the slug:
+ *
+ *   FORCE_CONTINUOUS → user palette → tree_instance → SCHEMES → generic → null
+ *
+ * `categoricalSchemeForRange` remains the unchanged fallback tail, so every
+ * existing call site keeps working and consumers migrate incrementally.
+ */
+export function categoricalSchemeForCloud(
+  attribute: string | undefined | null,
+  range: [number, number] | undefined | null,
+  palettes: Record<string, { slug: string; classes: ClassDef[] }> | undefined | null,
+): CategoricalScheme | null {
+  if (!attribute) return null;
+  const key = attribute.toLowerCase();
+  if (FORCE_CONTINUOUS.has(key)) return null;
+  const palette = palettes?.[key];
+  if (palette && palette.classes.length > 0) {
+    return { attribute: key, classes: palette.classes };
+  }
+  return categoricalSchemeForRange(attribute, range);
+}
+
 const UNKNOWN_CLASS_COLOR: RGB = [0.6, 0.6, 0.6];
 
 // Map a (possibly non-integer, due to float32 round-trip) attribute value to
@@ -323,6 +431,24 @@ export function colorForClassValue(scheme: CategoricalScheme, value: number): RG
   const rounded = Math.round(value);
   const cls = scheme.classes.find((c) => c.value === rounded);
   return cls ? cls.color : UNKNOWN_CLASS_COLOR;
+}
+
+// sRGB 0-1 triple → "#rrggbb". Lives here (rather than in each consumer) so the
+// scan-swatch hexes and the rendered point colors are produced by one function.
+export function rgbToHex([r, g, b]: readonly [number, number, number]): string {
+  const to255 = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
+  const h = (v: number) => to255(v).toString(16).padStart(2, '0');
+  return `#${h(r)}${h(g)}${h(b)}`;
+}
+
+// The swatch hex for a fixed categorical class — so a child cloud split out by
+// class (ground/non-ground, wood/leaf) carries exactly the colour the viewer
+// paints that class, and a scheme tweak can never leave the two out of sync.
+// Returns null for a slug with no registered scheme, so callers can fall back.
+export function classColorHex(attribute: string, value: number): string | null {
+  const scheme = categoricalSchemeFor(attribute);
+  if (!scheme) return null;
+  return rgbToHex(colorForClassValue(scheme, value));
 }
 
 // potree-core bakes the stop array into a 64-texel CanvasGradient sampled with

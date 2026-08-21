@@ -70,7 +70,7 @@ def las_with_misses(tmp_path):
 
 def test_las_file_source_drops_misses_by_default(las_with_misses):
     path, hits = las_with_misses
-    pos, _, _ = _read_points_from_source(PointSource(source_path=str(path)))
+    pos, _, _ = _read_points_from_source(PointSource(source_path=str(path), allow_file_source=True))
 
     assert len(pos) == len(hits), "miss rows must not reach a compute consumer"
     # The surviving extent is the tree, not the 2 km miss shell.
@@ -81,7 +81,7 @@ def test_las_file_source_keeps_misses_when_asked(las_with_misses):
     """Export/LAD deliberately opt in; the flag must still mean 'keep'."""
     path, hits = las_with_misses
     pos, _, _ = _read_points_from_source(
-        PointSource(source_path=str(path), include_misses=True))
+        PointSource(source_path=str(path), include_misses=True, allow_file_source=True))
 
     assert len(pos) == len(hits) + MISSES
     assert np.ptp(pos, axis=0).max() > 1000.0
@@ -98,7 +98,7 @@ def test_ascii_file_source_drops_misses(tmp_path):
     np.savetxt(path, np.column_stack([xyz, is_miss]), fmt="%.4f")
 
     pos, _, _ = _read_points_from_source(
-        PointSource(source_path=str(path), ascii_format="x y z is_miss"))
+        PointSource(source_path=str(path), ascii_format="x y z is_miss", allow_file_source=True))
 
     assert len(pos) == len(hits)
     assert np.ptp(pos, axis=0).max() < 50.0
@@ -112,7 +112,7 @@ def test_file_without_miss_column_is_untouched(tmp_path):
 
     assert _file_miss_mask(str(path), "x y z") is None
     pos, _, _ = _read_points_from_source(
-        PointSource(source_path=str(path), ascii_format="x y z"))
+        PointSource(source_path=str(path), ascii_format="x y z", allow_file_source=True))
     assert len(pos) == len(hits)
 
 

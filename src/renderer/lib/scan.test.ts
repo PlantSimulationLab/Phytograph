@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
   duplicateScanName, derivedScanName, hasData, hasParams, scanDisplayName,
-  missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, missReconSources, type Scan,
+  columnSlugs, missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, missReconSources, type Scan,
 } from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
 import type { PointCloudData, OctreeRef, ScalarField } from './pointCloudTypes';
@@ -237,5 +237,52 @@ describe('scanHasKnownOrigin', () => {
   it('is false when the scan has no data', () => {
     const scan: Scan = { id: '1', label: 'a', visible: true, color: '#000' };
     expect(scanHasKnownOrigin(scan)).toBe(false);
+  });
+});
+
+describe('the time column is recognised under either octree spelling', () => {
+  // A cloud whose timestamps round-tripped through the LAS `gps_time` field
+  // carries the octree attribute under PotreeConverter's own name, `gps-time`.
+  // The buffer key must stay that way (it indexes the GPU buffer), so the
+  // canonical-slug mapping happens in columnSlugs.
+  //
+  // THE REPORTED BUG: Backfill Misses refused such a scan with "no column
+  // 'timestamp'" while the Color-by picker listed `gps-time` — the same column,
+  // two names, one of which no predicate recognised.
+  const gpsTimeScan = {
+    data: {
+      octree: {
+        cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+        attributeRanges: { 'gps-time': { min: [85.15], max: [233.57] } },
+      },
+    },
+  } as never;
+
+  it('reports the canonical slug for a `gps-time` octree', () => {
+    expect([...columnSlugs(gpsTimeScan)]).toContain('timestamp');
+  });
+
+  it('allows Backfill Misses on a `gps-time` cloud', () => {
+    expect(missColumnsAvailable(gpsTimeScan)).toBe(true);
+    expect(isBackfillEligible(gpsTimeScan)).toBe(true);
+    expect(missReconSources(gpsTimeScan).preferred).toBe('timestamp');
+  });
+
+  it('still works for a cloud that names the column `timestamp` itself', () => {
+    // The old-export shape: a float32 extra dim named `timestamp`.
+    const s = {
+      data: { octree: { cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+        attributeRanges: { timestamp: { min: [85.15], max: [233.57] } } } },
+    } as never;
+    expect(isBackfillEligible(s)).toBe(true);
+  });
+
+  it('does not invent a timestamp for a cloud that has none', () => {
+    const s = {
+      data: { octree: { cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+        attributeRanges: { reflectance: { min: [0], max: [1] } } } },
+    } as never;
+    expect(missColumnsAvailable(s)).toBe(false);
+    expect(isBackfillEligible(s)).toBe(false);
   });
 });

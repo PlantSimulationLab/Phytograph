@@ -44,7 +44,7 @@ def grid_xyz(tmp_path):
 
 
 def test_full_resolution_count(grid_xyz):
-    src = main.PointSource(source_path=str(grid_xyz), ascii_format=GRID_FORMAT)
+    src = main.PointSource(source_path=str(grid_xyz), ascii_format=GRID_FORMAT, allow_file_source=True)
     pos, colors, intensity = main._read_points_from_source(src)
     assert pos.shape == (1000, 3)
     assert pos.dtype == np.float64
@@ -54,8 +54,7 @@ def test_full_resolution_count(grid_xyz):
 
 def test_max_points_stride_downsample(grid_xyz):
     src = main.PointSource(
-        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, max_points=100
-    )
+        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, max_points=100, allow_file_source=True)
     pos, _, _ = main._read_points_from_source(src)
     # stride = ceil(1000/100) = 10 → exactly 100 survivors.
     assert pos.shape[0] == 100
@@ -65,21 +64,19 @@ def test_max_points_stride_downsample(grid_xyz):
 
 def test_max_points_above_count_is_noop(grid_xyz):
     src = main.PointSource(
-        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, max_points=99999
-    )
+        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, max_points=99999, allow_file_source=True)
     pos, _, _ = main._read_points_from_source(src)
     assert pos.shape[0] == 1000
 
 
 def test_translation_is_added(grid_xyz):
     base = main._read_points_from_source(
-        main.PointSource(source_path=str(grid_xyz), ascii_format=GRID_FORMAT)
+        main.PointSource(source_path=str(grid_xyz), ascii_format=GRID_FORMAT, allow_file_source=True)
     )[0]
     t = [10.0, -5.0, 2.5]
     shifted = main._read_points_from_source(
         main.PointSource(
-            source_path=str(grid_xyz), ascii_format=GRID_FORMAT, translation=t
-        )
+            source_path=str(grid_xyz), ascii_format=GRID_FORMAT, translation=t, allow_file_source=True)
     )[0]
     # Every point moved by exactly +t.
     np.testing.assert_allclose(shifted - base, np.tile(t, (1000, 1)), atol=1e-9)
@@ -88,8 +85,7 @@ def test_translation_is_added(grid_xyz):
 
 def test_bad_translation_length_400(grid_xyz):
     src = main.PointSource(
-        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, translation=[1.0, 2.0]
-    )
+        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, translation=[1.0, 2.0], allow_file_source=True)
     with pytest.raises(main.HTTPException) as exc:
         main._read_points_from_source(src)
     assert exc.value.status_code == 400
@@ -97,8 +93,7 @@ def test_bad_translation_length_400(grid_xyz):
 
 def test_want_colors_returns_0_1_range(grid_xyz):
     src = main.PointSource(
-        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, want_colors=True
-    )
+        source_path=str(grid_xyz), ascii_format=GRID_FORMAT, want_colors=True, allow_file_source=True)
     _, colors, _ = main._read_points_from_source(src)
     assert colors is not None
     assert colors.shape == (1000, 3)
@@ -106,7 +101,7 @@ def test_want_colors_returns_0_1_range(grid_xyz):
 
 
 def test_missing_file_404():
-    src = main.PointSource(source_path="/no/such/file.xyz")
+    src = main.PointSource(source_path="/no/such/file.xyz", allow_file_source=True)
     with pytest.raises(main.HTTPException) as exc:
         main._read_points_from_source(src)
     assert exc.value.status_code == 404
@@ -213,3 +208,51 @@ def test_no_session_and_no_source_path_400():
     with pytest.raises(main.HTTPException) as exc:
         main._read_points_from_source(src)
     assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# File-source enforcement
+# ---------------------------------------------------------------------------
+# A cloud's file is read exactly once, at import; its in-RAM session is the
+# source of truth from then on. Computing from the file therefore means
+# computing on PRE-EDIT data — deletions, translation, filtering and labels all
+# live only in the session — which is silently wrong rather than an error. The
+# rule is enforced here, at the one chokepoint every compute/export path reads
+# through, so it holds for every caller instead of relying on each one guarding
+# itself (a renderer-side guard protects only today's single call site).
+
+def test_file_source_is_rejected_without_the_opt_in(grid_xyz):
+    """The default for a file source is refusal, not a silent stale read."""
+    src = main.PointSource(source_path=str(grid_xyz), ascii_format=GRID_FORMAT)
+    with pytest.raises(main.HTTPException) as exc:
+        main._read_points_from_source(src)
+    assert exc.value.status_code == 400
+    detail = exc.value.detail.lower()
+    assert "session_id" in detail
+    assert "stale" in detail or "source of truth" in detail
+
+
+def test_session_source_is_the_supported_path(grid_xyz, make_file_session):
+    """A session source is accepted and returns the cloud's points."""
+    sid = make_file_session(grid_xyz, GRID_FORMAT)
+    pos, _, _ = main._read_points_from_source(main.PointSource(session_id=sid))
+    assert pos.shape == (1000, 3)
+
+
+def test_session_source_ignores_a_stale_source_path(grid_xyz, make_file_session, tmp_path):
+    """`source_path` is provenance only once `session_id` is set.
+
+    This is the invariant that makes the session authoritative: a session whose
+    file has since been deleted (or replaced with different data) must still
+    compute from its in-RAM arrays, never from the path.
+    """
+    sid = make_file_session(grid_xyz, GRID_FORMAT)
+    expected, _, _ = main._read_points_from_source(main.PointSource(session_id=sid))
+
+    decoy = tmp_path / "decoy.xyz"
+    decoy.write_text("# x y z\n0 0 0\n1 1 1\n")
+    pos, _, _ = main._read_points_from_source(main.PointSource(
+        session_id=sid, source_path=str(decoy), ascii_format=GRID_FORMAT))
+
+    assert pos.shape == expected.shape, "the decoy file must not have been read"
+    np.testing.assert_allclose(pos, expected)

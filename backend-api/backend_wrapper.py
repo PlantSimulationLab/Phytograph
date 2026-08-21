@@ -23,6 +23,74 @@ if _SEG_WORKER_DIR:
     sys.exit(seg_worker.run(_SEG_WORKER_DIR))
 
 
+# ==================== Command line ====================
+# Parsed HERE — after the seg-worker re-entry above (which is spawned with an
+# empty argv and must never reach this parser), but BEFORE the matplotlib/uvicorn
+# imports below, which cost ~20 s in the frozen binary. So `--help` and a bad
+# argument answer instantly instead of after a long silent startup.
+#
+# Why this exists: the port normally arrives via PHYTOGRAPH_BACKEND_PORT (the
+# Electron supervisor in src/main/backend.ts spawns the bundled binary with an
+# empty argv and sets that env var; scripts/dev.mjs passes --port to uvicorn
+# directly, not to this wrapper). Nothing in the product passes --port here. But
+# running the packaged binary BY HAND to debug it is a real workflow, and before
+# this an unrecognized `--port 9000` was silently discarded — you got a server on
+# 8008 with no indication why. argparse also rejects unknown arguments outright,
+# which is the actual fix for that trap.
+def _parse_args(argv):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="phytograph_backend",
+        description="Phytograph compute backend (FastAPI + uvicorn).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="TCP port to bind on 127.0.0.1. Overrides PHYTOGRAPH_BACKEND_PORT; "
+             "defaults to that env var, then 8008.",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Interface to bind. Defaults to 127.0.0.1; the backend is not "
+             "authenticated, so only change this on a trusted network.",
+    )
+    # parse_args (not parse_known_args) so an unrecognized argument exits 2 with
+    # a usage message rather than being ignored.
+    return parser.parse_args(argv)
+
+
+_ARGS = _parse_args(sys.argv[1:])
+
+
+def _resolve_port(args) -> int:
+    """CLI flag > PHYTOGRAPH_BACKEND_PORT > 8008.
+
+    The env var stays the default so every existing launch path (supervisor, dev
+    script, E2E) is untouched; the flag is a manual-launch convenience layered on
+    top. A non-numeric env var would otherwise raise a bare ValueError from int(),
+    so it's reported as the configuration error it is.
+    """
+    if args.port is not None:
+        port = args.port
+        source = "--port"
+    else:
+        raw = os.environ.get("PHYTOGRAPH_BACKEND_PORT", "8008")
+        source = "PHYTOGRAPH_BACKEND_PORT"
+        try:
+            port = int(raw)
+        except ValueError:
+            raise SystemExit(
+                f"Invalid {source}={raw!r}: expected an integer port."
+            )
+    # 0 is legitimate (bind any free port), so the floor is 0, not 1.
+    if not (0 <= port <= 65535):
+        raise SystemExit(f"Invalid port {port} from {source}: must be 0-65535.")
+    return port
+
+
 def _configure_logging():
     """Send INFO+ to BOTH stderr (so the Electron supervisor's stdout/stderr tee
     in src/main/backend.ts captures it) AND a rotating file on disk.
@@ -113,18 +181,20 @@ from main import app
 import uvicorn
 
 if __name__ == "__main__":
-    # Port is chosen by whoever spawned us (the Electron supervisor in
+    # Port is normally chosen by whoever spawned us (the Electron supervisor in
     # src/main/backend.ts, or scripts/dev.mjs) and passed via
     # PHYTOGRAPH_BACKEND_PORT so multiple app instances / dev sessions never
-    # collide on a fixed port. Falls back to 8008 when launched standalone.
-    port = int(os.environ.get("PHYTOGRAPH_BACKEND_PORT", "8008"))
-    logger.info(f"Starting server on http://127.0.0.1:{port} (logs → {_LOG_DIR})")
+    # collide on a fixed port. An explicit --port overrides it (manual launches);
+    # falls back to 8008 when neither is given.
+    port = _resolve_port(_ARGS)
+    host = _ARGS.host or "127.0.0.1"
+    logger.info(f"Starting server on http://{host}:{port} (logs → {_LOG_DIR})")
     # log_config=None tells uvicorn NOT to install its own stdout-only logging
     # config, so its access/error loggers inherit the root handlers configured
     # above — i.e. uvicorn request logs also land in the rotating file.
     uvicorn.run(
         app,
-        host="127.0.0.1",
+        host=host,
         port=port,
         reload=False,
         log_level="info",

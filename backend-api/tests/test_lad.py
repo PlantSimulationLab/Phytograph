@@ -326,11 +326,13 @@ class TestLADRequestShaping:
         # Not the "no misses / no timestamp" warning — misses ARE present.
         assert not any("likely to be inaccurate" in w for w in result["warnings"])
 
-    def test_stale_session_falls_back_to_file_with_warning(self, tmp_path, stub_pyhelios):
-        # A session id the backend doesn't have (e.g. after a restart) must NOT
-        # 404 the whole computation when the scan also carries a source file —
-        # it falls back to the file and warns that unbaked edits were dropped.
-        # (is_miss column present so the inversion has misses to work with.)
+    def test_stale_session_never_falls_back_to_file(self, tmp_path, stub_pyhelios):
+        # A stale session id (backend restarted since import) must FAIL, even
+        # though the scan also carries a source file. The file predates every
+        # edit and every import-wizard choice (column roles, dropped columns,
+        # global shift), so inverting it would report a confident LAD for a
+        # cloud the user never saw — silently wrong, which is worse than an
+        # error. The old behaviour was to fall back with a warning.
         f = tmp_path / "scan.xyz"
         f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
         scan = main.HeliosScanEntry(
@@ -343,8 +345,29 @@ class TestLADRequestShaping:
             lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
         result = main._do_lad_computation(req)
 
+        assert result["success"] is False
+        err = result.get("error") or ""
+        # Names the real cause and the real remedy — not "Scan file not found".
+        assert "does-not-exist" in err
+        assert "Re-import" in err
+
+    def test_stale_session_may_read_file_with_explicit_opt_in(self, tmp_path, stub_pyhelios):
+        # The escape hatch (`allow_file_source`) exists for files that are NOT
+        # live clouds — unit tests driving the loaders, external files. The app
+        # never sets it; without it the entry above fails.
+        f = tmp_path / "scan.xyz"
+        f.write_text("0.1 0.1 0.5 0\n-0.1 0.0 0.6 0\n0.2 -0.1 0.4 0\n9.0 9.0 9.0 1\n")
+        scan = main.HeliosScanEntry(
+            session_id="does-not-exist", file_path=str(f),
+            ascii_format="x y z is_miss", allow_file_source=True,
+            origin=[0, 0, 5], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        result = main._do_lad_computation(req)
+
         assert result["success"] is True, result.get("error")
-        assert any("no longer available" in w for w in result["warnings"])
 
     def test_stale_session_without_file_errors_actionably(self, tmp_path, stub_pyhelios):
         # No fallback available: a clear, actionable error rather than a bare 404.
@@ -951,8 +974,12 @@ class TestMultiReturnImportColumnMapping:
         positions, colors, intensity = _r.positions, _r.colors, _r.intensity
         extras, extra_dims_meta = _r.extras, _r.extra_dims_meta
         # The per-pulse columns survived the round-trip under canonical slugs.
-        assert {"timestamp", "target_index", "target_count"} <= set(extras), \
-            sorted(extras)
+        # `timestamp` is the exception: it rides the dedicated float64 field, not
+        # the float32 extras, because a float32 cast has a 62 ms step at full GPS
+        # week-seconds — enough to collapse the pulse grouping this test exists
+        # to verify.
+        assert {"target_index", "target_count"} <= set(extras), sorted(extras)
+        assert _r.timestamps is not None, "timestamp was not carried"
 
         sess = main.CloudSession(
             session_id="testmr01",
@@ -961,6 +988,7 @@ class TestMultiReturnImportColumnMapping:
             column_plan=plan,
             positions=positions, colors=colors, intensity=intensity,
             extras=extras, extra_dims_meta=extra_dims_meta,
+            timestamps=_r.timestamps,
             deleted=np.zeros(len(positions), dtype=bool),
             deleted_history=[],
             octree_cache_id=None,
@@ -973,11 +1001,11 @@ class TestMultiReturnImportColumnMapping:
             # persist them in the session, the way the UI step does. The endpoint
             # streams PHP1 markers + a JSON tail; drain it to the result dict.
             import json as _json
-            resp = asyncio.run(main.backfill_cloud_misses(
+            resp = main.backfill_cloud_misses(
                 "testmr01",
                 main.BackfillMissesRequest(
                     origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
-                    theta_min=0, theta_max=180, phi_min=0, phi_max=360)))
+                    theta_min=0, theta_max=180, phi_min=0, phi_max=360))
 
             async def _collect():
                 return b"".join([c if isinstance(c, (bytes, bytearray)) else c.encode()

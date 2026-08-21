@@ -3,11 +3,14 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Sparkles} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
-import { getSettings } from '../lib/store';
+import {
+  getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
+  exportClassPalettes, importClassPalettes,
+} from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
 import {
   ColormapName,
@@ -22,7 +25,10 @@ import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { QSMPopup, type QSMStartOptions } from './QSMPopup';
 import { CrownFitPopup, type CrownFitStartArgs } from './CrownFitPopup';
 import { CROWN_SHAPE_LABELS, crownColorForTreeId, allocateCrownColor, type CrownFitScanEligibility } from '../lib/crownFit';
-import { downloadFile as saveToFile } from '../utils/fileDownload';
+import {
+  buildCrownCsv, crownExportBaseName, crownMeshFileName, joinExportPath, type CrownCsvRow,
+} from '../lib/crownExport';
+import { saveBinaryFileQuiet, saveTextFileQuiet } from '../utils/fileDownload';
 import { Toolbar } from './Toolbar';
 import { StitchDialog } from './StitchDialog';
 import { AlignDialog } from './AlignDialog';
@@ -66,7 +72,7 @@ import { getScannerModel } from '../lib/scannerModels';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { BulkImportProgress, type BulkImportProgressState } from './BulkImportProgress';
 import StatusPill from './StatusPill';
-import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams } from '../lib/scanParameters';
+import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams, isMovingScan } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
 import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
@@ -86,6 +92,29 @@ import {
   worldBoundsUnion,
   polygonRegionFromCamera,
 } from '../lib/cropGeometry';
+import { projectionKindOf } from '../lib/cameraRay';
+import {
+  slabToBox, slabPredicate, slabToPayload, stepSlab, slabCoverage, slabCenter,
+  defaultSlabForBounds, slabViewPose, slabFromCentreline,
+  type SlabRegion, type SlabStepMode,
+} from '../lib/crossSection';
+import { SlabWireframe } from './viewer/gizmos/SlabWireframe';
+import { SlabCentrelinePreview } from './viewer/gizmos/SlabCentrelinePreview';
+import { SlabDragPreview } from './viewer/gizmos/SlabDragPreview';
+import { LabelBrushOctree } from './viewer/gizmos/LabelBrushOctree';
+import { LabelBrushCursor } from './viewer/gizmos/LabelBrushCursor';
+import { ClassPaletteEditor } from './viewer/panels/ClassPaletteEditor';
+import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOverride';
+import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
+import {
+  makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
+  type ClassPalette,
+} from '../lib/classPalettes';
+import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
+import { LabelPanel } from './viewer/panels/LabelPanel';
+import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
+import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
+import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
 import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
 import {
   computeBoundsFromPositions,
@@ -93,6 +122,8 @@ import {
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
+  importedColumnsFor,
+  displayLabelFor,
   assembleScanScalarFields,
   voxelMeshToHeliosGrid,
   gridSnapSignature,
@@ -120,13 +151,22 @@ import {
 } from '../lib/pointCloudHelpers';
 import { applyTriangleFilter, computeTriangleMetrics, triangleFilterCounts } from '../lib/triangleFilter';
 import type { TriangleFilterEstimate } from '../lib/triangleFilter';
-import { Colorbar } from './viewer/Colorbar';
-import { ClassLegend } from './viewer/ClassLegend';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
+import { LegendStack } from './viewer/LegendStack';
+import {
+  buildLegendEntries,
+  cssColorToRgb,
+  type ChannelDescriptor,
+  type LegendEntry,
+} from '../lib/colorChannel';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
+import { CURATED_BARK_TEXTURES, getBarkTextures, getBarkTexture } from '../utils/backendApi';
+import { DEFAULT_TEXTURE_TILE_SIZE } from '../lib/qsmTube';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
 import { OctreePointCloud } from './viewer/renderers/OctreePointCloud';
 import { MissOctree } from './viewer/renderers/MissOctree';
+import { PotreeFrameDriver } from './viewer/renderers/PotreeFrameDriver';
+import { CropCornerMarker } from './viewer/gizmos/CropCornerMarker';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
 import { JFAOutline, OutlineSelect } from './viewer/outline/JFAOutline';
@@ -138,8 +178,11 @@ export { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
 import { Skeleton3D } from './viewer/renderers/Skeleton3D';
 import { QSM3D, type QSMColorMode } from './viewer/renderers/QSM3D';
 import { QsmIcon } from './icons/QsmIcon';
+import { GroundSegmentIcon } from './icons/GroundSegmentIcon';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
 import { CameraController } from './viewer/scene/CameraController';
+import { DepthProbe } from './viewer/scene/DepthProbe';
+import { SCENE_OVERLAY } from '../lib/sceneOverlay';
 import { GroundGrid } from './viewer/scene/GroundGrid';
 import { ViewportAxesGizmo } from './viewer/scene/ViewportAxesGizmo';
 import { SceneBackground } from './viewer/scene/SceneBackground';
@@ -179,7 +222,7 @@ import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
 import { ExportModal } from './ExportModal';
-import { defaultExportColumns, buildAsciiExport } from '../lib/exportColumns';
+import { defaultExportColumns, buildAsciiExport, cellValue, type ExportColumn } from '../lib/exportColumns';
 import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
@@ -205,6 +248,8 @@ import type {
   PointCloudEntry,
   CloudEditState,
   PendingDeleteRegion,
+  LabelStroke,
+  LabelEditState,
   MeshData,
   MeshEntry,
   SkeletonData,
@@ -234,10 +279,11 @@ export type {
 } from '../lib/pointCloudTypes';
 import { plantResponseToMeshData } from '../lib/plantMeshData';
 import { serializeQsm, sanitizeQsmFilename, qsmExtForFormat, type QSMExportFormat } from '../lib/qsmExport';
+import { serializeMeshObj, serializeMeshPly, serializeMeshStl, sanitizeMeshName } from '../lib/meshExport';
 
 // Grid plane options
 type GridPlane = 'z-up' | 'y-up';
-type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase';
+type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase' | 'label';
 
 // Tuning fields threaded from handleWoodSegment to each per-cloud worker. The
 // optional `reflectance_weight_max` (>0) and `scalar_slug` enable the reflectance
@@ -307,6 +353,9 @@ const isDescendantOfGridGroup = (
 export interface ImportRefs {
   importMesh: (mesh: Omit<MeshEntry, 'id'>) => void;
   importSkeleton: (skeleton: Omit<SkeletonEntry, 'id'>) => void;
+  // Import a QSM parsed from a cylinder CSV by the backend. The entry is already
+  // in /api/qsm/build's response shape, so it renders exactly like a built one.
+  importQSM: (qsm: Omit<QSMEntry, 'id'>) => void;
   // Import scans + grids parsed from a Helios scan XML (File → Import / drop
   // zone reach the same flow the Add-Scan popup uses). xmlPath is the on-disk
   // path of the XML so relative <filename> references resolve; null when none.
@@ -444,6 +493,23 @@ function buildHeliosTriParams(
 // meaningful knob to turn. The Lmax / aspect controls are therefore Helios-only;
 // Open3D meshes carry no `triangleFilter` / `unfilteredMesh`, so the Meshes panel
 // hides those controls for them.
+
+// The 4 corners (TL, TR, BR, BL) of the axis-aligned rect spanned by two
+// diagonal canvas-pixel points. Shared by the rect overlay's rubber-band and
+// the commit path (which also runs from a window-level mouseup, so this can't
+// live inside the overlay's render closure).
+function rectCornersOf(a: { x: number; y: number }, b: { x: number; y: number }) {
+  const minX = Math.min(a.x, b.x);
+  const minY = Math.min(a.y, b.y);
+  const maxX = Math.max(a.x, b.x);
+  const maxY = Math.max(a.y, b.y);
+  return [
+    { x: minX, y: minY },
+    { x: maxX, y: minY },
+    { x: maxX, y: maxY },
+    { x: minX, y: maxY },
+  ];
+}
 
 export default function PointCloudViewer({
   scans,
@@ -625,12 +691,77 @@ export default function PointCloudViewer({
   // unlit materials and are unaffected. Default 1.0 reproduces the prior
   // 1.125 intensity (= 0.75 base × 1.5).
   const [lightIntensity, setLightIntensity] = useState(1.0);
+  // The SCENE-DEFAULT cloud color mode. Clouds without their own entry in
+  // `cloudColorModes` follow this, so the Display panel keeps behaving as the
+  // "set everything" control it has always been.
   const [colorMode, setColorMode] = useState<ColorMode>('per-scan');
   const [selectedScalarField, setSelectedScalarField] = useState<string | undefined>(undefined);
+  // Per-cloud color mode + scalar field overrides, keyed by cloud id. Absent
+  // entry ⇒ follow the scene default above.
+  //
+  // Why per-cloud: a scalar field like `wood_class` only exists on the cloud a
+  // segmentation produced. Holding the selection globally meant deleting that
+  // cloud (or merely selecting another one) left `colorMode='scalar'` pointing
+  // at a field nothing carries — the renderer fell back to a flat gray ramp and
+  // the dropdown showed a value that wasn't in its own option list. That's the
+  // recurring "imports go gray / wrong color mode after delete" bug, previously
+  // papered over by a validation effect that reset the global selection.
+  // Storing the selection on the cloud that owns the field makes it die with
+  // that cloud, which removes the failure mode rather than detecting it.
+  const [cloudColorModes, setCloudColorModes] = useState<
+    Map<string, { mode: ColorMode; field?: string }>
+  >(new Map());
+  // Resolve a cloud's effective color mode: its own override, else the scene
+  // default. Mirrors colormapFor / resolveChannel.
+  const colorModeFor = useCallback(
+    (cloudId: string): { mode: ColorMode; field?: string } =>
+      cloudColorModes.get(cloudId) ?? { mode: colorMode, field: selectedScalarField },
+    [cloudColorModes, colorMode, selectedScalarField],
+  );
+  // Set (or clear, with `undefined`) one cloud's color-mode override.
+  const setCloudColorMode = useCallback(
+    (cloudId: string, next: { mode: ColorMode; field?: string } | undefined) => {
+      setCloudColorModes(prev => {
+        const map = new Map(prev);
+        if (next === undefined) map.delete(cloudId);
+        else map.set(cloudId, next);
+        return map;
+      });
+    },
+    [],
+  );
+  // The SCENE DEFAULT colormap. Objects inherit it unless they carry their own
+  // override in `colormapOverrides` — so changing this repaints everything the
+  // user hasn't explicitly overridden, which is what the global picker has
+  // always appeared to do.
   const [colormap, setColormap] = useState<ColormapName>('viridis');
+  // Per-object colormap overrides, keyed by object id (mesh id / LAD result id).
+  // Absent entry ⇒ inherit `colormap`. This is what makes the per-instance
+  // pickers real: before, the mesh-row and LAD-panel selects were both wired
+  // straight to setColormap, so "per-instance" changed every object at once.
+  const [colormapOverrides, setColormapOverrides] = useState<Map<string, ColormapName>>(new Map());
+  // Legend overlay interaction: which collapsed sliver the user promoted to
+  // full size, and which entry has its inline colormap editor open.
+  const [promotedLegendKey, setPromotedLegendKey] = useState<string | undefined>(undefined);
+  const [legendEditorKey, setLegendEditorKey] = useState<string | null>(null);
+  // Resolve an object's effective colormap: its own override, else the scene
+  // default. Mirrors resolveChannel() in lib/colorChannel.ts.
+  const colormapFor = useCallback(
+    (objectId: string): ColormapName => colormapOverrides.get(objectId) ?? colormap,
+    [colormapOverrides, colormap],
+  );
+  // Set (or clear, with `undefined`) one object's colormap override.
+  const setColormapOverride = useCallback((objectId: string, name: ColormapName | undefined) => {
+    setColormapOverrides(prev => {
+      const next = new Map(prev);
+      if (name === undefined) next.delete(objectId);
+      else next.set(objectId, name);
+      return next;
+    });
+  }, []);
   // One-shot remount generation per octree cacheId. An OctreePointCloud that
   // MOUNTS directly into a gradient mode (height/scalar) — e.g. a freshly
-  // imported cloud while the global colorMode is already 'height' — compiles
+  // imported cloud while the scene-default colorMode is already 'height' — compiles
   // its colour shader before any tiles exist, so the first tiles render with a
   // stale (grayscale) program until something forces a recompile. The
   // colorMode/field remount key only fires on a *change*, not on mount-into.
@@ -755,9 +886,12 @@ export default function PointCloudViewer({
   // Measure the ground tolerance off the settled cloth rather than seeding it
   // from the cloud's extent (the seed scales with tile width, which is unrelated
   // to the ground return band's thickness — see _estimate_class_threshold).
-  // `lastAutoThreshold` echoes what the last run measured, so the value the user
-  // is being given is visible rather than hidden inside the backend.
-  const [groundAutoClassThreshold, setGroundAutoClassThreshold] = useState(false);
+  // Defaults ON: the extent-derived seed is wrong often enough on field-scale
+  // scans that measuring is the better first run, and the panel fills the
+  // measured value into the tolerance box so hand-tuning from it stays one
+  // untick away. `lastAutoThreshold` echoes what the last run measured, so the
+  // value the user is being given is visible rather than hidden in the backend.
+  const [groundAutoClassThreshold, setGroundAutoClassThreshold] = useState(true);
   // Keyed by cloud: a measured tolerance describes the cloud it was measured on,
   // and the panel re-seeds from extent every time it opens, so without the key
   // the measurement would be silently clobbered the moment the user reopened it.
@@ -853,6 +987,12 @@ export default function PointCloudViewer({
   const [showTreeSegmentPanel, setShowTreeSegmentPanel] = useState(false);
   const [treeSegmentInProgress, setTreeSegmentInProgress] = useState(false);
   const [treeSegmentError, setTreeSegmentError] = useState<string | null>(null);
+  // Advisory workload estimate from the backend. Non-null means the panel is
+  // showing "Segment Anyway": the next run re-sends with acknowledge_cost so the
+  // expensive job actually starts. Cleared whenever a run begins or succeeds, so
+  // a later (cheaper) cloud doesn't inherit a stale confirmation.
+  const [treeSegmentCostWarning, setTreeSegmentCostWarning] = useState<string | null>(null);
+  const treeCostAcknowledgedRef = useRef(false);
   // "Split into one cloud per tree" runs AFTER the panel (and its inline
   // spinner) has closed and the recoloured parent is already on screen, so
   // without this the user watches a finished-looking viewport while the backend
@@ -975,6 +1115,75 @@ export default function PointCloudViewer({
   // The QSM id whose Adjust-Leaf-Angles modal is open (null = closed).
   const [adjustLeavesQSMId, setAdjustLeavesQSMId] = useState<string | null>(null);
   const [qsmColorMode, setQSMColorMode] = useState<QSMColorMode>('rank');
+  // Appearance settings for the two non-categorical QSM color modes. Global (one
+  // setting drives every QSM), matching how qsmColorMode itself already behaves.
+  const [qsmSolidColor, setQSMSolidColor] = useState('#8b6f47'); // bark brown
+  // Hex text draft while that field has focus (null = show the committed color).
+  const [qsmColorHexDraft, setQSMColorHexDraft] = useState<string | null>(null);
+  // Which bark image is selected: a curated builtin name, or an uploaded file path.
+  const [qsmBarkSource, setQSMBarkSource] = useState<
+    { mode: 'builtin'; name: string } | { mode: 'upload'; path: string }
+  >({ mode: 'builtin', name: CURATED_BARK_TEXTURES[0] });
+  // The decoded image for that selection (base64 + MIME), fetched from the backend.
+  const [qsmBarkTexture, setQSMBarkTexture] = useState<{ data: string; mime: string } | null>(null);
+  const [qsmBarkNames, setQSMBarkNames] = useState<string[]>(CURATED_BARK_TEXTURES);
+  const [qsmBarkError, setQSMBarkError] = useState<string | null>(null);
+  // World-space edge length (m) of one bark tile — the knob that makes bark read
+  // coarser or finer without ever stretching it (see qsmTube's wrapsForRadius).
+  const [qsmTextureTile, setQSMTextureTile] = useState(DEFAULT_TEXTURE_TILE_SIZE);
+
+  // Ask the backend for the authoritative bark list the first time the user opens
+  // texture mode (the hardcoded CURATED_BARK_TEXTURES is only the fallback). Runs
+  // once, and silently keeps the fallback if the backend can't answer.
+  const barkListLoaded = useRef(false);
+  useEffect(() => {
+    if (qsmColorMode !== 'texture' || barkListLoaded.current) return;
+    barkListLoaded.current = true;
+    let cancelled = false;
+    getBarkTextures()
+      .then((names) => { if (!cancelled && names.length) setQSMBarkNames(names); })
+      .catch(() => { /* keep the fallback list */ });
+    return () => { cancelled = true; };
+  }, [qsmColorMode]);
+
+  // Fetch the selected bark image (base64 + MIME). Only while texture mode is
+  // active, so the ~500KB payload isn't pulled for users who never texture a QSM.
+  useEffect(() => {
+    if (qsmColorMode !== 'texture') return;
+    let cancelled = false;
+    setQSMBarkError(null);
+    const source =
+      qsmBarkSource.mode === 'builtin'
+        ? { builtinName: qsmBarkSource.name }
+        : { texturePath: qsmBarkSource.path };
+    getBarkTexture(source)
+      .then((resp) => {
+        if (cancelled) return;
+        if (resp.success && resp.data_base64) {
+          setQSMBarkTexture({ data: resp.data_base64, mime: resp.mime || 'image/jpeg' });
+        } else {
+          // Leave any previously-loaded bark in place rather than flashing the
+          // tree to untextured; surface the reason instead.
+          setQSMBarkError(resp.error || 'Failed to load bark texture');
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setQSMBarkError(e instanceof Error ? e.message : String(e));
+      });
+    return () => { cancelled = true; };
+  }, [qsmColorMode, qsmBarkSource]);
+
+  // Pick a bark image off disk. Mirrors AddLeavesPopup's handlePickPng.
+  const handlePickBarkImage = useCallback(async () => {
+    const picked = await window.electronAPI.dialog.open({
+      title: 'Choose bark texture image',
+      filters: [{ name: 'Bark texture', extensions: ['jpg', 'jpeg', 'png'] }],
+    });
+    if (!picked) return;
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    setQSMBarkSource({ mode: 'upload', path });
+  }, []);
+
   // QSM-entry multi-selection (for the panel header bulk actions).
   const [selectedQSMIds, setSelectedQSMIds] = useState<Set<string>>(new Set());
   // Stable "zoom to selection" entry point. The implementation closes over
@@ -1022,6 +1231,14 @@ export default function PointCloudViewer({
     };
     addSkeleton(newSkeleton, 'Import skeleton');
   }, [addSkeleton]);
+
+  const importQSM = useCallback((qsm: Omit<QSMEntry, 'id'>) => {
+    const newQSM: QSMEntry = {
+      ...qsm,
+      id: crypto.randomUUID(),
+    };
+    addQSM(newQSM, 'Import QSM');
+  }, [addQSM]);
 
   // Bulk-import scans + grids parsed from a Helios scan XML. This is the shared
   // workhorse behind every XML entry point: the Add-Scan popup's "Import from
@@ -1104,6 +1321,7 @@ export default function PointCloudViewer({
       total: heliosScans.length,
       label: 'Preparing…',
     });
+    bulkImportCancelledRef.current = false;
     try {
       // Phase 1: resolve every referenced file FIRST (keeps the existing
       // missing-file prompt), and split scans into those with data
@@ -1160,7 +1378,7 @@ export default function PointCloudViewer({
         results = onRequestImportWizard
           ? await onRequestImportWizard(inputs)
           : // No wizard host (defensive): import with auto-detect.
-            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], worldShift: null, trajectory: null }));
+            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], droppedSlugs: [], keptSlugs: [], worldShift: null, trajectory: null }));
         if (!results) return; // user cancelled the wizard
       }
 
@@ -1179,8 +1397,17 @@ export default function PointCloudViewer({
         };
         if (p.resolved) {
           const r = byPath.get(p.resolved);
+          // A cancel stops the remaining scans too. This pathway is
+          // all-or-nothing (see the failures check below), so we bail out of the
+          // whole bundle rather than importing a partial set.
+          if (r && bulkImportCancelledRef.current) break;
           if (r) {
-            setBulkImportProgress({ current: attachedCount + 1, total: wizardPending.length, label: `Loading ${r.input.fileName}` });
+            const controller = new AbortController();   // fresh per scan
+            bulkImportAbortRef.current = controller;
+            setBulkImportProgress({
+              current: attachedCount + 1, total: wizardPending.length,
+              label: `Loading ${r.input.fileName}`, fraction: null,
+            });
             try {
               // Thread the scan's XML <origin> to the backend so re-imported scans
               // reproject their sky/miss points onto the display shell (otherwise
@@ -1192,7 +1419,13 @@ export default function PointCloudViewer({
                 o ? [o.x, o.y, o.z] : null;
               const data = await parsePointCloudFromPath(
                 p.resolved, r.asciiFormat, r.columnPlan, r.categoricalSlugs, r.worldShift,
-                r.continuousSlugs, null, scanOrigin);
+                r.continuousSlugs, null, scanOrigin,
+                {
+                  signal: controller.signal,
+                  onProgress: (fraction, message) =>
+                    setBulkImportProgress(b => (b ? { ...b, fraction, hint: message || undefined } : b)),
+                  onRunId: (runId) => { bulkImportRunIdRef.current = runId; },
+                });
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
               for (const slug of r.continuousSlugs) registerContinuousSlug(slug);
               scan.data = data;
@@ -1212,12 +1445,22 @@ export default function PointCloudViewer({
               }
               attachedCount += 1;
             } catch (err) {
+              // A cancel is the user's choice, not a load failure — it must not
+              // join `failures` (which raises an error toast below).
+              if (err instanceof ScanCancelledError || controller.signal.aborted
+                  || (err instanceof Error && err.name === 'AbortError')) {
+                bulkImportCancelledRef.current = true;
+                break;
+              }
               failures.push({ label: p.label, reason: err instanceof Error ? err.message : String(err) });
             }
           }
         }
         newScans.push(scan);
       }
+      // Cancelled: this pathway is all-or-nothing, so add NOTHING and return
+      // quietly. The modal closing is the feedback; no toast (nothing happened).
+      if (bulkImportCancelledRef.current) return;
       if (failures.length > 0) {
         const detail = failures.slice(0, 3).map(f => `${f.label}: ${f.reason}`).join('; ');
         const more = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
@@ -1256,15 +1499,17 @@ export default function PointCloudViewer({
     } finally {
       // Always clear the modal — leaving it up would lock the UI.
       setBulkImportProgress(null);
+      bulkImportAbortRef.current = null;
+      bulkImportRunIdRef.current = null;
     }
   }, [importMesh, onRequestImportWizard, onAddScans, scans]);
 
   // Expose import functions to parent
   useEffect(() => {
     if (importRefsCallback) {
-      importRefsCallback({ importMesh, importSkeleton, bulkImportScans });
+      importRefsCallback({ importMesh, importSkeleton, importQSM, bulkImportScans });
     }
-  }, [importRefsCallback, importMesh, importSkeleton, bulkImportScans]);
+  }, [importRefsCallback, importMesh, importSkeleton, importQSM, bulkImportScans]);
 
   // Report whether the viewer holds any non-scan content (meshes, skeletons, or
   // QSMs) so App can dismiss the empty-state hint when e.g. a plant is generated
@@ -1279,11 +1524,20 @@ export default function PointCloudViewer({
 
   // Export panel state
   const [showExportPanel, setShowExportPanel] = useState(false);
-  // Scan-export in flight. The backend serializes every scan's points to base64
-  // (5-10 s for a large bundle) with no streaming progress, so we close the modal
-  // and show an indeterminate StatusPill for the duration — otherwise the user
-  // stares at a frozen dialog and re-clicks Export.
+  // Export in flight — covers BOTH the scan bundle and a plain point-cloud
+  // export. Either one serializes millions of points to base64 (5-10 s for a
+  // large cloud) with no streaming progress, so we close the modal and show an
+  // indeterminate StatusPill for the duration — otherwise the user stares at a
+  // frozen dialog and re-clicks Export.
   const [isExportingScan, setIsExportingScan] = useState(false);
+  // Live export progress: {fraction 0..1 | null, message} streamed from the
+  // backend as PHP1 markers. Null fraction => indeterminate (the pill hides its
+  // bar and shows only the stage label).
+  const [exportProgress, setExportProgress] = useState<{ fraction: number | null; label: string } | null>(null);
+  // AbortController + backend run id for the in-flight export, so the pill's
+  // cancel button can stop BOTH sides: the backend work and the fetch.
+  const exportAbortRef = useRef<AbortController | null>(null);
+  const exportRunIdRef = useRef<string | null>(null);
 
   // Global app settings (persisted via electron-store, edited in SettingsDialog).
   // Loaded once on mount: the triangulate point cap for octree clouds, plus the
@@ -1535,6 +1789,20 @@ export default function PointCloudViewer({
   // Progress for a Helios XML bulk import in flight. The launching popup
   // closes immediately so the user sees this modal instead of an idle popup.
   const [bulkImportProgress, setBulkImportProgress] = useState<BulkImportProgressState | null>(null);
+  // Cancellation for that bulk import. Deliberately a second copy of App.tsx's
+  // trio rather than shared plumbing: this pathway owns its own progress modal
+  // and calls parsePointCloudFromPath directly, the two are never in flight at
+  // the same time, and threading one controller through the prop boundary costs
+  // more than the ~10 duplicated lines. Same ordering rule as App's
+  // cancelImport: tell the backend to stop, THEN tear down the fetch.
+  const bulkImportAbortRef = useRef<AbortController | null>(null);
+  const bulkImportRunIdRef = useRef<string | null>(null);
+  const bulkImportCancelledRef = useRef(false);
+  const cancelBulkImport = useCallback(() => {
+    bulkImportCancelledRef.current = true;
+    if (bulkImportRunIdRef.current) void cancelRun(bulkImportRunIdRef.current);
+    bulkImportAbortRef.current?.abort();
+  }, []);
   const [duplicateProgress, setDuplicateProgress] = useState<BulkImportProgressState | null>(null);
   // Per-row expansion state for the scans panel. Held in-memory only; resets
   // on app reload.
@@ -1559,25 +1827,6 @@ export default function PointCloudViewer({
   // state and blocks a second commit).
   const [isApplyingTranslate, setIsApplyingTranslate] = useState(false);
 
-  // Lower the octree point budget while a crop box is being previewed, restore
-  // when it ends. potree clips with a fragment `discard` (no early-Z), so the
-  // GPU can't cull occluded points during preview and overdraw goes quadratic
-  // with on-screen point density — concentrating the crop box pins the frame
-  // rate to single digits on a large cloud. Fewer points ⇒ proportionally fewer
-  // fragment invocations. The budget is global (shared potree manager), which is
-  // fine: crop is a modal, single-cloud-focused mode. Apply re-converts at full
-  // resolution, so the reduced preview detail never reaches the saved cloud.
-  const cropPreviewActive = editMode === 'crop' || isApplyingCrop;
-  useEffect(() => {
-    const budget = cropPreviewActive ? CROP_PREVIEW_POINT_BUDGET : DEFAULT_POINT_BUDGET;
-    setPointBudget(budget);
-    // E2E hook: lets a test confirm the preview budget engages/restores.
-    (window as { __pointBudget?: number }).__pointBudget = budget;
-    return () => {
-      setPointBudget(DEFAULT_POINT_BUDGET);
-      (window as { __pointBudget?: number }).__pointBudget = DEFAULT_POINT_BUDGET;
-    };
-  }, [cropPreviewActive]);
   // Cloud edit states (translation + erased indices + pending deletes) now live
   // in the scene store. Reads keep `.get(id)`; writes keep `setEditStates(prev => ...)`.
   const editStates = scene.state.editStates;
@@ -1673,6 +1922,54 @@ export default function PointCloudViewer({
   // in-region points (normal crop) and the cropped-out (inverse) points
   // become a brand-new cloud added to the scene — no points are discarded.
   const [cropSegment, setCropSegment] = useState(false);
+
+  // Lower the octree point budget while a crop box is being previewed, restore
+  // when it ends. potree clips with a fragment `discard` (no early-Z), so the
+  // GPU can't cull occluded points during preview and overdraw goes quadratic
+  // with on-screen point density — concentrating the crop box pins the frame
+  // rate to single digits on a large cloud. Fewer points ⇒ proportionally fewer
+  // fragment invocations. Apply re-converts at full resolution, so the reduced
+  // preview detail never reaches the saved cloud.
+  //
+  // The budget is global to the shared potree manager and is spent across ALL
+  // visible clouds in one pass (PotreeFrameDriver), so this caps total on-screen
+  // points during preview no matter how many scans are selected — which is the
+  // quantity the overdraw cost actually tracks. Crop is emphatically not a
+  // single-cloud mode (it applies to every selected scan); an earlier version
+  // assumed it was and let each cloud claim this budget independently, which
+  // multiplied resident points by the cloud count and thrashed the node LRU.
+  //
+  // Only for a CLIP-VOLUME preview, though — the reason above is specific to
+  // the fragment `discard`, and a screen-space (cropMask) preview doesn't use
+  // one. Its rejected points are dropped by an index buffer, so they are never
+  // submitted and cost no fragments at all; there is no overdraw to guard
+  // against. Charging it the same budget was a real bug: the cloud fell from
+  // 1.7M points (186 tiles) to 143k (3 tiles) the instant the polygon closed,
+  // which looks exactly like the crop having deleted most of the cloud — the
+  // reported "it removed 2/3 of the points" symptom, none of it the crop.
+  // (Tested inline rather than via `octreeCropMask`, which is built further
+  // down from buildCropPredicate — reading it here would be a use-before-
+  // declaration. These are the same conditions that make it non-null.)
+  // Keyed on the MODE, not on whether a region is closed yet. Gating on the
+  // closed region left the budget dropping the moment Crop opened and lifting
+  // again on Enter, so the cloud visibly collapsed to a fraction of its tiles
+  // while the user was still placing vertices and then re-streamed underneath
+  // them. Screen-space modes never use a clip volume at any stage, so they
+  // never need the overdraw guard.
+  const screenSpaceRegionActive =
+    !cropSegment && (cropMode === 'polygon' || cropMode === 'rect');
+  const cropVolumePreviewActive =
+    (editMode === 'crop' || isApplyingCrop) && !screenSpaceRegionActive;
+  useEffect(() => {
+    const budget = cropVolumePreviewActive ? CROP_PREVIEW_POINT_BUDGET : DEFAULT_POINT_BUDGET;
+    setPointBudget(budget);
+    // E2E hook: lets a test confirm the preview budget engages/restores.
+    (window as { __pointBudget?: number }).__pointBudget = budget;
+    return () => {
+      setPointBudget(DEFAULT_POINT_BUDGET);
+      (window as { __pointBudget?: number }).__pointBudget = DEFAULT_POINT_BUDGET;
+    };
+  }, [cropVolumePreviewActive]);
   // When true, Apply leaves the source cloud untouched (hidden, so the viewport
   // looks the same) and puts the kept points in a new "… (cropped)" cloud. The
   // octree path routes through session `extract` (parent untouched) instead of
@@ -1701,12 +1998,15 @@ export default function PointCloudViewer({
   // stable even if they orbit afterwards.
   const polygonCameraRef = useRef<THREE.Camera | null>(null);
   const polygonCanvasSizeRef = useRef<{ width: number; height: number } | null>(null);
-  // Live canvas-pixel position of the mouse while drawing a polygon —
-  // used to render the "next segment" preview line from the last vertex
-  // to the cursor. Stored on a ref since it updates on every mousemove
-  // and we don't want to re-render the panel for it.
-  const polygonCursorRef = useRef<{ x: number; y: number } | null>(null);
-  const [polygonCursorTick, setPolygonCursorTick] = useState(0);
+  // The screen-space overlays (crop lasso/rect, trunk seeding) sit at z-10,
+  // under the colorbar/class legend (z-15) and under every floating panel
+  // (tool panels z-20, right stack z-30, display
+  // bubble z-55, toasts z-110), so those panels swallow their clicks and
+  // mousemoves. `useViewportBlockZone` (below, one per tool) tracks the pointer
+  // on the window instead, measures the blockers off this root, and clamps the
+  // preview to their edge; `ViewportBlockedZone` marks the cursor with a ⊘ at
+  // the moment a click would be refused.
+  const viewerRootRef = useRef<HTMLDivElement | null>(null);
   // Rect-drag state (canvas-pixel space). A rectangle crop is a screen-space
   // drag that works from any view; on mouse-up its 4 corners are frozen into
   // cropPolygon, so it reuses the entire polygon project-and-test pipeline.
@@ -1741,6 +2041,100 @@ export default function PointCloudViewer({
   const [erasePreviewBoxes, setErasePreviewBoxes] = useState<THREE.Matrix4[]>([]);
   // Camera-facing square indicator transform that follows the cursor.
   const [eraseBrushMatrix, setEraseBrushMatrix] = useState<THREE.Matrix4 | null>(null);
+
+  // ── Manual labelling ──────────────────────────────────────────────────────
+  // The tool paints a per-point class column. Phase 1 reuses the EXISTING
+  // polygon lasso as its selection primitive (draw → close → the region becomes
+  // a stroke), so there is no new selection code here; the slab and the brush
+  // land in later phases.
+  // ── Cross-section slab ────────────────────────────────────────────────────
+  // A thin vertical section the user paints inside. World-space and camera-free
+  // (see lib/crossSection.ts), which is why — unlike crop and erase — the camera
+  // never has to be frozen here.
+  const [showSectionPanel, setShowSectionPanel] = useState(false);
+  const [slab, setSlab] = useState<SlabRegion | null>(null);
+  // Two-click centreline placement, reusing BoxDrawRaycaster's ground picks.
+  const [slabDrawState, setSlabDrawState] = useState<'idle' | 'awaiting-a' | 'awaiting-b'>('idle');
+  // Mirror of the two-click draw state for the raycaster's mounted handler,
+  // which cannot see later renders. Assigned during render, not in an effect —
+  // an effect runs after paint and the second click can beat it.
+  // Mirrors of the draw state for RENDERING the in-progress centreline. The ref
+  // above drives the handler (which cannot see later renders); these drive the
+  // preview, which must re-render.
+  const [slabFirstPointState, setSlabFirstPointState] =
+    useState<{ x: number; y: number } | null>(null);
+  const [slabCursor, setSlabCursor] = useState<{ x: number; y: number } | null>(null);
+  // Same cursor, outside React. SlabDragPreview reads this every frame so the
+  // box can track the pointer without re-rendering this component at 60 Hz.
+  const slabCursorRef = useRef<{ x: number; y: number } | null>(null);
+  // Thickness the drag preview is drawn at, frozen when the first point lands
+  // so the walls don't splay outward as the user aims.
+  const slabPreviewDepthRef = useRef(0);
+  /**
+   * Section defined but temporarily not clipping — "show me the whole cloud".
+   *
+   * Distinct from clearing it: the slab, its thickness and its position in the
+   * traverse all survive, so the user can look around and drop straight back
+   * into the same section. Without this the only way back to a full view was to
+   * destroy the section and redefine it from scratch.
+   */
+  const [slabSuspended, setSlabSuspended] = useState(false);
+
+  // E2E seam for the centreline placement feedback. Publishes the two facts a
+  // test can't otherwise see — the first click landed, and the rubber band is
+  // tracking — without exposing the scene graph. Mirrors __labelOverlay.
+  useEffect(() => {
+    (globalThis as any).__slabDraw = {
+      first: slabFirstPointState ?? null,
+      cursor: slabCursor ?? null,
+    };
+  }, [slabFirstPointState, slabCursor]);
+  const slabDrawRef = useRef<{
+    state: 'idle' | 'awaiting-a' | 'awaiting-b';
+    first: { x: number; y: number } | null;
+  }>({ state: 'idle', first: null });
+  const [slabStepMode, setSlabStepMode] = useState<SlabStepMode>('half');
+  const [slabFixedStep, setSlabFixedStep] = useState(0);
+  // ON by default: the face-on ortho view is the point of the workflow. Turning
+  // it off lets the user orbit to inspect the SAME slab in 3-D, which the
+  // world-space region makes safe.
+  const [slabLocked, setSlabLocked] = useState(true);
+
+  const [showLabelPanel, setShowLabelPanel] = useState(false);
+  // Drawing MODE within the open Label tool, mirroring `eraseActive`. The tool
+  // can be open with the panel visible while the view stays interactive;
+  // toggling this ON freezes the view and makes clicks place lasso vertices.
+  // Starts ON so opening the tool is immediately useful, and `L` toggles it.
+  const [labelDrawing, setLabelDrawing] = useState(true);
+  /**
+   * Selection primitive for the label tool: the polygon lasso, or the sphere
+   * brush.
+   *
+   * Both are kept because they answer different questions. A lasso is precise
+   * around an irregular outline and is the right tool for "everything in this
+   * region"; a brush is faster for touch-up and is depth-limited, so it does
+   * not paint the trunk behind the leaf you aimed at.
+   */
+  const [labelTool, setLabelTool] = useState<'lasso' | 'brush'>('lasso');
+  /** Brush radius in CANVAS PIXELS — constant on screen, as a brush should be. */
+  const [labelBrushPx, setLabelBrushPx] = useState(28);
+  const [labelBrushCursor, setLabelBrushCursor] =
+    useState<{ center: THREE.Vector3; radius: number } | null>(null);
+  const [labelBrushPainting, setLabelBrushPainting] = useState(false);
+  // Palette bound to the labelled cloud. Seeded from the cloud's OctreeRef when
+  // the tool opens, else from the wood/leaf preset (the common correction case).
+  const [labelPalette, setLabelPalette] = useState<ClassPalette | null>(null);
+  const [showPaletteEditor, setShowPaletteEditor] = useState(false);
+  /** The app-level saved-palette library, loaded on demand. */
+  const [paletteLibrary, setPaletteLibrary] = useState<ClassPalette[]>([]);
+  const [labelActiveClass, setLabelActiveClass] = useState(0);
+  const [labelVisibleClasses, setLabelVisibleClasses] = useState<Set<number>>(new Set());
+  // null = "Any visible" (no class gate) — see LabelPanel.
+  const [labelFromClasses, setLabelFromClasses] = useState<Set<number> | null>(null);
+  const [labelStrokes, setLabelStrokes] = useState<LabelStroke[]>([]);
+  const [labelClassCounts, setLabelClassCounts] = useState<Record<number, number>>({});
+  const [labelDirty, setLabelDirty] = useState(false);
+  const [labelBusy, setLabelBusy] = useState(false);
   // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
   // handed up by OctreePointCloud (which also reports null on unmount).
   //
@@ -1754,6 +2148,16 @@ export default function PointCloudViewer({
     const id = firstSelectedCloud?.id;
     return (id ? octreeRegistryRef.current.get(id) : null) ?? null;
   };
+
+  // Depth probe for zoom-to-cursor. DepthProbe (inside the Canvas, where the
+  // live camera/renderer are) fills this in; CameraController calls it on every
+  // wheel notch to find the surface under the pointer. Null while the probe is
+  // unmounted, in which case zoom falls back to a plain view-ray dolly.
+  const depthProbeRef = useRef<((x: number, y: number) => THREE.Vector3 | null) | null>(null);
+  const pickDepth = useCallback(
+    (x: number, y: number) => depthProbeRef.current?.(x, y) ?? null,
+    [],
+  );
 
   // Undo/redo history now lives in the scene store (scene.commit / scene.undo /
   // scene.redo / scene.boundary). isUndoingRef still guards capture during replay
@@ -1777,10 +2181,19 @@ export default function PointCloudViewer({
     axis: TransformAxis;
     startScreen: { x: number; y: number };
     pivot: { x: number; y: number; z: number };
-    target: 'mesh' | 'skeleton' | 'cloud' | 'pose';
+    target: 'mesh' | 'skeleton' | 'cloud' | 'pose' | 'scan';
     meshId?: string;
     skeletonId?: string;
     cloudIds?: string[];
+    // Scan position (scanner marker). `t` drives params.origin and `r` drives
+    // the scanner tilt — the same fields the Scan Parameters dialog edits.
+    // The whole params object is captured up front so apply* can spread a new
+    // origin/tilt onto it and cancel can write the original back verbatim:
+    // onUpdateScanParams takes a full params object rather than a functional
+    // updater, so keeping the original here avoids any stale-read window (and
+    // the parallel `*Ref` maps meshes need for the same reason).
+    scanId?: string;
+    originalScanParams?: ScanParameters;
     // Manual trajectory editor: the pose (row) index being transformed, plus its
     // original position + Euler orientation, so translate/rotate apply a delta
     // onto the originals (and cancel restores them).
@@ -1797,6 +2210,12 @@ export default function PointCloudViewer({
   }
   const transformModalRef = useRef<TransformModalState | null>(null);
   const [transformModal, setTransformModal] = useState<TransformModalState | null>(null);
+  // Last known cursor position, used as the anchor when a t/s/r modal starts.
+  // MUST live outside the keyboard-modal effect: that effect re-subscribes on
+  // every selection change, so an effect-local `{ set: false }` was being reset
+  // by the very click that selects the object — `t` then no-op'd (startModal
+  // bails when unset) until the user jiggled the mouse to fire a mousemove.
+  const lastMouseRef = useRef({ x: 0, y: 0, set: false });
 
   // ---- Manual trajectory editor session ----------------------------------
   // When set, the right-docked pose table is open and the targeted scan's
@@ -1830,6 +2249,15 @@ export default function PointCloudViewer({
     useState<TrajectoryEditorSession | null>(null);
   const trajectoryEditorRef = useRef<TrajectoryEditorSession | null>(null);
   trajectoryEditorRef.current = trajectoryEditor;
+
+  // Same render-time-ref idiom as trajectoryEditorRef above, and for the same
+  // reason: the modal transform effect needs the current scan params, but a
+  // scan-position gesture WRITES params on every mouse move. Listing
+  // scansWithParams in that effect's deps would tear down and re-add all four
+  // window listeners on every frame of a drag; the ref keeps the subscription
+  // stable while still reading fresh values.
+  const scansWithParamsRef = useRef<(Scan & { params: ScanParameters })[]>([]);
+  scansWithParamsRef.current = scansWithParams;
   // The manual trajectory editor draws interactive content in the viewport (and
   // opens before its scan exists when building for a new scan), so it must
   // suppress the empty-state import hint that would otherwise obscure it. Report
@@ -1908,8 +2336,21 @@ export default function PointCloudViewer({
       const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
       for (const cloud of clouds) {
         if (!newIdSet.has(cloud.id) || !cloud.data.bounds) continue;
-        min.min(cloud.data.bounds.min);
-        max.max(cloud.data.bounds.max);
+        // Frame the CONTENT: prefer the backend's percentile box over the raw
+        // AABB. A few stray returns hundreds of metres out (multipath, birds, a
+        // mis-registered scan) otherwise set the framing, which parks the camera
+        // far enough back to hold THEM and aims it at the empty space between
+        // them — the imported cloud lands as an off-axis speck, and no amount of
+        // zooming or panning recovers it because a dolly moves along the view
+        // ray and never corrects a lateral offset.
+        const rb = cloud.data.robustBounds;
+        if (rb) {
+          min.min(new THREE.Vector3(rb.min[0], rb.min[1], rb.min[2]));
+          max.max(new THREE.Vector3(rb.max[0], rb.max[1], rb.max[2]));
+        } else {
+          min.min(cloud.data.bounds.min);
+          max.max(cloud.data.bounds.max);
+        }
       }
       if (isFinite(min.x)) {
         const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
@@ -2060,6 +2501,18 @@ export default function PointCloudViewer({
     // Closing the picker only disarms it — placed labels persist, so they can
     // still be read while another tool is open.
     if (except !== 'point-pick') { setShowPointPickerPanel(false); setPointPickMode(false); }
+    // Closing the label tool only hides the panel — uncommitted strokes persist
+    // so they are not lost by opening another tool (same as point-pick).
+    if (except !== 'label') setShowLabelPanel(false);
+    // The cross-section panel is deliberately NOT closed here.
+    //
+    // A section is a VIEW STATE — like the camera or the point budget — not a
+    // mode. Modes are mutually exclusive; view states are not. Treating it as a
+    // mode meant opening Label closed the section (losing the clip and the
+    // stroke bound), and reaching over to adjust thickness mid-labelling closed
+    // the Label panel and the user's class selection with it.
+    //
+    // It stacks below the active tool's panel instead (see the panel mount).
   }, []);
 
   // Get edit state for a cloud
@@ -2333,6 +2786,10 @@ export default function PointCloudViewer({
     setTimeout(() => { isUndoingRef.current = false; }, 0);
   }, [scene]);
 
+  // Forward ref to the cloud being labelled — declared here because the window
+  // seams above are registered before labelTargetCloud exists.
+  const labelTargetCloudRef = useRef<{ id: string } | null>(null);
+
   // Expose viewer-scoped actions on window so the application menu (wired in
   // src/main/menu.ts) can dispatch to them via App.tsx without prop-drilling.
   // Matches the existing __resetPointCloudCamera / __snapToView pattern in
@@ -2349,13 +2806,29 @@ export default function PointCloudViewer({
     // re-pointed at the latest implementation on every render, so this stable
     // wrapper never goes stale. Used by the View → Fit to Selection app menu.
     (window as any).__zoomToSelection = () => zoomToSelectionRef.current();
+    // E2E seam: place a slab with EXACT geometry. Two viewport clicks can only
+    // give screen-derived coordinates, which is fine for testing the gesture but
+    // useless for asserting hard point counts — and hard counts are the only way
+    // to prove the section actually bounds what a stroke paints.
+    (window as any).__setSlab = (next: SlabRegion) => setSlab(next);
+    // E2E seams for the labelling preview. The overlay's own __labelOverlay
+    // fact counts the CPU buffer, which is filled in EVERY colour mode — it
+    // cannot tell you whether the shader actually SAMPLES it. These two expose
+    // the render mode the selected cloud is really in, and let a spec put it
+    // into a mode that ignores the intensity slot (as a real RGB scan does).
+    (window as any).__setCloudColorMode = (mode: ColorMode, field?: string) => {
+      const id = Array.from(selectedIds)[0];
+      if (id) setCloudColorMode(id, field ? { mode, field } : { mode });
+    };
     return () => {
+      delete (window as any).__setCloudColorMode;
       delete (window as any).__handleUndo;
       delete (window as any).__handleRedo;
       delete (window as any).__openExportPanel;
       delete (window as any).__zoomToSelection;
+      delete (window as any).__setSlab;
     };
-  }, [handleUndo, handleRedo, closeAllToolPanels]);
+  }, [handleUndo, handleRedo, closeAllToolPanels, selectedIds, colorModeFor, setCloudColorMode]);
 
   // Build a world-space inclusion predicate for the active crop region.
   // Returns null when there's no usable region (mode mismatch / nothing
@@ -2390,6 +2863,34 @@ export default function PointCloudViewer({
     }
     return null;
   }, [cropMode, cropBox, cropPolygon]);
+
+  // The screen-space crop preview handed to octree clouds (OctreePointCloud's
+  // `cropMask`). Box crops are excluded on purpose — an AABB is exactly what
+  // the GPU clip volume already does, at frame rate and without touching
+  // geometry, which matters while the gizmo drags. This covers what the clip
+  // volume CAN'T express: a closed polygon or a rect drawn off-axis.
+  //
+  // Gated on a CLOSED region (cropPolygon exists) — while the user is still
+  // clicking vertices there's no region to test against. Segment mode is
+  // excluded because neither half is discarded, so nothing should be hidden.
+  //
+  // `key` is what drives re-masking: it changes whenever the polygon geometry
+  // or the frozen camera changes, so redrawing re-tests, and orbiting after
+  // the polygon closed does NOT (the region is camera-frozen by design — the
+  // preview must stay pinned to the same points the apply will remove).
+  const octreeCropMask = useMemo(() => {
+    if (cropSegment) return null;
+    if (cropMode !== 'polygon' && cropMode !== 'rect') return null;
+    if (!cropPolygon || cropPolygon.points.length < 3) return null;
+    const predicate = buildCropPredicate();
+    if (!predicate) return null;
+    const pts = cropPolygon.points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(';');
+    return {
+      predicate,
+      invert: cropInvert,
+      key: `${cropMode}|${pts}|${cropPolygon.canvasSize.width}x${cropPolygon.canvasSize.height}`,
+    };
+  }, [cropSegment, cropMode, cropPolygon, cropInvert, buildCropPredicate]);
 
   // Apply the active crop region to every selected scan. Multi-scan crop
   // produces N cropped scans — one per input — preserving per-scan
@@ -2456,12 +2957,17 @@ export default function PointCloudViewer({
       { ...result, cache_dir: result.cache_dir ?? '', cached: false },
       octreeInfo.sourceXyzPath,
       fileName,
-      octreeInfo.asciiFormat ?? null,
-      octreeInfo.columnPlan ?? null,
-      octreeInfo.categoricalAttributes,
-      sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
-      octreeInfo.worldShift ?? null,
-      octreeInfo.continuousAttributes,
+      {
+        asciiFormat: octreeInfo.asciiFormat ?? null,
+        columnPlan: octreeInfo.columnPlan ?? null,
+        categoricalAttributes: octreeInfo.categoricalAttributes,
+        sessionId: sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
+        worldShift: octreeInfo.worldShift ?? null,
+        continuousAttributes: octreeInfo.continuousAttributes,
+        // Carry the user's palettes across the rebuild, or the cloud comes back
+        // with invented "Class N" names derived from the observed value range.
+        classPalettes: octreeInfo.classPalettes,
+      },
     );
     // A bake/filter/segment result carries the new hits octree (+ miss octree id)
     // but NOT has_misses/scanOrigin/scanParams — those are scan-level facts set at
@@ -2667,9 +3173,11 @@ export default function PointCloudViewer({
     const derivedCounts: number[] = [];
     // Number of new "(segment)" clouds added this apply — drives the toast.
     let segmentedCount = 0;
-    // Distinct color for the new segment cloud so it's separable from the
-    // source in the scene (mustard, matching the brand highlight palette).
-    const SEGMENT_COLOR = '#f59e0b';
+    // Note: derived clouds (segment / retained crop) inherit their SOURCE
+    // scan's color rather than taking a new palette entry — a crop output is
+    // the same scan's points, and the scene list reads better when the family
+    // shares a swatch. They're told apart by their "(segment)"/"(cropped)"
+    // label, not by colour.
 
     const finishUp = () => {
       if (touchedCloudIds.length > 0) {
@@ -2864,11 +3372,15 @@ export default function PointCloudViewer({
               }
               const newId = crypto.randomUUID();
               // Read from the ref, not the closure-captured `scans`: clouds
-              // added earlier in THIS loop must count toward name/color
-              // allocation, or a multi-scan crop hands every child the same
-              // label and swatch. Collisions are checked against DISPLAY names
-              // (scan.label), which is what the scene list actually shows.
+              // added earlier in THIS loop must count toward name allocation,
+              // or a multi-scan crop hands every child the same label.
+              // Collisions are checked against DISPLAY names (scan.label),
+              // which is what the scene list actually shows.
               const live = scansRef.current;
+              // Applying a crop must not move the camera: the user framed the
+              // region they're cropping and expects to keep looking at it.
+              // Registered BEFORE the add so the frame-on-add effect skips it.
+              suppressFrameCloudIdsRef.current.add(newId);
               onAddScan({
                 id: newId,
                 label: derivedScanName(
@@ -2877,7 +3389,11 @@ export default function PointCloudViewer({
                   'cropped',
                 ),
                 visible: true,
-                color: allocateScanColor(new Set(live.map(s => s.color))),
+                // Inherit the source scan's color. A cropped cloud is the same
+                // scan's points, so a fresh palette entry would break the visual
+                // link to its parent (and in a multi-scan crop, hand each child a
+                // colour belonging to a DIFFERENT source scan).
+                color: cloud.color,
                 data,
                 // A crop is a subset of the SAME scanner's returns, so the beam
                 // apex is still valid — keep the origin (deep-cloned so the two
@@ -2918,14 +3434,16 @@ export default function PointCloudViewer({
               }
               onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, src.fileName ?? cloud.id, undefined, { diverged: true }));
               if (result.leftover) {
+                const segmentId = crypto.randomUUID();
+                suppressFrameCloudIdsRef.current.add(segmentId);
                 onAddCloud({
-                  id: crypto.randomUUID(),
+                  id: segmentId,
                   data: buildSessionOctreeData(
                     result.leftover, octreeInfo, `${src.fileName ?? cloud.id} (segment)`,
                     result.leftover.session_id, { diverged: true },
                   ),
                   visible: true,
-                  color: SEGMENT_COLOR,
+                  color: cloud.color,
                 });
                 segmentedCount++;
               }
@@ -3057,11 +3575,13 @@ export default function PointCloudViewer({
       if (segment && onAddCloud) {
         const inverseData = buildSubset(cropInvert);
         if (inverseData) {
+          const segmentId = crypto.randomUUID();
+          suppressFrameCloudIdsRef.current.add(segmentId);
           onAddCloud({
-            id: crypto.randomUUID(),
+            id: segmentId,
             data: { ...inverseData, fileName: `${src.fileName ?? cloud.id} (segment)` },
             visible: true,
-            color: SEGMENT_COLOR,
+            color: cloud.color,
           });
           segmentedCount++;
         }
@@ -3084,6 +3604,7 @@ export default function PointCloudViewer({
         }
         const newId = crypto.randomUUID();
         const live = cloudsRef.current;
+        suppressFrameCloudIdsRef.current.add(newId);
         onAddScan({
           id: newId,
           label: derivedScanName(
@@ -3092,7 +3613,8 @@ export default function PointCloudViewer({
             'cropped',
           ),
           visible: true,
-          color: allocateScanColor(new Set(live.map(c => c.color))),
+          // Inherit the source scan's color — see the octree path above.
+          color: cloud.color,
           data: keptData,
           params: cloud.params
             ? { ...cloud.params, origin: { ...cloud.params.origin } }
@@ -3346,6 +3868,807 @@ export default function PointCloudViewer({
     setEditMode('none');
   }, [editMode, selectedIds, clouds, editStates, onUpdateCloud, eraseFrame, eraseBrushPx]);
 
+  // ── Cross-section derived state ───────────────────────────────────────────
+
+  /** The cloud the section applies to (single selection, session-backed). */
+  /** Cloud whose SECTION is in effect — clip, wireframe, stroke bound. */
+  const sectionTargetCloud = useMemo(() => {
+    // Gated on a SLAB EXISTING, not on the panel being open.
+    //
+    // Tying this to `showSectionPanel` meant opening the Label tool (which
+    // closes the section panel, since they share a slot) silently switched the
+    // whole section off — the clip, the wireframe, and the slab carried on each
+    // stroke. The user set up a section, went to paint in it, and the labelling
+    // tool behaved exactly as if no section existed.
+    //
+    // The section is a VIEWING CONTEXT, not a modal tool: it stays in effect
+    // until explicitly cleared, which is what makes "set up a section, then
+    // label inside it" work at all.
+    if (selectedIds.size !== 1) return null;
+    if (!showSectionPanel && !slab) return null;
+    return clouds.find(c => selectedIds.has(c.id)) ?? null;
+  }, [showSectionPanel, slab, selectedIds, clouds]);
+
+  /** World bounds of that cloud, for seeding and for the coverage readout. */
+  const sectionBounds = useMemo(() => {
+    const b = sectionTargetCloud?.data.bounds;
+    if (!b) return null;
+    const t = getEditState(sectionTargetCloud!.id).translation;
+    return {
+      min: new THREE.Vector3(b.min.x + t.x, b.min.y + t.y, b.min.z + t.z),
+      max: new THREE.Vector3(b.max.x + t.x, b.max.y + t.y, b.max.z + t.z),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectionTargetCloud, editStates]);
+
+  /**
+   * Oriented clip-box transform for the active slab. Null when no section, or
+   * while the section is suspended.
+   *
+   * This is the ONLY path by which the slab clips the view — labelling reads
+   * `slab` directly (see paintLabelStroke). That separation is deliberate:
+   * suspending the clip shows the whole cloud WITHOUT silently unbounding the
+   * paint, which would otherwise let a stroke sweep the full depth while the
+   * viewport looked like there was no section at all.
+   */
+  const slabBoxMatrix = useMemo(
+    () => (sectionTargetCloud && slab && !slabSuspended ? slabToBox(slab).matrix : null),
+    [sectionTargetCloud, slab, slabSuspended],
+  );
+
+  const slabCoverageInfo = useMemo(
+    () => (slab && sectionBounds
+      ? slabCoverage(slab, sectionBounds, slabStepMode, slabFixedStep)
+      : null),
+    [slab, sectionBounds, slabStepMode, slabFixedStep],
+  );
+
+  /**
+   * Move the camera to look at the slab face-on. One-shot imperative write, not
+   * a per-frame override — the user must still be able to nudge the view.
+   */
+  /**
+   * Remove the section entirely and return to a normal view of the whole cloud.
+   *
+   * The escape hatch. Every other control ADJUSTS the section — thickness,
+   * stepping, lock, suspend — so without this the only way out of a section was
+   * to close the panel and live with a permanently clipped cloud, since closing
+   * deliberately does not clear (the Label tool shares the panel slot, and
+   * clearing on close would silently switch off the section a user set up to
+   * paint inside).
+   */
+  const clearSlabSection = useCallback(() => {
+    setSlab(null);
+    setSlabSuspended(false);
+    setSlabLocked(true);   // back to the default for the next section
+    slabDrawRef.current = { state: 'idle', first: null };
+    setSlabFirstPointState(null);
+    setSlabCursor(null);
+    slabCursorRef.current = null;
+    setSlabDrawState('idle');
+  }, []);
+
+  const viewSlabFaceOn = useCallback((s: SlabRegion) => {
+    const camera = polygonCameraRef.current;
+    const target = slabCenter(s);
+    const distance = Math.max(
+      camera ? camera.position.distanceTo(target) : 0,
+      Math.max(s.zMax - s.zMin, 1) * 2,
+    );
+    const pose = slabViewPose(s, distance);
+    const off = displayOffsetRef.current;
+    (window as any).__viewSlab?.(
+      { x: pose.eye.x - (off?.x ?? 0), y: pose.eye.y - (off?.y ?? 0), z: pose.eye.z - (off?.z ?? 0) },
+      { x: pose.target.x - (off?.x ?? 0), y: pose.target.y - (off?.y ?? 0), z: pose.target.z - (off?.z ?? 0) },
+    );
+  }, []);
+
+  /** Second click of the centreline: build the slab and frame it. */
+  const commitSlabCentreline = useCallback((ax: number, ay: number, bx: number, by: number) => {
+    if (!sectionBounds) return;
+    // Shared with the while-you-drag preview, so what the second click produces
+    // is exactly the box that was on screen a moment earlier.
+    const next = slabFromCentreline(
+      { x: ax, y: ay }, { x: bx, y: by }, sectionBounds,
+    );
+    setSlab(next);
+    // The new section takes effect immediately — onDraw suspended clipping so
+    // the user could aim, and this is the click that ends that.
+    setSlabSuspended(false);
+    setSlabDrawState('idle');
+    if (slabLocked) viewSlabFaceOn(next);
+  }, [sectionBounds, slabLocked, viewSlabFaceOn]);
+
+  const handleSlabStep = useCallback((dir: 1 | -1) => {
+    setSlab(prev => {
+      if (!prev) return prev;
+      const next = stepSlab(prev, dir, slabStepMode, slabFixedStep);
+      // The camera TRANSLATES with the slab — no rotation, no zoom change. That
+      // is what makes stepping feel like flipping pages rather than
+      // re-navigating, and it is why the pose is derived from the slab.
+      if (slabLocked) viewSlabFaceOn(next);
+      return next;
+    });
+  }, [slabStepMode, slabFixedStep, slabLocked, viewSlabFaceOn]);
+
+  // ── Manual labelling ──────────────────────────────────────────────────────
+
+  // The cloud being labelled (single selection, session-backed).
+  const labelTargetCloud = useMemo(() => {
+    if (!showLabelPanel || selectedIds.size !== 1) return null;
+    const cloud = clouds.find(c => selectedIds.has(c.id));
+    return cloud?.data.octree?.sessionId ? cloud : null;
+  }, [showLabelPanel, selectedIds, clouds]);
+
+  // Read through a ref so the polygon-close callback (created once) can tell
+  // whether the lasso should paint rather than crop, without re-creating itself
+  // on every state change.
+  const labelModeRef = useRef(false);
+  // Whether the tool was armed on the PREVIOUS run of the arm/disarm effect
+  // below, which owns this ref exclusively. See the comment there.
+  const labelArmedRef = useRef(false);
+  useEffect(() => {
+    labelModeRef.current = !!labelTargetCloud;
+    labelTargetCloudRef.current = labelTargetCloud ? { id: labelTargetCloud.id } : null;
+  }, [labelTargetCloud]);
+
+  // Monotonic stamp so a slow label-summary read can never overwrite a newer
+  // paint/undo/commit result.
+  const labelCountsSeqRef = useRef(0);
+  const labelPaletteRef = useRef<ClassPalette | null>(null);
+  // Render-time, not an effect: paintLabelStroke reads this synchronously via
+  // the ref, so a post-paint effect could hand it the previous palette.
+  labelPaletteRef.current = labelPalette;
+
+  // Uncommitted-stroke guard.
+  //
+  // Phytograph has no project save/load — File > Save opens the export panel and
+  // the scene lives only in React state plus backend session RAM. For every
+  // other tool that is survivable: a triangulation re-runs in seconds. A
+  // labelling session is IRREPLACEABLE hand-made work, so losing it to a stray
+  // File > New or a window close is a different class of harm.
+  //
+  // Guard the exits we can. Real autosave/session restore is separate design
+  // work; this is the cheap part that prevents the worst outcome.
+  // Deliberately NOT a `beforeunload` handler. In Electron that raises a native
+  // Chromium dialog which the app cannot style, cannot dismiss programmatically,
+  // and which wedges an automated quit (it hung Playwright's worker teardown for
+  // the full 180 s timeout). The in-app warnings below — the File > New dialog
+  // and the panel's own unsaved-strokes hint — cover the paths a user actually
+  // takes, without hijacking window close.
+  //
+  // The File>New confirm dialog and E2E read this to know whether work is at risk.
+  useEffect(() => {
+    (window as any).__uncommittedLabelStrokes = labelStrokes.length;
+    return () => { (window as any).__uncommittedLabelStrokes = 0; };
+  }, [labelStrokes.length]);
+
+  // Opening the label tool arms the POLYGON LASSO. Phase 1 has no selection
+  // machinery of its own: it drives the crop tool's draw state, and
+  // closePolygonFrom routes a closed polygon to paintLabelStroke instead of
+  // setCropPolygon (see labelModeRef there). Every gate on the overlay, the
+  // blocked-zone clamping, the camera freeze and the Escape/Backspace cascade
+  // therefore works unchanged.
+  useEffect(() => {
+    if (labelTargetCloud) {
+      // Reset the published overlay fact when (re)opening on a cloud, so it can
+      // never report the previous session's counts before the first frame.
+      (window as any).__labelOverlay = undefined;
+    }
+    if (labelTargetCloud && labelDrawing) {
+      // Its OWN mode. Borrowing editMode==='crop' made the label tool literally
+      // BE the crop tool: the Crop toolbar button lit up as active, the crop
+      // box gizmo mounted behind the panel, and — worse — showCropPreview went
+      // true, so octreeCropMask started hiding points with an index buffer on
+      // the very tiles the label overlay was painting.
+      setEditMode('label');
+      setCropMode('polygon');
+      setCropDrawState('drawing-polygon');
+      setPolygonInProgress([]);
+      setCropPolygon(null);
+    } else if (labelArmedRef.current) {
+      // Tool closed: disarm it. Without this the panel disappears but the lasso
+      // stays live — the toolbar button reads active and clicks in the viewport
+      // keep dropping polygon vertices on a tool the user thinks is shut.
+      //
+      // Guarded by its OWN ref, not labelModeRef: that one is updated by a
+      // separate effect on the same dependency, and effects run in declaration
+      // order, so it has ALREADY flipped to false by the time this runs — the
+      // branch never fired.
+      setCropDrawState('idle');
+      setPolygonInProgress([]);
+      setCropPolygon(null);
+      setEditMode('none');
+    }
+    labelArmedRef.current = !!labelTargetCloud;
+  }, [labelTargetCloud, labelDrawing]);
+
+  // After a stroke lands, re-arm the lasso so the user can paint again without
+  // re-entering the tool.
+  useEffect(() => {
+    // Deliberately NOT gated on `labelBusy`: the paint is already on screen
+    // (optimistic), so making the user wait for the in-flight request before
+    // they can start the next lasso would put the round trip back into the
+    // interaction, just one step later. Strokes are applied in order server-side
+    // and each carries its own id, so overlapping requests reconcile correctly.
+    // Only the LASSO arms the polygon overlay. In brush mode the overlay would
+    // sit over the canvas swallowing every mousedown, so the brush would never
+    // receive one.
+    if (labelTargetCloud && labelDrawing && labelTool === 'lasso' && cropDrawState === 'idle') {
+      setCropDrawState('drawing-polygon');
+      setPolygonInProgress([]);
+      return;
+    }
+    // Switching TO the brush must also disarm an already-armed lasso. Not
+    // arming it is not enough: the overlay stays mounted from before the
+    // switch, fills the viewport, and swallows every mousedown — so the brush
+    // would never receive one and would appear completely dead.
+    if (labelTargetCloud && labelTool === 'brush' && cropDrawState === 'drawing-polygon') {
+      setCropDrawState('idle');
+      setPolygonInProgress([]);
+    }
+  }, [labelTargetCloud, labelDrawing, labelTool, cropDrawState]);
+
+  /** True while the sphere brush owns the pointer. */
+  const labelBrushActive = !!labelTargetCloud && labelDrawing && labelTool === 'brush';
+
+  // Brush radius: scroll wheel, or `[` / `]`.
+  //
+  // Wheel is the near-universal convention (Blender, QGIS, Photoshop,
+  // Segments.ai), which is why it is worth taking plain scroll from
+  // zoom-to-cursor while the brush is live — zoom moves to Alt+wheel for the
+  // duration (see CameraController's zoomOnAltWheel). Brackets are the
+  // wheel-free alternative, and matter on a trackpad where a deliberate small
+  // scroll is awkward.
+  //
+  // Registered CAPTURE-phase on window because CameraController's zoom handler
+  // is itself capture-phase on the canvas; bubbling here would let zoom consume
+  // the event first.
+  const labelBrushActiveRef = useRef(labelBrushActive);
+  labelBrushActiveRef.current = labelBrushActive;
+  useEffect(() => {
+    const BRUSH_MIN_PX = 4;
+    const BRUSH_MAX_PX = 250;
+    const clamp = (v: number) => Math.max(BRUSH_MIN_PX, Math.min(BRUSH_MAX_PX, v));
+
+    const onWheel = (e: WheelEvent) => {
+      if (!labelBrushActiveRef.current) return;
+      // Leave modified scroll alone — Alt+wheel is zoom while the brush is live.
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const canvas = document.querySelector('canvas[data-engine]');
+      if (!canvas || !(e.target instanceof Node) || !canvas.contains(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Proportional, so one notch feels the same at 8 px and at 200 px.
+      setLabelBrushPx((px) => clamp(Math.round(px * (e.deltaY < 0 ? 1.12 : 1 / 1.12))));
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (!labelBrushActiveRef.current) return;
+      if (e.key !== '[' && e.key !== ']') return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        || el.tagName === 'SELECT' || el.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      setLabelBrushPx((px) => clamp(Math.round(px * (e.key === ']' ? 1.12 : 1 / 1.12))));
+    };
+
+    window.addEventListener('wheel', onWheel, { capture: true, passive: false });
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('wheel', onWheel, { capture: true } as any);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, []);
+
+  /**
+   * Pull the authoritative per-class counts for `slug` and show them.
+   *
+   * Shared by tool-open and palette-switch. A palette names both a class
+   * VOCABULARY and the COLUMN it describes, so switching palettes must refetch:
+   * counts are keyed by class value, so leaving the old map in place renders
+   * one column's numbers under another's class names (wood/leaf's 40K/15K/10K
+   * reappearing as Unknown/Leaf/Petiole under the organ palette).
+   */
+  const refreshLabelCounts = useCallback(async (
+    sessionId: string, slug: string, cancelled?: () => boolean,
+  ) => {
+    // Stamp the request. A summary fetch is a READ of state that a paint may be
+    // about to change, so a slow reply must never clobber a newer write: paint
+    // while the open-fetch is still in flight and the stale {0: all} reply would
+    // land after it and reset the counts to zero. Monotonic counter, newest
+    // wins — the same discipline the stroke list uses against the backend.
+    const seq = ++labelCountsSeqRef.current;
+    try {
+      const res = await getCloudLabelSummary(sessionId, slug);
+      if (cancelled?.() || seq !== labelCountsSeqRef.current) return;
+      setLabelClassCounts(
+        Object.fromEntries(
+          Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
+        ) as Record<number, number>,
+      );
+    } catch {
+      // Only costs the readout; the next stroke's response repopulates it.
+      if (!cancelled?.() && seq === labelCountsSeqRef.current) setLabelClassCounts({});
+    }
+  }, []);
+
+  /**
+   * Make `next` the live palette.
+   *
+   * Shared by preset cycling and the editor, because switching palettes is
+   * never just a colour change: class VALUES differ between vocabularies, so
+   * the visible set, the active class, the From-gate and — critically — the
+   * counts must all be re-derived. `labelClassCounts` is keyed by class value,
+   * so carrying a stale map renders one column's numbers under another's names.
+   */
+  const applyLabelPalette = useCallback((next: ClassPalette) => {
+    setLabelPalette(next);
+    setLabelVisibleClasses(new Set(next.classes.map(c => c.value)));
+    setLabelActiveClass(prev => (
+      // Keep the user's active class if the new palette still has it, so an
+      // edit that only renames or recolours does not move their brush.
+      next.classes.some(c => c.value === prev && c.value !== UNCLASSIFIED_VALUE)
+        ? prev
+        : next.classes.find(c => c.value !== UNCLASSIFIED_VALUE)?.value ?? UNCLASSIFIED_VALUE
+    ));
+    setLabelFromClasses(null);
+    setLabelClassCounts({});
+    const sid = labelTargetCloud?.data.octree?.sessionId;
+    if (sid) void refreshLabelCounts(sid, next.slug);
+  }, [refreshLabelCounts, labelTargetCloud]);
+
+  // Load the saved-palette library when the editor opens. On demand rather than
+  // at mount: it is a disk read that only this panel needs.
+  useEffect(() => {
+    if (!showPaletteEditor) return;
+    let cancelled = false;
+    void getClassPalettes()
+      .then(list => { if (!cancelled) setPaletteLibrary(list); })
+      .catch(() => { if (!cancelled) setPaletteLibrary([]); });
+    return () => { cancelled = true; };
+  }, [showPaletteEditor]);
+
+  /**
+   * Save the edited palette: apply it, bind it to the cloud, and add it to the
+   * shared library.
+   *
+   * Binding on the cloud is what makes the palette survive closing the tool —
+   * the seed effect prefers `octree.classPalettes` over the default preset. The
+   * library copy is the reusable asset (TerraScan's `.PTC` idea): the same
+   * classes on the next cloud, or shared with a collaborator.
+   */
+  const handleSavePalette = useCallback(async (next: ClassPalette) => {
+    applyLabelPalette(next);
+    const cloud = labelTargetCloud;
+    const octreeInfo = cloud?.data.octree;
+    if (cloud && octreeInfo) {
+      onUpdateCloud(cloud.id, {
+        ...cloud.data,
+        octree: {
+          ...octreeInfo,
+          classPalettes: { ...(octreeInfo.classPalettes ?? {}), [next.slug]: next },
+          categoricalAttributes: Array.from(
+            new Set([...(octreeInfo.categoricalAttributes ?? []), next.slug]),
+          ),
+        },
+      });
+    }
+    try {
+      setPaletteLibrary(await saveClassPalette(next));
+      showToast({ title: `Saved "${next.name}"`, type: 'success' });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Saving palette').message, type: 'error' });
+    }
+  }, [applyLabelPalette, labelTargetCloud, onUpdateCloud, showToast]);
+
+  /** Write the whole library to a JSON file, for sharing between collaborators. */
+  const handleExportPalettes = useCallback(async () => {
+    try {
+      const json = await exportClassPalettes();
+      const savePath = await window.electronAPI?.dialog.save({
+        defaultPath: 'class-palettes.json',
+        title: 'Export class palettes',
+        filters: [{ name: 'Class palettes', extensions: ['json'] }],
+      });
+      if (!savePath) return;
+      await window.electronAPI.fs.writeText(savePath, json);
+      showToast({ title: 'Palettes exported', type: 'success' });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Exporting palettes').message, type: 'error' });
+    }
+  }, [showToast]);
+
+  /** Merge a collaborator's palette file into the library. */
+  const handleImportPalettes = useCallback(async () => {
+    try {
+      const picked = await window.electronAPI.dialog.open({
+        title: 'Import class palettes',
+        filters: [{ name: 'Class palettes', extensions: ['json'] }],
+      });
+      if (!picked) return;
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      const json = await window.electronAPI.fs.readText(path);
+      const count = await importClassPalettes(json);
+      setPaletteLibrary(await getClassPalettes());
+      showToast({
+        title: count > 0
+          ? `Imported ${count} palette${count === 1 ? '' : 's'}`
+          : 'No palettes found in that file',
+        type: count > 0 ? 'success' : 'error',
+      });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Importing palettes').message, type: 'error' });
+    }
+  }, [showToast]);
+
+  // Seed the palette when the tool opens on a cloud: prefer one already bound to
+  // this cloud (so re-opening keeps the user's own classes), else the wood/leaf
+  // preset — the common correction case for this app's data.
+  useEffect(() => {
+    if (!labelTargetCloud) return;
+    const bound = labelTargetCloud.data.octree?.classPalettes?.[MANUAL_CLASS_ATTRIBUTE];
+    const palette = bound ?? makePreset('wood_leaf', MANUAL_CLASS_ATTRIBUTE, Date.now());
+    setLabelPalette(palette);
+    setLabelVisibleClasses(new Set(palette.classes.map(c => c.value)));
+    // Start on the first non-Unclassified class: painting "Unclassified" by
+    // accident is a silent no-op the user would have to debug.
+    setLabelActiveClass(palette.classes.find(c => c.value !== 0)?.value ?? 0);
+    setLabelFromClasses(null);
+
+    // Populate the counts straight away. Without this every class reads 0 on a
+    // fresh cloud, which looks like "no points here" when in fact all of them
+    // are Unclassified — and the total then jumps once the first stroke lands.
+    //
+    // Fetched rather than derived from data.pointCount: the backend counts only
+    // EDITABLE points (no deleted rows, no sky/miss), so a locally-computed
+    // total would disagree with every later update.
+    const sessionId = labelTargetCloud.data.octree?.sessionId;
+    if (sessionId) {
+      let cancelled = false;
+      void refreshLabelCounts(sessionId, palette.slug, () => cancelled);
+      // Guard against a late reply landing after the user switched clouds.
+      return () => { cancelled = true; };
+    }
+    // Only when the TARGET changes — re-running on every palette edit would
+    // clobber the user's in-progress class list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labelTargetCloud?.id]);
+
+  /**
+   * Paint one stroke: POST it, then record it locally.
+   *
+   * The order matters — the stroke is only appended to the renderer's list on
+   * SUCCESS, so the invariant `strokes.length === backend label_edit_count`
+   * cannot drift on a failed request (the backend applies a batch under one
+   * lock, so there is no partial-apply case to reconcile).
+   */
+  const paintLabelStroke = useCallback(async (region: PendingDeleteRegion) => {
+    const cloud = labelTargetCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    const palette = labelPaletteRef.current;
+    if (!cloud || !sessionId || !palette) return;
+
+    const strokeId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    // A stroke drawn inside a cross-section is bounded by it. Captured on the
+    // stroke (not read live) so undo/redo replays the section the user actually
+    // painted in, even after they have stepped the slab on.
+    const activeSlab = sectionTargetCloud?.id === cloud.id ? slab : null;
+    const stroke: LabelStroke = {
+      strokeId,
+      region,
+      toClass: labelActiveClass,
+      fromClasses: labelFromClasses ? [...labelFromClasses] : undefined,
+      slab: activeSlab ? slabToPayload(activeSlab) : undefined,
+    };
+    const before: LabelEditState = {
+      strokes: labelStrokes,
+      activeClass: labelActiveClass,
+      visibleClasses: [...labelVisibleClasses],
+      paletteId: palette.id,
+      dirty: labelDirty,
+    };
+    const nextStrokes = [...labelStrokes, stroke];
+
+    // PAINT FIRST, confirm after.
+    //
+    // The overlay is driven by `labelStrokes` and is entirely client-side, so
+    // appending here makes the preview appear on the next frame — a ~16 ms pass
+    // over the loaded tiles. Waiting for the backend first (as this did
+    // originally) meant the user stared at an unchanged viewport for the whole
+    // HTTP round trip PLUS a full-resolution O(N) projection of the entire
+    // cloud: on a 50 M-point scan that is ~25x the work the renderer does, since
+    // the renderer only ever touches the ~2 M loaded points. That defeated the
+    // entire purpose of having a client-side overlay.
+    //
+    // The backend stays the source of truth: its reply supplies the authoritative
+    // class counts, and a failure rolls the stroke back below.
+    setLabelStrokes(nextStrokes);
+    setLabelDirty(true);
+    setLabelBusy(true);
+    try {
+      const res = await labelCloudRegion(sessionId, [{
+        region: region as CropOctreeRegion,
+        to_class: stroke.toClass,
+        ...(stroke.fromClasses ? { from_classes: stroke.fromClasses } : {}),
+        ...(stroke.slab ? { slab: stroke.slab as unknown as CropOctreeRegion } : {}),
+        stroke_id: strokeId,
+      }], palette.slug);
+
+      const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
+      labelCountsSeqRef.current++;   // any in-flight summary read is now stale
+      setLabelClassCounts(
+        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
+      );
+      // Do NOT reconcile the stroke list against `label_edit_count` here.
+      //
+      // The two counts measure different things: the renderer's list is USER
+      // GESTURES, the backend's history is UNDOABLE CHANGES. A stroke that
+      // changes nothing — e.g. the From-class gate matched no points — is
+      // correctly not recorded server-side, so the counts legitimately diverge
+      // by one. Truncating on that difference deleted the user's own stroke
+      // right after they drew it, and made the next lasso appear to do nothing.
+      //
+      // Eviction (the byte-bounded history dropping OLD entries) is a real case,
+      // but it trims the FRONT of the stack, so comparing lengths cannot detect
+      // it and slicing the tail is the wrong repair regardless.
+      scene.commit({
+        label: 'label points',
+        actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
+      });
+    } catch (err) {
+      // Roll the optimistic paint back so the viewport can never show a stroke
+      // the session does not actually carry.
+      setLabelStrokes((prev) => prev.filter((x) => x.strokeId !== strokeId));
+      setLabelDirty(before.dirty ?? false);
+      showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
+      labelVisibleClasses, labelDirty, scene, showToast,
+      // `slab`/`sectionTargetCloud` are READ in the body (activeSlab), so they
+      // must be dependencies. Omitting them froze `slab` at its first-render
+      // value — null — so every stroke drawn inside a section shipped WITHOUT
+      // its slab. The overlay reads the live slab, so the preview showed the
+      // section-bounded paint while the backend labelled unbounded (or, with
+      // the polygon covering the viewport, everything). Preview and truth
+      // silently disagreed, which is the exact failure C1-R warns about.
+      slab, sectionTargetCloud]);
+
+  // closePolygonFrom is created once, so it must reach the CURRENT painter
+  // through a ref rather than a captured closure.
+  const paintLabelStrokeRef = useRef<typeof paintLabelStroke | null>(null);
+  // Assigned during RENDER, not in an effect. An effect runs after paint, so a
+  // second lasso closed before it flushed would call the PREVIOUS closure —
+  // whose `labelStrokes` is the older array — and `[...old, stroke]` would come
+  // out the same length as before. Symptom: the stroke silently never lands,
+  // pending-strokes stays at 1, and the tool still looks armed. Writing a ref in
+  // render is safe here because it holds no state, only the latest callback.
+  paintLabelStrokeRef.current = paintLabelStroke;
+
+  // World-space membership test for a committed region, mirroring exactly what
+  // the backend's `_region_mask` does for the same payload — the preview and
+  // the applied result therefore agree by construction rather than by two
+  // parallel implementations. (Same reasoning as buildCropPredicate above; this
+  // one takes the wire-format region so a stored stroke can be replayed.)
+  const buildRegionPredicate = useCallback((region: PendingDeleteRegion) => {
+    if (region.kind === 'box') {
+      const [nx, ny, nz] = region.min;
+      const [xx, xy, xz] = region.max;
+      return (wx: number, wy: number, wz: number) =>
+        wx >= nx && wx <= xx && wy >= ny && wy <= xy && wz >= nz && wz <= xz;
+    }
+    if (region.kind === 'polygon') {
+      const { points, projection, view, canvas } = region;
+      const canvasSize = { width: canvas.width, height: canvas.height };
+      const poly = points.map(([x, y]) => ({ x, y }));
+      return (wx: number, wy: number, wz: number) => {
+        const pixel = projectWorldToCanvasPixel(
+          { x: wx, y: wy, z: wz }, projection, view, canvasSize,
+        );
+        return pixel ? pointInPolygon(pixel, poly) : false;
+      };
+    }
+    if (region.kind === 'spheres_union') {
+      // World-space and camera-free: exactly what the backend's
+      // _spheres_union_mask computes, so preview and apply cannot drift.
+      // Squared distance, to skip a sqrt per point per sphere.
+      const { centers, radii } = region;
+      const r2 = radii.map((r) => r * r);
+      return (wx: number, wy: number, wz: number) => {
+        for (let i = 0; i < centers.length; i++) {
+          const dx = wx - centers[i][0];
+          const dy = wy - centers[i][1];
+          const dz = wz - centers[i][2];
+          if (dx * dx + dy * dy + dz * dz <= r2[i]) return true;
+        }
+        return false;
+      };
+    }
+    // squares_union (the erase brush's shape) — not produced by the label tool
+    // in Phase 1, but replayable if a stroke ever carries one.
+    const { centers, half_sizes, projection, view, canvas } = region;
+    const canvasSize = { width: canvas.width, height: canvas.height };
+    return (wx: number, wy: number, wz: number) => {
+      const p = projectWorldToCanvasPixel(
+        { x: wx, y: wy, z: wz }, projection, view, canvasSize,
+      );
+      if (!p) return false;
+      for (let i = 0; i < centers.length; i++) {
+        const h = half_sizes[i];
+        if (Math.abs(p.x - centers[i][0]) <= h && Math.abs(p.y - centers[i][1]) <= h) {
+          return true;
+        }
+      }
+      return false;
+    };
+  }, []);
+
+  /**
+   * Cheap world-space AABB for a stroke, so the overlay can skip tiles the
+   * stroke cannot possibly touch (octreeLabelOverlay's per-stroke rejection).
+   *
+   * A BOX region has an exact one. A SCREEN-SPACE region does not: its volume is
+   * the frustum through the polygon, unbounded in depth, and any box we derived
+   * would either be wrong or be the whole scene. Returning null there is honest —
+   * the overlay then tests every tile, which is what it did before. The win is
+   * real for box strokes and for anything future that carries bounds (the Phase 3
+   * sphere brush has an exact AABB).
+   */
+  const strokeAabb = useCallback((region: PendingDeleteRegion): THREE.Box3 | null => {
+    if (region.kind === 'spheres_union') {
+      // A sphere union HAS an exact AABB, unlike the screen-space regions —
+      // it is bounded in depth. That makes the overlay's per-tile rejection
+      // genuinely selective for brush strokes: a small stamp touches a handful
+      // of tiles instead of forcing a full replay over every loaded point.
+      const box = new THREE.Box3();
+      region.centers.forEach(([x, y, z], i) => {
+        const r = region.radii[i];
+        box.union(new THREE.Box3(
+          new THREE.Vector3(x - r, y - r, z - r),
+          new THREE.Vector3(x + r, y + r, z + r),
+        ));
+      });
+      return box.isEmpty() ? null : box;
+    }
+    if (region.kind !== 'box') return null;
+    return new THREE.Box3(
+      new THREE.Vector3(region.min[0], region.min[1], region.min[2]),
+      new THREE.Vector3(region.max[0], region.max[1], region.max[2]),
+    );
+  }, []);
+
+  // ── Live label preview ────────────────────────────────────────────────────
+  //
+  // Turn the pending stroke list into the per-tile overlay the octree renderer
+  // paints. Without this the user paints and sees nothing change until Commit
+  // rebuilds the octree (minutes) — the tool would not feel like a paint tool
+  // at all. See octreeLabelOverlay.ts for why the octree cannot show it itself.
+  //
+  // Strokes carry a class VALUE, but the overlay paints a dense palette INDEX:
+  // potree bakes its step gradient into 64 texels, so a palette living at
+  // 64..255 would blend into one colour on screen.
+  const labelOverlayRef = useRef<LabelOverlayState | null>(null);
+  const labelOverlayState = useMemo<LabelOverlayState | null>(() => {
+    if (!labelTargetCloud || !labelPalette) return null;
+    const { valueToIndex } = paletteIndexMaps(labelPalette);
+    const unlabeledIndex = valueToIndex.get(UNCLASSIFIED_VALUE) ?? 0;
+    const strokes = labelStrokes.map((s) => {
+      const regionTest = buildRegionPredicate(s.region);
+      // AND the slab into the preview predicate. Without this the overlay would
+      // paint the points behind the section that the backend correctly refuses,
+      // and preview and result would disagree.
+      const slabTest = s.slab
+        ? slabPredicate({
+            kind: 'slab',
+            a: { x: s.slab.a[0], y: s.slab.a[1] },
+            b: { x: s.slab.b[0], y: s.slab.b[1] },
+            depth: s.slab.depth, zMin: s.slab.zMin, zMax: s.slab.zMax,
+            offset: s.slab.offset,
+          })
+        : null;
+      const predicate = slabTest
+        ? (x: number, y: number, z: number) => regionTest(x, y, z) && slabTest(x, y, z)
+        : regionTest;
+      const toIndex = valueToIndex.get(s.toClass) ?? unlabeledIndex;
+      const fromIndices = s.fromClasses
+        ? new Set(s.fromClasses.map((v) => valueToIndex.get(v) ?? -1))
+        : null;
+      return { predicate, aabb: strokeAabb(s.region), toIndex, fromIndices };
+    });
+    return {
+      strokes,
+      // Changes whenever the stroke list does, which is what re-triggers the
+      // per-tile replay. Stroke ids are unique and ordered, so this is enough.
+      key: `${labelPalette.id}|${labelStrokes.map((s) => s.strokeId).join(',')}`,
+      unlabeledIndex,
+    };
+  }, [labelTargetCloud, labelPalette, labelStrokes]);
+  // Render-time: the per-frame overlay pass reads this ref, so an effect-delayed
+  // update costs a frame of stale preview after every stroke.
+  labelOverlayRef.current = labelOverlayState;
+
+  // The categorical scheme the overlay's INDEX values colour through, so the
+  // legend and the points agree while previewing.
+  const labelIndexScheme = useMemo(
+    () => (labelPalette ? paletteToIndexScheme(labelPalette) : null),
+    [labelPalette],
+  );
+
+  /** Undo the most recent stroke, keeping renderer and backend in lock-step. */
+  const handleLabelUndo = useCallback(async () => {
+    const cloud = labelTargetCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    if (!cloud || !sessionId || labelStrokes.length === 0) return;
+    const keep = labelStrokes.length - 1;
+    setLabelBusy(true);
+    try {
+      const res = await resetCloudLabelEdits(sessionId, keep, labelPaletteRef.current?.slug);
+      // Trust the BACKEND's surviving count: its history is byte-bounded and may
+      // have evicted older entries, in which case the renderer's list is longer
+      // than anything it can still undo.
+      setLabelStrokes(prev => prev.slice(0, Math.min(keep, res.label_edit_count)));
+      labelCountsSeqRef.current++;
+      setLabelClassCounts(
+        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
+      );
+      setLabelDirty(true);
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Undo').message, type: 'error' });
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [labelTargetCloud, labelStrokes, showToast]);
+
+  /**
+   * Commit: bake the label column into the octree so it colours without the
+   * client-side overlay. The slow step (one PotreeConverter run).
+   *
+   * The strokes are NOT cleared until the new octree is mounted. Clearing them
+   * here would drop the overlay while the OLD octree — which does not carry the
+   * labels yet — is still on screen, and every painted point would visibly
+   * revert. Same discipline pendingDeletes follows for its clip preview.
+   */
+  const handleLabelCommit = useCallback(async () => {
+    const cloud = labelTargetCloud;
+    const octreeInfo = cloud?.data.octree;
+    const sessionId = octreeInfo?.sessionId;
+    if (!cloud || !octreeInfo || !sessionId) return;
+    setLabelBusy(true);
+    try {
+      const res = await commitCloudLabels(sessionId, labelPaletteRef.current?.slug);
+      const palette = labelPaletteRef.current;
+      const newData = buildSessionOctreeData(
+        res, octreeInfo, cloud.data.fileName ?? cloud.id,
+      );
+      if (newData.octree && palette) {
+        newData.octree.classPalettes = {
+          ...(octreeInfo.classPalettes ?? {}),
+          [res.slug]: palette,
+        };
+        newData.octree.categoricalAttributes = Array.from(
+          new Set([...(octreeInfo.categoricalAttributes ?? []), res.slug]),
+        );
+      }
+      onUpdateCloud(cloud.id, newData);
+      setCloudColorMode(cloud.id, { mode: 'scalar', field: res.slug });
+      // Now the octree carries the labels — safe to drop the overlay.
+      setLabelStrokes([]);
+      setLabelDirty(false);
+      labelCountsSeqRef.current++;
+      setLabelClassCounts(
+        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
+      );
+      showToast({ title: 'Labels saved to the point cloud', type: 'success' });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Commit labels').message, type: 'error' });
+    } finally {
+      setLabelBusy(false);
+    }
+  }, [labelTargetCloud, buildSessionOctreeData, onUpdateCloud, setCloudColorMode, showToast]);
+
   // Permanently apply (bake) a session cloud's pending deletions: rebuild the
   // octree from the survivors and clear the in-session mask + the accumulated
   // delete stack. The deliberately-slow step (one PotreeConverter run). After
@@ -3375,12 +4698,15 @@ export default function PointCloudViewer({
         },
         octreeInfo.sourceXyzPath,
         cloud.data.fileName ?? cloud.id,
-        octreeInfo.asciiFormat ?? null,
-        octreeInfo.columnPlan ?? null,
-        octreeInfo.categoricalAttributes,
-        sessionId,
-        octreeInfo.worldShift ?? null,
-        octreeInfo.continuousAttributes,
+        {
+          asciiFormat: octreeInfo.asciiFormat ?? null,
+          columnPlan: octreeInfo.columnPlan ?? null,
+          categoricalAttributes: octreeInfo.categoricalAttributes,
+          sessionId,
+          worldShift: octreeInfo.worldShift ?? null,
+          continuousAttributes: octreeInfo.continuousAttributes,
+          classPalettes: octreeInfo.classPalettes,
+        },
       );
       onUpdateCloud(cloud.id, newData);
       // Clear the pending-delete stack + history for this cloud now that the
@@ -3920,6 +5246,57 @@ export default function PointCloudViewer({
     }
     clearFilterStateForCloud(cloud.id);
   }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, onAddCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
+  // Close the in-progress lasso into a committed region. Shared by the two ways
+  // a user can finish one — Enter, and double-click on the last vertex — so the
+  // camera freeze and the region shape can't drift between them.
+  //
+  // Takes the vertex list explicitly rather than reading `polygonInProgress`:
+  // the double-click path has just filtered out the duplicate vertex that the
+  // dblclick's own second click added, and that filtered list is the one to
+  // close on. Returns whether it closed, so a caller can decide (the lasso
+  // needs at least a triangle).
+  const closePolygonFrom = useCallback((verts: { x: number; y: number }[]): boolean => {
+    if (verts.length < 3) return false;
+    if (!polygonCameraRef.current || !polygonCanvasSizeRef.current) return false;
+    const region = polygonRegionFromCamera(
+      verts,
+      polygonCameraRef.current,
+      polygonCanvasSizeRef.current,
+      false,
+      displayOffsetRef.current,
+    );
+    // The LABEL tool reuses this same lasso as its selection primitive: a closed
+    // polygon becomes a paint stroke rather than a crop region. Routing here
+    // (instead of duplicating the draw/close/freeze machinery) is what lets
+    // Phase 1 ship with zero new selection code.
+    if (labelModeRef.current) {
+      // Through a ref: closePolygonFrom is deliberately created ONCE (empty dep
+      // array, so the two close paths can't drift), which would otherwise freeze
+      // the first render's paintLabelStroke and silently drop every stroke.
+      void paintLabelStrokeRef.current?.({
+        kind: 'polygon',
+        points: region.points.map((p) => [p.x, p.y] as [number, number]),
+        projection: region.projection,
+        view: region.view,
+        canvas: { width: region.canvasSize.width, height: region.canvasSize.height },
+      });
+      setPolygonInProgress([]);
+      setCropDrawState('idle');
+      return true;
+    }
+    setCropPolygon({
+      points: region.points,
+      projection: region.projection,
+      view: region.view,
+      canvasSize: region.canvasSize,
+    });
+    setPolygonInProgress([]);
+    setCropDrawState('idle');
+    return true;
+    // paintLabelStroke is stable (useCallback); labelModeRef is a ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -3960,6 +5337,18 @@ export default function PointCloudViewer({
           setEraseActive(a => !a);
         }
       }
+      // 'L' arms/disarms the label lasso, mirroring 'E' for the erase brush.
+      // Without a quick disarm the tool swallows every viewport click, so there
+      // is no way to orbit between strokes.
+      if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing && showLabelPanel) {
+          e.preventDefault();
+          setLabelDrawing(d => !d);
+        }
+      }
       // Enter: while mid-polygon, close the polygon. Otherwise (in crop
       // mode) Enter is a no-op — apply is bound exclusively to the
       // explicit "Apply" button in the crop panel so the user can't
@@ -3967,26 +5356,11 @@ export default function PointCloudViewer({
       // after typing a coordinate. In other edit modes (translate,
       // erase…) Enter still exits the mode.
       if (e.key === 'Enter' && editMode !== 'none') {
-        if (editMode === 'crop') {
+        // 'label' shares the polygon lasso, so Enter must close it there too.
+        if (editMode === 'crop' || editMode === 'label') {
           if (cropDrawState === 'drawing-polygon') {
             e.preventDefault();
-            if (polygonInProgress.length >= 3 && polygonCameraRef.current && polygonCanvasSizeRef.current) {
-              const region = polygonRegionFromCamera(
-                polygonInProgress,
-                polygonCameraRef.current,
-                polygonCanvasSizeRef.current,
-                false,
-                displayOffsetRef.current,
-              );
-              setCropPolygon({
-                points: region.points,
-                projection: region.projection,
-                view: region.view,
-                canvasSize: region.canvasSize,
-              });
-              setPolygonInProgress([]);
-              setCropDrawState('idle');
-            }
+            closePolygonFrom(polygonInProgress);
             return;
           }
           // Crop mode + not drawing a polygon: don't preventDefault here
@@ -4000,7 +5374,7 @@ export default function PointCloudViewer({
       // Escape: cancel polygon-in-progress, or exit edit mode.
       if (e.key === 'Escape' && editMode !== 'none') {
         e.preventDefault();
-        if (editMode === 'crop' && cropDrawState === 'drawing-polygon') {
+        if ((editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
           setPolygonInProgress([]);
           setCropDrawState('idle');
           return;
@@ -4032,14 +5406,14 @@ export default function PointCloudViewer({
         setPointPickMode(false);
       }
       // Backspace: pop the last polygon vertex while drawing.
-      if (e.key === 'Backspace' && editMode === 'crop' && cropDrawState === 'drawing-polygon') {
+      if (e.key === 'Backspace' && (editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
         e.preventDefault();
         setPolygonInProgress(prev => prev.slice(0, -1));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected]);
+  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected, closePolygonFrom]);
 
   // Track shift key state for mixed selection (cloud + mesh)
   useEffect(() => {
@@ -4056,6 +5430,31 @@ export default function PointCloudViewer({
       window.removeEventListener('keyup', handleKeyUp);
     };
   }, []);
+
+  // The worldShift a QSM's cylinders are expressed against. Cylinders are always
+  // WORLD-frame, but clouds render in their STORED (shifted) frame, so anything
+  // that positions or measures a QSM has to subtract this. A built QSM reads it
+  // from its source scan; an imported one carries its own (there is no source
+  // scan to ask). Zero for an unshifted scene.
+  const qsmWorldShift = useCallback((qsm: QSMEntry): [number, number, number] => {
+    const ws = qsm.worldShift
+      ?? clouds.find(c => c.id === qsm.sourceCloudId)?.data?.octree?.worldShift;
+    return ws ? [ws[0], ws[1], ws[2]] : [0, 0, 0];
+  }, [clouds]);
+
+  // A QSM's AABB in the frame it RENDERS in (world minus its worldShift). The
+  // framing/fit-to-selection code compares this against cloud bounds, which are
+  // stored-frame — mixing the two aims the camera hundreds of km off on a UTM
+  // scene, so never feed raw qsmAabb() into a bounds calculation.
+  const qsmDisplayAabb = useCallback((qsm: QSMEntry) => {
+    const box = qsmAabb(qsm);
+    if (!box) return null;
+    const ws = qsmWorldShift(qsm);
+    return {
+      min: [box.min[0] - ws[0], box.min[1] - ws[1], box.min[2] - ws[2]] as [number, number, number],
+      max: [box.max[0] - ws[0], box.max[1] - ws[1], box.max[2] - ws[2]] as [number, number, number],
+    };
+  }, [qsmWorldShift]);
 
   // Calculate combined bounds (including clouds, meshes, and skeletons)
   const combinedBounds = useMemo(() => {
@@ -4143,10 +5542,11 @@ export default function PointCloudViewer({
       }
     }
 
-    // Include QSM bounds (cylinder endpoints, already world-space)
+    // Include QSM bounds, in the frame the QSM renders in (world − worldShift),
+    // so they're comparable with the stored-frame cloud bounds above.
     for (const qsm of qsms) {
       if (!qsm.visible) continue;
-      const box = qsmAabb(qsm);
+      const box = qsmDisplayAabb(qsm);
       if (!box) continue;
       min.x = Math.min(min.x, box.min[0]); max.x = Math.max(max.x, box.max[0]);
       min.y = Math.min(min.y, box.min[1]); max.y = Math.max(max.y, box.max[1]);
@@ -4209,8 +5609,53 @@ export default function PointCloudViewer({
     }
     if (!isFinite(groundZ)) groundZ = min.z;
 
-    return { min, max, center, size, groundZ };
-  }, [clouds, meshes, skeletons, qsms, scansWithParams, meshPositions, meshScales, meshRotations, getEditState]);
+    // Outlier-resistant scene extent for the camera's zoom limits: the LARGEST
+    // per-cloud robust extent (a percentile span the backend computed at import
+    // — see `_robust_extent`). Largest, not summed: it stands for "how big is
+    // the thing I am looking at", and with several clouds loaded the biggest one
+    // sets the scale at which the view has to work.
+    //
+    // Clouds only. Meshes, skeletons and scanner markers carry no percentile of
+    // their own, and folding their raw AABBs in would re-admit exactly the
+    // outlier inflation this exists to reject. When no cloud has one (mesh-only
+    // scene, renderer-side synthetic data, a cloud from before this existed) the
+    // result is undefined and the camera falls back to the raw `size`.
+    let robustExtent: [number, number, number] | undefined;
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const e = cloud.data.robustExtent;
+      if (!e) continue;
+      robustExtent = robustExtent
+        ? [Math.max(robustExtent[0], e[0]), Math.max(robustExtent[1], e[1]), Math.max(robustExtent[2], e[2])]
+        : [e[0], e[1], e[2]];
+    }
+
+    // Where the CONTENT actually is, for the camera's zoom fallback anchor. The
+    // union of the per-cloud percentile boxes (plus each cloud's live
+    // translation, so it tracks a Translate drag like groundZ does). With far
+    // outliers this is nowhere near `center`, which is the midpoint of the
+    // inflated raw box and can sit in empty space among the strays.
+    let cMin: [number, number, number] | undefined;
+    let cMax: [number, number, number] | undefined;
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const rb = cloud.data.robustBounds;
+      if (!rb) continue;
+      const t = getEditState(cloud.id).translation;
+      const tv = [t.x, t.y, t.z];
+      const lo = rb.min.map((v, i) => v + tv[i]) as [number, number, number];
+      const hi = rb.max.map((v, i) => v + tv[i]) as [number, number, number];
+      cMin = cMin ? (cMin.map((v, i) => Math.min(v, lo[i])) as [number, number, number]) : lo;
+      cMax = cMax ? (cMax.map((v, i) => Math.max(v, hi[i])) as [number, number, number]) : hi;
+    }
+    // Falls back to the raw centre when no cloud carries a percentile box
+    // (mesh-only scene, renderer-side synthetic data, an older cloud).
+    const contentCenter: [number, number, number] = cMin && cMax
+      ? [(cMin[0] + cMax[0]) / 2, (cMin[1] + cMax[1]) / 2, (cMin[2] + cMax[2]) / 2]
+      : [center.x, center.y, center.z];
+
+    return { min, max, center, size, groundZ, robustExtent, contentCenter };
+  }, [clouds, meshes, skeletons, qsms, qsmDisplayAabb, scansWithParams, meshPositions, meshScales, meshRotations, getEditState]);
 
   // Open the add-scan popup with sensible defaults: next label and current
   // scene center as origin. Shared by the toolbar Radio button (Create
@@ -4663,6 +6108,68 @@ export default function PointCloudViewer({
   const displayOffsetRef = useRef<Vec3Like>(displayOffset);
   displayOffsetRef.current = displayOffset;
 
+  // ── Screen-space crop draws: pointer tracking that survives the panels ────
+  //
+  // Freeze a rect drag's two diagonal corners into `cropPolygon` (the same
+  // camera-frozen region the lasso produces). Hoisted out of the overlay's JSX
+  // so the window-level mouseup below can commit a drag that was RELEASED over
+  // a floating panel — the overlay never sees that mouseup, so before this the
+  // drag simply got stuck mid-rubber-band.
+  const commitRectDrag = useCallback((start: { x: number; y: number }, end: { x: number; y: number }) => {
+    // Ignore zero-area drags (a click without movement).
+    if (Math.abs(end.x - start.x) < 3 || Math.abs(end.y - start.y) < 3) {
+      setRectDragStart(null);
+      rectDragCurrentRef.current = null;
+      setCropDrawState('idle');
+      return;
+    }
+    if (polygonCameraRef.current && polygonCanvasSizeRef.current) {
+      const region = polygonRegionFromCamera(
+        rectCornersOf(start, end),
+        polygonCameraRef.current,
+        polygonCanvasSizeRef.current,
+        false,
+        displayOffsetRef.current,
+      );
+      setCropPolygon({
+        points: region.points,
+        projection: region.projection,
+        view: region.view,
+        canvasSize: region.canvasSize,
+      });
+    }
+    setRectDragStart(null);
+    rectDragCurrentRef.current = null;
+    setCropDrawState('idle');
+  }, []);
+
+  // Pointer tracking + blocked-zone geometry for the crop draws. The overlays
+  // can't see the pointer over a floating panel (they're z-10, the panels are
+  // above), so this runs on the window: the rubber-band keeps following —
+  // clamped to the panel edge — and `blocked` says a click right now would be
+  // swallowed. Panels stay interactive; the ⊘ cursor marker says so.
+  const cropDrawing = cropDrawState === 'drawing-polygon' || cropDrawState === 'drawing-rect';
+  const cropZone = useViewportBlockZone(cropDrawing, viewerRootRef, {
+    onMove: (p) => {
+      if (rectDragStart) {
+        rectDragCurrentRef.current = p;
+        setRectDragTick(t => t + 1);
+      }
+    },
+    // A rect drag released anywhere — including over a panel, which the overlay
+    // never sees — commits at the clamped corner instead of hanging mid-drag.
+    onRelease: (p) => {
+      if (cropDrawState === 'drawing-rect' && rectDragStart) commitRectDrag(rectDragStart, p);
+    },
+  });
+
+  // Same treatment for TreeIso trunk seeding, which drives the identical kind of
+  // z-10 click overlay: while seeding, the panels that cover the viewport can't
+  // take a seed, so mark them instead of letting clicks vanish there. Seeding
+  // has no rubber-band, so the ⊘ at the clamped cursor is the whole feedback.
+  const treeSeedActive = showTreeSegmentPanel && treeSeedMode && selectedIds.size === 1;
+  const seedZone = useViewportBlockZone(treeSeedActive, viewerRootRef);
+
   // Is anything actually loaded? Drives the camera's framing decision and the
   // scene-origin marker's visibility. Note this is false in exactly the cases
   // where App draws its "Drag scan files here" hint over the viewport (that hint
@@ -4884,7 +6391,11 @@ export default function PointCloudViewer({
       // (rendered directly in the sidebar JSX) rather than the Tools palette — no
       // `toolGroup`, so it doesn't render as a Tools toolbar button. It stays in
       // the registry for the Cmd+K palette and the Tools menu.
-      { id: 'set-scene-origin', name: 'Set Scene Origin', keywords: ['pivot', 'center', 'origin', 'rotation center', 'orbit'], action: () => { const open = showSceneOriginPanel; closeAllToolPanels('scene-origin'); setShowSceneOriginPanel(!open); if (open) setOriginPlaceMode(false); }, category: 'View', requires: null, icon: Crosshair, testId: 'tool-set-scene-origin', isActive: () => showSceneOriginPanel },
+      // Opening the panel ARMS click-to-place straight away (same as Pick Point) —
+      // placing the pivot by clicking is the overwhelmingly common reason to open
+      // it, and the arming is one click away from being undone (the button
+      // toggles off, and any viewport click both places and disarms).
+      { id: 'set-scene-origin', name: 'Set Scene Origin', keywords: ['pivot', 'center', 'origin', 'rotation center', 'orbit'], action: () => { const open = showSceneOriginPanel; closeAllToolPanels('scene-origin'); setShowSceneOriginPanel(!open); setOriginPlaceMode(!open); }, category: 'View', requires: null, icon: Crosshair, testId: 'tool-set-scene-origin', isActive: () => showSceneOriginPanel },
       // Also a scene control rather than an analysis tool (no `toolGroup`, so it
       // renders in the View Controls box beside Set Scene Origin, not the Tools
       // palette) — it inspects whatever is visible and needs no selection.
@@ -4900,7 +6411,9 @@ export default function PointCloudViewer({
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
 
       // ── Segmentation ────────────────────────────────────────────────
-      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Layers, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
+      { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => setShowSectionPanel(v => !v), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
+      { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
+      { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
       { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GitBranch, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 
@@ -5264,11 +6777,12 @@ export default function PointCloudViewer({
       }
     }
 
-    // QSMs — cylinder endpoints are already world-space (no per-QSM translation).
+    // QSMs — cylinder endpoints are world-space, so shift them into the rendered
+    // frame (no per-QSM translation otherwise).
     for (const id of selectedQSMIds) {
       const qsm = qsms.find(q => q.id === id);
       if (!qsm) continue;
-      const box = qsmAabb(qsm);
+      const box = qsmDisplayAabb(qsm);
       if (!box) continue;
       grow(box.min[0], box.min[1], box.min[2]);
       grow(box.max[0], box.max[1], box.max[2]);
@@ -5307,7 +6821,7 @@ export default function PointCloudViewer({
       center: new THREE.Vector3(0, 0, 0),
       size: new THREE.Vector3(2, 2, 2)
     };
-  }, [selectedMeshIds, selectedSkeletonIds, selectedQSMIds, selectedIds, meshes, skeletons, qsms, clouds, meshPositions, skeletonPositions, getEditState, scansWithParams, selectedScanIds, scanWorldBounds]);
+  }, [selectedMeshIds, selectedSkeletonIds, selectedQSMIds, selectedIds, meshes, skeletons, qsms, qsmDisplayAabb, clouds, meshPositions, skeletonPositions, getEditState, scansWithParams, selectedScanIds, scanWorldBounds]);
 
   // Frame the current selection (or everything, if nothing is selected) without
   // changing the viewing angle. Wired into zoomToSelectionRef (declared earlier)
@@ -5380,6 +6894,11 @@ export default function PointCloudViewer({
 
   // Get display data for a cloud (with edits applied)
   // showCropPreview: when true, apply crop filtering for preview (used in crop mode)
+  //
+  // Segment mode never culls: both halves survive the apply, so hiding one of
+  // them in the preview is misleading (and pointless work). The region outline
+  // alone shows where the split will fall — see the `cropSegment` guards on the
+  // predicate below, in getDisplayIndices, and on the octree clipBox.
   const getDisplayData = useCallback((cloud: PointCloudEntry, showCropPreview: boolean = false): PointCloudData => {
     const editState = getEditState(cloud.id);
     const data = cloud.data;
@@ -5404,6 +6923,7 @@ export default function PointCloudViewer({
     const hasTranslation = tx !== 0 || ty !== 0 || tz !== 0;
     const cropIsNoOp =
       !showCropPreview ||
+      cropSegment ||
       (cropMode === 'box' && cropBox && !cropInvert &&
         data.bounds.min.x + tx >= cropBox.min.x && data.bounds.max.x + tx <= cropBox.max.x &&
         data.bounds.min.y + ty >= cropBox.min.y && data.bounds.max.y + ty <= cropBox.max.y &&
@@ -5470,7 +6990,7 @@ export default function PointCloudViewer({
     // get its world position, then run the predicate. We still write the
     // kept points back in local coordinates — the translate pass below
     // bakes translation into the rendered geometry.
-    const cropPredicate = showCropPreview ? buildCropPredicate() : null;
+    const cropPredicate = showCropPreview && !cropSegment ? buildCropPredicate() : null;
     if (cropPredicate) {
       const tx = editState.translation.x;
       const ty = editState.translation.y;
@@ -5585,7 +7105,7 @@ export default function PointCloudViewer({
     }
 
     return { positions, colors, intensities, pointCount, bounds: { min, max, center, size }, fileName: data.fileName };
-  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
+  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
 
   // BAKE a cloud's pending Transformation-tool draft (translation AND rotation)
   // into its real geometry, then reset the local (render-only) draft to identity.
@@ -5960,16 +7480,36 @@ export default function PointCloudViewer({
       const t = getEditState(cloud.id).translation;
       const translation: [number, number, number] | null =
         (t.x !== 0 || t.y !== 0 || t.z !== 0) ? [t.x, t.y, t.z] : null;
+      // A cloud is read from its file exactly ONCE, at import
+      // (/api/cloud/session/create); from then on the session's in-RAM arrays are
+      // the source of truth, carrying every edit — deletions, translation,
+      // filtering, segmentation labels — that the file on disk does not.
+      //
+      // The BACKEND enforces this: `_read_points_from_source` rejects a
+      // file-only source for every compute/export path, so a missing sessionId
+      // cannot silently produce a stale-data answer regardless of caller. This
+      // check is not that safety net — it exists to fail here, with the cloud's
+      // name and a clear next step, rather than surfacing as a generic 400 from
+      // a request we already knew was malformed.
+      if (!octree.sessionId) {
+        throw new Error(
+          `Cloud "${cloud.data.fileName ?? cloud.id}" has an octree but no backend session. ` +
+          `Its source file would not reflect edits (the in-RAM session is the source of ` +
+          `truth), so this operation was stopped. Re-import the cloud.`,
+        );
+      }
       return {
         kind: 'source',
         source: {
+          // Provenance only — the backend ignores it when session_id is set, and
+          // it is empty for synthetic-scan clouds that never had a source file.
           source_path: octree.sourceXyzPath || '',
           ascii_format: octree.asciiFormat ?? null,
           translation,
-          // When the cloud is session-backed, downstream ops read the in-RAM
-          // masked array (deletions already applied) instead of re-reading the
-          // source file — so unbaked deletions are honored with no bake.
-          session_id: octree.sessionId ?? null,
+          // Downstream ops read the in-RAM masked array (deletions already
+          // applied) instead of re-reading the source file, so unbaked edits are
+          // honored with no bake.
+          session_id: octree.sessionId,
         },
       };
     }
@@ -5997,7 +7537,9 @@ export default function PointCloudViewer({
     const ty = editState.translation.y;
     const tz = editState.translation.z;
 
-    const cropPredicate = showCropPreview ? buildCropPredicate() : null;
+    // Segment mode keeps the whole cloud visible — only the region outline is
+    // drawn, since neither half is discarded by the apply.
+    const cropPredicate = showCropPreview && !cropSegment ? buildCropPredicate() : null;
 
     // Fast path: nothing filters anything.
     if (!erased.size && !cropPredicate) return null;
@@ -6032,19 +7574,40 @@ export default function PointCloudViewer({
     let w = 0;
     for (let i = 0; i < data.pointCount; i++) if (keep(i)) out[w++] = i;
     return out;
-  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox]);
+  }, [getEditState, buildCropPredicate, cropInvert, cropMode, cropBox, cropSegment]);
 
-  // Helper to download a file
-  const downloadFile = useCallback((content: string | Blob, fileName: string) => {
-    const blob = content instanceof Blob ? content : new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  // Save exported content to a user-chosen path. Returns the written file name,
+  // or null if the user cancelled the save dialog.
+  //
+  // This MUST await a real save dialog + fs write rather than clicking an
+  // `<a download>`: under Electron an anchor download is handled out-of-band by
+  // Chromium, which pops its OWN native Save-As that the renderer never sees.
+  // The click returns immediately, so the caller reported "Export Complete"
+  // before the user had even picked a destination — and then went silent for the
+  // write that actually mattered. See exportPointCloud's success toast.
+  const downloadFile = useCallback(async (content: string | Uint8Array, fileName: string): Promise<string | null> => {
+    const saved = typeof content === 'string'
+      ? await saveTextFileQuiet(content, fileName)
+      : await saveBinaryFileQuiet(content, fileName);
+    if (!saved) return null;
+    // Report the name the user actually chose, not the suggested one.
+    const sep = saved.includes('\\') ? '\\' : '/';
+    return saved.slice(saved.lastIndexOf(sep) + 1) || fileName;
+  }, []);
+
+  // Write content to a path the user ALREADY chose (no dialog). Returns the
+  // file's base name. Used by the export branches that build their bytes in the
+  // renderer, after exportPointCloud has resolved the destination up front —
+  // which is what keeps the save dialog from appearing behind the progress pill.
+  const writeToPath = useCallback(async (content: string | Uint8Array, destPath: string): Promise<string> => {
+    if (typeof content === 'string') {
+      await window.electronAPI?.fs.writeText(destPath, content);
+    } else {
+      const ab = content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength) as ArrayBuffer;
+      await window.electronAPI?.fs.writeBinary(destPath, ab);
+    }
+    const sep = destPath.includes('\\') ? '\\' : '/';
+    return destPath.slice(destPath.lastIndexOf(sep) + 1) || destPath;
   }, []);
 
   // Export point cloud in various formats
@@ -6053,12 +7616,32 @@ export default function PointCloudViewer({
   // Inner worker: does the actual per-format serialize/encode/download for a
   // resolved cloud. Defined before exportPointCloud so the latter can list it as a
   // dependency without a temporal-dead-zone reference. Keeps its own early returns.
-  const exportPointCloudInner = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null, cloud: PointCloudEntry) => {
+  //
+  // Returns the written file name + point count on success, or null when the
+  // export failed (having already shown its own error toast). The caller owns the
+  // single success toast so every format reports completion the same way — an
+  // export that finishes silently reads as one that never ran.
+  //
+  // `destPath` is the absolute path the user already chose; the caller resolves
+  // it BEFORE calling so the save dialog never appears behind a progress pill.
+  const exportPointCloudInner = useCallback(async (
+    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
+    columns: string[] | null,
+    cloud: PointCloudEntry,
+    destPath: string,
+    // Progress/cancel plumbing for the backend-backed branches. The in-renderer
+    // branches (ASCII/PLY/OBJ/LAS on a flat cloud) format synchronously and have
+    // nothing to stream, so they ignore it.
+    opts?: { signal?: AbortSignal; onProgress?: BinaryFrameProgress; onRunId?: (runId: string) => void },
+  ): Promise<{ fileName: string; pointCount: number } | null> => {
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
+    const destName = destPath.slice(destPath.lastIndexOf(destPath.includes('\\') ? '\\' : '/') + 1);
 
     // Octree-backed cloud: it has no renderer positions to format, so every
     // format goes through the backend, which streams from the source file
-    // (applying any pending translation) and returns base64 output.
+    // (applying any pending translation) and writes it straight to destPath.
+    // Sending dest_path (rather than taking base64 back) is what makes a
+    // 25 M-point export possible at all — see PointCloudExportRequest.
     const ps = buildPointSource(cloud);
     if (ps.kind === 'source') {
       try {
@@ -6066,29 +7649,21 @@ export default function PointCloudViewer({
           source: { ...ps.source, want_colors: true },
           format,
           filename: `${baseName}.${format}`,
-        });
-        if (response.success && response.data) {
-          const binaryString = atob(response.data);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-          const blob = new Blob([bytes], { type: 'application/octet-stream' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = response.filename;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        } else {
-          showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
+          dest_path: destPath,
+          // Forward the column picker's ordered selection. Without this the
+          // backend fell back to its fixed layout, so the picker was decorative
+          // on the octree/session path — i.e. on every normally-imported cloud.
+          // LAS/LAZ ignore it (fixed schema + named extra dimensions).
+          ...(columns && columns.length ? { columns } : {}),
+        }, opts?.signal, opts?.onProgress, opts?.onRunId);
+        if (response.success) {
+          return { fileName: response.filename || destName, pointCount: response.point_count };
         }
+        showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
       } catch (error) {
         showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
       }
-      return;
+      return null;
     }
 
     const data = ps.data;
@@ -6123,34 +7698,20 @@ export default function PointCloudViewer({
           points,
           colors,
           format: 'laz',
-          filename: `${baseName}.laz`
-        });
+          filename: `${baseName}.laz`,
+          dest_path: destPath,
+        }, opts?.signal, opts?.onProgress, opts?.onRunId);
 
-        if (response.success && response.data) {
-          // Decode base64 and download
-          const binaryString = atob(response.data);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-          const blob = new Blob([bytes], { type: 'application/octet-stream' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = response.filename;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        } else {
-          console.error('LAZ export failed:', response.error);
-          showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
+        if (response.success) {
+          return { fileName: response.filename || destName, pointCount: response.point_count };
         }
+        console.error('LAZ export failed:', response.error);
+        showToast({ title: 'Export Failed', message: response.error || 'Unknown error', type: 'error' });
       } catch (error) {
         console.error('LAZ export failed:', error);
         showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
       }
-      return;
+      return null;
     }
 
     if (format === 'xyz' || format === 'txt' || format === 'csv') {
@@ -6172,35 +7733,49 @@ export default function PointCloudViewer({
       const delimiter = format === 'csv' ? ',' : ' ';
       const headerPrefix = format === 'csv' ? '' : '# ';
       const text = buildAsciiExport(data, slugs, delimiter, headerPrefix);
-      downloadFile(text, `${baseName}.${format}`);
+      {
+        const saved = await writeToPath(text, destPath);
+        return { fileName: saved, pointCount: data.pointCount };
+      }
     } else if (format === 'ply') {
-      const hasColors = !!data.colors;
+      // PLY takes a column selection (an ASCII PLY names each column as a
+      // `property`, so a chosen scalar round-trips by name). Honor the picker's
+      // slugs; fall back to geometry + colour when none were passed, which is
+      // the layout this branch always wrote before the picker covered PLY.
+      let slugs = columns ?? [];
+      if (slugs.length === 0) {
+        slugs = ['x', 'y', 'z'];
+        if (data.colors) slugs.push('r', 'g', 'b');
+      }
+      // Declare each column with the type PLY expects: colour is uchar 0-255,
+      // geometry and scalars are float.
+      const PLY_PROPS: Record<string, string> = {
+        x: 'float x', y: 'float y', z: 'float z',
+        r: 'uchar red', g: 'uchar green', b: 'uchar blue',
+      };
       const lines: string[] = [
         'ply',
         'format ascii 1.0',
         `element vertex ${data.pointCount}`,
-        'property float x',
-        'property float y',
-        'property float z',
+        ...slugs.map(s => `property ${PLY_PROPS[s] ?? `float ${s}`}`),
+        'end_header',
       ];
-      if (hasColors) {
-        lines.push('property uchar red', 'property uchar green', 'property uchar blue');
-      }
-      lines.push('end_header');
       for (let i = 0; i < data.pointCount; i++) {
-        let line = `${data.positions[i * 3].toFixed(6)} ${data.positions[i * 3 + 1].toFixed(6)} ${data.positions[i * 3 + 2].toFixed(6)}`;
-        if (hasColors) {
-          line += ` ${Math.round(data.colors![i * 3] * 255)} ${Math.round(data.colors![i * 3 + 1] * 255)} ${Math.round(data.colors![i * 3 + 2] * 255)}`;
-        }
-        lines.push(line);
+        lines.push(slugs.map(s => cellValue(data, s, i)).join(' '));
       }
-      downloadFile(lines.join('\n'), `${baseName}.ply`);
+      {
+        const saved = await writeToPath(lines.join('\n'), destPath);
+        return { fileName: saved, pointCount: data.pointCount };
+      }
     } else if (format === 'obj') {
       const lines: string[] = [`# Point cloud exported from Phytograph`, `# ${data.pointCount} points`];
       for (let i = 0; i < data.pointCount; i++) {
         lines.push(`v ${data.positions[i * 3].toFixed(6)} ${data.positions[i * 3 + 1].toFixed(6)} ${data.positions[i * 3 + 2].toFixed(6)}`);
       }
-      downloadFile(lines.join('\n'), `${baseName}.obj`);
+      {
+        const saved = await writeToPath(lines.join('\n'), destPath);
+        return { fileName: saved, pointCount: data.pointCount };
+      }
     } else if (format === 'las') {
       // Export as LAS 1.2 format (binary)
       const hasColors = !!data.colors;
@@ -6324,35 +7899,83 @@ export default function PointCloudViewer({
         }
       }
 
-      // Download binary file
-      const blob = new Blob([buffer], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${baseName}.las`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Save the binary through the real save dialog (not an <a download>, which
+      // Electron handles out-of-band with its own invisible Save-As).
+      const saved = await writeToPath(new Uint8Array(buffer), destPath);
+      return { fileName: saved, pointCount: data.pointCount };
     }
-  }, [getDisplayData, buildPointSource, downloadFile]);
 
-  const exportPointCloud = useCallback(async (format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz', columns: string[] | null = null) => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
+    return null;
+  }, [getDisplayData, buildPointSource, writeToPath]);
+
+  const exportPointCloud = useCallback(async (
+    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
+    columns: string[] | null = null,
+    // The Export window names the cloud explicitly (it is whatever is CHECKED in
+    // its object list, which is seeded from — but no longer tied to — the scene
+    // selection). Other callers still mean "the selected cloud".
+    cloudId?: string,
+  ) => {
+    const id = cloudId ?? (selectedIds.size === 1 ? Array.from(selectedIds)[0] : undefined);
+    if (!id) return;
     const cloud = clouds.find(c => c.id === id);
     if (!cloud) return;
 
-    // A large cloud takes seconds to serialize/compress on the backend with no
-    // streaming progress, so dismiss the modal and raise the StatusPill for the
-    // duration — same treatment as the scan export. The inner work keeps its own
-    // early returns; the finally clears the pill on every path.
+    // Ask WHERE first. The save dialog has to come before the progress pill:
+    // raising the pill first left it spinning behind the file browser, claiming
+    // work was underway while we were still waiting on the user. Cancelling here
+    // must leave no trace — no pill, no file, no toast.
+    const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
+    const destPath = await window.electronAPI?.dialog.save({
+      defaultPath: `${baseName}.${format}`,
+      title: 'Export Point Cloud',
+      filters: [{ name: `${format.toUpperCase()} files`, extensions: [format] }],
+    });
+    if (!destPath) { setShowExportPanel(false); return; }
+
+    // The destination is chosen — the work now begins. A large cloud takes
+    // seconds to read/format/write with no streaming progress, so dismiss the
+    // modal and raise the StatusPill for the duration. The inner work keeps its
+    // own early returns; the finally clears the pill on every path.
     setShowExportPanel(false);
     setIsExportingScan(true);
+    setExportProgress({ fraction: null, label: 'Exporting…' });
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    exportRunIdRef.current = null;
     try {
-      await exportPointCloudInner(format, columns, cloud);
+      // Yield a frame before starting. The ASCII/PLY/OBJ/LAS branches serialize
+      // millions of points synchronously on the main thread, so without this the
+      // pill's state update and its clear land in the same task and React never
+      // paints it — the user sees a multi-second freeze and no progress at all.
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      const result = await exportPointCloudInner(format, columns, cloud, destPath, {
+        signal: controller.signal,
+        onProgress: (fraction, message) =>
+          setExportProgress({ fraction, label: message || 'Exporting…' }),
+        onRunId: (runId) => { exportRunIdRef.current = runId; },
+      });
+      if (result) {
+        showToast({
+          title: 'Export Complete',
+          type: 'success',
+          message: `Wrote ${result.fileName} (${result.pointCount.toLocaleString()} points).`,
+        });
+      }
+    } catch (error) {
+      // A user cancel is not a failure — the pill's X aborts the signal, which
+      // surfaces as a reason-less AbortError (see describeBackendError).
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        showToast({ title: 'Export cancelled', type: 'info' });
+      } else {
+        showToast({ title: 'Export Failed', type: 'error',
+          message: error instanceof Error ? error.message : 'Unknown error' });
+      }
     } finally {
       setIsExportingScan(false);
+      setExportProgress(null);
+      exportAbortRef.current = null;
+      exportRunIdRef.current = null;
     }
   }, [selectedIds, clouds, exportPointCloudInner]);
 
@@ -6363,15 +7986,71 @@ export default function PointCloudViewer({
   // Build the export entry for one scan-bearing cloud (source precedence
   // session → file → inline, plus viewer translation and the is_miss column).
   // Returns null when the cloud has no scanner params or no point data.
+  // Attach the point SOURCE (session → file → inline) and the viewer translation
+  // to a scan-export entry. Shared by the with-parameters and no-parameters
+  // branches of buildScanExportEntry below: none of it depends on scanner
+  // geometry, and two copies would drift the moment one gains a source kind.
+  const attachScanExportSource = useCallback((
+    entry: ScanExportEntry, cloud: PointCloudEntry,
+  ): ScanExportEntry | null => {
+    const t = getEditState(cloud.id).translation;
+    if (t.x !== 0 || t.y !== 0 || t.z !== 0) entry.translation = [t.x, t.y, t.z];
+
+    const sessionId = cloud.data.octree?.sessionId;
+    if (sessionId) {
+      // session_id ONLY — deliberately NOT accompanied by file_path. A cloud's
+      // file is read exactly once, at import; the session arrays carry every
+      // edit and every import-wizard choice the file knows nothing about, so a
+      // file "fallback" would export data the user never saw. If the session is
+      // gone (backend restart), the backend must fail loudly and say re-import.
+      // `sourcePath` is also not always a readable point-cloud file: for a
+      // .riproject it is the project DIRECTORY, kept purely as provenance.
+      entry.session_id = sessionId;
+    } else if (cloud.sourcePath) {
+      entry.file_path = cloud.sourcePath;
+      entry.ascii_format = cloud.asciiFormat ?? null;
+    } else if (cloud.data.positions.length > 0) {
+      const points: number[][] = [];
+      for (let i = 0; i < cloud.data.pointCount; i++) {
+        points.push([cloud.data.positions[i * 3], cloud.data.positions[i * 3 + 1], cloud.data.positions[i * 3 + 2]]);
+      }
+      entry.points = points;
+      // Inline clouds must ship the is_miss column so misses survive export.
+      const miss = cloud.data.scalarFields?.[MISS_ATTRIBUTE];
+      if (miss && miss.values.length === cloud.data.pointCount) {
+        entry.scalar_columns = { [MISS_ATTRIBUTE]: Array.from(miss.values) };
+      }
+    } else {
+      return null;  // no point data
+    }
+    return entry;
+  }, [getEditState]);
+
   const buildScanExportEntry = useCallback((cloudId: string): ScanExportEntry | null => {
     const cloud = clouds.find(c => c.id === cloudId);
-    if (!cloud || !cloud.params) return null;
+    if (!cloud) return null;
     const params = cloud.params;
-    // A Livox rosette has no Ntheta×Nphi grid or angular sweep — the grid-based
-    // Helios XML/ASCII export can't represent it, so skip it here (a prism-stack
-    // XML round-trip is a future extension). Excluded from the export bundle.
-    if (params.pattern === 'risley_prism') return null;
+    // Name the entry the way the Scans panel and the export list name it, so the
+    // progress pill reads "Writing plot A (2/4)" rather than a raw filename the
+    // user may have renamed away from.
+    const scan = scans.find(sc => sc.id === cloud.id);
+    const label = scan ? scanDisplayName(scan) : (cloud.data.fileName || cloud.id);
+    // A cloud with no scanner parameters is still exportable as DATA — only the
+    // Helios XML bundle and PTX need the scan geometry, and the modal blocks
+    // those rows for exactly that reason. Everything below this point (source
+    // precedence, translation, the is_miss column) is parameter-agnostic, so a
+    // minimal entry carrying just an origin is all the backend needs.
+    if (!params) {
+      const scanOrigin = cloud.data.octree?.scanOrigin;
+      const entry: ScanExportEntry = {
+        origin: scanOrigin ? [...scanOrigin] : [0, 0, 0],
+        scan_pattern: 'raster',
+        label,
+      };
+      return attachScanExportSource(entry, cloud);
+    }
     const entry: ScanExportEntry = {
+      label,
       origin: [params.origin.x, params.origin.y, params.origin.z],
       scan_pattern: params.pattern,
       beam_elevation_angles_deg:
@@ -6397,40 +8076,47 @@ export default function PointCloudViewer({
       return_selection: params.returnSelection,
       max_returns: params.maxReturns,
     };
-    const t = getEditState(cloud.id).translation;
-    if (t.x !== 0 || t.y !== 0 || t.z !== 0) entry.translation = [t.x, t.y, t.z];
-
-    const sessionId = cloud.data.octree?.sessionId;
-    if (sessionId) {
-      entry.session_id = sessionId;
-      if (cloud.sourcePath) {
-        entry.file_path = cloud.sourcePath;
-        entry.ascii_format = cloud.asciiFormat ?? null;
-      }
-    } else if (cloud.sourcePath) {
-      entry.file_path = cloud.sourcePath;
-      entry.ascii_format = cloud.asciiFormat ?? null;
-    } else if (cloud.data.positions.length > 0) {
-      const points: number[][] = [];
-      for (let i = 0; i < cloud.data.pointCount; i++) {
-        points.push([cloud.data.positions[i * 3], cloud.data.positions[i * 3 + 1], cloud.data.positions[i * 3 + 2]]);
-      }
-      entry.points = points;
-      // Inline clouds must ship the is_miss column so misses survive export.
-      const miss = cloud.data.scalarFields?.[MISS_ATTRIBUTE];
-      if (miss && miss.values.length === cloud.data.pointCount) {
-        entry.scalar_columns = { [MISS_ATTRIBUTE]: Array.from(miss.values) };
-      }
-    } else {
-      return null;  // no point data
-    }
-    return entry;
-  }, [clouds, getEditState]);
+    return attachScanExportSource(entry, cloud);
+  }, [clouds, scans, attachScanExportSource]);
 
   // Export one or more selected scans, either as a Helios XML + per-scan ASCII
   // bundle (writeXml=true) or as the per-scan ASCII data files only
   // (writeXml=false). `scanIds` are the user-chosen scans (from the panel's list).
-  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = []) => {
+  // Available ASCII export columns, in default order, for the object the Export
+  // window's column picker is describing. `cloudId` is the sole checked cloud in
+  // single-cloud mode; `null` asks for a representative set for a multi-object
+  // export, which prefers a checked scan (the scans share a column set) and
+  // falls back to any scan in the scene.
+  const getExportColumns = useCallback((cloudId: string | null): ExportColumn[] => {
+    const c = cloudId
+      ? clouds.find(c => c.id === cloudId)
+      : clouds.find(c => selectedIds.has(c.id) && !!c.params)
+        ?? clouds.find(c => !!c.params)
+        ?? clouds.find(c => selectedIds.has(c.id));
+    if (!c) return [];
+    return defaultExportColumns(c.data, {
+      isLabel: (slug) => isCategoricalAttribute(slug),
+      // The labels map is keyed by the octree BUFFER name, but the columns here
+      // are keyed by the CANONICAL slug — `gps-time` becomes `timestamp` on the
+      // way in — so a direct lookup misses for exactly that column and the
+      // picker fell back to the bare slug. Try the buffer name too, via the same
+      // mapping, so the export list reads "Timestamp" like every other panel.
+      labelFor: (slug) => displayLabelFor(slug, c.data.octree?.attributeLabels),
+      // Octree/session clouds keep their points (and scalar columns) on disk, so
+      // recover the available columns from the ASCII_format hint.
+      asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,
+      // …and from the octree's own attribute list, which is the only source that
+      // covers a plain LAS/LAZ/E57/PLY import (no ASCII_format, no in-RAM
+      // scalarFields). Same input the colour-by and scalar-filter pickers use.
+      octreeAttributes: Object.keys(c.data.octree?.attributeRanges ?? {}),
+      // …and the ranges themselves, so the all-zero LAS schema dims
+      // PotreeConverter invents for a bare XYZ source (intensity, classification,
+      // gps-time…) don't show up as exportable fields.
+      octreeAttributeRanges: c.data.octree?.attributeRanges,
+    });
+  }, [clouds, selectedIds]);
+
+  const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = [], baseName: string = 'scans') => {
     const entries: ScanExportEntry[] = [];
     for (const id of scanIds) {
       const e = buildScanExportEntry(id);
@@ -6455,34 +8141,25 @@ export default function PointCloudViewer({
       .map(id => gridOpts.find(g => g.id === id)?.grid)
       .filter((g): g is HeliosGrid => !!g);
 
-    // Effective per-scan file extension: XML mode always writes Helios .xyz data;
-    // data-only writes the chosen format. The save picker fixes the folder + base
-    // name only — the actual per-scan files are named <base>_<id>.<ext> by the backend.
-    const ext = writeXml ? 'xml' : dataFormat;
-    // Default save name: the single scan's label (filesystem-sanitised), matching
-    // the Scans panel; a generic name for a multi-scan bundle.
-    const firstScan = scans.find(s => s.id === scanIds[0]);
-    const firstLabel = firstScan
-      ? scanDisplayName(firstScan).replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '_').trim()
-      : '';
-    const baseName = entries.length === 1
-      ? (firstLabel || 'scan')
-      : 'scans';
-    const savePath = await window.electronAPI?.dialog.save({
-      defaultPath: `${baseName}.${ext}`,
-      title: writeXml ? 'Export Scan (XML + per-scan data)' : `Export Scan Data (${dataFormat.toUpperCase()})`,
-      filters: writeXml
-        ? [{ name: 'Helios scan XML', extensions: ['xml'] }]
-        : [{ name: `Scan data (${dataFormat.toUpperCase()})`, extensions: [dataFormat] }],
+    // A FOLDER, not a file: this export writes one file per object, named
+    // <base>_<scan label>.<ext> by the backend (a lone object keeps the base name
+    // itself). A native Save panel names exactly one file, so it misdescribed
+    // every multi-object run — it offered to save "myscan.laz" and then wrote
+    // myscan_ScanPos002.laz and friends instead. The base name is typed in the
+    // Export window, which also previews the resulting names.
+    const dir = await window.electronAPI?.dialog.open({
+      directory: true,
+      title: writeXml
+        ? 'Choose a folder for the scan bundle'
+        : `Choose a folder for the exported ${dataFormat.toUpperCase()} files`,
     });
-    if (!savePath) { setShowExportPanel(false); return; }
+    if (!dir || typeof dir !== 'string') { setShowExportPanel(false); return; }
 
-    // Derive the chosen folder + base name so the backend names match the files we
-    // write. Strip ANY trailing extension the user may have typed — the per-scan
-    // files are named by the backend in the chosen format.
-    const sep = savePath.includes('\\') ? '\\' : '/';
-    const dir = savePath.slice(0, savePath.lastIndexOf(sep));
-    const chosenBase = savePath.slice(savePath.lastIndexOf(sep) + 1).replace(/\.[^.]+$/, '') || 'scan';
+    const sep = dir.includes('\\') ? '\\' : '/';
+    // Mirror the backend's own reading of the name (basename minus one
+    // extension), so a pasted path or a typed "myscan.laz" can't leak into it.
+    const chosenBase = (baseName.trim().split(/[\\/]/).pop() ?? '')
+      .replace(/\.[A-Za-z0-9]{1,8}$/, '').trim() || 'scans';
 
     // The path is chosen — the work now begins. Dismiss the modal and raise the
     // StatusPill so the (5-10 s, no-stream) serialize/encode/write isn't a silent
@@ -6490,18 +8167,40 @@ export default function PointCloudViewer({
     // data-only export — they share this backend round-trip, only write_xml differs.
     setShowExportPanel(false);
     setIsExportingScan(true);
+    setExportProgress({ fraction: null, label: 'Exporting…' });
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    exportRunIdRef.current = null;
     try {
+      // Yield a frame before the round-trip starts, so React actually paints the
+      // pill before the network + backend work begins (same reason the
+      // point-cloud export does it).
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const resp = await exportScanXml({
         scans: entries, base_name: chosenBase, include_misses: includeMisses,
         write_xml: writeXml, data_format: dataFormat,
+        // Let the backend write straight into the chosen folder. Taking the files
+        // back as base64 put every scan's bytes in one JSON body, which overran
+        // V8's string cap on a multi-scan export ("Unexpected end of JSON input").
+        dest_dir: dir,
         ...(grids.length ? { grids } : {}),
-      });
+      }, controller.signal, (fraction, message) => {
+        setExportProgress({ fraction, label: message || 'Exporting…' });
+        // E2E seam, mirroring __triStages: the pill's rendered text is a single
+        // live value, so a spec can't prove the bar actually MOVED through the
+        // backend's stages without recording them as they arrive.
+        const w = window as unknown as { __exportStages?: string[] };
+        if (w.__exportStages && message) w.__exportStages.push(`${fraction ?? ''}|${message}`);
+      }, (runId) => { exportRunIdRef.current = runId; });
       if (!resp.success || !resp.files) {
         showToast({ title: 'Export Failed', type: 'error', message: resp.error || 'Unknown error' });
         return;
       }
-      // Write each returned file into the chosen folder, decoding base64.
+      // Write any file the backend handed back inline. With dest_dir it already
+      // wrote them (written=true, data=null), so this loop is a no-op — it stays
+      // for the base64 path, which callers without a known destination still use.
       for (const f of resp.files) {
+        if (f.written || f.data == null) continue;
         const bin = atob(f.data);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -6511,105 +8210,133 @@ export default function PointCloudViewer({
       showToast({ title: 'Export Complete', type: 'success',
         message: `Wrote ${resp.files.length} file(s) (${resp.point_count?.toLocaleString() ?? '?'} points).` });
     } catch (error) {
-      showToast({ title: 'Export Failed', type: 'error',
-        message: error instanceof Error ? error.message : 'Unknown error' });
+      // A user cancel is not a failure — the pill's X aborts the signal, which
+      // surfaces as a reason-less AbortError (see describeBackendError).
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        showToast({ title: 'Export cancelled', type: 'info' });
+      } else {
+        showToast({ title: 'Export Failed', type: 'error',
+          message: error instanceof Error ? error.message : 'Unknown error' });
+      }
     } finally {
       setIsExportingScan(false);
+      setExportProgress(null);
+      exportAbortRef.current = null;
+      exportRunIdRef.current = null;
     }
   }, [clouds, buildScanExportEntry]);
 
-  // Export mesh in various formats
-  const exportMesh = useCallback((meshId: string, format: 'obj' | 'ply' | 'stl') => {
+  // Export mesh in various formats.
+  //
+  // The user picks the destination FIRST (native Save dialog), then the files are
+  // written and only then does the success toast fire — so the toast always
+  // describes a write that actually happened. An OBJ goes out as a bundle: the
+  // .obj plus its .mtl and texture images, written as siblings of the chosen
+  // path, so a textured plant round-trips back through mesh import with its
+  // materials intact.
+  const exportMesh = useCallback(async (meshId: string, format: 'obj' | 'ply' | 'stl') => {
     const mesh = meshes.find(m => m.id === meshId);
     if (!mesh) return;
 
     const sourceCloud = clouds.find(c => c.id === mesh.sourceCloudId);
     // Use plant name if it's a plant, otherwise use source cloud filename
-    const baseName = mesh.isPlant
+    const defaultBase = mesh.isPlant
       ? `${mesh.plantType}_plant_age${mesh.plantAge}`
       : (sourceCloud?.data.fileName?.replace(/\.[^.]+$/, '') || 'mesh');
-    const { vertices, indices, normals } = mesh.data;
+    const suggestedName = `${sanitizeMeshName(defaultBase)}_mesh.${format}`;
+    const comments = mesh.isPlant
+      ? [`Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`]
+      : [];
 
-    if (format === 'obj') {
-      const lines: string[] = [`# Mesh exported from Phytograph`, `# ${mesh.data.vertexCount} vertices, ${mesh.data.triangleCount} triangles`];
-      if (mesh.isPlant) {
-        lines.push(`# Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`);
-      }
-      for (let i = 0; i < mesh.data.vertexCount; i++) {
-        lines.push(`v ${vertices[i * 3].toFixed(6)} ${vertices[i * 3 + 1].toFixed(6)} ${vertices[i * 3 + 2].toFixed(6)}`);
-      }
-      if (normals) {
-        for (let i = 0; i < mesh.data.vertexCount; i++) {
-          lines.push(`vn ${normals[i * 3].toFixed(6)} ${normals[i * 3 + 1].toFixed(6)} ${normals[i * 3 + 2].toFixed(6)}`);
-        }
-      }
-      for (let i = 0; i < mesh.data.triangleCount; i++) {
-        const i0 = indices[i * 3] + 1;
-        const i1 = indices[i * 3 + 1] + 1;
-        const i2 = indices[i * 3 + 2] + 1;
-        if (normals) {
-          lines.push(`f ${i0}//${i0} ${i1}//${i1} ${i2}//${i2}`);
-        } else {
-          lines.push(`f ${i0} ${i1} ${i2}`);
-        }
-      }
-      downloadFile(lines.join('\n'), `${baseName}_mesh.obj`);
-    } else if (format === 'ply') {
-      const lines: string[] = [
-        'ply',
-        'format ascii 1.0',
-        `comment Mesh exported from Phytograph`,
-        ...(mesh.isPlant ? [`comment Helios Plant: ${mesh.plantType}, Age: ${mesh.plantAge} days`] : []),
-        `element vertex ${mesh.data.vertexCount}`,
-        'property float x',
-        'property float y',
-        'property float z',
-        `element face ${mesh.data.triangleCount}`,
-        'property list uchar int vertex_indices',
-        'end_header',
-      ];
-      for (let i = 0; i < mesh.data.vertexCount; i++) {
-        lines.push(`${vertices[i * 3].toFixed(6)} ${vertices[i * 3 + 1].toFixed(6)} ${vertices[i * 3 + 2].toFixed(6)}`);
-      }
-      for (let i = 0; i < mesh.data.triangleCount; i++) {
-        lines.push(`3 ${indices[i * 3]} ${indices[i * 3 + 1]} ${indices[i * 3 + 2]}`);
-      }
-      downloadFile(lines.join('\n'), `${baseName}_mesh.ply`);
-    } else if (format === 'stl') {
-      const lines: string[] = [`solid mesh`];
-      for (let i = 0; i < mesh.data.triangleCount; i++) {
-        const i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
-        const v0 = [vertices[i0 * 3], vertices[i0 * 3 + 1], vertices[i0 * 3 + 2]];
-        const v1 = [vertices[i1 * 3], vertices[i1 * 3 + 1], vertices[i1 * 3 + 2]];
-        const v2 = [vertices[i2 * 3], vertices[i2 * 3 + 1], vertices[i2 * 3 + 2]];
-        // Calculate normal
-        const u = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
-        const v = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
-        const n = [u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0]];
-        const len = Math.sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]) || 1;
-        lines.push(`  facet normal ${(n[0]/len).toFixed(6)} ${(n[1]/len).toFixed(6)} ${(n[2]/len).toFixed(6)}`);
-        lines.push(`    outer loop`);
-        lines.push(`      vertex ${v0[0].toFixed(6)} ${v0[1].toFixed(6)} ${v0[2].toFixed(6)}`);
-        lines.push(`      vertex ${v1[0].toFixed(6)} ${v1[1].toFixed(6)} ${v1[2].toFixed(6)}`);
-        lines.push(`      vertex ${v2[0].toFixed(6)} ${v2[1].toFixed(6)} ${v2[2].toFixed(6)}`);
-        lines.push(`    endloop`);
-        lines.push(`  endfacet`);
-      }
-      lines.push(`endsolid mesh`);
-      downloadFile(lines.join('\n'), `${baseName}_mesh.stl`);
+    // Ask where to save before doing any work. Cancelling here must leave no
+    // trace — no files, no toast.
+    let savePath: string | null = null;
+    if (window.electronAPI) {
+      savePath = await window.electronAPI.dialog.save({
+        defaultPath: suggestedName,
+        title: `Export mesh (${format.toUpperCase()})`,
+        filters: [{ name: `${format.toUpperCase()} mesh`, extensions: [format] }],
+      });
+      if (!savePath) return; // cancelled
     }
 
-    // For Helios plants, also export the plant structure XML
-    if (mesh.isPlant && mesh.heliosXml) {
-      // Small delay to ensure browser can handle multiple downloads
-      setTimeout(() => {
-        downloadFile(mesh.heliosXml!, `${baseName}_helios.xml`);
-        showToast({ title: `Exported ${format.toUpperCase()} mesh and Helios XML`, type: 'success' });
-      }, 100);
+    try {
+      // Split the chosen path into the directory the sibling files go in and the
+      // stem the bundle is named from.
+      const sep = savePath?.includes('\\') ? '\\' : '/';
+      const slash = savePath ? savePath.lastIndexOf(sep) : -1;
+      const dir = savePath && slash >= 0 ? savePath.slice(0, slash) : '';
+      const chosenFile = savePath ? savePath.slice(slash + 1) : suggestedName;
+      const baseName = chosenFile.replace(/\.[^.]+$/, '') || sanitizeMeshName(defaultBase);
+
+      if (format === 'obj') {
+        const files = serializeMeshObj(mesh.data, {
+          baseName,
+          materials: mesh.plantMaterials,
+          comments,
+        });
+        if (window.electronAPI && savePath) {
+          for (const [i, f] of files.entries()) {
+            // The first file is the OBJ itself: write it to EXACTLY the path the
+            // user typed (extension and all), so we never rename behind their
+            // back. The .mtl / textures are siblings named from the same stem.
+            const target = i === 0 ? savePath : `${dir}${dir ? sep : ''}${f.name}`;
+            if (f.bytes) {
+              await window.electronAPI.fs.writeBinary(target, f.bytes.buffer.slice(0) as ArrayBuffer);
+            } else {
+              await window.electronAPI.fs.writeText(target, f.text ?? '');
+            }
+          }
+        } else {
+          // Browser fallback (vite dev outside Electron): anchor-download each file.
+          for (const f of files) {
+            await downloadFile(f.bytes ? new Uint8Array(f.bytes) : (f.text ?? ''), f.name);
+          }
+        }
+        const extras = files.length - 1;
+        showToast({
+          title: 'Export Complete',
+          type: 'success',
+          message: extras > 0
+            ? `Wrote ${baseName}.obj with its .mtl and ${extras - 1} texture${extras - 1 === 1 ? '' : 's'}.`
+            : `Wrote ${baseName}.obj (${mesh.data.triangleCount.toLocaleString()} triangles).`,
+        });
+      } else {
+        const content = format === 'ply'
+          ? serializeMeshPly(mesh.data, { comments })
+          : serializeMeshStl(mesh.data);
+        if (window.electronAPI && savePath) {
+          await window.electronAPI.fs.writeText(savePath, content);
+        } else {
+          await downloadFile(content, `${baseName}.${format}`);
+        }
+        showToast({
+          title: 'Export Complete',
+          type: 'success',
+          message: `Wrote ${baseName}.${format} (${mesh.data.triangleCount.toLocaleString()} triangles).`,
+        });
+      }
+
+      // For Helios plants, also write the plant structure XML beside the mesh.
+      if (mesh.isPlant && mesh.heliosXml) {
+        const xmlName = `${baseName}_helios.xml`;
+        if (window.electronAPI && savePath) {
+          await window.electronAPI.fs.writeText(`${dir}${dir ? sep : ''}${xmlName}`, mesh.heliosXml);
+        } else {
+          await downloadFile(mesh.heliosXml, xmlName);
+        }
+      }
+    } catch (error) {
+      showToast({
+        title: 'Export Failed',
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return;
     }
 
     setShowExportPanel(false);
-  }, [meshes, clouds, downloadFile]);
+  }, [meshes, clouds, downloadFile, showToast]);
 
   // Export a DEM surface's raster LAYERS as GIS files (.asc / GeoTIFF). A DTM
   // carries several bands (elevation / density / intensity / hillshade / slope /
@@ -7275,7 +9002,7 @@ export default function PointCloudViewer({
   );
 
   // Export skeleton in various formats
-  const exportSkeleton = useCallback((skeletonId: string, format: 'obj' | 'ply' | 'json') => {
+  const exportSkeleton = useCallback(async (skeletonId: string, format: 'obj' | 'ply' | 'json') => {
     const skeleton = skeletons.find(s => s.id === skeletonId);
     if (!skeleton) return;
 
@@ -7379,7 +9106,7 @@ export default function PointCloudViewer({
           vertexCount += radialSegments * 2;
         }
 
-        downloadFile(lines.join('\n'), `${baseName}_skeleton_mesh.obj`);
+        await downloadFile(lines.join('\n'), `${baseName}_skeleton_mesh.obj`);
       } else {
         // Export as points and lines (original behavior)
         const lines: string[] = [
@@ -7395,7 +9122,7 @@ export default function PointCloudViewer({
             lines.push(`l ${from + 1} ${to + 1}`);
           }
         }
-        downloadFile(lines.join('\n'), `${baseName}_skeleton.obj`);
+        await downloadFile(lines.join('\n'), `${baseName}_skeleton.obj`);
       }
     } else if (format === 'ply') {
       const lines: string[] = [
@@ -7421,7 +9148,7 @@ export default function PointCloudViewer({
           lines.push(`${from} ${to}`);
         }
       }
-      downloadFile(lines.join('\n'), `${baseName}_skeleton.ply`);
+      await downloadFile(lines.join('\n'), `${baseName}_skeleton.ply`);
     } else if (format === 'json') {
       const data = {
         nodes: Array.from({ length: pointCount }, (_, i) => ({
@@ -7438,7 +9165,7 @@ export default function PointCloudViewer({
           maxBranchOrder: skeleton.data.maxBranchOrder,
         },
       };
-      downloadFile(JSON.stringify(data, null, 2), `${baseName}_skeleton.json`);
+      await downloadFile(JSON.stringify(data, null, 2), `${baseName}_skeleton.json`);
     }
     setShowExportPanel(false);
   }, [skeletons, clouds, downloadFile, skeletonShowAsCylinders, skeletonTubeRadius]);
@@ -7787,8 +9514,7 @@ export default function PointCloudViewer({
         const meta = await sessionSegmentGround(sessionId, csfParams, abort.signal);
         // The parent keeps ALL points, classified + coloured by ground_class.
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
-        setColorMode('scalar');
-        setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
         setShowGroundSegmentPanel(false);
 
         // Optional split: extract each class into its own child session (parent
@@ -7810,8 +9536,10 @@ export default function PointCloudViewer({
               });
             }
           };
-          await addClassCloud(1, 'ground', '#8c6643');
-          await addClassCloud(2, 'non-ground', '#4caf50');
+          // Swatch colours come from the ground_class scheme itself, so a child
+          // cloud reads as the class the viewer paints and the two can't drift.
+          await addClassCloud(1, 'ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 1) ?? '#8c6643');
+          await addClassCloud(2, 'non-ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 2) ?? '#4caf50');
         }
 
         showToast({
@@ -7846,8 +9574,7 @@ export default function PointCloudViewer({
         [GROUND_CLASS_ATTRIBUTE]: { values: labels, min: 1, max: 2 },
       };
       onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
-      setColorMode('scalar');
-      setSelectedScalarField(GROUND_CLASS_ATTRIBUTE);
+      setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
       setShowGroundSegmentPanel(false);
 
       // Optional split into ground / plant child clouds.
@@ -7895,8 +9622,9 @@ export default function PointCloudViewer({
             color,
           });
         };
-        makeChild(1, 'ground', '#8c6643');
-        makeChild(2, 'non-ground', '#4caf50');
+        // Scheme-derived swatches — see the session path above.
+        makeChild(1, 'ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 1) ?? '#8c6643');
+        makeChild(2, 'non-ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 2) ?? '#4caf50');
       }
 
       showToast({
@@ -8068,8 +9796,7 @@ export default function PointCloudViewer({
         if (wantHAG && result.cacheId && result.rawMeta) {
           onUpdateCloud(id, buildSessionOctreeData(result.rawMeta as unknown as OctreeMetadata, octreeInfo, baseName));
           registerContinuousSlug(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
-          setColorMode('scalar');
-          setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+          setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
         }
         return result;
       }
@@ -8112,8 +9839,7 @@ export default function PointCloudViewer({
             [HEIGHT_ABOVE_GROUND_ATTRIBUTE]: { values: hag, min: hmin, max: hmax },
           },
         });
-        setColorMode('scalar');
-        setSelectedScalarField(HEIGHT_ABOVE_GROUND_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: HEIGHT_ABOVE_GROUND_ATTRIBUTE });
       }
       return result;
     };
@@ -8386,8 +10112,9 @@ export default function PointCloudViewer({
             });
           }
 
-          setColorMode('scalar');
-          setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+          // Joint segmentation: every participating cloud carries the new
+          // wood_class field, so each gets the mode (not just one of them).
+          for (const o of order) setCloudColorMode(o.id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
           setShowWoodSegmentPanel(false);
           showToast({
             type: 'success',
@@ -8459,8 +10186,7 @@ export default function PointCloudViewer({
         } else {
           // Label in place; the parent keeps ALL points, coloured by wood_class.
           onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
-          setColorMode('scalar');
-          setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+          setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         }
         setShowWoodSegmentPanel(false);
 
@@ -8482,8 +10208,10 @@ export default function PointCloudViewer({
               });
             }
           };
-          await addClassCloud(WOOD, 'wood', '#67421f');
-          await addClassCloud(LEAF, 'leaf', '#4caf50');
+          // Swatch colours come from the wood_class scheme itself, so a child
+          // cloud reads as the class the viewer paints and the two can't drift.
+          await addClassCloud(WOOD, 'wood', classColorHex(WOOD_CLASS_ATTRIBUTE, WOOD) ?? '#67421f');
+          await addClassCloud(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50');
         }
 
         showToast({
@@ -8579,7 +10307,7 @@ export default function PointCloudViewer({
 
       if (woodMode === 'remove') {
         // Replace the cloud in place with just the leaf points.
-        makeChild(LEAF, 'leaf', '#4caf50', true);
+        makeChild(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', true);
       } else {
         // Full-length (misses = 0, outside the 1..2 wood/leaf range) so the
         // scalar field stays aligned to positions.
@@ -8588,11 +10316,11 @@ export default function PointCloudViewer({
           [WOOD_CLASS_ATTRIBUTE]: { values: woodLabels, min: 1, max: 2 },
         };
         onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
-        setColorMode('scalar');
-        setSelectedScalarField(WOOD_CLASS_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         if (woodMode === 'split') {
-          makeChild(WOOD, 'wood', '#67421f', false);
-          makeChild(LEAF, 'leaf', '#4caf50', false);
+          // Scheme-derived swatches — see the session path above.
+          makeChild(WOOD, 'wood', classColorHex(WOOD_CLASS_ATTRIBUTE, WOOD) ?? '#67421f', false);
+          makeChild(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', false);
         }
       }
 
@@ -8625,6 +10353,13 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     treeSegmentAbortRef.current = abort;
 
+    // Consume any pending "Segment Anyway" confirmation: this run carries the
+    // acknowledgement, and the armed state is cleared so a subsequent run on a
+    // different cloud prompts again rather than silently inheriting it.
+    const acknowledgeCost = treeCostAcknowledgedRef.current;
+    treeCostAcknowledgedRef.current = false;
+    setTreeSegmentCostWarning(null);
+
     const tiParams = {
       reg_strength1: treeRegStrength1,
       reg_strength2: treeRegStrength2,
@@ -8632,6 +10367,7 @@ export default function PointCloudViewer({
       decimate_res2: treeDecimateRes2,
       max_gap: treeMaxGap,
       max_outlier_gap: treeMaxOutlierGap,
+      acknowledge_cost: acknowledgeCost,
     };
     const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
 
@@ -8653,8 +10389,7 @@ export default function PointCloudViewer({
         }, abort.signal);
         // The parent keeps ALL points, coloured by tree_instance.
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
-        setColorMode('scalar');
-        setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+        setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
         setShowTreeSegmentPanel(false);
         setTreeSeedMode(false);
 
@@ -8687,7 +10422,11 @@ export default function PointCloudViewer({
               { diverged: true },
             ),
             visible: true,
-            color: '#4caf50',
+            // Each child carries ITS TREE's colour from the tree_instance
+            // colormap, so the scan-list swatches match the recoloured parent
+            // (a single shared green told the user nothing about which row is
+            // which tree). `value` is the tree id; ids <= 0 are excluded above.
+            color: crownColorForTreeId(c.value) ?? '#4caf50',
           }));
           for (const e of childEntries) suppressFrameCloudIdsRef.current.add(e.id);
           for (const e of childEntries) onAddCloud(e);
@@ -8723,6 +10462,14 @@ export default function PointCloudViewer({
       }
 
       const response = await segmentTrees({ points, seed_points: seeds, ground_class: groundClass, ...tiParams }, abort.signal);
+      // Not a failure: the backend wants an explicit confirmation before an
+      // expensive run. Arm the panel's "Segment Anyway" and stop here — clicking
+      // again re-sends with acknowledge_cost.
+      if (!response.success && response.cost_warning) {
+        treeCostAcknowledgedRef.current = true;
+        setTreeSegmentCostWarning(response.cost_warning.message);
+        return;
+      }
       if (!response.success) {
         throw new Error(response.error || 'Tree segmentation failed');
       }
@@ -8735,8 +10482,7 @@ export default function PointCloudViewer({
         [TREE_INSTANCE_ATTRIBUTE]: { values: labels, min: 0, max: response.num_trees },
       };
       onUpdateCloud(id, { ...displayData, scalarFields: newScalarFields });
-      setColorMode('scalar');
-      setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+      setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
       setShowTreeSegmentPanel(false);
       setTreeSeedMode(false);
 
@@ -8785,7 +10531,9 @@ export default function PointCloudViewer({
               fileName: `${baseName} (tree ${treeId})`,
             },
             visible: true,
-            color: '#4caf50',
+            // Match the tree_instance colormap — see the session path above.
+            // The loop skips treeId <= 0, so the fallback is unreachable.
+            color: crownColorForTreeId(treeId) ?? '#4caf50',
           });
         }
       }
@@ -8802,6 +10550,13 @@ export default function PointCloudViewer({
       // cancel reached the backend worker) — not a failure.
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (error instanceof ScanCancelledError) return;
+      // Session path: a 409 cost advisory is a confirmation prompt, not an
+      // error. Arm "Segment Anyway" instead of surfacing a failure toast.
+      if (error instanceof CostWarningError) {
+        treeCostAcknowledgedRef.current = true;
+        setTreeSegmentCostWarning(error.costWarning.message);
+        return;
+      }
       console.error('Tree segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Tree segmentation failed';
       setTreeSegmentError(errorMessage);
@@ -8841,8 +10596,7 @@ export default function PointCloudViewer({
           [TREE_INSTANCE_ATTRIBUTE]: { values: newLabels, min: 0, max: maxId },
         },
       });
-      setColorMode('scalar');
-      setSelectedScalarField(TREE_INSTANCE_ATTRIBUTE);
+      setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
       showToast({ type: 'success', title: actionLabel, message: `${maxId} trees now.` });
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Refine failed';
@@ -10174,20 +11928,38 @@ export default function PointCloudViewer({
     return qsm.sourceLabel || clouds.find(c => c.id === qsm.sourceCloudId)?.data.fileName || 'QSM';
   }, [clouds]);
 
-  // Export the selected QSMs, one file per QSM, into a user-picked folder.
+  // Export the selected QSMs. One QSM → a Save dialog pre-filled with a suggested
+  // name the user can edit (matching the point-cloud / raster exporters); several
+  // QSMs → one folder picker, then a file per QSM named after its label.
   const handleExportQSMs = useCallback(async (qsmIds: string[], format: QSMExportFormat) => {
     const targets = qsms.filter(q => qsmIds.includes(q.id));
     if (targets.length === 0) return;
 
-    // Pick the output folder. Falls back to a single save dialog when running
+    const ext = qsmExtForFormat(format);
+    // Suggested name for the single-QSM Save dialog: the QSM's display label,
+    // filesystem-sanitised, with the format's extension.
+    const suggestedName = `${sanitizeQsmFilename(qsmDisplayLabel(targets[0]))}.${ext}`;
+
+    // Where the files go. Single export resolves to an explicit, user-editable
+    // path; multi-export resolves to a folder. Falls back to anchor-downloads
     // outside Electron (e.g. vite dev in a plain browser) — there we can only
     // export one file, so require a single selection.
     let dir: string | null = null;
+    let singlePath: string | null = null;
     if (window.electronAPI) {
-      // directory:true returns a single folder path (or null when cancelled).
-      const picked = await window.electronAPI.dialog.open({ directory: true, title: 'Choose export folder' });
-      dir = typeof picked === 'string' ? picked : null;
-      if (!dir) return; // cancelled
+      if (targets.length === 1) {
+        singlePath = await window.electronAPI.dialog.save({
+          defaultPath: suggestedName,
+          title: `Export QSM (${format.toUpperCase()})`,
+          filters: [{ name: `QSM ${format.toUpperCase()}`, extensions: [ext] }],
+        });
+        if (!singlePath) return; // cancelled
+      } else {
+        // directory:true returns a single folder path (or null when cancelled).
+        const picked = await window.electronAPI.dialog.open({ directory: true, title: 'Choose export folder' });
+        dir = typeof picked === 'string' ? picked : null;
+        if (!dir) return; // cancelled
+      }
     } else if (targets.length > 1) {
       showToast({ type: 'error', title: 'Export', message: 'Select a single QSM to export in browser mode.' });
       return;
@@ -10195,7 +11967,6 @@ export default function PointCloudViewer({
 
     setQSMExporting(true);
     try {
-      const ext = qsmExtForFormat(format);
       const usedNames = new Set<string>();
       let written = 0;
       for (const qsm of targets) {
@@ -10207,7 +11978,10 @@ export default function PointCloudViewer({
         usedNames.add(name);
 
         const content = serializeQsm(qsm, format);
-        if (window.electronAPI && dir) {
+        if (window.electronAPI && singlePath) {
+          // Exactly the path the user typed — no renaming behind their back.
+          await window.electronAPI.fs.writeText(singlePath, content);
+        } else if (window.electronAPI && dir) {
           const sep = dir.includes('\\') ? '\\' : '/';
           const path = dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
           await window.electronAPI.fs.writeText(path, content);
@@ -10401,11 +12175,28 @@ export default function PointCloudViewer({
       return false;
     };
 
-    const lastMouse = { x: 0, y: 0, set: false };
+    const lastMouse = lastMouseRef.current;
 
     const getCanvas = (): HTMLCanvasElement | null =>
       (document.querySelector('canvas[data-engine]') as HTMLCanvasElement | null) ||
       (document.querySelector('canvas') as HTMLCanvasElement | null);
+
+    // The scan position (scanner marker) a t/r gesture acts on: the first
+    // selected scan carrying params. A MOVING scan is excluded — its origin is
+    // only a derived anchor and its tilt is forced to zero, because attitude
+    // comes from the trajectory's per-pose quaternions and the backend's
+    // addScanMoving rejects a static tilt (see applyTrajectoryToParams). That
+    // is the same reason the Scan Parameters dialog shows origin read-only and
+    // hides the tilt fields for one; per-pose edits go through the manual
+    // trajectory editor, which has its own t/r on a selected pose.
+    const scanTransformTarget = (): (Scan & { params: ScanParameters }) | null => {
+      for (const scan of scansWithParamsRef.current) {
+        if (!selectedIds.has(scan.id)) continue;
+        if (isMovingScan(scan.params)) continue;
+        return scan;
+      }
+      return null;
+    };
 
     const computePivot = (): { x: number; y: number; z: number } | null => {
       // Manual trajectory editor takes precedence: pivot on the selected pose.
@@ -10449,6 +12240,22 @@ export default function PointCloudViewer({
         }
         cx /= pointCount; cy /= pointCount; cz /= pointCount;
         return { x: cx + pos.x, y: cy + pos.y, z: cz + pos.z };
+      }
+      // Scan position. Must precede the cloud branch below: a data-bearing scan
+      // is in BOTH sets (selectedIds is the scan selection set), and when the
+      // Transform tool isn't open a t/r gesture targets the scanner, not the
+      // points. params.origin is WORLD-frame but the marker renders in the
+      // scan's stored frame (world − worldShift), and startModal subtracts
+      // displayOffset afterwards — so fold in worldShift here exactly as the
+      // pose branch above does, or the pivot's screen projection drifts away
+      // from the drawn marker on a cloud with a non-zero shift.
+      if (editMode !== 'translate') {
+        const scan = scanTransformTarget();
+        if (scan) {
+          const ws = scan.data?.octree?.worldShift ?? [0, 0, 0];
+          const o = scan.params.origin;
+          return { x: o.x - ws[0], y: o.y - ws[1], z: o.z - ws[2] };
+        }
       }
       if (selectedIds.size > 0) {
         let cx = 0, cy = 0, cz = 0, n = 0;
@@ -10592,6 +12399,24 @@ export default function PointCloudViewer({
     };
 
     const applyRotate = (modal: TransformModalState, angleDeg: number) => {
+      if (modal.target === 'scan') {
+        if (!modal.scanId || !modal.originalScanParams) return;
+        // Rotation for a scan position IS its scanner tilt — the same two
+        // fields the Scan Parameters dialog exposes. X locks roll, Y locks
+        // pitch, and free defaults to roll (the component the dialog applies
+        // first). Z is deliberately inert: tilt has no Z, and the dialog's
+        // separate heading field (azimuthOffsetDeg) is out of scope here.
+        const orig = modal.originalScanParams;
+        let roll = orig.tiltRollDeg, pitch = orig.tiltPitchDeg;
+        if (modal.axis === 'y') pitch = orig.tiltPitchDeg + angleDeg;
+        else if (modal.axis === 'x' || modal.axis === 'free') roll = orig.tiltRollDeg + angleDeg;
+        else if (modal.axis === 'xy' || modal.axis === 'yz' || modal.axis === 'xz') {
+          roll = orig.tiltRollDeg + angleDeg;
+          pitch = orig.tiltPitchDeg + angleDeg;
+        }
+        onUpdateScanParams(modal.scanId, { ...orig, tiltRollDeg: roll, tiltPitchDeg: pitch });
+        return;
+      }
       if (modal.target === 'pose') {
         if (modal.poseIndex == null || !modal.originalPoseRot) return;
         const orig = modal.originalPoseRot;
@@ -10629,6 +12454,21 @@ export default function PointCloudViewer({
     };
 
     const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
+      if (modal.target === 'scan') {
+        if (!modal.scanId || !modal.originalScanParams) return;
+        // Writes params.origin — the dialog's Origin X/Y/Z fields. The delta is
+        // already axis-masked by computeTranslateDelta, so x/y/z locking maps
+        // straight onto the three fields. Always relative to the captured
+        // originals, so repeated updates during the drag don't compound.
+        const orig = modal.originalScanParams;
+        const origin = {
+          x: orig.origin.x + delta.x,
+          y: orig.origin.y + delta.y,
+          z: orig.origin.z + delta.z,
+        };
+        onUpdateScanParams(modal.scanId, { ...orig, origin });
+        return;
+      }
       if (modal.target === 'pose') {
         if (modal.poseIndex == null || !modal.originalPosePos) return;
         const orig = modal.originalPosePos;
@@ -10745,6 +12585,18 @@ export default function PointCloudViewer({
     const cancelModal = () => {
       const modal = transformModalRef.current;
       if (!modal) return;
+      if (modal.target === 'scan') {
+        // The captured params ARE the pre-gesture state, so writing them back
+        // restores origin and tilt in one shot — nothing to reconstruct.
+        if (modal.scanId && modal.originalScanParams) {
+          onUpdateScanParams(modal.scanId, modal.originalScanParams);
+        }
+        pendingHistoryRef.current = null;
+        transformModalRef.current = null;
+        setTransformModal(null);
+        setGizmoDragging(false);
+        return;
+      }
       if (modal.target === 'pose') {
         if (modal.poseIndex != null && modal.originalPosePos && modal.originalPoseRot) {
           const idx = modal.poseIndex;
@@ -10815,7 +12667,12 @@ export default function PointCloudViewer({
       // path and can't disagree. No undo history is recorded for the draft (the
       // eventual bake is non-undoable). Meshes/skeletons keep their render-only
       // transform and DO record history as before.
-      if (isCloudTranslate) {
+      // A scan transform writes params straight through onUpdateScanParams and
+      // records no history: 'scan' isn't a kind pendingHistoryRef/captureTransform
+      // can represent, and handleUpdateScanParams dispatches the non-undoable
+      // replaceCollection. Same gap pose edits already have. Explicit rather
+      // than relying on commitHistoryEntry's no-pending early return.
+      if (isCloudTranslate || modal.target === 'scan') {
         pendingHistoryRef.current = null;  // drop the BEFORE from startModal
       } else {
         commitHistoryEntry();
@@ -10839,6 +12696,7 @@ export default function PointCloudViewer({
       const pivot = { x: worldPivot.x - off.x, y: worldPivot.y - off.y, z: worldPivot.z - off.z };
 
       let state: TransformModalState | null = null;
+      const scanTarget = scanTransformTarget();
 
       const ed = trajectoryEditorRef.current;
       if (ed && ed.selectedIndex != null) {
@@ -10884,6 +12742,24 @@ export default function PointCloudViewer({
           numericBuffer: '',
         };
         startHistoryEntry('skeleton', selectedSkeleton.id);
+      } else if (op !== 'scale' && editMode !== 'translate' && scanTarget) {
+        // Scan position. Ahead of the cloud branch and gated on the Transform
+        // tool being closed: with it OPEN, `t` keeps its existing meaning of
+        // moving the point cloud, so no existing gesture changes behavior.
+        // Scale is skipped for the same reason a pose skips it — a scanner has
+        // no size. No history entry: 'scan' isn't a representable history kind
+        // (see commitModal), matching how pose edits behave today.
+        const scan = scanTarget;
+        state = {
+          op,
+          axis: 'free',
+          startScreen: { x: lastMouse.x, y: lastMouse.y },
+          pivot,
+          target: 'scan',
+          scanId: scan.id,
+          originalScanParams: scan.params,
+          numericBuffer: '',
+        };
       } else if (op === 'translate' && selectedIds.size > 0) {
         const originals = new Map<string, { x: number; y: number; z: number }>();
         const ids: string[] = [];
@@ -10927,9 +12803,16 @@ export default function PointCloudViewer({
         // draft with nowhere to apply it. Mesh/skeleton transforms (s/r, and t
         // on a selected mesh/skeleton) are unaffected: they still commit their
         // own render-only transform directly and don't use the panel.
+        //
+        // A selected SCAN POSITION is the exception carved out here: with the
+        // Transform tool closed, `t` moves the scanner's origin (a direct
+        // params write with its own commit, no panel involved), so this guard
+        // must not swallow the key. With the tool OPEN, editMode === 'translate'
+        // already falsifies the guard and the cloud keeps the gesture.
         const cloudTranslateBlocked =
           k === 't' && editMode !== 'translate' &&
-          selectedIds.size > 0 && !selectedMesh && !selectedSkeleton;
+          selectedIds.size > 0 && !selectedMesh && !selectedSkeleton &&
+          !scanTransformTarget();
         if (cloudTranslateBlocked) return;
         if (k === 't') { e.preventDefault(); startModal('translate'); }
         else if (k === 's') { e.preventDefault(); startModal('scale'); }
@@ -10987,6 +12870,12 @@ export default function PointCloudViewer({
     };
 
     const handleMouseDown = (e: MouseEvent) => {
+      // A click anchors the cursor too, not just a move — otherwise a pointer
+      // that was never moved (or moved only before mount) leaves `set` false
+      // and the t/s/r modal silently refuses to start.
+      lastMouse.x = e.clientX;
+      lastMouse.y = e.clientY;
+      lastMouse.set = true;
       if (!transformModalRef.current) return;
       e.preventDefault();
       e.stopPropagation();
@@ -11017,6 +12906,11 @@ export default function PointCloudViewer({
     editMode,
     startHistoryEntry,
     commitHistoryEntry,
+    // Scan-position transforms. The scan list itself is read through
+    // scansWithParamsRef, NOT listed here — a gesture rewrites params on every
+    // mouse move, so depending on it would re-subscribe all four listeners per
+    // frame. onUpdateScanParams is a stable useCallback([]) in App.tsx.
+    onUpdateScanParams,
   ]);
 
   // Determine what type of object is selected
@@ -11527,11 +13421,15 @@ export default function PointCloudViewer({
       // For a DEM 'layer' mode, resolve the selected layer's per-vertex values.
       const layerName = mode === 'layer' ? (selectedMeshLayer.get(mesh.id) ?? 'elevation') : undefined;
       const layer = layerName ? mesh.demLayers?.[layerName] : undefined;
+      // This mesh's OWN colormap (its override, else the scene default). Must be
+      // per-mesh here: keying the cache on the scene default would leave an
+      // overridden mesh painted with the previous map.
+      const meshColormap = colormapFor(mesh.id);
 
       // Full cache hit: same geometry, mode, colormap, and (for layers) layer.
       const cached = cache.get(mesh.id);
       if (cached && cached.data === mesh.data && cached.mode === mode &&
-          cached.colormap === colormap && cached.layer === layerName) {
+          cached.colormap === meshColormap && cached.layer === layerName) {
         out.set(mesh.id, cached.result);
         continue;
       }
@@ -11546,12 +13444,12 @@ export default function PointCloudViewer({
         const colors = buildMeshScanColors(mesh.data);
         if (colors) result = { positions, colors };
       } else {
-        const built = buildMeshTriangleColors(mesh.data, mode, colormap, undefined, layer?.vertexValues);
+        const built = buildMeshTriangleColors(mesh.data, mode, meshColormap, undefined, layer?.vertexValues);
         if (built) result = { positions, colors: built.colors, min: built.min, max: built.max };
       }
 
       if (result) {
-        cache.set(mesh.id, { data: mesh.data, mode, colormap, layer: layerName, result });
+        cache.set(mesh.id, { data: mesh.data, mode, colormap: meshColormap, layer: layerName, result });
         out.set(mesh.id, result);
       }
     }
@@ -11561,67 +13459,84 @@ export default function PointCloudViewer({
       if (!liveIds.has(id)) cache.delete(id);
     }
     return out;
-  }, [meshes, meshColorModes, selectedMeshLayer, colormap]);
+  }, [meshes, meshColorModes, selectedMeshLayer, colormapFor]);
 
-  // Gradient colorbar range for the selected mesh's scalar pseudocolor mode
-  // (inclination/azimuth/area). Null for 'solid' and the categorical 'scan'
-  // mode (which gets a legend instead).
-  // The mesh whose pseudocolor readout (colorbar or scan legend) is shown. A
-  // legend should be visible whenever a mesh is being pseudocolored, not only
-  // while it's selected — so prefer the selected mesh if it has an active mode,
-  // otherwise fall back to any mesh that does (typically just one at a time).
-  const activeColorMesh = useMemo(() => {
-    const hasMode = (m: MeshEntry) => {
-      const mode = meshColorModes.get(m.id);
-      return !!mode && mode !== 'solid';
+  // Drop colormap overrides whose object is gone (mesh or LAD result deleted).
+  // Without this the map grows unboundedly across a session, and — worse — a
+  // recycled id would silently inherit the dead object's colormap.
+  useEffect(() => {
+    setColormapOverrides(prev => {
+      if (prev.size === 0) return prev;
+      const live = new Set<string>([
+        ...meshes.map(m => m.id),
+        ...ladResults.map(r => r.id),
+      ]);
+      let changed = false;
+      const next = new Map(prev);
+      for (const id of prev.keys()) {
+        if (!live.has(id)) { next.delete(id); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [meshes, ladResults]);
+
+  // Test hook: the mean RGB of each mesh's per-triangle color buffer — the
+  // exact bytes handed to the GPU. E2E can't assert on rendered pixels (the
+  // launcher hides the window, and an offscreen Electron WebGL context reads
+  // back black — see tests/e2e/visual/capture-plant.mjs), so this exposes the
+  // color data itself, which is what a per-instance colormap regression would
+  // actually corrupt. Sampled, not summed over every triangle, to stay cheap.
+  useEffect(() => {
+    (window as any).__meshColorSignature = () => {
+      const out: Record<string, { r: number; g: number; b: number; n: number }> = {};
+      for (const [id, built] of meshTriangleColors) {
+        const c = built.colors;
+        const stride = Math.max(3, Math.floor(c.length / 3000) * 3);
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i + 2 < c.length; i += stride) {
+          r += c[i]; g += c[i + 1]; b += c[i + 2]; n++;
+        }
+        out[id] = n ? { r: r / n, g: g / n, b: b / n, n } : { r: 0, g: 0, b: 0, n: 0 };
+      }
+      return out;
     };
-    if (selectedMesh && hasMode(selectedMesh)) return selectedMesh;
-    return meshes.find(hasMode) ?? null;
-  }, [selectedMesh, meshes, meshColorModes]);
+    return () => { delete (window as any).__meshColorSignature; };
+  }, [meshTriangleColors]);
 
-  // Gradient colorbar range for the active mesh's scalar mode
-  // (inclination/azimuth/area). Null for 'solid' and the categorical 'scan'
-  // mode (which gets a legend instead).
-  const activeMeshColorInfo = useMemo(() => {
-    if (!activeColorMesh) return null;
-    const mode = meshColorModes.get(activeColorMesh.id);
-    if (!mode || mode === 'solid' || mode === 'scan') return null;
-    // Reuse the range already computed while building the color buffer, rather
-    // than running the O(triangles) scalar pass a second time just for the
-    // colorbar (a needless full pass that doubled the freeze on large meshes).
-    const built = meshTriangleColors.get(activeColorMesh.id);
-    if (!built || built.min === undefined || built.max === undefined) return null;
-    // For a 'layer' mode the caption is the selected layer's stored label; else the
-    // geometric-mode label.
-    let label = meshColorModeLabel(mode);
-    if (mode === 'layer') {
-      const name = selectedMeshLayer.get(activeColorMesh.id) ?? 'elevation';
-      label = activeColorMesh.demLayers?.[name]?.label ?? name;
-    }
-    return { mode, min: built.min, max: built.max, label };
-  }, [activeColorMesh, meshColorModes, selectedMeshLayer, meshTriangleColors]);
-
-  // The LAD result whose colorbar is shown: the explicitly-selected one, else
-  // the most recent visible result. Its LAD range (override-aware) drives the
-  // colorbar domain.
-  const activeLadInfo = useMemo(() => {
-    if (ladResults.length === 0) return null;
-    const result =
-      ladResults.find(r => r.id === selectedLadId && r.visible) ??
-      [...ladResults].reverse().find(r => r.visible);
-    if (!result) return null;
-    const auto = ladRange(result.voxels);
-    const min = result.ladMinOverride ?? auto.min;
-    const max = result.ladMaxOverride ?? auto.max;
-    return { result, min, max };
-  }, [ladResults, selectedLadId]);
+  // Test hook: the distinct per-vertex colours on the selected mesh (or the only
+  // mesh), quantised and capped. Complements __meshColorSignature above, which
+  // only sees meshes with a built per-triangle colour buffer — a textured plant
+  // renders through TexturedPlantMesh and never gets one, so its vertex colours
+  // (the ONLY thing colouring untextured organs like petioles and internodes)
+  // are invisible to that hook. A mean would hide the failure this guards: a
+  // handful of correct leaf colours averaged with grey organs still looks
+  // plausible, so we expose the palette and let the test assert on membership.
+  useEffect(() => {
+    (window as any).__meshVertexColorPalette = (meshId?: string) => {
+      const mesh = meshId
+        ? meshes.find(m => m.id === meshId)
+        : (meshes.length === 1 ? meshes[0] : meshes.find(m => selectedMeshIds.has(m.id)));
+      const c = mesh?.data.vertexColors;
+      if (!c) return [];
+      const seen = new Set<string>();
+      const out: [number, number, number][] = [];
+      for (let i = 0; i + 2 < c.length && out.length < 64; i += 3) {
+        const key = `${Math.round(c[i] * 100)},${Math.round(c[i + 1] * 100)},${Math.round(c[i + 2] * 100)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push([c[i], c[i + 1], c[i + 2]]);
+      }
+      return out;
+    };
+    return () => { delete (window as any).__meshVertexColorPalette; };
+  }, [meshes, selectedMeshIds]);
 
   // Per-scan legend entries (color + count) when the active mesh is colored by
   // source scan. Null otherwise.
-  const activeMeshScanLegend = useMemo(() => {
-    if (!activeColorMesh) return null;
-    if (meshColorModes.get(activeColorMesh.id) !== 'scan') return null;
-    const { triangleScanIds, scanColors } = activeColorMesh.data;
+  // Per-scan legend entries (color + triangle count) for ANY mesh carrying
+  // per-triangle scan provenance. Null when the mesh has none.
+  const meshScanLegendFor = useCallback((mesh: MeshEntry) => {
+    const { triangleScanIds, scanColors } = mesh.data;
     if (!triangleScanIds || !scanColors) return null;
     const counts = new Array(scanColors.length).fill(0);
     for (let i = 0; i < triangleScanIds.length; i++) {
@@ -11630,7 +13545,7 @@ export default function PointCloudViewer({
     }
     return scanColors.map((color, i) => ({ color, count: counts[i], index: i }))
       .filter(e => e.count > 0);
-  }, [activeColorMesh, meshColorModes]);
+  }, []);
 
   // Handle Helios triangulation as a background task with cancel support.
   // `scanColors` is aligned 1:1 with request.scans so we can stash per-triangle
@@ -12179,6 +14094,77 @@ export default function PointCloudViewer({
     };
   }, []);
 
+  // Write the crown table, plus a mesh file per ALPHA crown.
+  //
+  // Why alpha is special: the CSV carries each fit's defining parameters, so a
+  // parametric crown's row fully reproduces its solid. A concave hull has no such
+  // parameters — the mesh IS the model — so those crowns are written as mesh files
+  // beside the CSV and named in its mesh_file column, which is what keeps the
+  // table a complete record rather than a set of bbox statistics.
+  //
+  // That also decides the destination: no alpha crowns means exactly one file, so
+  // the native Save dialog is right; alpha crowns mean N+1 files, which a save
+  // dialog can't express, so we ask for a FOLDER instead (mirroring handleExportQSMs).
+  // Returns a sentence for the completion toast, or '' if the user cancelled.
+  const exportCrownTable = useCallback(async (
+    args: CrownFitStartArgs, rows: CrownCsvRow[],
+  ): Promise<string> => {
+    const base = crownExportBaseName(args.exportBaseName, rows[0]?.scanName ?? '');
+    const csvName = `${base}.csv`;
+    const alphaRows = rows.filter(r => r.crown.shape === 'alpha');
+
+    if (alphaRows.length === 0) {
+      const path = await saveTextFileQuiet(buildCrownCsv(rows, args.strictness), csvName);
+      return path ? ` Wrote ${csvName}.` : '';
+    }
+
+    // Name every alpha crown's mesh first, so the names are already in the rows
+    // by the time the CSV is serialized — the column and the files can't drift.
+    const used = new Set<string>();
+    for (const r of alphaRows) {
+      r.meshFile = crownMeshFileName(
+        base, r.scanName, r.crown.tree_instance_id, args.meshFormat, used);
+    }
+    const csv = buildCrownCsv(rows, args.strictness);
+
+    if (!window.electronAPI) {
+      // Plain-browser dev: no folder to write into. Save the table alone rather
+      // than silently dropping it, and say what's missing.
+      await saveTextFileQuiet(csv, csvName);
+      showToast({
+        type: 'warning', title: 'Crown Export',
+        message: 'Crown meshes need the desktop app; only the CSV was saved.',
+      });
+      return '';
+    }
+
+    const picked = await window.electronAPI.dialog.open({
+      directory: true, title: 'Choose a folder for the crown export',
+    });
+    const dir = typeof picked === 'string' ? picked : null;
+    if (!dir) return ''; // cancelled
+
+    for (const r of alphaRows) {
+      const data = crownToMeshData(r.crown);
+      let content: string;
+      if (args.meshFormat === 'ply') {
+        content = serializeMeshPly(data);
+      } else if (args.meshFormat === 'stl') {
+        content = serializeMeshStl(data);
+      } else {
+        // A fitted crown carries no materials, so serializeMeshObj emits just the
+        // .obj — no .mtl sibling to write.
+        const files = serializeMeshObj(data, { baseName: r.meshFile!.replace(/\.obj$/, '') });
+        content = files.find(f => f.name.endsWith('.obj'))?.text ?? '';
+      }
+      await window.electronAPI.fs.writeText(joinExportPath(dir, r.meshFile!), content);
+    }
+    await window.electronAPI.fs.writeText(joinExportPath(dir, csvName), csv);
+
+    const n = alphaRows.length;
+    return ` Wrote ${csvName} + ${n} crown mesh${n === 1 ? '' : 'es'}.`;
+  }, [crownToMeshData, showToast]);
+
   // Fit crown shapes to one or more scans (one crown per tree), add each as a
   // mesh with per-crown metrics, and optionally export a metrics CSV. Mirrors the
   // triangulation/LAD multi-scan flow: buildPointSource per scan (session_id
@@ -12199,7 +14185,7 @@ export default function PointCloudViewer({
       ...args.scanIds.map(id => scans.find(s => s.id === id)?.color).filter((c): c is string => !!c),
     ]);
     // Rows for the CSV: one per fitted crown, across every scan.
-    const csvRows: { scanName: string; crown: CrownFitCrown }[] = [];
+    const csvRows: CrownCsvRow[] = [];
     const allWarnings: string[] = [];
     // Overall progress = (scans finished + current scan's own fraction) / total.
     // Advances smoothly across scans, and within a scan the backend's per-tree
@@ -12286,32 +14272,15 @@ export default function PointCloudViewer({
         showToast({ type: 'warning', title: 'Crown Fit', message: w });
       }
       if (allMeshes.length > 0) {
+        // Export BEFORE the completion toast, so one toast reports both the fit
+        // and what actually landed on disk (the old path used the toasting
+        // saveToFile, which stacked a second "Download Complete" on top).
+        const exportNote = args.exportCsv ? await exportCrownTable(args, csvRows) : '';
         showToast({
           type: 'success',
           title: 'Crown Fit Complete',
-          message: `Fitted ${allMeshes.length} crown${allMeshes.length === 1 ? '' : 's'}.`,
+          message: `Fitted ${allMeshes.length} crown${allMeshes.length === 1 ? '' : 's'}.${exportNote}`,
         });
-        if (args.exportCsv) {
-          const esc = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
-          const header = [
-            'scan_name', 'tree_instance_id', 'shape', 'tree_height_m', 'crown_volume_m3',
-            'crown_center_x', 'crown_center_y', 'crown_center_z',
-            'crown_dim_x_m', 'crown_dim_y_m', 'crown_dim_z_m',
-            'crown_surface_area_m2', 'num_points_used', 'strictness',
-          ];
-          const rows = csvRows.map(({ scanName, crown }) => {
-            const m = crown.metrics;
-            return [
-              scanName, String(crown.tree_instance_id), crown.shape,
-              m.tree_height_m.toFixed(4), m.crown_volume_m3.toFixed(4),
-              m.crown_center[0].toFixed(4), m.crown_center[1].toFixed(4), m.crown_center[2].toFixed(4),
-              m.crown_dims_m[0].toFixed(4), m.crown_dims_m[1].toFixed(4), m.crown_dims_m[2].toFixed(4),
-              m.surface_area_m2.toFixed(4), String(m.num_points_used), String(args.strictness),
-            ];
-          });
-          const csv = [header, ...rows].map(r => r.map(esc).join(',')).join('\n') + '\n';
-          await saveToFile(csv, 'crown_metrics.csv');
-        }
       } else {
         showToast({ type: 'error', title: 'Crown Fit', message: 'No crowns were fitted.' });
       }
@@ -12328,7 +14297,7 @@ export default function PointCloudViewer({
       crownFitAbortRef.current = null;
       crownFitRunIdRef.current = null;
     }
-  }, [crownFitRunning, clouds, scans, meshes, buildPointSource, crownToMeshData, addMeshes, onHideScan]);
+  }, [crownFitRunning, clouds, scans, meshes, buildPointSource, crownToMeshData, exportCrownTable, addMeshes, onHideScan]);
 
   // Cancel an in-flight crown fit: stop the backend worker (frees its memory) if
   // a run-id arrived, then abort the fetch (the streaming disconnect also kills
@@ -13250,24 +15219,39 @@ export default function PointCloudViewer({
       console.log(`[GIF] Captured ${frameCount} frames, encoding...`);
       setGifProgress({ current: frameCount, total: totalFrames, phase: 'encoding' });
 
-      // Encode GIF
+      // Encode GIF, then save it where the user chooses. An `<a download>` click
+      // would be serviced out-of-band by Electron (its own Save-As, invisible to
+      // us) and return immediately — so the old success toast fired before the
+      // file existed, and a cancelled save still reported success.
       gif.on('finished', (blob: Blob) => {
-        // Download the GIF
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${mesh.plantType}_growth_${startAge}-${endAge}.gif`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        console.log('[GIF] Download started');
-        showToast({ title: 'GIF downloaded successfully!', type: 'success' });
-
-        cleanup();
-        setIsGeneratingGif(false);
-        setGifProgress(null);
+        void (async () => {
+          try {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            const saved = await saveBinaryFileQuiet(
+              bytes,
+              `${mesh.plantType}_growth_${startAge}-${endAge}.gif`,
+              'image/gif',
+            );
+            if (saved) {
+              const sep = saved.includes('\\') ? '\\' : '/';
+              showToast({
+                title: 'GIF Saved',
+                type: 'success',
+                message: `Wrote ${saved.slice(saved.lastIndexOf(sep) + 1)} (${frameCount} frames).`,
+              });
+            }
+          } catch (err) {
+            showToast({
+              title: 'GIF save failed',
+              type: 'error',
+              message: err instanceof Error ? err.message : String(err),
+            });
+          } finally {
+            cleanup();
+            setIsGeneratingGif(false);
+            setGifProgress(null);
+          }
+        })();
       });
 
       gif.render();
@@ -13338,25 +15322,13 @@ export default function PointCloudViewer({
     setOriginSelected(false);
   }, [showOriginMarker, sceneHasContent, editMode, treeSeedMode, trajectoryEditor]);
 
-  // Color modes that benefit from a colormap + colorbar (continuous scalars).
-  const isScalarColorMode = (
-    colorMode === 'x' ||
-    colorMode === 'y' ||
-    colorMode === 'height' ||
-    colorMode === 'intensity' ||
-    colorMode === 'scalar'
-  );
-
-  // Stable key for the active continuous mode (so per-mode min/max overrides
-  // don't leak across different fields/axes).
-  const colorRangeKey =
-    colorMode === 'scalar' && selectedScalarField
-      ? `scalar:${selectedScalarField}`
-      : colorMode;
-
   // Compute the data-derived default min/max for the active mode against a
   // representative cloud (the first visible selected cloud, or the first
   // visible cloud overall). Returns null if no defaults apply.
+  // The cloud the Display panel edits: strictly the user's selection (first
+  // visible selected, else the first visible cloud). It must NOT wander to some
+  // other cloud — the panel has to describe what the user just clicked, or the
+  // "Color by" dropdown would report a mode for a scan they aren't looking at.
   const colorbarSourceCloud = useMemo(() => {
     const firstSelected = Array.from(selectedIds)
       .map(id => clouds.find(c => c.id === id))
@@ -13365,71 +15337,310 @@ export default function PointCloudViewer({
     return clouds.find(c => c.visible) ?? null;
   }, [clouds, selectedIds]);
 
-  // Guard against a stale 'scalar' selection surviving across cloud changes.
-  // colorMode/selectedScalarField are GLOBAL across all clouds, but a scalar
-  // field (e.g. wood_class from a segmentation) only exists on the cloud that
-  // produced it. When that cloud is deleted — or a different cloud without the
-  // field becomes the representative — the dropdown drops the option but the
-  // mode stays 'scalar', so the renderer falls back to a flat gray ramp (and
-  // the dropdown shows a non-existent value). This is the recurring "imports
-  // gray / wrong color mode after delete" bug. Rather than reset color mode in
-  // every delete/import/segment path (the patch that keeps regressing), we
-  // validate the selection here against the SAME available-fields computation
-  // the dropdown uses, and fall back to the default when it's orphaned.
-  useEffect(() => {
-    if (colorMode !== 'scalar' || !selectedScalarField) return;
-    const cloud = colorbarSourceCloud;
-    // No visible cloud at all → nothing to validate against; leave state as-is
-    // so re-selecting the source cloud restores the mode.
-    if (!cloud) return;
-    const available = cloud.data.octree
-      ? octreeScalarFieldOptions(
-          cloud.data.octree.attributeRanges,
-          cloud.data.octree.attributeLabels,
-        ).map(o => o.value)
-      : Object.keys(cloud.data.scalarFields ?? {});
-    if (!available.includes(selectedScalarField)) {
-      setColorMode('per-scan');
-      setSelectedScalarField(undefined);
-    }
-  }, [colorMode, selectedScalarField, colorbarSourceCloud]);
+  // The cloud the class legend / colorbar describes. This one MAY fall back
+  // past the selection: splitting a segmented cloud selects the freshly-created
+  // children, which carry only positions/colors and so map nothing — without a
+  // fallback the legend the still-visible segmented parent is displaying would
+  // vanish the moment the split completed. Kept separate from
+  // colorbarSourceCloud precisely so this fallback can't leak into the panel.
+  const legendSourceCloud = useMemo(() => {
+    const mapsAScalar = (c: PointCloudEntry) => colorModeFor(c.id).mode === 'scalar';
+    const selected = Array.from(selectedIds)
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c?.visible);
+    return selected.find(mapsAScalar)
+      ?? clouds.find(c => c.visible && mapsAScalar(c))
+      ?? selected[0]
+      ?? clouds.find(c => c.visible)
+      ?? null;
+  }, [clouds, selectedIds, colorModeFor]);
 
-  const dataRange = useMemo<{ min: number; max: number; label: string } | null>(() => {
-    if (!colorbarSourceCloud || !isScalarColorMode) return null;
-    const d = colorbarSourceCloud.data;
-    if (colorMode === 'x') return { min: d.bounds.min.x, max: d.bounds.max.x, label: 'X' };
-    if (colorMode === 'y') return { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
-    if (colorMode === 'height') return { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
-    if (colorMode === 'intensity') return { min: 0, max: 1, label: 'Intensity' };
-    if (colorMode === 'scalar' && selectedScalarField) {
+  // The scalar attribute the overlay reports via `data-active-scalar`. The
+  // legend content itself now comes from legendEntries; this stays as the
+  // stable test hook several specs assert on to identify the active field.
+  const legendColorMode = legendSourceCloud
+    ? colorModeFor(legendSourceCloud.id).mode
+    : colorMode;
+  const legendScalarField = legendSourceCloud
+    ? colorModeFor(legendSourceCloud.id).field
+    : selectedScalarField;
+
+  // The mode the Display panel edits: the SELECTED cloud's own mode (its
+  // override, else the scene default). Reading it from that cloud — rather than
+  // from global state — is what makes the panel show what the user is actually
+  // looking at once clouds can differ from each other.
+  const activeColorMode = colorbarSourceCloud
+    ? colorModeFor(colorbarSourceCloud.id).mode
+    : colorMode;
+  const activeScalarField = colorbarSourceCloud
+    ? colorModeFor(colorbarSourceCloud.id).field
+    : selectedScalarField;
+
+  // Color modes that benefit from a colormap + colorbar (continuous scalars).
+  const isScalarColorMode = (
+    activeColorMode === 'x' ||
+    activeColorMode === 'y' ||
+    activeColorMode === 'height' ||
+    activeColorMode === 'intensity' ||
+    activeColorMode === 'scalar'
+  );
+
+  // Stable key for the active continuous mode (so per-mode min/max overrides
+  // don't leak across different fields/axes).
+  const colorRangeKey =
+    activeColorMode === 'scalar' && activeScalarField
+      ? `scalar:${activeScalarField}`
+      : activeColorMode;
+
+  // Drop per-cloud color-mode overrides whose cloud is gone, and any whose
+  // scalar field the cloud no longer carries.
+  //
+  // This REPLACES the old global-selection validation effect. That one existed
+  // because colorMode/selectedScalarField were global: a field like wood_class
+  // lives on exactly one cloud, so deleting that cloud (or selecting a
+  // different one) left the global mode pointing at a field nothing had — the
+  // renderer painted a flat gray ramp and the dropdown showed a value absent
+  // from its own options. The selection now lives on the cloud that owns the
+  // field, so deleting the cloud removes the selection with it; every other
+  // cloud is unaffected because it never shared the selection in the first
+  // place. What remains here is ordinary garbage collection, not a workaround:
+  // it also covers a field disappearing from a surviving cloud (e.g. an undo
+  // that rolls back a segmentation).
+  useEffect(() => {
+    setCloudColorModes(prev => {
+      if (prev.size === 0) return prev;
+      const byId = new Map(clouds.map(c => [c.id, c]));
+      let changed = false;
+      const next = new Map(prev);
+      for (const [id, entry] of prev) {
+        const cloud = byId.get(id);
+        if (!cloud) { next.delete(id); changed = true; continue; }
+        if (entry.mode !== 'scalar' || !entry.field) continue;
+        const available = cloud.data.octree
+          ? octreeScalarFieldOptions(
+              cloud.data.octree.attributeRanges,
+              cloud.data.octree.attributeLabels,
+            ).map(o => o.value)
+          : Object.keys(cloud.data.scalarFields ?? {});
+        if (!available.includes(entry.field)) { next.delete(id); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [clouds]);
+
+  // Data-derived min/max + caption for a given cloud under a given mode.
+  // Returns null when the mode maps nothing (rgb / single / per-scan) or the
+  // cloud doesn't carry the field.
+  const dataRangeFor = useCallback((
+    cloud: PointCloudEntry | null,
+    mode: ColorMode,
+    field: string | undefined,
+  ): { min: number; max: number; label: string } | null => {
+    if (!cloud) return null;
+    const d = cloud.data;
+    if (mode === 'x') return { min: d.bounds.min.x, max: d.bounds.max.x, label: 'X' };
+    if (mode === 'y') return { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
+    if (mode === 'height') return { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
+    if (mode === 'intensity') return { min: 0, max: 1, label: 'Intensity' };
+    if (mode === 'scalar' && field) {
       // Flat clouds carry per-field min/max in scalarFields; octree clouds
       // carry it in octree.attributeRanges (keyed by on-disk slug). Prefer
       // the human-readable label for the colorbar caption when we have one.
-      if (d.scalarFields?.[selectedScalarField]) {
-        const f = d.scalarFields[selectedScalarField];
-        return { min: f.min, max: f.max, label: selectedScalarField };
+      if (d.scalarFields?.[field]) {
+        const f = d.scalarFields[field];
+        return { min: f.min, max: f.max, label: field };
       }
-      const r = d.octree?.attributeRanges?.[selectedScalarField];
+      const r = d.octree?.attributeRanges?.[field];
       if (r && r.min.length > 0 && r.max.length > 0) {
-        const label = d.octree?.attributeLabels?.[selectedScalarField] ?? selectedScalarField;
+        const label = d.octree?.attributeLabels?.[field] ?? field;
         return { min: r.min[0], max: r.max[0], label };
       }
     }
     return null;
-  }, [colorbarSourceCloud, colorMode, selectedScalarField, isScalarColorMode]);
+  }, []);
 
-  // The actual min/max being applied to the colormap (override → fallback).
-  const activeRange = useMemo<{ min: number; max: number } | null>(() => {
-    if (!dataRange) return null;
-    const override = colorRanges[colorRangeKey];
-    return {
-      min: override?.min ?? dataRange.min,
-      max: override?.max ?? dataRange.max,
-    };
-  }, [dataRange, colorRanges, colorRangeKey]);
+  // The min/max actually applied to a cloud's colormap: the user's range
+  // override for that mode/field, else the data-derived range.
+  const rangeForCloud = useCallback((cloud: PointCloudEntry): { min: number; max: number } | null => {
+    const { mode, field } = colorModeFor(cloud.id);
+    const base = dataRangeFor(cloud, mode, field);
+    if (!base) return null;
+    const key = mode === 'scalar' && field ? `scalar:${field}` : mode;
+    const override = colorRanges[key];
+    return { min: override?.min ?? base.min, max: override?.max ?? base.max };
+  }, [colorModeFor, dataRangeFor, colorRanges]);
+
+  // The selected cloud's range, driving the Display panel's range inputs.
+  const dataRange = useMemo(
+    () => dataRangeFor(colorbarSourceCloud, activeColorMode, activeScalarField),
+    [dataRangeFor, colorbarSourceCloud, activeColorMode, activeScalarField],
+  );
+
+  // Every pseudocolored object's contribution to the legend stack, in scene
+  // order (clouds → meshes → LAD grids). buildLegendEntries folds identical
+  // channels together and drops the ones that map nothing, so this list is
+  // deliberately permissive: describe what each object is doing and let the
+  // selector decide what deserves a legend.
+  const legendDescriptors = useMemo<ChannelDescriptor[]>(() => {
+    const out: ChannelDescriptor[] = [];
+
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const { mode, field } = colorModeFor(cloud.id);
+      const range = dataRangeFor(cloud, mode, field);
+      // No mapped range ⇒ rgb / per-scan / single: nothing to put on a scale.
+      if (!range) continue;
+      const scan = scans.find(s => s.id === cloud.id);
+      out.push({
+        objectId: cloud.id,
+        objectName: scan ? scanDisplayName(scan) : (cloud.data.fileName ?? 'Scan'),
+        objectKindPlural: 'scans',
+        variableLabel: range.label,
+        channel: {
+          mode,
+          field,
+          colormap: colormapFor(cloud.id),
+          range: rangeForCloud(cloud) ?? undefined,
+        },
+        dataRange: range,
+        selected: selectedIds.has(cloud.id),
+        origin: 'cloud',
+      });
+    }
+
+    for (const mesh of meshes) {
+      if (!mesh.visible) continue;
+      const mode = meshColorModes.get(mesh.id);
+      if (!mode || mode === 'solid') continue;
+      if (mode === 'scan') {
+        // Source-scan colouring is categorical, but its palette is the mesh's
+        // own per-scan swatches rather than a registered classification
+        // scheme — so hand the scheme in explicitly.
+        const legend = meshScanLegendFor(mesh);
+        if (!legend || legend.length === 0) continue;
+        out.push({
+          objectId: mesh.id,
+          objectName: displayNameOfMesh(mesh),
+          objectKindPlural: 'meshes',
+          variableLabel: 'Source scan',
+          channel: { mode: 'scan', field: `scan:${mesh.id}`, colormap: colormapFor(mesh.id) },
+          scheme: {
+            attribute: `scan:${mesh.id}`,
+            classes: legend.map(e => ({
+              value: e.index,
+              label: `Scan ${e.index + 1}`,
+              color: cssColorToRgb(e.color),
+            })),
+          },
+          selected: selectedMeshIds.has(mesh.id),
+          origin: 'mesh',
+        });
+        continue;
+      }
+      const built = meshTriangleColors.get(mesh.id);
+      if (!built || built.min === undefined || built.max === undefined) continue;
+      let label = meshColorModeLabel(mode);
+      if (mode === 'layer') {
+        const name = selectedMeshLayer.get(mesh.id) ?? 'elevation';
+        label = mesh.demLayers?.[name]?.label ?? name;
+      }
+      out.push({
+        objectId: mesh.id,
+        objectName: displayNameOfMesh(mesh),
+        objectKindPlural: 'meshes',
+        variableLabel: label,
+        channel: { mode, colormap: colormapFor(mesh.id) },
+        dataRange: { min: built.min, max: built.max },
+        selected: selectedMeshIds.has(mesh.id),
+        origin: 'mesh',
+      });
+    }
+
+    for (const result of ladResults) {
+      if (!result.visible) continue;
+      const auto = ladRange(result.voxels);
+      const min = result.ladMinOverride ?? auto.min;
+      const max = result.ladMaxOverride ?? auto.max;
+      out.push({
+        objectId: result.id,
+        objectName: `LAD ${result.nx}×${result.ny}×${result.nz}`,
+        objectKindPlural: 'LAD grids',
+        variableLabel: 'LAD [m²/m³]',
+        channel: { mode: 'lad', colormap: colormapFor(result.id), range: { min, max } },
+        dataRange: { min, max },
+        selected: selectedLadId === result.id,
+        origin: 'lad',
+      });
+    }
+
+    return out;
+  }, [
+    clouds, scans, selectedIds, colorModeFor, dataRangeFor, rangeForCloud, colormapFor,
+    meshes, meshColorModes, meshTriangleColors, selectedMeshLayer, selectedMeshIds,
+    displayNameOfMesh, meshScanLegendFor,
+    ladResults, selectedLadId,
+  ]);
+
+  const legendEntries = useMemo(
+    () => buildLegendEntries(legendDescriptors),
+    [legendDescriptors],
+  );
+
+  // Inline editor for a legend entry: change the colormap (and reset to the
+  // scene default) for every object folded into it. Putting the control on the
+  // legend means it sits next to the thing it affects, rather than only in the
+  // object panels.
+  //
+  // A grouped entry ("5 scans") applies the change to all its members, which is
+  // exactly what the caption promises. Categorical entries get no colormap
+  // picker — their colours come from the classification scheme, not a ramp.
+  const renderLegendEditor = useCallback((entry: LegendEntry) => {
+    if (entry.kind !== 'continuous') {
+      return (
+        <div className="text-[10px] text-neutral-500 leading-snug">
+          Class colors come from the classification scheme.
+        </div>
+      );
+    }
+    const overridden = entry.objectIds.some(id => colormapOverrides.has(id));
+    return (
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] text-neutral-400">Colormap</span>
+          {overridden && (
+            <button
+              data-testid="legend-colormap-reset"
+              onClick={() => { for (const id of entry.objectIds) setColormapOverride(id, undefined); }}
+              className="text-[10px] text-neutral-400 hover:text-blue-400 transition-colors"
+              title="Follow the scene default colormap"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+        <select
+          data-testid="legend-colormap"
+          data-overridden={overridden ? 'true' : 'false'}
+          value={entry.colormap}
+          onChange={(e) => {
+            const name = e.target.value as ColormapName;
+            for (const id of entry.objectIds) setColormapOverride(id, name);
+          }}
+          className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-1.5 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none"
+        >
+          {COLORMAP_NAMES.map(name => (
+            <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }, [colormapOverrides, setColormapOverride]);
 
   return (
     <div
+      // Measured while a crop lasso/rect is drawn, to find the floating panels
+      // that occlude the overlays (see readBlockedRects).
+      ref={viewerRootRef}
       // min-h-0/min-w-0: as a flex item this root must be allowed to shrink
       // below the R3F canvas's current pixel size, or the canvas's intrinsic
       // height makes the viewer ratchet to its largest-ever size and window
@@ -13451,6 +15662,10 @@ export default function PointCloudViewer({
       // showing its translation gizmo). The gizmo lives in the canvas and has no
       // DOM of its own, so this is the only way to assert on it.
       data-origin-selected={originSelected ? 'true' : 'false'}
+      // Test hook: whether the scene-origin marker is actually drawn. Its
+      // checkbox lives in the Display panel, but the marker also stands down on
+      // an empty scene, so the checkbox alone doesn't tell you.
+      data-origin-marker-visible={showOriginMarker && sceneHasContent ? 'true' : 'false'}
       // Record the press location so onPointerMissed can reject orbit-drags
       // (native event has no R3F `delta`). Bubbles up from the canvas.
       onPointerDown={(e) => { viewportPointerDownRef.current = { x: e.clientX, y: e.clientY }; }}
@@ -13492,6 +15707,10 @@ export default function PointCloudViewer({
         {/* Camera capture for GIF generation */}
         <CameraCapture cameraRef={mainCameraRef} />
 
+        {/* The one per-frame potree LOD/budget update for every octree in the
+            scene. Must stay a single instance — see PotreeFrameDriver. */}
+        <PotreeFrameDriver />
+
         {/* Render all visible clouds.
             We pass the source `cloud.data` (or the resample preview when
             active) straight to <PointCloud> without copying. Crop preview
@@ -13503,6 +15722,24 @@ export default function PointCloudViewer({
           if (!cloud.visible) return null;
           const editState = getEditState(cloud.id);
           const isSelected = selectedIds.has(cloud.id);
+          // This cloud's OWN color mode (its override, else the scene default).
+          // Every colour decision below reads these, not the global state, so
+          // two clouds can sit in different modes at once.
+          const rawColorMode = colorModeFor(cloud.id);
+          // While the labelling tool is open on THIS cloud, force scalar mode.
+          //
+          // The overlay writes classes into the `intensity` attribute slot, but
+          // that slot is only ever SAMPLED under PointColorType.INTENSITY_GRADIENT
+          // — i.e. scalar mode. In 'rgb' / 'per-scan' / 'height' the shader
+          // ignores it entirely, so the labels are computed and uploaded and then
+          // simply not drawn: counts move in the panel, viewport never changes.
+          // The user's own colour choice is SUSPENDED, not overwritten — closing
+          // the tool restores it, because this is a render-time override rather
+          // than a write to the cloud's stored mode.
+          const isLabelTarget = labelTargetCloud?.id === cloud.id;
+          const { mode: cloudColorMode, field: cloudScalarField } = isLabelTarget
+            ? { mode: 'scalar' as const, field: labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE }
+            : rawColorMode;
           // Keep the crop preview (hidden to-be-cropped points) alive while
           // the apply's backend round-trip is in flight. handleApplyCrop
           // flips editMode to 'none' immediately (to hide the box handles +
@@ -13565,7 +15802,7 @@ export default function PointCloudViewer({
                   // just the colour mode — switching the field needs a fresh
                   // material + BindingStates so the new attribute's buffer
                   // (swapped into `intensity`) binds correctly.
-                  key={`octree-${colorMode}-${selectedScalarField ?? ''}-${sourceData.octree ? (octreePaintGen[sourceData.octree.cacheId] ?? 0) : 0}`}
+                  key={`octree-${cloudColorMode}-${cloudScalarField ?? ''}-${sourceData.octree ? (octreePaintGen[sourceData.octree.cacheId] ?? 0) : 0}`}
                   data={sourceData}
                   // The octree attaches to the scene root, NOT inside the parent
                   // <group position> above, so the group's translation never
@@ -13599,31 +15836,48 @@ export default function PointCloudViewer({
                   // clean octree equivalent yet (no axis-scalar shader),
                   // so they fall through to 'height' which colours by Z.
                   colorMode={
-                    colorMode === 'per-scan'
+                    cloudColorMode === 'per-scan'
                       ? 'single'
-                      : colorMode === 'x' || colorMode === 'y'
+                      : cloudColorMode === 'x' || cloudColorMode === 'y'
                         ? 'height'
-                        : colorMode
+                        : cloudColorMode
                   }
-                  selectedScalarField={selectedScalarField}
-                  singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
-                  colormap={colormap}
-                  rangeMin={activeRange?.min}
-                  rangeMax={activeRange?.max}
+                  selectedScalarField={cloudScalarField}
+                  singleColor={cloudColorMode === 'per-scan' ? cloud.color : undefined}
+                  colormap={colormapFor(cloud.id)}
+                  rangeMin={rangeForCloud(cloud)?.min}
+                  rangeMax={rangeForCloud(cloud)?.max}
                   // Live crop preview: pass the current crop box only in
                   // box mode while a crop is being drawn AND this cloud
-                  // is in the selection. Polygon mode falls back to the
-                  // overlay-only preview (the gizmo-screen polygon is
-                  // already drawn); the apply still runs full polygon
-                  // through the backend.
+                  // is in the selection. Screen-space modes (polygon /
+                  // rect) aren't boxes, so they preview through `cropMask`
+                  // below instead. Segment mode never clips — both
+                  // halves survive, so the whole cloud stays visible and
+                  // only the CropBox wireframe marks the split.
                   clipBox={
-                    showCropPreview && cropMode === 'box' && cropBox
+                    showCropPreview && !cropSegment && cropMode === 'box' && cropBox
                       ? {
                           min: new THREE.Vector3(cropBox.min.x, cropBox.min.y, cropBox.min.z),
                           max: new THREE.Vector3(cropBox.max.x, cropBox.max.y, cropBox.max.z),
                           invert: cropInvert,
                         }
                       : null
+                  }
+                  // Exact per-point preview for a screen-space crop region.
+                  // Only for a CLOSED polygon/rect (the predicate needs the
+                  // frozen camera), never in segment mode (both halves
+                  // survive, so nothing is hidden). Same predicate the apply
+                  // sends to the backend, so the preview matches the result
+                  // by construction rather than by a parallel implementation.
+                  cropMask={showCropPreview ? octreeCropMask : null}
+                  // Live labelling preview — only for the cloud being labelled.
+                  labelOverlayRef={
+                    labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
+                  }
+                  labelCommittedSlug={labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE}
+                  slabBoxMatrix={sectionTargetCloud?.id === cloud.id ? slabBoxMatrix : null}
+                  labelIndexScheme={
+                    labelTargetCloud?.id === cloud.id ? labelIndexScheme : null
                   }
                   // GPU clip-volume union (CLIP_INSIDE) combining:
                   //  - committed but unbaked deletes for THIS cloud (the
@@ -13689,13 +15943,13 @@ export default function PointCloudViewer({
                     pointSize={pointSize}
                     // 'per-scan' is rendered as 'single' with the cloud's own
                     // swatch color — keeps PointCloud unaware of multi-cloud state.
-                    colorMode={colorMode === 'per-scan' ? 'single' : colorMode}
-                    singleColor={colorMode === 'per-scan' ? cloud.color : undefined}
-                    selectedScalarField={selectedScalarField}
+                    colorMode={cloudColorMode === 'per-scan' ? 'single' : cloudColorMode}
+                    singleColor={cloudColorMode === 'per-scan' ? cloud.color : undefined}
+                    selectedScalarField={cloudScalarField}
                     filters={cloudFilters.get(cloud.id)}
-                    colormap={colormap}
-                    rangeMin={activeRange?.min}
-                    rangeMax={activeRange?.max}
+                    colormap={colormapFor(cloud.id)}
+                    rangeMin={rangeForCloud(cloud)?.min}
+                    rangeMax={rangeForCloud(cloud)?.max}
                   />
                 );
                 if (!hasRot || hasResamplePreview) return cloudEl;
@@ -13954,7 +16208,9 @@ export default function PointCloudViewer({
           // leaves (the compute reads world-frame points), but the cloud renders in
           // its STORED frame; subtract the source cloud's worldShift on the outer
           // group so the QSM lands on the cloud. No-op without a shift.
-          const qsmWs = clouds.find(c => c.id === qsm.sourceCloudId)?.data?.octree?.worldShift ?? [0, 0, 0];
+          // An imported QSM has no source cloud to read the shift from, so it
+          // carries its own (resolved at import from the scene it lands in).
+          const qsmWs = qsmWorldShift(qsm);
           return (
             <group key={qsm.id} position={[-qsmWs[0], -qsmWs[1], -qsmWs[2]]}>
               {/* QSM3D subtracts displayOffset in its own float64 vertex build
@@ -13966,6 +16222,9 @@ export default function PointCloudViewer({
                 shoots={qsm.shoots}
                 colorMode={qsmColorMode}
                 displayOffset={displayOffset}
+                solidColor={qsmSolidColor}
+                barkTexture={qsmBarkTexture}
+                textureTileSize={qsmTextureTile}
               />
               {qsm.leaves && qsm.leavesVisible !== false && (
                 <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
@@ -13994,7 +16253,7 @@ export default function PointCloudViewer({
                 voxels={result.voxels}
                 rotationDeg={result.gridRotationDeg ?? 0}
                 gridCenter={result.gridCenter}
-                colormap={colormap}
+                colormap={colormapFor(result.id)}
                 min={min}
                 max={max}
                 opacity={result.opacity}
@@ -14130,19 +16389,41 @@ export default function PointCloudViewer({
         <CameraController
           bounds={combinedBounds}
           hasContent={sceneHasContent}
-          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive}
+          // The label brush deliberately does NOT disable the camera outright,
+          // unlike erase: a sphere is the same volume from any angle, so
+          // orbiting between strokes is useful and safe. Only the drag ITSELF
+          // is suppressed, or a left-drag would paint and orbit at once.
+          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive && !labelBrushPainting}
+          // While the brush owns plain wheel for its radius, zoom moves to Alt.
+          zoomOnAltWheel={labelBrushActive}
           displayOffset={displayOffset}
           // The view turns about the scene origin — the point the 3D-cursor
           // marker shows — so panning no longer moves the rotation center. Same
           // pivot the Transform tool rotates about, whether or not the marker is
           // currently drawn (hiding it is about clutter, not behavior).
           orbitPivot={sceneOrigin}
+          // Zoom flies toward whatever is under the pointer, not toward the
+          // orbit target — see the zoom-to-cursor effect in CameraController.
+          pickDepth={pickDepth}
+        />
+
+        {/* Publishes the depth probe the zoom-to-cursor path uses. Probes every
+            VISIBLE octree cloud (miss/sky octrees are never registered, so a ray
+            into the sky can't anchor zoom on a point projected ~1 km out) plus
+            mesh geometry via the BVH raycast. */}
+        <DepthProbe
+          probeRef={depthProbeRef}
+          octrees={clouds.flatMap((c) => {
+            if (!c.visible || !c.data.octree) return [];
+            const oct = octreeRegistryRef.current.get(c.id);
+            return oct ? [oct] : [];
+          })}
         />
 
         {/* Snapshots the camera/size for the polygon- and rect-crop in/out
             test. Both freeze the camera at draw time, so the snapshotter
             lives whenever either screen-space shape could be active. */}
-        {editMode === 'crop' && (cropMode === 'polygon' || cropMode === 'rect') && (
+        {(editMode === 'crop' || editMode === 'label') && (cropMode === 'polygon' || cropMode === 'rect') && (
           <PolygonCameraSnapshotter
             cameraRef={polygonCameraRef}
             sizeRef={polygonCanvasSizeRef}
@@ -14177,6 +16458,93 @@ export default function PointCloudViewer({
         {/* Point picker. Armed from the Pick Point control; each click labels
             the point under the cursor. Picks across EVERY visible octree cloud
             plus the flat ones, so it needs no selection. */}
+        {/* Cross-section: two ground-plane clicks place the centreline, reusing
+            the crop tool's raycaster rather than a new gizmo. The wireframe
+            shows where the slab sits; the projection override flattens the view
+            so a 2-D lasso selects what it visually encloses. */}
+        {sectionTargetCloud && slabDrawState !== 'idle' && (
+          <BoxDrawRaycaster
+            // Pick on the GROUND, not the mid-height of the cloud. Raycasting a
+            // plane floating in mid-canopy put the clicks metres away from the
+            // geometry the user was aiming at, so the section landed somewhere
+            // unrelated to what they clicked on.
+            groundZ={sectionBounds
+              ? (sectionTargetCloud?.data.groundZ ?? sectionBounds.min.z)
+              : 0}
+            onPick={(x, y) => {
+              // Read the draw state through a REF. The two clicks land on the
+              // same mounted raycaster, and a state read from this closure is
+              // the value from the render that mounted it — so the second click
+              // still saw 'awaiting-a' and just overwrote the first point,
+              // meaning a slab was never committed. Same stale-closure trap as
+              // paintLabelStroke and the overlay ref.
+              if (slabDrawRef.current.state === 'awaiting-a') {
+                slabDrawRef.current = { state: 'awaiting-b', first: { x, y } };
+                setSlabFirstPointState({ x, y });
+                setSlabCursor(null);
+                slabCursorRef.current = null;
+                // Freeze the preview thickness now: keeping an existing
+                // section's thickness makes redraws predictable, and otherwise
+                // fall back to the cloud-derived seed. Either way it stays
+                // constant for the whole drag.
+                slabPreviewDepthRef.current = slab?.depth
+                  ?? (sectionBounds ? defaultSlabForBounds(sectionBounds).depth : 0);
+                setSlabDrawState('awaiting-b');
+              } else if (slabDrawRef.current.first) {
+                const a = slabDrawRef.current.first;
+                slabDrawRef.current = { state: 'idle', first: null };
+                setSlabCursor(null);
+                slabCursorRef.current = null;
+                commitSlabCentreline(a.x, a.y, x, y);
+              }
+            }}
+            onMove={(x, y) => {
+              if (slabDrawRef.current.state !== 'awaiting-b') return;
+              // The ref drives the box every frame; the state drives the
+              // rubber-band line. Only the ref is written per mousemove — the
+              // state write is what a 60 Hz re-render would cost, so it is
+              // throttled to meaningful movement below.
+              slabCursorRef.current = { x, y };
+              setSlabCursor((prev) => (
+                prev && Math.hypot(prev.x - x, prev.y - y) < 1e-4 ? prev : { x, y }
+              ));
+            }}
+          />
+        )}
+        {/* The volume the second click will create. Gated on sectionBounds,
+            which is derived from sectionTargetCloud and additionally requires
+            real bounds to size the box against — the same condition the
+            raycaster above needs to place a point at all. */}
+        {sectionBounds && slabDrawState === 'awaiting-b' && slabFirstPointState && (
+          <SlabDragPreview
+            first={slabFirstPointState}
+            cursorRef={slabCursorRef}
+            bounds={sectionBounds}
+            depth={slabPreviewDepthRef.current}
+            displayOffset={displayOffset}
+          />
+        )}
+        {sectionTargetCloud && slabDrawState === 'awaiting-b' && slabFirstPointState && (
+          <SlabCentrelinePreview
+            first={slabFirstPointState}
+            cursor={slabCursor}
+            z={sectionTargetCloud.data.groundZ ?? sectionBounds?.min.z ?? 0}
+            displayOffset={displayOffset}
+          />
+        )}
+        {sectionTargetCloud && slab && (
+          <SlabWireframe
+            slab={slab}
+            displayOffset={displayOffset}
+            dimmed={slabLocked}
+          />
+        )}
+        {/* Not while suspended: the override pins an ortho frustum sized for the
+            slab, so "show the whole cloud" would still be seen through a
+            section-shaped lens — face-on, and cropped to the slab's extent. */}
+        {sectionTargetCloud && slab && slabLocked && !slabSuspended && (
+          <SectionProjectionOverride slab={slab} />
+        )}
         {pointPickMode && (
           <PointPicker
             octrees={clouds.flatMap((c) => {
@@ -14408,19 +16776,15 @@ export default function PointCloudViewer({
           const first = boxDrawFirstCornerRef.current;
           const cursor = boxDrawCursorRef.current;
           const markerColor = cropInvert ? '#ef4444' : '#22c55e';
-          const markerSize = Math.max(
-            (combinedBounds.max.x - combinedBounds.min.x),
-            (combinedBounds.max.y - combinedBounds.min.y),
-          ) * 0.01 || 0.1;
           return (
             // first/cursor are stored in WORLD coords; this preview group renders
             // them in DISPLAY space via the −displayOffset transform.
-            <group position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+            <group {...SCENE_OVERLAY} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
               {first && (
-                <mesh position={[first.x, first.y, combinedBounds.min.z]}>
-                  <sphereGeometry args={[markerSize, 16, 16]} />
-                  <meshBasicMaterial color={markerColor} />
-                </mesh>
+                <CropCornerMarker
+                  position={[first.x, first.y, combinedBounds.min.z]}
+                  color={markerColor}
+                />
               )}
               {first && cursor && (
                 <CropBox
@@ -14547,11 +16911,88 @@ export default function PointCloudViewer({
           );
         })()}
 
+        {/* Label brush: world-space sphere stamps.
+
+            No camera freeze and no ortho override, unlike the erase brush — a
+            sphere is the same volume from any angle, so the user can orbit
+            mid-stroke. The stroke goes through the SAME paintLabelStroke as the
+            lasso, so slab bounding, the From-class gate, the live overlay and
+            undo all work on it with no extra wiring. */}
+        {labelBrushActive && labelTargetCloud && (() => {
+          const b = labelTargetCloud.data.bounds;
+          const cloudId = labelTargetCloud.id;
+          return (
+            <LabelBrushOctree
+              // Keyed on the CLOUD, not on the surrounding IIFE's identity. The
+              // gizmo registers DOM listeners on the canvas in an effect, so a
+              // remount that overlaps its predecessor leaves two live listener
+              // sets on the same element: the outgoing one keeps handling moves
+              // and nulls the cursor the incoming one just resolved, and the
+              // brush looks dead while every pick is succeeding.
+              key={labelTargetCloud.id}
+              // Resolved at EVENT time, not at render time.
+              //
+              // `onOctreeReady` writes octreeRegistryRef, which is a ref — so
+              // registration triggers no re-render. Passing the looked-up value
+              // as a prop meant the brush captured whatever was in the registry
+              // on the render that happened to mount it: usually null, because
+              // the octree registers while the cloud streams. It then only
+              // picked up an octree if some unrelated state change re-rendered
+              // the viewer afterwards, which is why the brush worked on some
+              // scenes and not others with no visible difference between them.
+              getOctree={() => octreeRegistryRef.current.get(cloudId) ?? null}
+              brushRadiusPx={labelBrushPx}
+              cloudCenter={{
+                x: b.center.x - displayOffset.x,
+                y: b.center.y - displayOffset.y,
+                z: b.center.z - displayOffset.z,
+              }}
+              onCursorChange={(c) => {
+                setLabelBrushCursor(c);
+                // E2E seam: whether the brush can currently FIND a surface. The
+                // anchor depends on a GPU/CPU pick against streamed geometry,
+                // so a spec that paints before the octree has tiles gets a
+                // correct refusal that looks like a broken brush.
+                (globalThis as any).__labelBrushCursor = c
+                  ? { ok: true, r: c.radius }
+                  : { ok: false };
+              }}
+              onPaintingChange={setLabelBrushPainting}
+              onStroke={(stroke) => {
+                // The gizmo works in DISPLAY space (that is what the camera and
+                // the picked points live in); regions are WORLD space, because
+                // the backend replays them against unshifted positions. Convert
+                // once, here, rather than making the gizmo carry the offset.
+                void paintLabelStrokeRef.current?.({
+                  kind: 'spheres_union',
+                  centers: stroke.centers.map(([x, y, z]) => [
+                    x + displayOffset.x, y + displayOffset.y, z + displayOffset.z,
+                  ] as [number, number, number]),
+                  radii: stroke.radii,
+                });
+              }}
+            />
+          );
+        })()}
+
+        {/* Where the brush will paint, in the active class's colour. */}
+        {labelBrushActive && labelBrushCursor && (
+          <LabelBrushCursor
+            center={labelBrushCursor.center}
+            radius={labelBrushCursor.radius}
+            painting={labelBrushPainting}
+            color={rgbToHex(
+              labelPalette?.classes.find(c => c.value === labelActiveClass)?.color
+                ?? [1, 1, 1],
+            )}
+          />
+        )}
+
         {/* Erase brush indicator (octree path): a camera-facing square outline
             at the cursor (the cross-section of the view-extruded erase volume),
             red while actively erasing. Shown only while erase mode is active. */}
         {editMode === 'erase' && eraseActive && firstSelectedCloud?.data.octree && eraseBrushMatrix && (
-          <group matrixAutoUpdate={false} matrix={eraseBrushMatrix}>
+          <group {...SCENE_OVERLAY} matrixAutoUpdate={false} matrix={eraseBrushMatrix}>
             {/* Unit plane (the box matrix already scales X/Y to the square). A
                 thin box edge reads as a square ring facing the camera. */}
             <lineSegments>
@@ -14624,8 +17065,11 @@ export default function PointCloudViewer({
           unprojects onto the cloud's ground plane (via the live camera) and
           records a world-space seed; right-click removes the last one. Markers
           are drawn at their projected screen positions. The overlay captures
-          pointer events, so the camera is effectively fixed while seeding. */}
-      {showTreeSegmentPanel && treeSeedMode && selectedIds.size === 1 && (() => {
+          pointer events, so the camera is effectively fixed while seeding.
+          Like the crop overlays it's z-10, so the floating panels above it take
+          the click first — see the ViewportBlockedZone rendered below, which
+          marks the cursor when a seed would be refused. */}
+      {treeSeedActive && (() => {
         const cam = mainCameraRef.current;
         const cloud = clouds.find(c => selectedIds.has(c.id));
         const groundZ = cloud?.data.groundZ ?? cloud?.data.bounds?.min.z ?? 0;
@@ -14684,10 +17128,20 @@ export default function PointCloudViewer({
         );
       })()}
 
-      {editMode === 'crop' && cropMode === 'polygon' && (cropDrawState === 'drawing-polygon' || cropPolygon) && (() => {
+      {/* "Can't seed here" zone — the panels covering the trunk-seed overlay. */}
+      {treeSeedActive && (
+        <ViewportBlockedZone
+          testId="tree-seed-blocked-zone"
+          rects={seedZone.rects}
+          cursor={seedZone.cursor}
+          blocked={seedZone.blocked}
+        />
+      )}
+
+      {(editMode === 'crop' || editMode === 'label') && cropMode === 'polygon' && (cropDrawState === 'drawing-polygon' || cropPolygon) && (() => {
         const isDrawing = cropDrawState === 'drawing-polygon';
         const points = isDrawing ? polygonInProgress : (cropPolygon?.points ?? []);
-        const cursor = isDrawing ? polygonCursorRef.current : null;
+        const cursor = isDrawing ? cropZone.cursor : null;
 
         const handleClick = (e: React.MouseEvent<SVGSVGElement>) => {
           if (!isDrawing) return;
@@ -14702,22 +17156,33 @@ export default function PointCloudViewer({
           e.preventDefault();
           setPolygonInProgress(prev => prev.slice(0, -1));
         };
-        const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+        // Double-click closes the lasso, the same as Enter.
+        //
+        // The browser fires dblclick AFTER both of its click events, so by the
+        // time we get here the second click has already appended a vertex on
+        // top of the first — a duplicate at (or within a pixel or two of) the
+        // same spot. Drop it, or the committed polygon carries a degenerate
+        // zero-length edge. The tolerance is a few px because a real
+        // double-click drifts slightly between the two presses.
+        const handleDoubleClick = (e: React.MouseEvent<SVGSVGElement>) => {
           if (!isDrawing) return;
+          e.preventDefault();
           const rect = e.currentTarget.getBoundingClientRect();
-          polygonCursorRef.current = {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top,
-          };
-          // Bump the tick so the cursor preview line re-renders. Cheap —
-          // the overlay's only a handful of SVG elements.
-          setPolygonCursorTick(t => t + 1);
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          const verts = [...polygonInProgress];
+          const last = verts[verts.length - 1];
+          if (last && Math.abs(last.x - x) <= 3 && Math.abs(last.y - y) <= 3) verts.pop();
+          closePolygonFrom(verts);
         };
+        // NOTE: no onMouseMove here. The cursor comes from useViewportBlockZone,
+        // which tracks it on the window, so the preview keeps following —
+        // clamped — when the pointer slides under a floating panel, where this
+        // SVG receives no events at all.
+        const cursorBlocked = isDrawing && cropZone.blocked;
 
         const polylinePoints = points.map(p => `${p.x},${p.y}`).join(' ');
         const closedPoints = !isDrawing && points.length >= 3 ? polylinePoints : null;
-        // Suppress unused-state warning — we read polygonCursorTick to force re-render.
-        void polygonCursorTick;
 
         return (
           <svg
@@ -14738,8 +17203,8 @@ export default function PointCloudViewer({
               cursor: isDrawing ? 'crosshair' : 'default',
             }}
             onClick={handleClick}
+            onDoubleClick={handleDoubleClick}
             onContextMenu={handleContextMenu}
-            onMouseMove={handleMouseMove}
           >
             {closedPoints && (
               <polygon
@@ -14757,13 +17222,17 @@ export default function PointCloudViewer({
                   stroke="#22c55e"
                   strokeWidth={2}
                 />
+                {/* Pending-segment preview. Turns amber while the pointer is
+                    parked on a panel: the segment is drawn to the CLAMPED point
+                    (the edge of the blocker), and the colour change says a
+                    click there would be refused rather than placed. */}
                 {cursor && (
                   <line
                     x1={points[points.length - 1].x}
                     y1={points[points.length - 1].y}
                     x2={cursor.x}
                     y2={cursor.y}
-                    stroke="#22c55e"
+                    stroke={cursorBlocked ? '#f59e0b' : '#22c55e'}
                     strokeWidth={1}
                     strokeDasharray="4 4"
                   />
@@ -14774,7 +17243,7 @@ export default function PointCloudViewer({
                     y1={cursor.y}
                     x2={points[0].x}
                     y2={points[0].y}
-                    stroke="#22c55e"
+                    stroke={cursorBlocked ? '#f59e0b' : '#22c55e'}
                     strokeWidth={1}
                     strokeDasharray="2 4"
                     opacity={0.5}
@@ -14807,56 +17276,18 @@ export default function PointCloudViewer({
         // Read the tick so the rubber-band re-renders as the cursor moves.
         void rectDragTick;
 
-        // Build the 4 corners (TL, TR, BR, BL) of the axis-aligned rect
-        // spanned by two diagonal canvas-pixel points.
-        const cornersOf = (a: { x: number; y: number }, b: { x: number; y: number }) => {
-          const minX = Math.min(a.x, b.x);
-          const minY = Math.min(a.y, b.y);
-          const maxX = Math.max(a.x, b.x);
-          const maxY = Math.max(a.y, b.y);
-          return [
-            { x: minX, y: minY },
-            { x: maxX, y: minY },
-            { x: maxX, y: maxY },
-            { x: minX, y: maxY },
-          ];
-        };
-
         let corners: { x: number; y: number }[] | null = null;
         if (isDrawing && rectDragStart && rectDragCurrentRef.current) {
-          corners = cornersOf(rectDragStart, rectDragCurrentRef.current);
+          corners = rectCornersOf(rectDragStart, rectDragCurrentRef.current);
         } else if (!isDrawing && cropPolygon && cropPolygon.points.length >= 3) {
           corners = cropPolygon.points;
         }
 
-        const commit = (start: { x: number; y: number }, end: { x: number; y: number }) => {
-          // Ignore zero-area drags (a click without movement).
-          if (Math.abs(end.x - start.x) < 3 || Math.abs(end.y - start.y) < 3) {
-            setRectDragStart(null);
-            rectDragCurrentRef.current = null;
-            setCropDrawState('idle');
-            return;
-          }
-          if (polygonCameraRef.current && polygonCanvasSizeRef.current) {
-            const region = polygonRegionFromCamera(
-              cornersOf(start, end),
-              polygonCameraRef.current,
-              polygonCanvasSizeRef.current,
-              false,
-              displayOffsetRef.current,
-            );
-            setCropPolygon({
-              points: region.points,
-              projection: region.projection,
-              view: region.view,
-              canvasSize: region.canvasSize,
-            });
-          }
-          setRectDragStart(null);
-          rectDragCurrentRef.current = null;
-          setCropDrawState('idle');
-        };
-
+        // Only mousedown lives here: the drag's move and release are tracked on
+        // the window (see the crop pointer-tracking effect) so a drag that runs
+        // under — or is released over — a floating panel still rubber-bands
+        // (clamped to the panel edge) and still commits. This SVG is at z-10 and
+        // sees no events at all over those panels.
         const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
           if (!isDrawing || e.button !== 0) return;
           const rect = e.currentTarget.getBoundingClientRect();
@@ -14864,17 +17295,6 @@ export default function PointCloudViewer({
           setRectDragStart(p);
           rectDragCurrentRef.current = p;
           setRectDragTick(t => t + 1);
-        };
-        const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-          if (!isDrawing || !rectDragStart) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          rectDragCurrentRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-          setRectDragTick(t => t + 1);
-        };
-        const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
-          if (!isDrawing || e.button !== 0 || !rectDragStart) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          commit(rectDragStart, { x: e.clientX - rect.left, y: e.clientY - rect.top });
         };
 
         const polyPoints = corners ? corners.map(p => `${p.x},${p.y}`).join(' ') : '';
@@ -14892,8 +17312,6 @@ export default function PointCloudViewer({
               cursor: isDrawing ? 'crosshair' : 'default',
             }}
             onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
           >
             {corners && (
               <polygon
@@ -14919,13 +17337,37 @@ export default function PointCloudViewer({
         );
       })()}
 
+      {/* "Can't draw here" feedback for the crop draws — the ⊘ cursor marker
+          shown while the pointer is over a panel that occludes the overlays. */}
+      {editMode === 'crop' && cropDrawing && (
+        <ViewportBlockedZone
+          testId="crop-blocked-zone"
+          rects={cropZone.rects}
+          cursor={cropZone.cursor}
+          blocked={cropZone.blocked}
+        />
+      )}
+
       {/* Crop apply status indicator. Mirrors the Helios pill but without a
           cancel button — the crop apply isn't cancelable today. Shown while
           the backend crop round-trip runs (octree re-conversion is ~15-20s);
           the to-be-cropped points stay hidden via isApplyingCrop. */}
       {isApplyingCrop && <StatusPill label="Cropping…" />}
 
-      {isExportingScan && <StatusPill testId="scan-export-running" label="Exporting scan…" />}
+      {isExportingScan && (
+        <StatusPill
+          testId="scan-export-running"
+          label={exportProgress?.label || 'Exporting…'}
+          progress={exportProgress?.fraction ?? null}
+          onCancel={() => {
+            // Stop the backend work first (it frees its memory and stops
+            // formatting), then tear down the fetch.
+            const runId = exportRunIdRef.current;
+            if (runId) void cancelRun(runId).catch(() => {});
+            exportAbortRef.current?.abort();
+          }}
+        />
+      )}
 
       {/* Open3D triangulation status indicator (ball pivoting / poisson / etc.) */}
       {triangulationInProgress && !isHeliosRunning && (
@@ -15064,6 +17506,55 @@ export default function PointCloudViewer({
           </div>
         );
       })()}
+
+      {/* Cross-section HUD.
+
+          Mounted on the SLAB, not on the panel, and that is the whole point: a
+          section keeps clipping after its panel is closed (closing only puts the
+          tool away — the Label tool shares that slot and must be able to paint
+          inside a section). Without a viewport-level indicator a user closes the
+          panel, forgets the section is on, and sees a cloud with most of it
+          missing and no visible cause — with the fix being to reopen a tool they
+          have no reason to associate with the problem.
+
+          So: always visible while a section is in effect, and it carries its own
+          way out rather than only naming the tool to go back to. */}
+      {slab && sectionTargetCloud && (
+        <div
+          data-testid="section-hud"
+          data-suspended={slabSuspended ? 'true' : 'false'}
+          className="absolute top-14 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/90 backdrop-blur-sm rounded-full border border-neutral-700/50 z-30 shadow-lg"
+        >
+          <Layers3 className={`w-3 h-3 ${slabSuspended ? 'text-neutral-500' : 'text-sky-400'}`} />
+          <span className="text-[11px] text-neutral-200 font-medium">
+            {slabSuspended ? 'Section hidden' : 'Cross-section'}
+          </span>
+          {slabCoverageInfo && !slabSuspended && (
+            <span className="text-[11px] text-neutral-400 font-mono tabular-nums">
+              {slabCoverageInfo.index}/{slabCoverageInfo.total}
+            </span>
+          )}
+          <span className="text-[11px] text-neutral-600">·</span>
+          <button
+            data-testid="section-hud-suspend"
+            onClick={() => setSlabSuspended(v => !v)}
+            title={slabSuspended
+              ? 'Show the section again'
+              : 'Temporarily show the whole cloud — the section is kept'}
+            className="text-[11px] text-neutral-300 hover:text-white px-1.5 py-0.5 rounded hover:bg-neutral-700"
+          >
+            {slabSuspended ? 'Show section' : 'Show full cloud'}
+          </button>
+          <button
+            data-testid="section-hud-clear"
+            onClick={clearSlabSection}
+            title="Remove the section and go back to the full cloud"
+            className="text-[11px] text-neutral-400 hover:text-red-200 px-1.5 py-0.5 rounded hover:bg-red-900/50"
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       {/* Manual trajectory editor: the docked pose table + the insert-'+' overlay
           that follows the pointer along a hovered path segment. */}
@@ -15215,7 +17706,18 @@ export default function PointCloudViewer({
           overflow-y-auto scrolls the column as one unit; `pr-1` keeps the
           scrollbar off panel content; `overflow-x-visible` keeps leftward-
           opening color/transform popovers from clipping. */}
-      <div className="absolute top-4 bottom-[4.5rem] right-4 z-30 flex flex-col gap-2 overflow-y-auto overflow-x-visible pr-1">
+      {/* This column is pinned top-and-bottom, so it is full-height however few
+          panels it holds — with one scan loaded, ~400px of it is empty. It used
+          to swallow every click in that dead space: orbiting, and the crop/seed
+          tools, were refused down the whole right edge for no visible reason.
+          `pointer-events-none` + `[&>*]:pointer-events-auto` passes the empty
+          area through while each panel stays interactive (the same pattern as
+          left-toolbar-column). data-viewport-panel-stack makes readBlockedRects
+          measure the panels INSIDE rather than this box. */}
+      <div
+        data-viewport-panel-stack
+        className="absolute top-4 bottom-[4.5rem] right-4 z-30 flex flex-col gap-2 overflow-y-auto overflow-x-visible pr-1 pointer-events-none [&>*]:pointer-events-auto"
+      >
         {/* Unified Scans Panel — shows every scan whether it has data, params,
             or both. Per-row actions adapt to which fields are present. */}
         <div data-testid="scans-panel" className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col shrink-0">
@@ -15331,7 +17833,12 @@ export default function PointCloudViewer({
               const trajText = isMovingScanRow
                 ? `${scan.params.trajectory!.poses.length} poses`
                 : null;
+              // Plain-text twin of `subtitle`, used as the row's tooltip: the
+              // subtitle shares its line with the action icons, so a long origin
+              // readout ellipsises — hovering still shows the whole thing.
+              const detailText = isMovingScanRow ? `moving · ${trajText}` : `origin ${originText}`;
               let subtitle: React.ReactNode;
+              let subtitleText: string;
               if (scanHasData && scanHasParams) {
                 subtitle = (<>
                   {effectivePointCount.toLocaleString()} pts
@@ -15341,11 +17848,13 @@ export default function PointCloudViewer({
                     ? <>{movingBadge} <span className="ml-1 font-mono">{trajText}</span></>
                     : <span className="font-mono">origin {originText}</span>}
                 </>);
+                subtitleText = `${effectivePointCount.toLocaleString()} pts${hasCloudEdits ? ' *' : ''} · ${detailText}`;
               } else if (scanHasData) {
                 subtitle = (<>
                   {effectivePointCount.toLocaleString()} pts
                   {hasCloudEdits && <span className="ml-1 text-amber-400">*</span>}
                 </>);
+                subtitleText = `${effectivePointCount.toLocaleString()} pts${hasCloudEdits ? ' *' : ''}`;
               } else {
                 subtitle = (<>
                   params <span className="mx-1">·</span>
@@ -15353,6 +17862,7 @@ export default function PointCloudViewer({
                     ? <>{movingBadge} <span className="ml-1 font-mono">{trajText}</span></>
                     : <span className="font-mono">origin {originText}</span>}
                 </>);
+                subtitleText = `params · ${detailText}`;
               }
 
               return (
@@ -15402,185 +17912,197 @@ export default function PointCloudViewer({
                       const allowDeselect = selectedMeshIds.size === 0 && selectedSkeletonIds.size === 0;
                       onToggleSelection(scan.id, e.ctrlKey || e.metaKey, e.shiftKey, allowDeselect);
                     }}
-                    className={`flex items-center gap-1.5 p-2 rounded cursor-pointer select-none transition-colors ${
+                    className={`flex flex-col gap-0.5 p-2 rounded cursor-pointer select-none transition-colors ${
                       isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
-                    {onUpdateScanColor ? (
-                      <button
-                        data-testid="scan-color-swatch"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (colorPopoverScanId === scan.id) {
-                            setColorPopoverScanId(null);
-                            return;
-                          }
-                          // Anchor the fixed popover just below the swatch.
-                          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          setScanColorPopoverAnchor({ top: r.bottom + 4, left: r.left });
-                          setColorPopoverScanId(scan.id);
-                        }}
-                        className="w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-white/20 hover:ring-white/60 transition-shadow"
-                        style={{ backgroundColor: scan.color }}
-                        title="Set color"
-                      />
-                    ) : (
-                      <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-neutral-200 truncate" data-testid="scan-row-name" title={displayName}>{displayName}</div>
-                      <div className="text-[10px] text-neutral-500" data-testid="scan-row-subtitle">
-                        {subtitle}
-                      </div>
-                    </div>
-                    {/* Expand chevron — only useful when there's something to show. */}
-                    {scanHasParams && (
-                      <button
-                        data-testid={`scan-expand-${scan.id}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setExpandedScanIds(prev => {
-                            const next = new Set(prev);
-                            if (next.has(scan.id)) next.delete(scan.id); else next.add(scan.id);
-                            return next;
-                          });
-                        }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title={isExpanded ? 'Collapse' : 'Expand'}
-                      >
-                        {isExpanded ? (
-                          <ChevronDown className="w-3 h-3 text-neutral-400" />
-                        ) : (
-                          <ChevronRight className="w-3 h-3 text-neutral-400" />
-                        )}
-                      </button>
-                    )}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onToggleVisibility(scan.id); }}
-                      className="p-1 hover:bg-neutral-600 rounded"
-                      title={scan.visible ? 'Hide' : 'Show'}
-                    >
-                      {scan.visible ? (
-                        <Eye className="w-3 h-3 text-neutral-400" />
-                      ) : (
-                        <EyeOff className="w-3 h-3 text-neutral-600" />
-                      )}
-                    </button>
-                    {scan.data?.octree?.hasMisses && onToggleMisses && (() => {
-                      // The misses live in their own projected octree (built at
-                      // create/bake/backfill) — the projection is baked in, so the
-                      // toggle works whenever that octree exists, regardless of
-                      // whether a live scanner origin is still attached. The toggle
-                      // is disabled only when the misses are flagged but NO octree
-                      // was built (all unplaceable: zeroed coords, no recovered beam
-                      // direction — run Backfill Misses to recover them).
-                      const canShow = scan.data?.octree?.missOctreeCacheId != null;
-                      return (
+                    {/* Line 1 — colour swatch + the name, on a row of its own. The name used
+                        to share a line with the action icons, which in a 256px panel left it
+                        only a few characters before the ellipsis. */}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {onUpdateScanColor ? (
                         <button
-                          data-testid={`scan-toggle-misses-${scan.id}`}
+                          data-testid="scan-color-swatch"
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (!canShow) return;
-                            onToggleMisses(scan.id);
-                          }}
-                          disabled={!canShow}
-                          className={`p-1 rounded ${canShow ? 'hover:bg-neutral-600 cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
-                          title={canShow
-                            ? (scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points')
-                            : 'Sky/miss points are flagged but have no recovered beam direction yet. Run Backfill Misses to reconstruct them from the scan grid.'}
-                        >
-                          <CircleDot
-                            className={`w-3 h-3 ${scan.showMisses && canShow ? 'text-amber-500' : 'text-neutral-600'}`}
-                          />
-                        </button>
-                      );
-                    })()}
-                    {!scanHasData && (
-                      <button
-                        data-testid={`scan-attach-data-${scan.id}`}
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          const picked = await window.electronAPI.dialog.open({
-                            title: 'Attach point cloud data',
-                            filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
-                          });
-                          if (!picked) return;
-                          const path = Array.isArray(picked) ? picked[0] : picked;
-                          // Show the progress modal while the backend parses —
-                          // a large scan can take 15-30s and otherwise the UI
-                          // would sit idle until the points appear.
-                          setBulkImportProgress({
-                            current: 1,
-                            total: 1,
-                            label: `Loading ${path.split(/[\\/]/).pop()}`,
-                          });
-                          try {
-                            const data = await parsePointCloudFromPath(path);
-                            onUpdateScanData(scan.id, data);
-                            // A file carrying reconstructed scan params (e.g. a LAS
-                            // with per-pulse beam-origin ExtraBytes → a moving-platform
-                            // trajectory) auto-populates the scan's parameters, so it
-                            // becomes a moving scan with its path drawn rather than a
-                            // plain static cloud.
-                            const sp = data.octree?.scanParams;
-                            if (sp && !scan.params) {
-                              onUpdateScanParams(scan.id, scanParametersFromFile(sp));
+                            if (colorPopoverScanId === scan.id) {
+                              setColorPopoverScanId(null);
+                              return;
                             }
-                            showToast({ title: `Attached ${data.pointCount.toLocaleString()} points to ${scan.label}`, type: 'success' });
-                          } catch (err) {
-                            const msg = err instanceof Error ? err.message : 'Failed to read file';
-                            showToast({ title: `Could not attach point cloud: ${msg}`, type: 'error' });
-                          } finally {
-                            setBulkImportProgress(null);
-                          }
-                        }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title="Attach point cloud data…"
+                            // Anchor the fixed popover just below the swatch.
+                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            setScanColorPopoverAnchor({ top: r.bottom + 4, left: r.left });
+                            setColorPopoverScanId(scan.id);
+                          }}
+                          className="w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-white/20 hover:ring-white/60 transition-shadow"
+                          style={{ backgroundColor: scan.color }}
+                          title="Set color"
+                        />
+                      ) : (
+                        <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: scan.color }} />
+                      )}
+                      <div
+                        className="flex-1 min-w-0 text-xs text-neutral-200 truncate"
+                        data-testid="scan-row-name"
+                        title={displayName}
                       >
-                        <FileUp className="w-3 h-3 text-neutral-400" />
-                      </button>
-                    )}
-                    {!scanHasParams && (
+                        {displayName}
+                      </div>
+                    </div>
+                    {/* Line 2 — subtitle + the per-row action icons. */}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <div className="flex-1 min-w-0 text-[10px] text-neutral-500 truncate" data-testid="scan-row-subtitle" title={subtitleText}>
+                        {subtitle}
+                      </div>
+                      {/* Expand chevron — only useful when there's something to show. */}
+                      {scanHasParams && (
+                        <button
+                          data-testid={`scan-expand-${scan.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedScanIds(prev => {
+                              const next = new Set(prev);
+                              if (next.has(scan.id)) next.delete(scan.id); else next.add(scan.id);
+                              return next;
+                            });
+                          }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title={isExpanded ? 'Collapse' : 'Expand'}
+                        >
+                          {isExpanded ? (
+                            <ChevronDown className="w-3 h-3 text-neutral-400" />
+                          ) : (
+                            <ChevronRight className="w-3 h-3 text-neutral-400" />
+                          )}
+                        </button>
+                      )}
                       <button
-                        data-testid={`scan-attach-params-${scan.id}`}
-                        onClick={(e) => { e.stopPropagation(); openAddParamsPopupFor(scan); }}
+                        onClick={(e) => { e.stopPropagation(); onToggleVisibility(scan.id); }}
                         className="p-1 hover:bg-neutral-600 rounded"
-                        title="Add scan parameters…"
+                        title={scan.visible ? 'Hide' : 'Show'}
                       >
-                        <Radio className="w-3 h-3 text-neutral-400" />
+                        {scan.visible ? (
+                          <Eye className="w-3 h-3 text-neutral-400" />
+                        ) : (
+                          <EyeOff className="w-3 h-3 text-neutral-600" />
+                        )}
                       </button>
-                    )}
-                    {scanHasParams && (
+                      {scan.data?.octree?.hasMisses && onToggleMisses && (() => {
+                        // The misses live in their own projected octree (built at
+                        // create/bake/backfill) — the projection is baked in, so the
+                        // toggle works whenever that octree exists, regardless of
+                        // whether a live scanner origin is still attached. The toggle
+                        // is disabled only when the misses are flagged but NO octree
+                        // was built (all unplaceable: zeroed coords, no recovered beam
+                        // direction — run Backfill Misses to recover them).
+                        const canShow = scan.data?.octree?.missOctreeCacheId != null;
+                        return (
+                          <button
+                            data-testid={`scan-toggle-misses-${scan.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!canShow) return;
+                              onToggleMisses(scan.id);
+                            }}
+                            disabled={!canShow}
+                            className={`p-1 rounded ${canShow ? 'hover:bg-neutral-600 cursor-pointer' : 'cursor-not-allowed opacity-50'}`}
+                            title={canShow
+                              ? (scan.showMisses ? 'Hide sky/miss points' : 'Show sky/miss points')
+                              : 'Sky/miss points are flagged but have no recovered beam direction yet. Run Backfill Misses to reconstruct them from the scan grid.'}
+                          >
+                            <CircleDot
+                              className={`w-3 h-3 ${scan.showMisses && canShow ? 'text-amber-500' : 'text-neutral-600'}`}
+                            />
+                          </button>
+                        );
+                      })()}
+                      {!scanHasData && (
+                        <button
+                          data-testid={`scan-attach-data-${scan.id}`}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            const picked = await window.electronAPI.dialog.open({
+                              title: 'Attach point cloud data',
+                              filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
+                            });
+                            if (!picked) return;
+                            const path = Array.isArray(picked) ? picked[0] : picked;
+                            // Show the progress modal while the backend parses —
+                            // a large scan can take 15-30s and otherwise the UI
+                            // would sit idle until the points appear.
+                            setBulkImportProgress({
+                              current: 1,
+                              total: 1,
+                              label: `Loading ${path.split(/[\\/]/).pop()}`,
+                            });
+                            try {
+                              const data = await parsePointCloudFromPath(path);
+                              onUpdateScanData(scan.id, data);
+                              // A file carrying reconstructed scan params (e.g. a LAS
+                              // with per-pulse beam-origin ExtraBytes → a moving-platform
+                              // trajectory) auto-populates the scan's parameters, so it
+                              // becomes a moving scan with its path drawn rather than a
+                              // plain static cloud.
+                              const sp = data.octree?.scanParams;
+                              if (sp && !scan.params) {
+                                onUpdateScanParams(scan.id, scanParametersFromFile(sp));
+                              }
+                              showToast({ title: `Attached ${data.pointCount.toLocaleString()} points to ${scan.label}`, type: 'success' });
+                            } catch (err) {
+                              const msg = err instanceof Error ? err.message : 'Failed to read file';
+                              showToast({ title: `Could not attach point cloud: ${msg}`, type: 'error' });
+                            } finally {
+                              setBulkImportProgress(null);
+                            }
+                          }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Attach point cloud data…"
+                        >
+                          <FileUp className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
+                      {!scanHasParams && (
+                        <button
+                          data-testid={`scan-attach-params-${scan.id}`}
+                          onClick={(e) => { e.stopPropagation(); openAddParamsPopupFor(scan); }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Add scan parameters…"
+                        >
+                          <Radio className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
+                      {scanHasParams && (
+                        <button
+                          data-testid={`scan-edit-${scan.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setScanPopupState({ kind: 'edit', id: scan.id });
+                          }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Edit scan parameters"
+                        >
+                          <Pencil className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
+                      {onAddScan && (
+                        <button
+                          data-testid={`scan-duplicate-${scan.id}`}
+                          onClick={(e) => { e.stopPropagation(); handleDuplicateScan(scan.id); }}
+                          className="p-1 hover:bg-neutral-600 rounded"
+                          title="Duplicate scan"
+                        >
+                          <Copy className="w-3 h-3 text-neutral-400" />
+                        </button>
+                      )}
                       <button
-                        data-testid={`scan-edit-${scan.id}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setScanPopupState({ kind: 'edit', id: scan.id });
-                        }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title="Edit scan parameters"
+                        data-testid={`scan-delete-${scan.id}`}
+                        onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', ids: [scan.id], label: displayName }); }}
+                        className="p-1 hover:bg-red-600/30 rounded"
+                        title="Remove"
                       >
-                        <Pencil className="w-3 h-3 text-neutral-400" />
+                        <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
                       </button>
-                    )}
-                    {onAddScan && (
-                      <button
-                        data-testid={`scan-duplicate-${scan.id}`}
-                        onClick={(e) => { e.stopPropagation(); handleDuplicateScan(scan.id); }}
-                        className="p-1 hover:bg-neutral-600 rounded"
-                        title="Duplicate scan"
-                      >
-                        <Copy className="w-3 h-3 text-neutral-400" />
-                      </button>
-                    )}
-                    <button
-                      data-testid={`scan-delete-${scan.id}`}
-                      onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'cloud', ids: [scan.id], label: displayName }); }}
-                      className="p-1 hover:bg-red-600/30 rounded"
-                      title="Remove"
-                    >
-                      <Trash2 className="w-3 h-3 text-neutral-500 hover:text-red-400" />
-                    </button>
+                    </div>
                   </div>
                   {/* Expanded parameters block. */}
                   {isExpanded && scanHasParams && (
@@ -15661,6 +18183,27 @@ export default function PointCloudViewer({
                       )}
                     </div>
                   )}
+
+                  {/* Which scalar columns this cloud actually carries.
+                      The Color-by dropdown is a lossy proxy for this: it hides
+                      `intensity` (own mode), every LAS builtin, and anything
+                      constant-valued — so an importer that silently dropped a
+                      column looked identical to one that kept it. Listing them
+                      here is the only direct answer to "what did I import?". */}
+                  {isExpanded && scanHasData && importedColumnsFor(scan).length > 0 && (
+                    <div
+                      data-testid={`scan-columns-${scan.id}`}
+                      className="pl-6 pr-2 pb-2 text-[10px] text-neutral-400"
+                    >
+                      <span>fields: </span>
+                      <span
+                        className="font-mono text-neutral-300"
+                        data-columns={importedColumnsFor(scan).join(',')}
+                      >
+                        {importedColumnsFor(scan).join(', ')}
+                      </span>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -15683,7 +18226,8 @@ export default function PointCloudViewer({
             meshRotations={meshRotations}
             meshPositions={meshPositions}
             meshScales={meshScales}
-            colormap={colormap}
+            colormapFor={colormapFor}
+            isColormapOverridden={(id) => colormapOverrides.has(id)}
             meshWireframe={meshWireframe}
             defaultOpacityFor={defaultMeshOpacity}
             isTextured={isTexturedMesh}
@@ -15735,7 +18279,7 @@ export default function PointCloudViewer({
                 return next;
               });
             }}
-            onColormapChange={setColormap}
+            onColormapChange={setColormapOverride}
             onOpacityChange={(id, value) => setMeshOpacities(prev => new Map(prev).set(id, value))}
             onWireframeChange={setMeshWireframe}
             onOpenLeafAngles={setShowLeafAngleMeshId}
@@ -15912,18 +18456,107 @@ export default function PointCloudViewer({
                 );
               })}
             </div>
-            {/* Display settings: color mode. */}
-            <div className="p-2 border-t border-neutral-700 flex items-center gap-2">
-              <span className="text-[10px] text-neutral-400">Color by</span>
-              <select
-                data-testid="qsm-color-mode"
-                value={qsmColorMode}
-                onChange={(e) => setQSMColorMode(e.target.value as QSMColorMode)}
-                className="flex-1 bg-neutral-700 text-neutral-200 text-[10px] rounded px-1 py-0.5 border border-neutral-600"
-              >
-                <option value="rank">Shoot rank</option>
-                <option value="shoot">Shoot id</option>
-              </select>
+            {/* Display settings: color mode, plus the controls each mode needs. */}
+            <div className="p-2 border-t border-neutral-700 flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-neutral-400">Color by</span>
+                <select
+                  data-testid="qsm-color-mode"
+                  value={qsmColorMode}
+                  onChange={(e) => setQSMColorMode(e.target.value as QSMColorMode)}
+                  className="flex-1 bg-neutral-700 text-neutral-200 text-[10px] rounded px-1 py-0.5 border border-neutral-600"
+                >
+                  <option value="rank">Shoot rank</option>
+                  <option value="shoot">Shoot id</option>
+                  <option value="color">Color</option>
+                  <option value="texture">Texture</option>
+                </select>
+              </div>
+
+              {/* Flat color: native picker + hex field, the same pairing the mesh
+                  and scan color popovers use. Only a COMPLETE hex is committed so
+                  the render path never sees a partial value mid-typing. */}
+              {qsmColorMode === 'color' && (
+                <div className="flex items-center gap-2" data-testid="qsm-color-controls">
+                  <span className="text-[10px] text-neutral-400">Color</span>
+                  <input
+                    type="color"
+                    data-testid="qsm-solid-color"
+                    value={qsmSolidColor}
+                    onChange={(e) => setQSMSolidColor(e.target.value)}
+                    className="w-8 h-6 rounded cursor-pointer bg-transparent border-0 p-0"
+                    title="Pick QSM color"
+                  />
+                  <input
+                    type="text"
+                    data-testid="qsm-solid-color-hex"
+                    // Controlled by a DRAFT while focused, by the committed color
+                    // otherwise. A raw controlled input bound to qsmSolidColor
+                    // would fight the user mid-typing (a partial "#e6" isn't a
+                    // valid color); an uncontrolled defaultValue instead goes
+                    // STALE when the swatch changes the color. The draft gives
+                    // free typing and still follows the picker.
+                    value={qsmColorHexDraft ?? qsmSolidColor}
+                    onFocus={() => setQSMColorHexDraft(qsmSolidColor)}
+                    onBlur={() => setQSMColorHexDraft(null)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setQSMColorHexDraft(v);
+                      if (/^#[0-9a-fA-F]{6}$/.test(v)) setQSMSolidColor(v);
+                    }}
+                    className="w-20 px-1.5 py-0.5 text-[10px] bg-neutral-800 border border-neutral-600 rounded text-neutral-200 font-mono"
+                    maxLength={7}
+                  />
+                </div>
+              )}
+
+              {/* Bark: curated library + upload, mirroring the Add Leaves picker.
+                  An uploaded file shows as a synthetic selected <option>. */}
+              {qsmColorMode === 'texture' && (
+                <div className="flex flex-col gap-1.5" data-testid="qsm-texture-controls">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-400">Bark</span>
+                    <select
+                      data-testid="qsm-bark-texture"
+                      value={qsmBarkSource.mode === 'builtin' ? qsmBarkSource.name : ''}
+                      onChange={(e) => setQSMBarkSource({ mode: 'builtin', name: e.target.value })}
+                      className="flex-1 bg-neutral-700 text-neutral-200 text-[10px] rounded px-1 py-0.5 border border-neutral-600"
+                    >
+                      {qsmBarkSource.mode === 'upload' && (
+                        <option value="">{qsmBarkSource.path.split(/[\\/]/).pop()}</option>
+                      )}
+                      {qsmBarkNames.map((t) => (
+                        <option key={t} value={t}>{t.replace(/\.(jpg|jpeg|png)$/i, '')}</option>
+                      ))}
+                    </select>
+                    <button
+                      data-testid="qsm-bark-upload"
+                      onClick={handlePickBarkImage}
+                      title="Upload a bark image"
+                      className="px-1.5 py-0.5 text-[10px] bg-neutral-700 hover:bg-neutral-600 border border-neutral-600 rounded text-neutral-200"
+                    >
+                      Upload
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-400" title="World size of one bark tile. Smaller = finer bark pattern.">
+                      Tile (m)
+                    </span>
+                    <DebouncedNumberInput
+                      data-testid="qsm-texture-tile"
+                      value={qsmTextureTile}
+                      onCommit={setQSMTextureTile}
+                      min={0.01}
+                      max={5}
+                      step={0.05}
+                      className="w-20 px-1.5 py-0.5 text-[10px] bg-neutral-800 border border-neutral-600 rounded text-neutral-200"
+                    />
+                  </div>
+                  {qsmBarkError && (
+                    <p className="text-[9px] text-red-400" data-testid="qsm-bark-error">{qsmBarkError}</p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -15933,12 +18566,13 @@ export default function PointCloudViewer({
           <LADResultsPanel
             ladResults={ladResults}
             selectedLadId={selectedLadId}
-            colormap={colormap}
+            colormapFor={colormapFor}
+            isOverridden={(id) => colormapOverrides.has(id)}
             onSelect={setSelectedLadId}
             onToggleVisible={toggleLadVisible}
             onRemove={removeLadResult}
             onUpdate={updateLadResult}
-            onColormapChange={setColormap}
+            onColormapChange={setColormapOverride}
           />
         )}
 
@@ -15975,7 +18609,8 @@ export default function PointCloudViewer({
               const open = showSceneOriginPanel;
               closeAllToolPanels('scene-origin');
               setShowSceneOriginPanel(!open);
-              if (open) setOriginPlaceMode(false);
+              // Auto-arm click-to-place on open (see the registry entry above).
+              setOriginPlaceMode(!open);
             }}
             className={`p-2 rounded transition-colors flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed ${
               showSceneOriginPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
@@ -16052,7 +18687,10 @@ export default function PointCloudViewer({
 
       {/* Crop Panel — single panel handles Box, Rect, and Polygon modes
           and applies to every selected scan when N > 1. */}
-      {editMode === 'crop' && selectedIds.size > 0 && (() => {
+      {/* The label tool borrows crop's polygon draw state for its lasso, so
+          suppress crop's OWN panel while labelling — otherwise two panels stack
+          at the same position and the top one swallows the other's clicks. */}
+      {editMode === 'crop' && selectedIds.size > 0 && !labelTargetCloud && (() => {
         const closeCropPanel = () => {
           setEditMode('none');
           setCropDrawState('idle');
@@ -16083,15 +18721,11 @@ export default function PointCloudViewer({
         const cropBoxMaxStr = cropBox
           ? `${cropBox.max.x.toFixed(3)},${cropBox.max.y.toFixed(3)},${cropBox.max.z.toFixed(3)}`
           : '';
-        // Projection kind of a committed screen-space region (rect / polygon). An
-        // orthographic projection matrix has m[15]=1, m[11]=0; a perspective one
-        // has m[15]=0, m[11]=-1. The Rect tool draws orthographically so its
-        // extrusion is a true prism — exposed for the trapezoid-regression test.
+        // Projection kind of a committed screen-space region (rect / polygon).
+        // The Rect tool draws orthographically so its extrusion is a true prism
+        // — exposed for the trapezoid-regression test. See lib/cameraRay.ts.
         const cropProjectionKind = cropPolygon
-          ? (Math.abs(cropPolygon.projection[15] - 1) < 1e-6 &&
-             Math.abs(cropPolygon.projection[11]) < 1e-6
-              ? 'orthographic' as const
-              : 'perspective' as const)
+          ? projectionKindOf(cropPolygon.projection)
           : '' as const;
 
         return (
@@ -16184,14 +18818,11 @@ export default function PointCloudViewer({
         const flatStep = (flatMax - flatMin) / 100;
 
         // Projection kind of the painted frame. Erase runs under an orthographic
-        // override so the square cuts a straight prism whose footprint matches the
-        // brush outline (ortho ⇒ m[15]=1, m[11]=0). Asserted by the regression
-        // test guarding against the center-biased perspective trapezoid.
+        // override so the square cuts a straight prism whose footprint matches
+        // the brush outline. Asserted by the regression test guarding against
+        // the center-biased perspective trapezoid. See lib/cameraRay.ts.
         const eraseProjectionKind = eraseFrame
-          ? (Math.abs(eraseFrame.projection[15] - 1) < 1e-6 &&
-             Math.abs(eraseFrame.projection[11]) < 1e-6
-              ? 'orthographic' as const
-              : 'perspective' as const)
+          ? projectionKindOf(eraseFrame.projection)
           : '' as const;
         const cloud = firstSelectedCloud;
 
@@ -16555,6 +19186,134 @@ export default function PointCloudViewer({
       />
 
       {/* Ground Segmentation Panel */}
+      {/* The PANEL follows its own flag. The section itself (clip, wireframe,
+          stroke bound) outlives it — conflating the two made the close button
+          appear dead once a slab existed. */}
+      {showSectionPanel && sectionTargetCloud && (
+        <CrossSectionPanel
+          stacked={!!labelTargetCloud}
+          hasSlab={!!slab}
+          drawing={slabDrawState !== 'idle'}
+          thickness={slab?.depth ?? 0}
+          thicknessMin={sectionBounds ? Math.max((sectionBounds.max.z - sectionBounds.min.z) / 1000, 1e-4) : 0.001}
+          thicknessMax={sectionBounds ? Math.max(sectionBounds.max.y - sectionBounds.min.y, 1) : 100}
+          thicknessStep={slab ? Math.max(slab.depth / 10, 1e-4) : 0.01}
+          stepMode={slabStepMode}
+          fixedStep={slabFixedStep}
+          coverage={slabCoverageInfo}
+          locked={slabLocked}
+          suspended={slabSuspended}
+          onToggleSuspended={() => setSlabSuspended(v => !v)}
+          onClear={clearSlabSection}
+          onDraw={() => {
+            slabDrawRef.current = { state: 'awaiting-a', first: null };
+            setSlabFirstPointState(null);
+            setSlabCursor(null);
+            // Stop clipping while picking. Redrawing left the OLD section
+            // clipping the view, so the user was aiming the new centreline at a
+            // cloud that was still cut away — you cannot aim at what is hidden.
+            // The drag preview shows the box being made, so the old section is
+            // not needed on screen. Reinstated when the second click commits.
+            setSlabSuspended(true);
+            setSlabDrawState('awaiting-a');
+          }}
+          onThicknessChange={(v) => setSlab(prev => (prev ? { ...prev, depth: v } : prev))}
+          onStepModeChange={setSlabStepMode}
+          onFixedStepChange={setSlabFixedStep}
+          onStep={handleSlabStep}
+          onResetOffset={() => setSlab(prev => {
+            if (!prev) return prev;
+            const next = { ...prev, offset: 0 };
+            if (slabLocked) viewSlabFaceOn(next);
+            return next;
+          })}
+          onToggleLocked={() => setSlabLocked(v => {
+            const next = !v;
+            if (next && slab) viewSlabFaceOn(slab);
+            return next;
+          })}
+          onClose={() => setShowSectionPanel(false)}
+        />
+      )}
+      {showPaletteEditor && labelPalette && (
+        <ClassPaletteEditor
+          // Remount on a palette switch so the draft reseeds — otherwise the
+          // editor would keep showing the previous palette's classes.
+          key={labelPalette.id}
+          palette={labelPalette}
+          classCounts={labelClassCounts}
+          library={paletteLibrary}
+          onSave={(next) => { void handleSavePalette(next); setShowPaletteEditor(false); }}
+          onLoad={(p) => { applyLabelPalette(p); setShowPaletteEditor(false); }}
+          onDelete={(id) => { void deleteClassPalette(id).then(setPaletteLibrary); }}
+          onExport={() => { void handleExportPalettes(); }}
+          onImport={() => { void handleImportPalettes(); }}
+          onClose={() => setShowPaletteEditor(false)}
+        />
+      )}
+
+      {labelTargetCloud && labelPalette && (
+        <LabelPanel
+          classes={labelPalette.classes}
+          paletteName={labelPalette.name}
+          activeClass={labelActiveClass}
+          classCounts={labelClassCounts}
+          visibleClasses={labelVisibleClasses}
+          fromClasses={labelFromClasses}
+          pendingStrokes={labelStrokes.length}
+          dirty={labelDirty}
+          busy={labelBusy}
+          onSelectClass={setLabelActiveClass}
+          onToggleVisible={(v) => setLabelVisibleClasses(prev => {
+            const next = new Set(prev);
+            if (next.has(v)) next.delete(v); else next.add(v);
+            return next;
+          })}
+          onToggleFromClass={(v) => setLabelFromClasses(prev => {
+            const next = new Set(prev ?? []);
+            if (next.has(v)) next.delete(v); else next.add(v);
+            // An empty selection means "no restriction", i.e. back to Any visible.
+            return next.size === 0 ? null : next;
+          })}
+          onSetFromAnyVisible={() => setLabelFromClasses(null)}
+          onUndoStroke={handleLabelUndo}
+          onCommit={handleLabelCommit}
+          // Two distinct controls: cycle through the built-in preset
+          // vocabularies, or open the editor to build one of your own.
+          onCyclePreset={() => {
+            const order: Array<'wood_leaf' | 'organ' | 'ground' | 'asprs'> =
+              ['wood_leaf', 'organ', 'ground', 'asprs'];
+            const i = order.indexOf((labelPalette.preset ?? 'wood_leaf') as typeof order[number]);
+            const preset = order[(i + 1) % order.length];
+            // Each preset names its own COLUMN, not just a vocabulary: ASPRS
+            // describes an imported LAS classification byte, the others describe
+            // the hand-labelling column. Binding them all to manual_class made
+            // ASPRS read an empty column and report every class as 0.
+            const next = makePreset(
+              preset, defaultSlugForPreset(preset, MANUAL_CLASS_ATTRIBUTE), Date.now(),
+            );
+            setLabelPalette(next);
+            setLabelVisibleClasses(new Set(next.classes.map(c => c.value)));
+            setLabelActiveClass(next.classes.find(c => c.value !== 0)?.value ?? 0);
+            setLabelFromClasses(null);
+            // Counts are keyed by class VALUE, so a stale map renders one
+            // column's numbers under another's class names. Refetch for the
+            // column this palette actually describes.
+            setLabelClassCounts({});
+            const sid = labelTargetCloud.data.octree?.sessionId;
+            if (sid) void refreshLabelCounts(sid, next.slug);
+          }}
+          onEditPalette={() => setShowPaletteEditor(true)}
+          tool={labelTool}
+          onToolChange={setLabelTool}
+          brushPx={labelBrushPx}
+          drawing={labelDrawing}
+          onToggleDrawing={() => setLabelDrawing(v => !v)}
+          sectionActive={!!slab && sectionTargetCloud?.id === labelTargetCloud.id}
+          onClearSection={clearSlabSection}
+          onClose={() => setShowLabelPanel(false)}
+        />
+      )}
       {showGroundSegmentPanel && selectedIds.size === 1 && (
         <GroundSegmentPanel
           clothResolution={groundClothResolution}
@@ -16656,6 +19415,7 @@ export default function PointCloudViewer({
           splitClouds={treeSplitClouds}
           inProgress={treeSegmentInProgress}
           error={treeSegmentError}
+          costWarning={treeSegmentCostWarning}
           hasTrees={!!clouds.find(cl => selectedIds.has(cl.id))?.data.scalarFields?.[TREE_INSTANCE_ATTRIBUTE]}
           mergeA={treeMergeA}
           mergeB={treeMergeB}
@@ -16963,11 +19723,6 @@ export default function PointCloudViewer({
             origin={sceneOrigin}
             isCustom={sceneOriginOverride !== null}
             placeMode={originPlaceMode}
-            showMarker={showOriginMarker}
-            // The marker stands down on an empty viewport (it would sit on top of
-            // the "Drag scan files here" hint), so say so rather than showing a
-            // ticked box next to nothing.
-            markerSuppressed={!sceneHasContent}
             canMoveToSelection={canMoveToSelection}
             onCoordChange={(axis, value) => {
               // Base on the EFFECTIVE origin, so editing one axis of the default
@@ -16978,11 +19733,14 @@ export default function PointCloudViewer({
               setSceneOriginOverride(next);
             }}
             onTogglePlaceMode={() => setOriginPlaceMode(m => !m)}
-            onToggleShowMarker={() => setShowOriginMarker(v => !v)}
             onMoveToSelection={() => {
               const c = selectionCenter();
               if (c) setSceneOriginOverride(c);
             }}
+            // Explicit "take me to the pivot". Framing no longer bends toward the
+            // origin implicitly (zoom-to-cursor makes the whole scene reachable),
+            // so getting there is a command the user invokes.
+            onFrameOrigin={() => (window as any).__frameSceneOrigin?.()}
             onReset={() => { setSceneOriginOverride(null); setOriginPlaceMode(false); }}
             onClose={() => { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }}
           />
@@ -17055,43 +19813,40 @@ export default function PointCloudViewer({
       {showExportPanel && (
         <ExportModal
           selectionType={selectionType}
-          singleCloudSelected={selectedIds.size === 1}
-          cloudIsScan={selectedIds.size === 1 && !!clouds.find(c => c.id === Array.from(selectedIds)[0])?.params}
-          cloudName={clouds.find(c => c.id === Array.from(selectedIds)[0])?.data.fileName || ''}
-          // Available ASCII export columns, in default order. For a single
-          // selected cloud, from that cloud; otherwise from a representative
-          // selected scan (so the column picker works for multi-scan export too).
-          cloudColumns={(() => {
-            const ids = Array.from(selectedIds);
-            const c = ids.length === 1
-              ? clouds.find(c => c.id === ids[0])
-              : clouds.find(c => selectedIds.has(c.id) && !!c.params)
-                ?? clouds.find(c => !!c.params);
-            if (!c) return [];
-            return defaultExportColumns(c.data, {
-              isLabel: (slug) => isCategoricalAttribute(slug),
-              labelFor: (slug) => c.data.octree?.attributeLabels?.[slug] ?? slug,
-              // Octree/session clouds keep their points (and scalar columns) on
-              // disk, so recover the available columns from the ASCII_format hint.
-              asciiFormat: c.data.octree?.asciiFormat ?? c.asciiFormat ?? null,
-            });
-          })()}
-          // Every scan that carries scanner parameters (so it can be written as a
-          // scan XML), with whether it currently holds misses and is selected. The
-          // modal renders these as a checkbox list, pre-checked to the selection.
-          scanExportList={clouds
-            .filter(c => !!c.params)
-            .map(c => {
-              // Show the scan's user-configurable label (falling back to filename),
-              // matching how the Scans panel names the row.
-              const scan = scans.find(s => s.id === c.id);
-              return {
-                id: c.id,
-                name: scan ? scanDisplayName(scan) : (c.data.fileName || c.id),
-                hasMisses: !!(c.data.octree?.hasMisses || c.data.scalarFields?.[MISS_ATTRIBUTE]),
-                selected: selectedIds.has(c.id),
-              };
-            })}
+          // Only seeds the initial check state: a mesh/skeleton selection must
+          // not arm a whole-scene export now that every cloud is listed.
+          sceneSelectionHasNonCloud={selectedIds.size === 0
+            && (selectedMeshIds.size > 0 || !!selectedSkeletonId)}
+          getExportColumns={getExportColumns}
+          // Every point cloud in the scene — not just the ones carrying scanner
+          // parameters, and not just the selected ones. The Scans-panel
+          // selection rides along as `selected` and decides only what starts
+          // checked; `xmlBlockedReason` / `ptxBlockedReason` say which rows the
+          // scan-shaped outputs cannot write.
+          exportObjects={clouds.map(c => {
+            // Show the scan's user-configurable label (falling back to filename),
+            // matching how the Scans panel names the row.
+            const scan = scans.find(s => s.id === c.id);
+            const pattern = c.params?.pattern;
+            return {
+              id: c.id,
+              name: scan ? scanDisplayName(scan) : (c.data.fileName || c.id),
+              pointCount: c.data.pointCount,
+              hasMisses: !!(c.data.octree?.hasMisses || c.data.scalarFields?.[MISS_ATTRIBUTE]),
+              selected: selectedIds.has(c.id),
+              isScan: !!c.params,
+              xmlBlockedReason: !c.params
+                ? 'No scanner parameters — a Helios scan XML needs a scanner origin and angular sweep. Use Data only to export this cloud.'
+                : pattern === 'risley_prism'
+                  ? "Livox rosette (Risley) scans have no Ntheta×Nphi grid, so they can't be written to a Helios scan XML."
+                  : undefined,
+              ptxBlockedReason: !c.params
+                ? 'PTX needs a complete scan grid — this cloud has no scanner parameters.'
+                : pattern !== 'raster'
+                  ? 'PTX needs a raster scan grid (Ntheta×Nphi); this scan pattern has none.'
+                  : undefined,
+            };
+          })}
           // Scene voxel-box grids the user can add to a scan XML export (id +
           // label; geometry is resolved in exportScanXmlBundle via the same list).
           gridOptions={heliosGridOptions.map(g => ({ id: g.id, label: g.label }))}
@@ -17100,7 +19855,6 @@ export default function PointCloudViewer({
           meshName={selectedMesh ? displayNameOfMesh(selectedMesh) : ''}
           meshTriangleCount={selectedMesh?.data.triangleCount ?? 0}
           meshIsDem={selectedMesh?.method === 'dem' && !!selectedMesh?.demGrid}
-          isScanning={isScanning}
           skeletonSelected={!!selectedSkeleton}
           skeletonName={selectedSkeleton ? (clouds.find(c => c.id === selectedSkeleton.sourceCloudId)?.data.fileName || '') : ''}
           skeletonNodeCount={selectedSkeleton?.data.pointCount ?? 0}
@@ -17110,7 +19864,6 @@ export default function PointCloudViewer({
           onExportMesh={(format) => { if (selectedMesh) exportMesh(selectedMesh.id, format); }}
           onExportDEMRaster={(format) => { if (selectedMesh) handleExportDEMRaster(selectedMesh.id, format); }}
           onExportSkeleton={(format) => { if (selectedSkeleton) exportSkeleton(selectedSkeleton.id, format); }}
-          onRunScan={() => handleRunScan()}
         />
       )}
 
@@ -17130,101 +19883,31 @@ export default function PointCloudViewer({
           flush against the colorbar when it grows to the bottom. Laid out in
           one bottom-aligned flex row so any combination of colorbars coexists
           without overlapping each other. */}
+      {/* z-[15]: ABOVE the screen-space overlays (z-10) but BELOW the floating
+          tool panels (z-20). The legend's expanded cards are
+          pointer-events-auto (they open the colormap editor), they are anchored
+          bottom-right, and they grow upward and leftward as entries are added —
+          straight into the `right-[280px]` lane the tool panels occupy. At the
+          legend's old z-20 that was a TIE with the panels, broken by DOM order,
+          and this overlay is rendered LAST — so a tall/wide legend won and ate
+          the panel's own buttons. It swallowed DEM's Run button on CI (the
+          click timed out on "scalar-overlay subtree intercepts pointer
+          events"), while passing locally where the legend was narrower and only
+          covered the button's right edge, leaving the centre Playwright clicks
+          clear. A passive readout must never outrank an interactive panel. */}
       <div
         data-testid="scalar-overlay"
-        data-active-scalar={colorMode === 'scalar' ? selectedScalarField ?? '' : ''}
-        className="absolute bottom-4 right-[296px] z-20 flex flex-row items-end gap-3 pointer-events-none"
+        data-active-scalar={legendColorMode === 'scalar' ? legendScalarField ?? '' : ''}
+        className="absolute bottom-4 right-[296px] z-[15] pointer-events-none"
       >
-        {/* Tree instance ids are arbitrary nominal labels — a per-tree legend
-            would list every tree (Tree 1…Tree N), filling the viewport height,
-            and a continuous colorbar would be meaningless. So show neither when
-            coloring by tree_instance; the points stay colored, just no overlay. */}
-        {selectedScalarField === TREE_INSTANCE_ATTRIBUTE ? null :
-         isScalarColorMode && colorMode === 'scalar' && selectedScalarField &&
-         dataRange && categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max]) ? (
-          <div
-            data-testid="class-legend"
-            data-legend-attribute={selectedScalarField}
-          >
-            <ClassLegend
-              scheme={categoricalSchemeForRange(selectedScalarField, [dataRange.min, dataRange.max])!}
-              label={dataRange.label}
-            />
-          </div>
-        ) : isScalarColorMode && activeRange && dataRange && (
-          <div
-            data-testid="colorbar"
-            data-colorbar-label={dataRange.label}
-            data-colorbar-min={activeRange.min}
-            data-colorbar-max={activeRange.max}
-          >
-            <Colorbar
-              colormap={colormap}
-              min={activeRange.min}
-              max={activeRange.max}
-              label={dataRange.label}
-            />
-          </div>
-        )}
-
-        {/* Mesh pseudocolor colorbar — when a mesh is colored by
-            inclination/azimuth/area. */}
-        {activeMeshColorInfo && (
-          <div
-            data-testid="mesh-colorbar"
-            data-colorbar-label={activeMeshColorInfo.label}
-            data-colorbar-min={activeMeshColorInfo.min}
-            data-colorbar-max={activeMeshColorInfo.max}
-          >
-            <Colorbar
-              colormap={colormap}
-              min={activeMeshColorInfo.min}
-              max={activeMeshColorInfo.max}
-              label={activeMeshColorInfo.label}
-            />
-          </div>
-        )}
-
-        {/* Source-scan legend — when a mesh is colored by scan. */}
-        {activeMeshScanLegend && activeMeshScanLegend.length > 0 && (
-          <div
-            data-testid="mesh-scan-legend"
-            data-scan-count={activeMeshScanLegend.length}
-          >
-            <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg px-2.5 py-2 border border-neutral-700/50 select-none max-w-[200px]">
-              <div className="text-[10px] text-neutral-300 mb-1.5">Source scan</div>
-              <div className="space-y-1 max-h-[200px] overflow-y-auto">
-                {activeMeshScanLegend.map(entry => (
-                  <div key={entry.index} className="flex items-center gap-2 text-[10px] text-neutral-300">
-                    <span
-                      className="w-3 h-3 rounded-sm border border-neutral-600 flex-shrink-0"
-                      style={{ backgroundColor: entry.color }}
-                    />
-                    <span className="flex-1 truncate">Scan {entry.index + 1}</span>
-                    <span className="text-neutral-500">{entry.count.toLocaleString()}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Leaf area density colorbar — when an LAD result is visible. */}
-        {activeLadInfo && (
-          <div
-            data-testid="lad-colorbar"
-            data-colorbar-label="LAD"
-            data-colorbar-min={activeLadInfo.min}
-            data-colorbar-max={activeLadInfo.max}
-          >
-            <Colorbar
-              colormap={colormap}
-              min={activeLadInfo.min}
-              max={activeLadInfo.max}
-              label="LAD [m²/m³]"
-            />
-          </div>
-        )}
+        <LegendStack
+          entries={legendEntries}
+          promotedKey={promotedLegendKey}
+          onPromote={setPromotedLegendKey}
+          onEdit={(entry) => setLegendEditorKey(k => (k === entry.key ? null : entry.key))}
+          editingKey={legendEditorKey}
+          renderEditor={renderLegendEditor}
+        />
       </div>
 
       {/* LAD voxel hover readout — the value of the cell under the cursor. */}
@@ -17259,7 +19942,11 @@ export default function PointCloudViewer({
         {/* Collapsible Content */}
         {!displayPanelCollapsed && (
           <div className="px-3 pb-3 space-y-2">
-            {/* Color by — global across all clouds. Options are derived from a
+            {/* Color by. Applies to the SELECTED clouds when there is a
+                selection, else sets the scene default that unselected clouds
+                follow — so the long-standing "change it for everything"
+                behaviour is what you get with nothing selected, and picking a
+                scan first scopes the change to it. Options are derived from a
                 representative cloud (first selected-visible, else first
                 visible): X/Y are hidden for octree clouds, and that cloud's
                 scalar fields are offered as additional modes. */}
@@ -17292,22 +19979,41 @@ export default function PointCloudViewer({
               // Encode scalar selections as `scalar:<field>` so the single
               // <select> can drive both colorMode and selectedScalarField.
               const selectValue =
-                colorMode === 'scalar' && selectedScalarField
-                  ? `scalar:${selectedScalarField}`
-                  : colorMode;
+                activeColorMode === 'scalar' && activeScalarField
+                  ? `scalar:${activeScalarField}`
+                  : activeColorMode;
+              // Clouds this change applies to: the visible selection, else
+              // nothing (which means "set the scene default" below).
+              const targetIds = clouds
+                .filter(c => c.visible && selectedIds.has(c.id))
+                .map(c => c.id);
               return (
                 <div>
-                  <label className="text-[10px] text-neutral-400 block mb-1">Color by</label>
+                  <label className="text-[10px] text-neutral-400 block mb-1">
+                    {targetIds.length > 0
+                      ? `Color by (${targetIds.length} selected)`
+                      : 'Color by (all scans)'}
+                  </label>
                   <select
                     data-testid="display-color-mode"
+                    data-target-count={targetIds.length}
                     value={selectValue}
                     onChange={(e) => {
                       const v = e.target.value;
-                      if (v.startsWith('scalar:')) {
-                        setColorMode('scalar');
-                        setSelectedScalarField(v.slice('scalar:'.length));
+                      const next = v.startsWith('scalar:')
+                        ? { mode: 'scalar' as ColorMode, field: v.slice('scalar:'.length) }
+                        : { mode: v as ColorMode, field: undefined };
+                      if (targetIds.length > 0) {
+                        // Scoped edit: override just the selected clouds.
+                        for (const id of targetIds) setCloudColorMode(id, next);
                       } else {
-                        setColorMode(v as ColorMode);
+                        // No selection → move the scene default, and clear the
+                        // per-cloud overrides so the change is visible on every
+                        // cloud (otherwise an earlier scoped edit would pin a
+                        // cloud and the "all scans" label would be a lie).
+                        setColorMode(next.mode);
+                        setSelectedScalarField(next.field);
+                        setCloudColorModes(new Map());
                       }
                     }}
                     className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
@@ -17324,14 +20030,21 @@ export default function PointCloudViewer({
                     )}
                   </select>
 
-                  {/* Colormap + range — only for continuous (scalar) modes. */}
+                  {/* Colormap + range — only for continuous (scalar) modes.
+                      This picker is the SCENE DEFAULT: every object follows it
+                      until the user overrides that object individually (from
+                      its own row in the Meshes / LAD panels), so changing it
+                      here repaints everything still inheriting. */}
                   {isScalarColorMode && (
                     <>
+                      <label className="text-[10px] text-neutral-400 block mt-1.5 mb-1">
+                        Default colormap
+                      </label>
                       <select
                         data-testid="display-colormap"
                         value={colormap}
                         onChange={(e) => setColormap(e.target.value as ColormapName)}
-                        className="w-full mt-1 bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+                        className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
                       >
                         {COLORMAP_NAMES.map((name) => (
                           <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
@@ -17480,6 +20193,20 @@ export default function PointCloudViewer({
               <label className="flex items-center gap-2 text-neutral-300 cursor-pointer">
                 <input data-testid="display-scan-markers" type="checkbox" checked={showScanMarkers} onChange={(e) => setShowScanMarkers(e.target.checked)} className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500" />
                 Scan markers
+              </label>
+              {/* The scene-origin marker. Hiding it leaves the pivot itself
+                  untouched — only the gizmo and its click target go away. On an
+                  empty viewport the marker stands down regardless (it would sit
+                  on top of the "Drag scan files here" hint), so say so rather
+                  than showing a ticked box next to nothing. */}
+              <label
+                className={`flex items-center gap-2 ${sceneHasContent ? 'text-neutral-300 cursor-pointer' : 'text-neutral-500 cursor-default'}`}
+                title={sceneHasContent
+                  ? 'Show the scene-origin marker in the viewport (the pivot itself is unchanged)'
+                  : 'The origin marker is hidden until something is loaded'}
+              >
+                <input data-testid="display-origin-marker" type="checkbox" checked={showOriginMarker} onChange={(e) => setShowOriginMarker(e.target.checked)} className="rounded bg-neutral-700 border-neutral-600 accent-neutral-500" />
+                Origin marker
               </label>
             </div>
           </div>
@@ -18020,7 +20747,7 @@ export default function PointCloudViewer({
         gridAvailable={pendingGridAvailable}
       />
 
-      <BulkImportProgress progress={bulkImportProgress} />
+      <BulkImportProgress progress={bulkImportProgress} onCancel={cancelBulkImport} />
       <BulkImportProgress
         progress={duplicateProgress}
         title="Duplicating scan…"

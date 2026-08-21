@@ -32,6 +32,7 @@ import pytest
 import requests
 
 import main
+from tests.binframe import _create_session_direct, decode_streamed_json
 
 
 def _converter_available() -> bool:
@@ -108,7 +109,7 @@ def _create(base: str, grid: Path, world_shift=None) -> dict:
         body["world_shift"] = list(world_shift)
     r = requests.post(f"{base}/api/cloud/session/create", json=body, timeout=60)
     assert r.status_code == 200, r.text
-    return r.json()
+    return decode_streamed_json(r.content)
 
 
 def test_merge_concatenates_and_spans_both_inputs(server, tmp_path):
@@ -145,12 +146,12 @@ def test_merge_reconciles_different_world_shifts(tmp_path, monkeypatch):
     b = _write_grid(tmp_path / "b.xyz")
     shift_a = [1000.0, 0.0, 0.0]
     shift_b = [1000.5, -3.0, 2.0]
-    sa = loop.run_until_complete(main.create_cloud_session(
+    sa = loop.run_until_complete(_create_session_direct(
         main.CloudSessionCreateRequest(source_path=str(a), ascii_format=GRID_FORMAT, world_shift=shift_a)))["session_id"]
-    sb = loop.run_until_complete(main.create_cloud_session(
+    sb = loop.run_until_complete(_create_session_direct(
         main.CloudSessionCreateRequest(source_path=str(b), ascii_format=GRID_FORMAT, world_shift=shift_b)))["session_id"]
 
-    merged = loop.run_until_complete(main.session_merge(main.SessionMergeRequest(session_ids=[sa, sb])))["merged"]
+    merged = main.session_merge(main.SessionMergeRequest(session_ids=[sa, sb]))["merged"]
     mid = merged["session_id"]
     assert merged["point_count"] == 2000
 
@@ -183,9 +184,9 @@ def test_merge_unions_extra_columns_with_zero_fill(tmp_path, monkeypatch):
         f"{i*0.1:.4f} {j*0.1:.4f} {k*0.1:.4f}"
         for i in range(10) for j in range(10) for k in range(10)
     ) + "\n")
-    sa = loop.run_until_complete(main.create_cloud_session(
+    sa = loop.run_until_complete(_create_session_direct(
         main.CloudSessionCreateRequest(source_path=str(a), ascii_format="x y z deviation")))["session_id"]
-    sb = loop.run_until_complete(main.create_cloud_session(
+    sb = loop.run_until_complete(_create_session_direct(
         main.CloudSessionCreateRequest(source_path=str(b), ascii_format="x y z")))["session_id"]
 
     na = len(main._cloud_sessions[sa].positions)
@@ -194,7 +195,7 @@ def test_merge_unions_extra_columns_with_zero_fill(tmp_path, monkeypatch):
     assert "deviation" in main._cloud_sessions[sa].extras
     assert "deviation" not in main._cloud_sessions[sb].extras
 
-    merged = loop.run_until_complete(main.session_merge(main.SessionMergeRequest(session_ids=[sa, sb])))["merged"]
+    merged = main.session_merge(main.SessionMergeRequest(session_ids=[sa, sb]))["merged"]
     sess = main._cloud_sessions[merged["session_id"]]
 
     assert "deviation" in sess.extras

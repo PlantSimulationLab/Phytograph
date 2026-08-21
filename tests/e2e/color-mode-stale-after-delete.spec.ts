@@ -8,13 +8,17 @@ const WOOD_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.
 const PLAIN_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree-view1.xyz');
 
 // Regression for a recurring bug: a scalar color mode (e.g. wood_class from a
-// segmentation) is GLOBAL state, but the field only exists on the cloud that
-// produced it. After deleting that cloud and importing a different one, the
-// mode stayed 'scalar:wood_class' — a field the new cloud doesn't have — so the
-// renderer fell back to a flat gray/z-height ramp and the dropdown showed a
-// dead value. The fix validates the active scalar selection against the
-// representative cloud and resets to the default ('per-scan') when it's
-// orphaned. This test reproduces the exact reported sequence end-to-end.
+// segmentation) used to be GLOBAL state, but the field only exists on the cloud
+// that produced it. After deleting that cloud and importing a different one,
+// the mode stayed 'scalar:wood_class' — a field the new cloud doesn't have — so
+// the renderer fell back to a flat gray/z-height ramp and the dropdown showed a
+// dead value.
+//
+// The colour mode now lives on the cloud that owns the field, so the selection
+// is deleted along with its cloud and can never be inherited by an unrelated
+// import. What the new cloud shows is simply the scene default — this test
+// asserts the stale field is gone and the dropdown offers a mode the cloud
+// actually has, rather than pinning one specific fallback name.
 test('scalar color mode resets to per-scan after the source cloud is deleted', async () => {
   const { app, page, close } = await launchApp();
 
@@ -60,11 +64,22 @@ test('scalar color mode resets to per-scan after the source cloud is deleted', a
     await expect(plainRow).toBeVisible({ timeout: 20_000 });
 
     // 4. The stale scalar:wood_class mode must NOT survive. With the bug it
-    //    stayed 'scalar:wood_class' (rendering gray); fixed, it falls back to
-    //    the default per-scan color, and the wood_class legend is gone.
+    //    stayed 'scalar:wood_class' (rendering gray); the wood_class legend is
+    //    gone and the dropdown no longer names the dead field.
     await expect(legend).toBeHidden();
     await displayToggle.click();
-    await expect(colorMode).toHaveValue('per-scan');
+    await expect(colorMode).not.toHaveValue('scalar:wood_class');
+
+    // The selected mode must be one the dropdown actually offers — the precise
+    // failure of the old bug was a <select> displaying a value absent from its
+    // own options, which is what made the cloud render gray.
+    const selected = await colorMode.inputValue();
+    const options = await colorMode.locator('option').evaluateAll(
+      (opts) => opts.map(o => (o as HTMLOptionElement).value),
+    );
+    expect(options, `"${selected}" must be a real option`).toContain(selected);
+    // And no scalar option may reference the deleted cloud's field.
+    expect(options.filter(o => o.includes('wood_class'))).toHaveLength(0);
   } finally {
     await close();
   }

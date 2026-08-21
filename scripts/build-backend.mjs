@@ -20,10 +20,11 @@
 // venv/bin/pyinstaller (which can happen if the venv was relocated).
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyDropboxIgnores } from './dropbox-ignore.mjs';
+import { BACKEND_STAMP_FILE, readBackendVersionFromSource } from './backend-version.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -235,6 +236,14 @@ proc.on('exit', (code) => {
   }
   // Clean up PyInstaller's build artifacts; keep only the bundle directory.
   rmSync(join(distPath, 'build'), { recursive: true, force: true });
+  // Stamp the bundle with the BACKEND_VERSION it was built from. The bundle is
+  // otherwise opaque — you can only learn its version by launching it and
+  // hitting /version, which is why a stale one goes unnoticed until every E2E
+  // spec hangs at the backend splash 30s in. With the stamp, launchApp() (and
+  // `npm run check:backend`) can catch it instantly, before spawning anything.
+  const builtVersion = readBackendVersionFromSource();
+  writeFileSync(join(distPath, 'phytograph_backend', BACKEND_STAMP_FILE), `${builtVersion}\n`);
+  console.log(`[build-backend] stamped bundle as version ${builtVersion}`);
   // The bundle directory was just recreated from scratch, which drops the
   // com.dropbox.ignored xattr — re-mark it, or ~1 GB of regenerable output
   // starts syncing (and gets scanned by every backup/AV agent) all over again.

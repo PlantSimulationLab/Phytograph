@@ -47,6 +47,30 @@ four shapes):
   shape's bounding box.
 - **Surface area** and the **number of points** the fit used.
 
+## Shape parameters
+
+The metrics *describe* a crown. The **shape parameters** are what it takes
+to **rebuild** it, and every fit reports them too:
+
+| Shape | Parameters |
+|-------|------------|
+| **Ellipsoid** | `a`, `b`, `c` — the semi-axes along x, y, z. |
+| **Rectangular prism** | `a`, `b`, `c` — the half-extents along x, y, z. |
+| **Cone** | base radius and height. |
+| **Alpha shape** | the alpha radius used, and whether it was auto-grown. |
+
+`a`, `b`, `c` mean the same thing for both box-like shapes — the
+semi-extent along that axis — so they're directly comparable. Each is half
+the corresponding crown dimension, and the shape's **center is the crown
+center**, so the parameters plus the center reproduce the solid exactly.
+
+The alpha shape is the exception, and it's the reason crown exports can
+carry meshes. Its radius controls how the hull is built but doesn't
+describe the result: a concave hull has no analytic form, so its
+**geometry is the parameter set**. That's why an
+[exported crown table](../workflows/fit-crown.md#csv-export) writes a mesh
+file alongside each alpha crown's row, and none for the other three.
+
 ## Fuzzy trimming
 
 Real crowns have the occasional branch shooting well outside the general

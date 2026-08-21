@@ -5,6 +5,12 @@
 Three entry points. All accept the same set of formats — see
 **[File formats](../reference/file-formats.md)** for the full list.
 
+!!! tip "RIEGL raw projects"
+    A RIEGL `.riproject` / `.PROJ` is a *directory* of scan positions, not a file, so it has its
+    own path: **[Import a RIEGL project](import-riegl-project.md)**. Data
+    that has already been through RiSCAN PRO or RiPROCESS should be exported to
+    LAS/E57 and imported normally.
+
 === "Drag and drop"
 
     Drag any supported file from your file manager anywhere onto the
@@ -35,6 +41,8 @@ Three entry points. All accept the same set of formats — see
     - **Mesh** — force, e.g., a vertex-only `.obj` to be read as a mesh
     - **Skeleton** — for `.json` skeleton graphs
     - **Scan XML** — for Helios `.xml` scan/grid definitions
+    - **QSM CSV** — for `.csv` cylinder tables (see
+      [Importing a QSM](#importing-a-qsm))
 
     Use a specific format when auto-detection picks the wrong type. As with
     drag-and-drop, point clouds open the [import wizard](#the-import-wizard)
@@ -71,8 +79,7 @@ the file, with the first rows of real data shown underneath — and a
 dropdown at the top of each column for its role. Auto-detection fills the
 dropdowns in; you correct anything that's wrong before importing:
 
-- **Column roles** — for ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`,
-  `.asc`), each column's dropdown sets its role: **X / Y / Z**,
+- **Column roles** — each column's dropdown sets its role: **X / Y / Z**,
   **Red / Green / Blue**, **Intensity**, **Reflectance**,
   **Timestamp**, **Target Index**, **Target Count**,
   **Scan Row Index**, **Scan Column Index**, **Miss Flag**,
@@ -81,6 +88,38 @@ dropdowns in; you correct anything that's wrong before importing:
   **Label**, and **Skip** is a *singleton* — a cloud has exactly one of each —
   so assigning one to a column removes it from whichever column previously held
   it (that column drops to **Skip**).
+
+    For ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) every column is
+    freely assignable, including X / Y / Z.
+
+    For formats that carry named scalar fields (`.las`, `.laz`, RIEGL projects)
+    the **geometry** columns are fixed by the file, but the scalar fields can be
+    reassigned. This matters because a scalar's name is whatever the exporting
+    software chose: Phytograph recognises the common spellings — `gps_time`,
+    `GpsTime`, `time` and `Timestamp[s]` all resolve to **Timestamp** — but it
+    cannot know that a column called `shot_time` is the same thing. Set its
+    dropdown to **Timestamp** and the tools that need one (Backfill Misses,
+    leaf-area density, multi-return grouping) will find it.
+
+    Reassigning a role only changes how Phytograph reads the column. Your
+    source file is never modified.
+- **Import (skip a column)** — every column except X / Y / Z carries an
+  **Import** checkbox above its role dropdown. Untick it to leave that field
+  out: its preview values grey out, and the column is never read. A skipped
+  field is not stored in the cloud, doesn't appear in the Display panel's
+  *Color by* list, and can't be exported — so unticking the columns you don't
+  need keeps a cloud smaller and its field list shorter. X, Y, and Z have no
+  checkbox because a cloud can't be imported without them.
+
+    The checkbox works for **every** format, including the ones whose roles
+    are fixed (`.ply`, `.pcd`, `.e57`, `.ptx`). For ASCII files it is the same
+    thing as choosing the **Skip** role (the two controls stay in sync).
+
+    Unticking a field that other tools read — **Miss Flag**, the scan grid
+    indices, or the multi-return trio — shows an inline warning naming what
+    stops working (leaf-area density, gap filling, the Hit/Miss coloring).
+    It's still allowed: an all-zero miss flag on a hits-only export is exactly
+    the kind of dead weight worth dropping.
 - **Scalar vs Label** — a **Scalar** column is a continuous measurement
   (intensity, height, timestamp) and colors as a smooth gradient; a
   **Label** column holds class ids (tree id, segment, classification) and
@@ -186,10 +225,15 @@ dropdowns in; you correct anything that's wrong before importing:
   but you can give any scan its own trajectory, and an explicit per-scan choice is
   never overwritten by the default.
 
-For `.ply`, `.pcd`, `.las`, and `.laz`, the column layout is defined inside
-the file, so X/Y/Z and color roles can't be reassigned — but you can still
+For `.ply`, `.pcd`, `.las`, `.laz` and `.ptx`, the column layout is defined
+inside the file, so X/Y/Z and color roles can't be reassigned — but you can still
 preview the fields, rename scalars, and switch any scalar between **Scalar**
-and **Label**.
+and **Label**. For `.las`, `.laz` and RIEGL projects you can additionally assign a
+scalar its true role (see *Column roles* above), which is how you tell Phytograph
+that a field named something it doesn't recognise is really the timestamp,
+reflectance, or a multi-return column. `.e57` is the one format with no sample rows: reading values out
+of it means decoding its binary point data, so the wizard shows the structure
+only.
 
 (A LAS/LAZ or ASCII cloud that already carries per-pulse beam-origin columns —
 `ox`/`oy`/`oz` — needs no trajectory: those ground-truth origins are used
@@ -214,7 +258,21 @@ clouds, use [Stitch](register-compare.md#stitch) after import.
 
 While a large import is in progress a modal shows the file currently being
 read and overall progress, so you know the app is working — reading a
-multi-GB scan from disk can take 30 seconds or more.
+multi-GB scan from disk can take 30 seconds or more. The bar tracks the
+stage the import has reached (reading the source file, loading points into
+memory, building the octree), so it keeps moving even on a single file.
+
+**Cancel** stops the import. This genuinely halts the work — the app tells
+the backend to abandon the run and frees the memory it had allocated,
+rather than just hiding the dialog and letting the import finish out of
+sight. Use it if you picked the wrong file or an import is taking longer
+than you're willing to wait.
+
+When you cancel part-way through a **multi-file** import, the scans that
+already finished are kept (they're complete and correct); a notice tells you
+how many of the selected files made it. Cancelling a Helios scan **XML**
+import is all-or-nothing, matching how that pathway already treats a failed
+scan — nothing from the bundle is added.
 
 Importing a Helios scan **XML** (which can reference several scans at once)
 runs the same wizard, once the referenced point-cloud files are located.
@@ -261,6 +319,13 @@ imports as a point cloud — see
 Both ASCII and binary PLY meshes are read, including per-vertex color; PLY
 meshes carry no textures.
 
+An `.stl` is imported as a mesh in either encoding — ASCII or binary, detected
+from the file's own contents, so binary files written by Blender, MeshLab, CAD
+tools and slicers import directly. Binary STL has an unstandardized per-facet
+color field that different tools write incompatibly; Phytograph reads it only
+for facets that set the field's "color valid" bit, and leaves the mesh
+untinted when no facet does. STL is always **exported** as ASCII.
+
 ### Importing ASCII clouds with custom columns
 
 For `.xyz`, `.txt`, and `.csv` files, auto-detection maps columns by header
@@ -275,9 +340,35 @@ mapping when the file uses a non-standard column order, RGB stored as 0–1
 floats, or a class column that should be categorical. You can color the cloud
 by any scalar field later — see **[Color modes](../reference/color-modes.md)**.
 
+### Importing a QSM
+
+A QSM cylinder CSV — one Phytograph exported, or one from another
+SimpleForest/TreeQSM-family tool — can be imported back as a QSM. It appears in
+the QSM results panel exactly as a freshly built one does, with its shoots and
+ranks intact, so you can color it by **Shoot rank** or **Shoot id**, add leaves,
+or re-export it.
+
+**Export a QSM to CSV and re-import it and you get the same model back** — same
+cylinders, same shoot topology, and the same trunk diameter, height, woody
+volume, and max rank in the results panel. The whole-tree metrics aren't columns
+in the file; they're recomputed from the cylinders when you import.
+
+`.csv` is shared with point clouds, so Phytograph looks at the header row to
+tell them apart: a cylinder table has `branchID` and `branchOrder` columns,
+which no point-cloud CSV does. Drag-and-drop and **Open With** route on that
+automatically. Use **File → Import → QSM CSV…** to skip the check and force a
+file to be read as a QSM — useful for an unusual dialect whose header isn't
+recognized.
+
+An imported QSM has no source point cloud, so it's listed under the file's name
+rather than a scan's, and its coordinates are used exactly as they appear in the
+file. See
+[File formats: QSM cylinder CSV](../reference/file-formats.md#qsm-cylinder-csv)
+for the columns and the requirements on a hand-edited file.
+
 ### Importing scans with sky/miss points
 
-`.e57` and structured `.ply` scans — and a re-imported Helios **scan XML
+`.e57`, `.ptx` and structured `.ply` scans — and a re-imported Helios **scan XML
 bundle**, which carries the scanner `<origin>` and an `is_miss` column — bring
 **sky/miss points** — pulses that hit the sky and returned nothing — which the
 [leaf-area-density inversion](../concepts/leaf-area-density.md) relies on.
@@ -285,66 +376,165 @@ Phytograph recovers and tags them on import. They're hidden by default (their
 true positions are ~20 km away); toggle the **Show misses** button on a scan row
 to draw them in a distinct colour, relocated onto the scan's bounding sphere, so
 you can confirm a scan actually carries miss information. The relocation needs a
-scanner origin — supplied by the E57/PLY pose or the XML bundle's `<origin>`; a
-bare ASCII cloud with no scanner geometry shows its misses at their true
-far-field position instead. See
+scanner origin — supplied by the E57/PTX/PLY pose or the XML bundle's
+`<origin>`; a bare ASCII cloud with no scanner geometry shows its misses at their
+true far-field position instead. See
 **[Sky/miss points](../reference/file-formats.md#skymiss-points)**.
 
 ### Scans that bring their own parameters
 
 When a point-cloud file records the scanner's geometry in its header, importing
 it on its own auto-fills the scan's **scan parameters** — no need to enter them
-by hand. `.e57` brings the scanner origin and orientation, plus the angular
-sweep and grid resolution when present; `.pcd` brings a sensor origin from its
+by hand. A file holding several scanner setups (a multi-block `.ptx`, a
+multi-scan `.e57`) imports as **one scan per setup**, each with its own pose and
+grid — see
+**[Files holding several scan positions](../reference/file-formats.md#files-holding-several-scan-positions)**.
+`.e57` brings the scanner origin and orientation, plus the angular
+sweep and grid resolution when present; `.ptx` brings the registered scanner
+position and the grid resolution from its header, and its angular sweep is
+measured back off the scan grid; `.pcd` brings a sensor origin from its
 `VIEWPOINT` field. Anything the file omits stays at its default. (Loading a
 Helios XML still takes precedence — its `<scan>` definitions win.) See
 **[Scan parameters recovered from the point-cloud file](../reference/file-formats.md#scan-parameters-recovered-from-the-point-cloud-file)**.
 
 ## Export
 
-Select an object in the Scene panel and click the purple **Export** button
-in the toolbar (or **File → Export…**) to open the **Export** window. It is
-context-sensitive: a point cloud shows the format chooser + column picker, a
-mesh or skeleton shows its formats, and any scans in the scene show the scan
-export section. You pick the destination in a native file dialog after setting
-the options.
+Choose **File → Export…** (<kbd>⌘/Ctrl</kbd>+<kbd>S</kbd>), or
+run *Export* from the command palette, to open the **Export** window.
+
+It opens on an **object list** holding *every* point cloud in the scene, each
+with a checkbox. Whatever you had selected in the Scans panel starts checked —
+but that is only a starting point, and checking or unchecking a row here never
+changes the viewport selection. What you check then decides the rest of the
+window: a single plain cloud shows the format chooser + column picker for that
+one file, while several objects (or any scan) show the batch controls described
+under [Exporting several objects](#exporting-several-objects). A selected mesh
+or skeleton shows its own formats instead. Once the options are set you pick the
+destination in a native dialog: a **file** for the exports that write exactly one
+(a single plain cloud, a mesh, a skeleton), a **folder** for the batch export,
+which writes one file per object.
 
 ### Point cloud formats
 
-Pick a **Format** in the Export window, then click **Export**. For the text
-formats (XYZ / TXT / CSV) a **column picker** appears: check which fields to
-write (x, y, z, colour, intensity, scalars, labels) and **drag the rows to
-reorder** them — the chosen order becomes the file's column order. The binary /
-structured formats (LAS / LAZ / PLY / OBJ) use their own fixed schema, so the
-column picker is hidden for them.
+Pick a **Format** in the Export window, then click **Export**. Every format
+except OBJ shows a **field picker**: check which fields to write (x, y, z, colour,
+intensity, scalars, labels). Everything is checked by default, so a plain export
+stays lossless and you prune from there. The picker lists **every field the cloud
+actually holds** — including scalars that came from a LAS extra dimension or an
+import-wizard column, and the class labels a segmentation added.
+
+For XYZ / TXT / CSV / PLY you can also **drag the rows to reorder** them; the
+chosen order becomes the file's column order. **LAS / LAZ** identify their
+dimensions by name rather than by position, so order doesn't apply there and the
+drag handle is omitted.
+
+**OBJ** stores vertex coordinates only and cannot carry colour or scalars at all,
+so it has no picker.
+
+!!! note "What LAS/LAZ cannot leave out"
+
+    Each scalar becomes a named LAS *extra dimension*, so any scalar can be
+    unchecked. Two standard dimensions are different:
+
+    - **X/Y/Z** are the point record itself.
+    - **Intensity** is present in every LAS point format, so it cannot be
+      removed — unchecking it could only write zeros. Both are shown locked.
+
+    Unchecking **colour** is a real omission: it selects LAS point format 1,
+    which has no RGB dimension. (Because the point format is a fixed menu rather
+    than a free choice of dimensions, dropping RGB also drops GPS time.)
 
 | Format | Carries |
 |---|---|
-| `.las` / `.laz` | x, y, z, intensity, color, classification — LAS standard fields only |
-| `.ply` | All fields including arbitrary scalars |
-| `.xyz` | x, y, z only, with a `#`-prefixed column header line |
-| `.txt` | x, y, z plus color / intensity / scalars, with a `#`-prefixed column header |
-| `.csv` | Same fields as `.txt` but comma-separated with a plain header row |
-| `.obj` | Vertices only (no faces) — useful for piping into other tools |
+| `.las` / `.laz` | x, y, z, intensity, colour, plus the scalars you select as **named LAS extra dimensions** |
+| `.ply` | The columns you select, each declared as a named `property` |
+| `.xyz` | The columns you select, whitespace-separated, with no header line |
+| `.txt` | The columns you select, whitespace-separated, with a `#`-prefixed column header |
+| `.csv` | Same columns as `.txt` but comma-separated with a plain header row |
+| `.obj` | Vertices only (no faces) — geometry cannot carry scalars in OBJ |
 
-The `.xyz` and `.txt` exports write a leading `#`-prefixed column header
-(the CloudCompare convention, e.g. `# x y z is_miss`). Phytograph's own
-importer reads that header to auto-map columns on re-import, and most
-ASCII readers (CloudCompare included) skip the `#` line as a comment.
+The `.txt` export writes a leading `#`-prefixed column header (the CloudCompare
+convention, e.g. `# X Y Z is_miss`). Phytograph's own importer reads that header
+to auto-map columns on re-import, and most ASCII readers (CloudCompare included)
+skip the `#` line as a comment. Bare `.xyz` carries no header, so its extra
+columns are positional — use `.txt` or `.csv` when you want the field names
+preserved.
 
-If you need to round-trip with full fidelity, use `.ply` — it preserves
-everything Phytograph knows about the cloud.
+For a full-fidelity round trip, use `.las` / `.laz` or `.ply`. LAS/LAZ writes
+each scalar as a named extra dimension, so re-importing the file restores the
+same named fields (and is far smaller and faster than text for a large cloud).
 
-### Exporting scans
+!!! note "Scalar fields are no longer dropped"
 
-Whenever the scene holds **scans** — clouds that carry scanner parameters
-(origin, field of view, beam optics) — the Export window shows a **Scan export**
-section. It lists every scan with a checkbox, so you can export one, several,
-or all of them at once. The checklist is pre-checked to match the scans
-currently selected in the Scans panel, but you can check or uncheck any scan
-without changing the viewport selection. The export always writes **one data
-file per scan** (named `<base>_<scanID>.<ext>`); you pick the destination
-folder in the file dialog after setting the options.
+    Before v0.65.0 the text exports wrote only x/y/z (plus colour and intensity
+    for `.txt`/`.csv`) and LAS/LAZ wrote only x/y/z and colour — every other
+    field was silently lost, and the column picker offered only x/y/z for a
+    normally-imported cloud. If you have exports from an earlier version that
+    are missing their scalars, re-export them.
+
+After you click **Export**, a save dialog asks where to write the file. Once you
+confirm the destination the Export window closes and a **progress pill** appears
+at the top of the viewer, showing a live percentage as the cloud is written (a
+25-million-point text export takes roughly half a minute). The pill has a
+**cancel** button — stopping an export leaves no partial file behind. When the
+write finishes the pill clears and a toast reports the file name and point
+count, so there's no need to click Export twice. Cancelling the save dialog
+writes nothing and reports nothing.
+
+The pill names the stage it is on. For the text formats that is mostly
+*Formatting*, which is where nearly all their time goes; `.las`/`.laz` step
+through *Computing bounds*, *Packing coordinates*, *Packing colours*, *Packing
+intensity*, *Packing scalar fields* and *Writing file* instead (the packing
+stages appear only for the fields the cloud actually has). Binary formats are
+several times faster than text for the same cloud, so their pill moves through
+those stages quickly.
+
+### Exporting several objects
+
+Check more than one object in the list — or any single **scan** (a cloud
+carrying scanner parameters: origin, field of view, beam optics) — and the
+window switches to **Export objects**, which writes **one data file per checked
+object**.
+
+Because that is many files from one name, this export does not ask for a file
+name in a Save dialog. You type a **Base name** in the window and the button
+asks only for a destination **folder** — and above the button the window lists
+the files it is about to write, so nothing is a surprise:
+
+```
+Base name  [ myscan ]
+
+Will write 3 files:
+  myscan_ScanPos002.laz
+  myscan_ScanPos001.laz
+  myscan_ScanPos014.laz
+```
+
+Each file is named for the object it holds, so the exported set maps back to the
+Scans panel rather than to the order the scans were added. Characters a file
+system won't take (spaces, slashes, `:` and friends) become underscores, and two
+objects sharing a name get a `_2`, `_3` … suffix. Exporting a **single** object
+is the exception — it is written under the base name alone, with nothing
+appended. An **XML + data** bundle also writes `<base>.xml` next to its per-scan
+data files.
+
+The list holds every cloud in the scene, scans and plain imports alike, with a
+**Select all** checkbox above it and a count of how many of them are checked.
+Plain clouds (a `.xyz` / `.las` / `.ply` import with no scanner metadata) can be
+written to any of the data formats, so exporting a whole folder's worth of
+clouds in one pass is a single check-all and click.
+
+Two outputs *do* need scan geometry, and the rows they can't write grey out with
+the reason on hover rather than vanishing:
+
+- the **XML + data** bundle needs a scanner origin and angular sweep, so it is
+  offered only when something checked is a scan;
+- **PTX** needs a complete raster grid, so it skips plain clouds and non-raster
+  patterns (a Livox rosette has no `Ntheta × Nphi` grid).
+
+**Select all** only ever checks the rows the current output can actually write,
+and switching between outputs is non-destructive — a cloud greyed out by XML
+mode is still checked when you switch back to **Data only**.
 
 **Output mode** — the two toggles at the top:
 
@@ -356,15 +546,27 @@ folder in the file dialog after setting the options.
   Helios triangulation) again. It is the round-trip-faithful path for synthetic
   and edited scans.
 - **Data only** — writes just the per-scan data files, no XML, and reveals a
-  **Format** chooser: `LAS`, `LAZ`, `PLY`, `XYZ`, `CSV`, `TXT`, `OBJ`, or
-  `E57`. Use this to round-trip a scan into any supported format for another
+  **Format** chooser: `LAS`, `LAZ`, `PLY`, `XYZ`, `CSV`, `TXT`, `OBJ`, `E57`, or
+  `PTX`. Use this to round-trip a scan into any supported format for another
   tool.
+
+!!! note "Exporting to PTX"
+    PTX is a *complete raster*: it writes one line per grid cell, so the file
+    always has `Ntheta x Nphi` data rows and a cell with no return is recorded as
+    an all-zero row. That completeness is what lets a PTX be re-imported with its
+    sky/miss points recovered. Two consequences: the scan needs a grid — either
+    real row/column indices (from an E57/PTX import) or a raster scan's
+    **Ntheta x Nphi** resolution — and a non-raster pattern (Risley/Livox) can't be
+    exported to PTX at all. **Include miss points** has no effect on a PTX,
+    because an excluded miss is written as the same empty cell. Points are written
+    in the scanner's local frame with the registered scanner position in the
+    header, so the file opens in the right place in Cyclone or CloudCompare.
 
 **Columns** — for the text formats (XYZ / CSV / TXT, and the XML bundle's
 `.xyz` data), a column picker lets you check which fields to write and **drag to
 reorder** them. `x`, `y`, `z` are required and locked on. Binary / structured
-formats (LAS / LAZ / PLY / OBJ / E57) use their own fixed schema, so the column
-picker is hidden for them.
+formats (LAS / LAZ / PLY / OBJ / E57 / PTX) use their own fixed schema, so the
+column picker is hidden for them.
 
 **Include miss points** — when on (default), the sky/miss points and the
 `is_miss` flag are written, so misses survive the round-trip. The `is_miss`
@@ -384,23 +586,47 @@ ticked and the saved XML carries the grid back out, ready to drive
 again. Leaving the box unticked (or checking it but adding no grids) writes no
 `<grid>` blocks.
 
-The per-scan file split is always kept (the XML metadata references each data
-file by scan). Edits (crop, translation, filtering) are baked into the exported
-coordinates — what you see is what gets written. If the scene holds no scans
-with parameters, the section does not appear.
+The per-object file split is always kept (in XML mode the metadata references
+each data file by scan). Edits (crop, translation, filtering) are baked into the
+exported coordinates — what you see is what gets written.
 
-After you choose a save location the export dialog closes and a small **progress
-pill** appears at the top of the viewer while the scans are written (a large
-bundle can take a few seconds). The pill clears and a toast confirms the file
+After you choose a save location the export dialog closes and a **progress pill**
+appears at the top of the viewer, showing a live percentage as each object is
+written — it names the object it is on (*Writing plot_A (2/5)*), and the objects
+are weighted by point count, so a batch holding one big cloud and three small
+ones doesn't jump to 75% and stall. The pill has a **cancel** button; stopping a
+batch removes the files it had already written, so you never find half a bundle
+in the destination folder. In **XML + data** mode the bar advances per scan while
+the scans are loaded, then parks on *Writing Helios scan bundle* for the single
+write that produces the files. The pill clears and a toast confirms the file
 count when the write finishes — there's no need to click Export twice.
 
 ### Mesh formats
 
+Click a format and pick the destination in the save dialog; the file is written
+when you confirm, and a toast reports what was saved.
+
 | Format | Carries |
 |---|---|
-| `.obj` | Vertices, faces, normals, vertex colors |
-| `.ply` | Same as `.obj` plus arbitrary per-vertex scalars |
+| `.obj` | Vertices, faces, normals, UVs and materials (see below) |
+| `.ply` | Vertices, faces and per-vertex color |
 | `.stl` | Triangles only (no color or topology metadata) |
+
+A textured mesh — a generated plant, or an OBJ you imported with its materials —
+exports to `.obj` as a **bundle**: the `.obj`, a `.mtl` material library, and one
+image per textured material, all written together in the folder you chose. That
+is what lets the model round-trip: re-importing the `.obj` picks the `.mtl` and
+its images back up and the plant comes back textured. Move the three together;
+an `.obj` on its own re-imports as plain grey geometry.
+
+Organs with no texture (petioles, internodes, stems) keep their color too — they
+are grouped by color into materials in the same `.mtl`, since OBJ has no portable
+per-vertex color. A mesh with only vertex colors and no textures therefore still
+exports an `.obj` + `.mtl` pair; one with no color information at all exports as
+a single `.obj`.
+
+Generated plants also write their Helios structure XML (`<name>_helios.xml`)
+beside the mesh.
 
 ### Skeleton formats
 
@@ -411,6 +637,9 @@ count when the write finishes — there's no need to click Export twice.
 
 Use `.json` if you want to do further analysis programmatically. Use
 `.obj` if you want a quick visualization in Blender or MeshLab.
+
+As with the other object types, clicking a format opens a save dialog; the file
+is written where you choose and a toast confirms it.
 
 ## What's next
 

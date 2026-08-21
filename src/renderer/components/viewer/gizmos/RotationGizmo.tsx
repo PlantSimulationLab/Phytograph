@@ -1,6 +1,7 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
 
 // Rotation gizmo: three colored rings (X red, Y green, Z blue) drawn around the
 // pivot. Dragging a ring rotates the cloud about that world axis. The emitted
@@ -47,7 +48,9 @@ function RotationRing({
   const color = hovered ? AXIS_HOVER[axis] : AXIS_COLOR[axis];
 
   return (
+    // UI overlay, not content — see lib/sceneOverlay.ts.
     <mesh
+      {...SCENE_OVERLAY}
       position={center}
       rotation={rotation}
       onPointerOver={(e: ThreeEvent<PointerEvent>) => { e.stopPropagation(); setHovered(true); gl.domElement.style.cursor = 'grab'; }}
@@ -140,7 +143,9 @@ export function RotationGizmo({ center, size, onRotate, onDragStart, onDragEnd }
 
   const radius = size;
   return (
-    <group>
+    // UI overlay, not content — see lib/sceneOverlay.ts. On the root group so
+    // every ring, handle and the pivot marker below inherit it.
+    <group {...SCENE_OVERLAY}>
       <RotationRing axis="x" center={center} radius={radius} onDragStart={handleAxisDragStart} />
       <RotationRing axis="y" center={center} radius={radius} onDragStart={handleAxisDragStart} />
       <RotationRing axis="z" center={center} radius={radius} onDragStart={handleAxisDragStart} />

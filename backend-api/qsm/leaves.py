@@ -681,6 +681,33 @@ CURATED_LEAF_TEXTURES: List[str] = [
     "RedbudLeaf.png",
 ]
 
+# Bark counterpart, surfaced in the QSM "Color by > Texture" picker. This is the
+# COMPLETE set of bark images the plantarchitecture plugin ships (all JPG); the
+# plugin reuses them across species (walnut borrows apple bark, pistachio borrows
+# olive). Allow-listed for the same reason as the leaves: the name arrives from the
+# renderer, so an unchecked value would be a path-traversal vector.
+CURATED_BARK_TEXTURES: List[str] = [
+    "AlmondBark.jpg",
+    "AppleBark.jpg",
+    "GrapeBark.jpg",
+    "OliveBark.jpg",
+    "WesternRedbudBark.jpg",
+]
+
+# Image MIME types we serve to the renderer, which needs the real type for the
+# `data:` URL it builds. The bark assets are JPG, so hardcoding image/png (as the
+# older plant-texture path does) would be wrong.
+_MIME_BY_SUFFIX = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+}
+
+
+def mime_for_path(path: Path) -> str:
+    """MIME type for an image path, defaulting to JPEG (the bark library's format)."""
+    return _MIME_BY_SUFFIX.get(path.suffix.lower(), "image/jpeg")
+
 
 def _plantarch_texture_dir() -> Path:
     """Resolve the plantarchitecture textures directory (dev + bundled).
@@ -782,6 +809,37 @@ def resolve_builtin_texture(name: str) -> Tuple[str, str, float]:
     data = path.read_bytes()
     w, h = read_png_dimensions(data)
     return base, base64.b64encode(data).decode("utf-8"), _leaf_aspect(w, h)
+
+
+def resolve_builtin_bark(name: str) -> Tuple[str, str, str]:
+    """Resolve a curated bark texture name to (basename, base64, mime).
+
+    Deliberately returns NO aspect ratio, unlike ``resolve_builtin_texture``. A
+    leaf's aspect sizes its quad, but bark tiling is driven entirely by a
+    world-space tile size chosen in the renderer, so the image's pixel dimensions
+    are irrelevant. (``read_png_dimensions`` also parses only PNG headers, and
+    every bark asset is JPG — calling it here would return a meaningless 1x1.)
+
+    Raises ``ValueError`` if the name is not allow-listed or the file is missing.
+    """
+    base = os.path.basename(name)
+    if base not in CURATED_BARK_TEXTURES:
+        raise ValueError(f"Unknown builtin bark texture: {name}")
+    path = _plantarch_texture_dir() / base
+    if not path.is_file():
+        raise ValueError(f"Builtin bark texture not found on disk: {base}")
+    data = path.read_bytes()
+    return base, base64.b64encode(data).decode("utf-8"), mime_for_path(path)
+
+
+def read_bark_texture_file(path: Path) -> Tuple[str, str, str]:
+    """Read a user-uploaded bark image to (basename, base64, mime)."""
+    if not path.is_file():
+        raise ValueError(f"Texture file not found: {path}")
+    if path.suffix.lower() not in _MIME_BY_SUFFIX:
+        raise ValueError(f"Unsupported image format: {path.suffix} (use PNG or JPEG)")
+    data = path.read_bytes()
+    return path.name, base64.b64encode(data).decode("utf-8"), mime_for_path(path)
 
 
 def read_texture_file(path: Path) -> Tuple[str, str, float]:

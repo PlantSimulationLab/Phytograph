@@ -23,11 +23,21 @@ test('Layer2: UTM cloud frames with displayOffset and crops in world space', asy
     await expect(wizard).toBeVisible({ timeout: 30_000 });
 
     // The shift is auto-suggested + ON for large coords; turn it OFF.
+    //
+    // Wait for the toggle rather than testing `count()`. The whole shift block
+    // only renders once the backend preview has resolved (`cfg && !cfg.loading`),
+    // and that preview handler sets `shiftEnabled: sug != null` — so before it
+    // lands there is nothing to uncheck, and a `count()` guard silently SKIPS
+    // the uncheck and imports with the shift ON. That is not a hypothetical:
+    // the cloud then arrives with small local coords and a zero displayOffset,
+    // and the waitForFunction below (which needs |bounds.min[0]| > 1e4) times
+    // out 20s later — a failure that points nowhere near the real cause.
+    // Deterministic in the E2E container, intermittent on macOS, purely a race
+    // against how fast /api/preview answers.
     const shiftToggle = page.getByTestId('import-wizard-shift-enabled');
-    if (await shiftToggle.count()) {
-      if (await shiftToggle.isChecked()) await shiftToggle.uncheck();
-      await expect(shiftToggle).not.toBeChecked();
-    }
+    await expect(shiftToggle).toBeVisible({ timeout: 30_000 });
+    if (await shiftToggle.isChecked()) await shiftToggle.uncheck();
+    await expect(shiftToggle).not.toBeChecked();
     const importBtn = page.getByTestId('import-wizard-import');
     await expect(importBtn).toBeEnabled({ timeout: 30_000 });
     await importBtn.click();

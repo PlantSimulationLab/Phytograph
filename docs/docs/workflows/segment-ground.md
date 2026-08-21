@@ -10,8 +10,8 @@ labels the points the cloth settles onto as ground.
 ## Segment
 
 1. Select a single point cloud.
-2. Click **Segment Ground** (the layers icon in the tool column), or open
-   the command palette and choose **Segment Ground**.
+2. Click **Segment Ground** (the points-split-by-a-ground-plane icon in the
+   tool column), or open the command palette and choose **Segment Ground**.
 3. Adjust the parameters if needed (hover the **?** beside any parameter for
    a quick explanation). The parameters are seeded automatically from the
    cloud's size **and shape** each time you open the panel — a few centimetres
@@ -21,7 +21,10 @@ labels the points the cloth settles onto as ground.
    cloth, but a large *sloped* tile (e.g. an aerial scan of a hillside forest)
    gets a **finer cloth, low rigidness, and slope smoothing on** so the cloth
    can bend to follow the slope instead of draping flat and catching only the
-   valley floor.
+   valley floor. Relief that is very large compared with the footprint — a
+   single tall tree standing on flat ground, say — is read as *vegetation*
+   rather than terrain, and keeps the flat-ground recipe: a conforming cloth
+   would climb the trunk.
    (CSF's parameters are absolute distances, so a fixed default that suits a
    1 m plant scan would label nearly everything as non-ground on a 50 m
    field — and a coarse, stiff cloth tuned for a flat field bridges over a
@@ -31,7 +34,9 @@ labels the points the cloth settles onto as ground.
       finer ground relief but is slower; for pot/plot-scale scans a few
       centimetres works well.
     - **Ground tolerance (m)** — how far a point can sit *above* the draped
-      cloth and still count as ground. Raise it to pull low plant material —
+      cloth and still count as ground. The box is greyed out while **Measure
+      from the scan** (below) is ticked, which it is by default; untick that to
+      set the tolerance by hand. Raise it to pull low plant material —
       weeds, ground cover, inter-row vegetation — into the ground class;
       lower it to keep more of the plant base separate. Because it's an
       absolute height above the cloth, field- or orchard-scale scans need
@@ -40,18 +45,19 @@ labels the points the cloth settles onto as ground.
       tree canopy as non-ground, whereas the seeded ~0.5 m keeps them
       separate. Nudge it up until the weeds flip to ground without the trees
       following.
-    - **Measure from the scan** — tick this to have the tolerance measured
+    - **Measure from the scan** — on by default: the tolerance is measured
       from your data instead of seeded from the cloud's size, and see
-      [below](#why-ground-points-come-out-as-non-ground) for when you need it.
-      The measured value is reported when the run finishes and filled into the
-      tolerance box, so you can nudge it from there on a later run.
+      [below](#why-ground-points-come-out-as-non-ground) for why. The measured
+      value is reported when the run finishes and filled into the tolerance
+      box, so you can untick this and nudge it from there on a later run.
     - **Rigidness (1–3)** — cloth stiffness. Use **3** for flat ground,
       lower (down to **1**) for undulating or sloped terrain so the cloth can
       bend to follow the slope instead of bridging over it.
     - **Slope smoothing** — enables CSF's slope-handling pass. Leave it off for
       flat ground; turn it on (together with a low rigidness) for undulating or
       steep terrain. It's auto-enabled when the cloud's vertical relief is
-      large relative to its footprint.
+      large relative to its footprint — but not when it's so large that the
+      height clearly comes from vegetation rather than terrain.
 4. (Optional) Tick **Split into ground + plant clouds** to also produce two
    new clouds — ground and non-ground — alongside the classified original.
 5. Click **Segment Ground**. While it runs, the button shows a spinner and a
@@ -83,9 +89,11 @@ If you ticked **Split**, two extra clouds appear in the scan list —
 skeleton extraction / triangulation on the non-ground cloud alone.
 
 !!! note "Large clouds"
-    Clouds imported from XYZ files stream from disk as an octree. Ground
-    segmentation re-reads the original file at full resolution, so the
-    classification covers every point — not a downsampled subset.
+    Large clouds stream to the viewer as an octree, but the *data* lives in
+    an in-memory session that holds every point at full precision. Ground
+    segmentation runs on that in-RAM array — the source file is never
+    re-read — so the classification covers every point, not a downsampled
+    subset.
 
 ## Why ground points come out as non-ground
 
@@ -111,6 +119,13 @@ disagree badly on field-scale tiles.
 off the draped cloth and cuts where the ground returns end and vegetation
 begins. Because the measurement is taken relative to the cloth, terrain slope
 is already accounted for — it works the same on a hillside as on flat ground.
+
+It also handles the opposite extreme. On a clean scan of a single tree over
+flat ground the ground returns form a very thin band with empty air above it,
+and the nearest thing that looks like the "top" of the band is the canopy
+metres overhead — which would place the cut far too high and swallow the
+bottom of the trunk into the ground class. The measurement recognises that
+shape and keeps the cut on the ground band where it belongs.
 
 If you'd rather set it by hand, look at the point where the ground stops and
 the canopy starts: a tolerance anywhere in that empty gap gives the same

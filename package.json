@@ -1,7 +1,7 @@
 {
   "name": "phytograph",
   "private": true,
-  "version": "0.61.0",
+  "version": "0.71.0",
   "description": "Phytograph desktop app.",
   "author": "Phytograph",
   "main": "dist-main/main.js",
@@ -17,6 +17,8 @@
     "build": "npm run gen:version && npm run build:renderer && npm run build:main && npm run build:preload && npm run dropbox:ignore",
     "build:backend": "node scripts/build-backend.mjs",
     "dropbox:ignore": "node scripts/dropbox-ignore.mjs",
+    "prune:releases": "node scripts/prune-release-assets.mjs",
+    "prune:releases:dry": "node scripts/prune-release-assets.mjs --dry-run",
     "build:potree-converter": "node scripts/build-potree-converter.mjs",
     "start": "electron .",
     "build:output-dir": "node scripts/build-output-dir.mjs",
@@ -30,8 +32,9 @@
     "test:unit:watch": "vitest",
     "test:unit:coverage": "vitest run --coverage",
     "test:backend": "cd backend-api && ./venv/bin/pytest",
-    "test:e2e": "playwright test",
-    "test:e2e:profile": "node scripts/monitor-resources.mjs --timeline perf/e2e-timeline.jsonl -- npx playwright test",
+    "check:backend": "node scripts/check-backend-bundle.mjs",
+    "test:e2e": "npm run check:backend && playwright test",
+    "test:e2e:profile": "npm run check:backend && node scripts/monitor-resources.mjs --timeline perf/e2e-timeline.jsonl -- npx playwright test",
     "test:smoke-packaged": "node scripts/smoke-packaged-app.mjs",
     "test": "npm run typecheck && npm run test:unit && npm run test:backend && npm run test:e2e"
   },
@@ -148,6 +151,12 @@
         "icon": "build/icon"
       },
       {
+        "ext": "ptx",
+        "name": "PTX Structured Scan",
+        "role": "Viewer",
+        "icon": "build/icon"
+      },
+      {
         "ext": "obj",
         "name": "OBJ Mesh",
         "role": "Viewer",
@@ -207,6 +216,13 @@
           "icon.ico",
           "icon-dock.png"
         ]
+      },
+      {
+        "from": "docker",
+        "to": "docker",
+        "filter": [
+          "riegl/**/*"
+        ]
       }
     ],
     "mac": {
@@ -238,9 +254,11 @@
           ]
         }
       ],
-      "signingHashAlgorithms": [
-        "sha256"
-      ]
+      "signtoolOptions": {
+        "signingHashAlgorithms": [
+          "sha256"
+        ]
+      }
     },
     "nsis": {
       "oneClick": false,
