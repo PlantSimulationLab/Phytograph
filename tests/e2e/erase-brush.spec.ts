@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { clickCanvasAt, dismissToasts, expectPointsHitCanvas } from './helpers/canvasClick';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -99,6 +100,14 @@ test('erase brush: painting square stamps and applying removes points (octree)',
   // through the cloud; the drag removes a strict subset (not a full wipe).
   const cx = box.x + box.width * 0.5;
   const cy = box.y + box.height * 0.5;
+  // Every point of the swath must land on the canvas: a toast or panel over any
+  // of them silently eats that stamp. See helpers/canvasClick.ts.
+  await dismissToasts(page);
+  await expectPointsHitCanvas(page, [
+    { x: cx - box.width * 0.08, y: cy },
+    { x: cx, y: cy },
+    { x: cx + box.width * 0.08, y: cy },
+  ], 'erase brush swath');
   await page.mouse.move(cx - box.width * 0.08, cy);
   await page.mouse.down();
   await page.mouse.move(cx, cy);
@@ -159,7 +168,7 @@ test('erase brush: Clear Strokes discards the preview without erasing', async ()
   if (!box) throw new Error('viewer canvas has no bounding box');
 
   // Click the centre of the viewport (where the cylinder projects) to stamp.
-  await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
 
   await expect
     .poll(async () => Number(await panel.getAttribute('data-stamp-count')), { timeout: 5_000 })
@@ -204,7 +213,7 @@ test('erase brush: E toggles erase mode within the open tool', async () => {
   await expect(panel).toHaveAttribute('data-erase-active', 'true');
 
   // A click on the cloud stamps (view frozen → click erases, not orbit).
-  await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
   await expect
     .poll(async () => Number(await panel.getAttribute('data-stamp-count')), { timeout: 5_000 })
     .toBeGreaterThan(0);

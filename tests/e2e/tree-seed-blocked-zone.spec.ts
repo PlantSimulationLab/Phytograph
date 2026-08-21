@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
+import { dismissToasts } from './helpers/canvasClick';
 import { resetToFreshScene } from './helpers/resetApp';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'multi_tree.xyz');
@@ -97,6 +98,32 @@ test('seeding marks the panels that swallow seed clicks, and drops the mode clea
   await expect(zone).toHaveCount(0);
 });
 
+/**
+ * Assert a point is owned by the seeding overlay itself.
+ *
+ * The generic expectPointsHitCanvas guard doesn't apply here: while seeding,
+ * the overlay legitimately sits ON TOP of the canvas and is the click target.
+ * What must NOT be there is a toast or a panel. Clears toasts first, then
+ * checks the topmost element is the overlay (or a child of it).
+ */
+async function expectPointOwnedBySeedOverlay(
+  page: LaunchedApp['page'],
+  point: { x: number; y: number },
+): Promise<void> {
+  await dismissToasts(page);
+  const owner = await page.evaluate(({ x, y }) => {
+    const el = document.elementFromPoint(Math.round(x), Math.round(y)) as HTMLElement | null;
+    if (!el) return 'null';
+    const overlay = el.closest('[data-testid="tree-seed-overlay"]');
+    return overlay ? 'tree-seed-overlay' : (el.dataset.testid || el.tagName.toLowerCase());
+  }, point);
+  expect(
+    owner,
+    `expected the seeding overlay to own (${Math.round(point.x)},${Math.round(point.y)}), ` +
+    `but the topmost element was "${owner}" — the click would not place a seed`,
+  ).toBe('tree-seed-overlay');
+}
+
 test('the seeding overlay never swallows the panel it is driven from', async () => {
   const { page } = session;
   const { panel } = await startSeeding(session);
@@ -111,7 +138,12 @@ test('the seeding overlay never swallows the panel it is driven from', async () 
   const overlay = page.getByTestId('tree-seed-overlay');
   const box = await overlay.boundingBox();
   if (!box) throw new Error('tree-seed-overlay has no bounding box');
-  await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.55);
+  const seedAt = { x: box.x + box.width * 0.3, y: box.y + box.height * 0.55 };
+  // Unlike most viewport specs this one clicks the seeding OVERLAY, which is
+  // meant to be topmost — so the guard is that the overlay (not a toast, and
+  // not a panel) owns the pixel. A toast is full-height and reaches here.
+  await expectPointOwnedBySeedOverlay(page, seedAt);
+  await page.mouse.click(seedAt.x, seedAt.y);
   await expect(panel.getByTestId('tree-seed-count')).toHaveText('1 seed');
 
   await panel.getByText('Clear seeds').click();
@@ -127,8 +159,12 @@ test('cursor over a panel is marked refused and the click places no seed', async
   const box = await overlay.boundingBox();
   if (!box) throw new Error('tree-seed-overlay has no bounding box');
 
-  // A seed in reachable viewport registers — the baseline.
-  await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.55);
+  // A seed in reachable viewport registers — the baseline. Guarded, because if
+  // a toast were sitting here the baseline would fail and read as a seeding
+  // regression rather than an occluded click.
+  const seedAt = { x: box.x + box.width * 0.3, y: box.y + box.height * 0.55 };
+  await expectPointOwnedBySeedOverlay(page, seedAt);
+  await page.mouse.click(seedAt.x, seedAt.y);
   await expect(panel.getByTestId('tree-seed-count')).toHaveText('1 seed');
   await expect(zone).toHaveAttribute('data-cursor-blocked', 'false');
 

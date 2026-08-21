@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { clickCanvasAt } from './helpers/canvasClick';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -69,7 +70,9 @@ test('erase masks instantly (count drops with no rebuild), then bake applies', a
   }, maxPx ?? '150');
 
   const box = (await page.locator('canvas').first().boundingBox())!;
-  await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  // Guarded: a toast or panel over the centre eats the stamp, and the failure
+  // then surfaces as a zero stamp-count. See helpers/canvasClick.ts.
+  await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
   await expect
     .poll(async () => Number(await panel.getAttribute('data-stamp-count')), { timeout: 5_000 })
     .toBeGreaterThan(0);
@@ -133,7 +136,9 @@ test('undo last deletion restores the masked points', async () => {
   }, maxPx ?? '150');
 
   const box = (await page.locator('canvas').first().boundingBox())!;
-  await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  // Guarded: a toast or panel over the centre eats the stamp, and the failure
+  // then surfaces as a zero stamp-count. See helpers/canvasClick.ts.
+  await clickCanvasAt(page, { x: box.x + box.width * 0.5, y: box.y + box.height * 0.5 }, 'erase stamp');
   await expect
     .poll(async () => Number(await panel.getAttribute('data-stamp-count')), { timeout: 5_000 })
     .toBeGreaterThan(0);

@@ -1111,10 +1111,35 @@ jobs:
           set -euo pipefail
           arm64=manifests/latest-mac-arm64/latest-mac.yml
           x64=manifests/latest-mac-x64/latest-mac.yml
-          if [ ! -f "$arm64" ] || [ ! -f "$x64" ]; then
-            echo "Fewer than two macOS manifests present — nothing to merge."
-            ls -laR manifests || true
+          # Missing manifests used to `exit 0` quietly. That was the wrong
+          # signal: this job is `if: always()`, so on a partial macOS release it
+          # runs anyway, and exiting clean left the release carrying whichever
+          # SINGLE-ARCH latest-mac.yml electron-builder had already uploaded —
+          # published, green, and silently broken for the other architecture's
+          # auto-updater. (v0.70.0 shipped exactly that for ~2 hours: an
+          # arm64-only manifest, after the Intel job failed on a transient npm
+          # ECONNRESET.) Fail loudly instead, so the release is visibly
+          # incomplete until the missing build is re-run.
+          #
+          # The one legitimate skip is a release with no macOS jobs at all
+          # (neither manifest) — nothing to merge and nothing to break.
+          if [ ! -f "$arm64" ] && [ ! -f "$x64" ]; then
+            echo "No macOS manifests at all — no macOS build ran; nothing to merge."
             exit 0
+          fi
+          if [ ! -f "$arm64" ] || [ ! -f "$x64" ]; then
+            missing=$([ -f "$arm64" ] && echo x64 || echo arm64)
+            echo "::error title=Incomplete macOS release::Only one macOS manifest is present (missing: $missing)."
+            echo ""
+            echo "The published latest-mac.yml is therefore SINGLE-ARCH: $missing users'"
+            echo "auto-updater will find no matching asset. The $missing build must be"
+            echo "re-run before this release is usable:"
+            echo ""
+            echo "    gh run rerun ${{ github.run_id }} --failed"
+            echo ""
+            echo "That re-runs only the failed job and re-triggers this merge."
+            ls -laR manifests || true
+            exit 1
           fi
 
           pip install --quiet pyyaml
