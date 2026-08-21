@@ -69,12 +69,17 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // Start a run. The run button flips to the disabled spinner state and the
     // Cancel button appears beside it.
     //
-    // Timeouts here are sized for CI, not for this laptop. The same grid costs
+    // Timeouts here are sized for CI, not for this laptop: the same grid costs
     // ~1.3 s locally and 20-30 s on the Linux runner (measured against the
     // sibling generate-dem specs), so every budget below has to cover a cancel
-    // that lands mid-compute on a loaded, 2-worker runner. This test passed on
-    // CI at 48.3 s on 2026-08-03 and failed at ~72 s on 2026-08-21 with the
-    // suite grown around it — it was always the marginal one in the file.
+    // that lands mid-compute on a loaded, 2-worker runner.
+    //
+    // These were widened while chasing a CI failure that turned out NOT to be a
+    // timing problem at all — the legend was swallowing the Run click (see
+    // legend-does-not-block-panels.spec.ts). They are kept because the old
+    // 5s/10s budgets were laptop-sized on their own merits, but note that a
+    // failure here is far more likely to be something eating the click than the
+    // op genuinely running long.
     await runButton.click();
     await expect(cancelButton).toBeVisible({ timeout: 30_000 });
     await expect(runButton).toBeDisabled();
