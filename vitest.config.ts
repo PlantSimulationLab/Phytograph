@@ -24,6 +24,11 @@ export default defineConfig({
       // src/shared holds the cross-process contracts (e.g. the tool-menu
       // manifest and its parity guard against the renderer's registry).
       'src/shared/**/*.test.ts',
+      // Build/release scripts that carry real decision logic — currently the
+      // notarization retry predicate, which must never retry a genuine Apple
+      // rejection. Not in the coverage scope below (that stays renderer-only
+      // by design); these are correctness pins, not a coverage target.
+      'scripts/**/*.test.mjs',
     ],
     coverage: {
       provider: 'v8',

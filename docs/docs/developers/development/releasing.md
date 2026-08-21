@@ -68,6 +68,46 @@ because these binaries are signed and notarized, recreating one means
 re-running the full release pipeline against the old tag. Always dry-run
 first when changing the policy.
 
+## When one platform fails
+
+The four platform builds run as a matrix with `fail-fast: false`, so one
+failure leaves the other three published. Re-run just the broken one:
+
+```bash
+gh run rerun <run-id> --failed
+```
+
+That re-runs only the failed job, leaves the successful jobs' already-uploaded
+assets untouched, and re-triggers the dependent `merge-latest-mac`.
+
+**Then check `latest-mac.yml` before calling the release done.** The merge job
+is `if: always()`, so on a partial macOS release it still runs — and
+electron-builder will already have uploaded a *single-arch* manifest from
+whichever macOS job succeeded. Download it and confirm it lists all four macOS
+files (arm64 zip + dmg, x64 zip + dmg):
+
+```bash
+gh release download v<version> -p latest-mac.yml -D /tmp && cat /tmp/latest-mac.yml
+```
+
+An arm64-only manifest means Intel users' auto-updater finds no matching asset.
+The merge *script* is guarded (it refuses to clobber unless both manifests are
+present), but that guard leaves the single-arch file in place rather than
+fixing it.
+
+Transient failures are common enough to expect: v0.70.0's Intel job failed
+twice — once on `ECONNRESET` from the npm registry, once on an Apple notary
+timeout (`NSURLErrorDomain Code=-1001`) — then passed unchanged on the third
+attempt. `scripts/notarize.cjs` now retries transport failures up to three
+times with backoff, while failing immediately on a genuine notarization
+*verdict* (`status: Invalid`/`Rejected`), so a rejected bundle still fails fast
+instead of burning three upload cycles. That policy is pinned by
+`scripts/notarize.test.mjs`.
+
+Verify a release by its artifacts, not by job status: assets present, the
+manifest contents above, and the job's own **Verify macOS notarization** and
+**Smoke-test packaged app** steps.
+
 ## Required GitHub Secrets
 
 | Secret | Purpose |
