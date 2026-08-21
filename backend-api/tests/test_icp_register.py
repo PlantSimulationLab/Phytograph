@@ -305,3 +305,73 @@ def _json_tail(raw: bytes) -> bytes:
         json_len = struct.unpack_from("<I", raw, off + 4)[0]
         off += 8 + json_len
     return raw[off:]
+
+
+# --------------------------------------------------------------------------
+# Correspondence window is scaled from point spacing, not cloud extent
+# --------------------------------------------------------------------------
+
+def test_correspondence_distance_tracks_spacing_not_extent():
+    """Denser points must get a TIGHTER window, at unchanged extent.
+
+    The old rule was `robust_diagonal * 0.05`, which ignores density entirely:
+    two clouds filling the same box got the same window whether points sat 2 cm
+    or 20 cm apart. On every real scan measured that resolved to ~100x the point
+    spacing -- wide enough on a repetitive planting to pair a point with the
+    wrong plant row.
+
+    The fixture is scan-SHAPED (clustered plants over a wide plot) rather than a
+    uniform cube. That matters: for uniformly filled volumes 20x the spacing
+    always exceeds the extent cap, so a cube would measure the cap instead of
+    the rule. Real scans are dense relative to their footprint -- measured on
+    three orchards, the spacing term wins (0.22-0.41 m against caps of
+    1.3-2.0 m).
+    """
+    def planting(per_plant, seed):
+        rng = np.random.default_rng(seed)
+        return np.vstack([
+            np.array([i * 4.0, j * 4.0, 1.5]) + rng.normal(0, 0.5, size=(per_plant, 3))
+            for i in range(7) for j in range(7)
+        ])
+
+    sparse, dense = planting(300, 5), planting(6000, 5)
+
+    diag_sparse = main._robust_cloud_diagonal(sparse)
+    diag_dense = main._robust_cloud_diagonal(dense)
+    assert diag_sparse == pytest.approx(diag_dense, rel=0.1)
+
+    w_sparse = main._auto_correspondence_distance(sparse, diag_sparse)
+    w_dense = main._auto_correspondence_distance(dense, diag_dense)
+
+    assert w_dense < w_sparse, (
+        f"denser cloud got a window of {w_dense:.3f} m against the sparse "
+        f"cloud's {w_sparse:.3f} m at the same extent -- the rule is still "
+        "ignoring point density"
+    )
+
+
+def test_correspondence_distance_never_exceeds_the_old_extent_rule():
+    """A sparse cloud must not get a window wider than the plot itself."""
+    rng = np.random.default_rng(7)
+    sparse = rng.uniform(0, 4, size=(200, 3))       # very few points, wide gaps
+    diagonal = main._robust_cloud_diagonal(sparse)
+    assert (main._auto_correspondence_distance(sparse, diagonal)
+            <= diagonal * 0.05 + 1e-9)
+
+
+def test_correspondence_distance_falls_back_when_spacing_is_unmeasurable():
+    """Too few points to measure spacing => the previous rule, not a guess."""
+    tiny = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    assert main._median_point_spacing(tiny) is None
+    assert main._auto_correspondence_distance(tiny, 20.0) == pytest.approx(1.0)
+
+
+# The row-hop failure itself is NOT reproduced here. A synthetic planting was
+# tried and the fix made no difference to it -- the bug needs real scan
+# characteristics (a ~100:1 near-to-far density gradient over a 150 m plot, with
+# 5.2 m rows) that a generated fixture did not capture, and a test that passes
+# with the fix reverted proves nothing. It is covered instead by
+# `test_raster_correlation.py::test_second_orchard_is_not_regressed_by_peach_tuning`
+# and the GrapeX benchmark, which run against real scans. The unit tests above
+# pin the RULE (window follows spacing, capped by extent); the real-data tests
+# pin the OUTCOME.

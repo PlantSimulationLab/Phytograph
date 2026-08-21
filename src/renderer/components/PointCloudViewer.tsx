@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import { getSettings } from '../lib/store';
 import { resolveTargets, resolveDeleteIds, anyTargetVisible, buildDeleteLabel } from '../lib/bulkActions';
@@ -9072,6 +9072,11 @@ export default function PointCloudViewer({
       /** Extra sentence appended to the toast. A callback rather than a string
        *  so the caller can fill it in from the response it just received. */
       extraDetail?: () => string;
+      /** Suppress the per-pair success toast. Set when a caller applies several
+       *  scans in a row and reports once for the whole set -- one toast per
+       *  scan would bury the summary that actually matters. Errors still
+       *  surface: a failure the user cannot see is a different problem. */
+      silent?: boolean;
     },
   ) => {
     // Inputs come from the Align dialog (explicit target/source) or, as a
@@ -9328,6 +9333,7 @@ export default function PointCloudViewer({
         // reporting success.
         const toastLabel = options?.label ?? 'Cloud Alignment';
         const pair = `Aligned "${sourceCloud.data.fileName || 'Cloud'}" to "${targetCloud.data.fileName || 'Cloud'}".`;
+        if (options?.silent) return;
         const extra = options?.extraDetail?.() ?? '';
         const detail = extra ? ` ${extra}` : '';
         showToast({
@@ -9438,6 +9444,127 @@ export default function PointCloudViewer({
       extraDetail: () => confidenceNote,
     });
   }, [handleCloudToCloudICP]);
+
+  // Register three or more scans as a SET, cross-checked by loop closure.
+  //
+  // Not an optimisation over looping the pairwise call: it registers every pair
+  // and then asks whether the poses agree with each other. That question cannot
+  // be asked of a single pair, and it is the only thing that catches a
+  // row-shifted alignment on a repetitive planting — such a pose lands plant on
+  // plant and scores BETTER than the truth on every residual measure.
+  const handleMultiScanRegister = useCallback(async (
+    targetId: string, sourceIds: string[],
+  ) => {
+    const targetCloud = clouds.find(c => c.id === targetId);
+    const sourceClouds = sourceIds
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is NonNullable<typeof c> => !!c);
+    if (!targetCloud || sourceClouds.length < 2) return;
+
+    const ctrl = new AbortController();
+    icpAbortRef.current = ctrl;
+    icpRunIdRef.current = null;
+    setIsRunningICP(true);
+    setIcpProgress(null);
+
+    try {
+      // Index 0 is the reference; the backend keys its results by these indices.
+      const ordered = [targetCloud, ...sourceClouds];
+      const payloads = ordered.map(c => buildPointSource(c));
+
+      // The backend takes EITHER a list of sources or a list of inline arrays,
+      // not a mix, so a single inline cloud forces every scan inline. Session
+      // sources are far cheaper (no megabytes of JSON), hence the preference.
+      const allSourced = payloads.every(p => p.kind === 'source');
+      const request: MultiScanRegisterRequest = allSourced
+        ? { scans: payloads.map(p => (p as Extract<PointSourcePayload, { kind: 'source' }>).source) }
+        : {
+            scan_points: payloads.map(p => (p.kind === 'source'
+              // Mixed set: this cloud has no in-RAM positions to send.
+              ? []
+              : collectHitPoints(p.data).points.flat())),
+          };
+      if (!allSourced && request.scan_points?.some(a => a.length === 0)) {
+        showToast({ type: 'error', title: 'Auto-Register',
+          message: 'Cannot mix streamed and in-memory clouds in one multi-scan run.' });
+        return;
+      }
+
+      const response = await multiScanRegister({
+        ...request, reference: 0,
+      }, ctrl.signal,
+        (p, msg) => setIcpProgress({ label: msg, value: p }),
+        (id) => { icpRunIdRef.current = id; });
+
+      if (!response.success) {
+        showToast({ type: 'error', title: 'Auto-Register',
+          message: response.error ?? 'Registration failed' });
+        return;
+      }
+
+      const matrices = response.transformation_matrices ?? {};
+      const unresolved = new Set(response.unresolved_scans ?? []);
+      let applied = 0;
+
+      // Apply one scan at a time through the SAME path the pairwise tool uses,
+      // so the session/octree and in-RAM branches, the scan-origin update and
+      // the undo entry all behave identically here.
+      for (let i = 1; i < ordered.length; i++) {
+        if (unresolved.has(i)) continue;
+        const flat = matrices[String(i)];
+        if (!flat || flat.length !== 16) continue;
+        await handleCloudToCloudICP(targetId, ordered[i].id, {
+          label: 'Auto-Register',
+          runRegistration: async () => ({
+            success: true,
+            transformation_matrix: flat,
+          } as ICPRegistrationResponse),
+          silent: true,
+        });
+        applied++;
+      }
+
+      const withheld = unresolved.size;
+      const variant = response.variant;
+      const how = variant
+        ? ` Matched on ${variant.mode === 'height' ? 'canopy height' : 'canopy pattern'}.`
+        : '';
+      if (withheld > 0) {
+        // Withheld scans are the honest outcome, not a partial failure: their
+        // alignments contradicted the rest of the set.
+        showToast({
+          type: 'warning',
+          title: 'Auto-Register',
+          message: `Registered ${applied} scan${applied === 1 ? '' : 's'}. `
+            + `${withheld} could not be placed consistently and ${withheld === 1 ? 'was' : 'were'} left alone.`
+            + how,
+        });
+      } else if (response.validated) {
+        showToast({
+          type: 'success',
+          title: 'Auto-Register',
+          message: `Registered ${applied} scans; every alignment agrees with the others.` + how,
+        });
+      } else {
+        showToast({
+          type: 'success', title: 'Auto-Register',
+          message: `Registered ${applied} scan${applied === 1 ? '' : 's'}.` + how,
+        });
+      }
+    } catch (error) {
+      if ((error as Error)?.name === 'AbortError') {
+        showToast({ type: 'info', title: 'Auto-Register', message: 'Cancelled' });
+      } else {
+        showToast({ type: 'error', title: 'Auto-Register',
+          message: (error as Error)?.message ?? 'Registration failed' });
+      }
+    } finally {
+      setIsRunningICP(false);
+      setIcpProgress(null);
+      icpAbortRef.current = null;
+      icpRunIdRef.current = null;
+    }
+  }, [clouds, buildPointSource, handleCloudToCloudICP, showToast]);
 
   // Mesh-to-mesh ICP alignment
   // Mesh-to-mesh ICP. Inputs are picked in the MeshAlignDialog and passed in
@@ -17670,7 +17797,16 @@ export default function PointCloudViewer({
         clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color }))}
         initialSelectedIds={selectedIds}
         isRunning={isRunningICP}
-        onRegister={(targetId, sourceId, opts) => { void handleAutoRegister(targetId, sourceId, opts); }}
+        onRegister={(targetId, sourceIds, opts) => {
+          // Three or more scans (reference + two) form a closed loop, which is
+          // what lets the alignments validate each other. Two go down the
+          // cheaper pairwise path -- there is no loop to check there anyway.
+          if (sourceIds.length >= 2) {
+            void handleMultiScanRegister(targetId, sourceIds);
+          } else if (sourceIds.length === 1) {
+            void handleAutoRegister(targetId, sourceIds[0], opts);
+          }
+        }}
       />
       <SceneTypeMismatchDialog
         mismatch={sceneMismatch}

@@ -38,7 +38,9 @@ interface AutoRegisterDialogProps {
   clouds: AutoRegisterCloudOption[];
   initialSelectedIds?: Set<string>;
   isRunning?: boolean;
-  onRegister: (targetId: string, sourceId: string, options: AutoRegisterOptions) => void;
+  /** `sourceIds` may hold more than one scan: three or more in total are
+   *  registered as a set so their alignments can validate each other. */
+  onRegister: (targetId: string, sourceIds: string[], options: AutoRegisterOptions) => void;
 }
 
 /** Scene type decides the ALGORITHM, so it is asked first and asked plainly.
@@ -69,7 +71,7 @@ export function AutoRegisterDialog({
   isOpen, onClose, clouds, initialSelectedIds, isRunning, onRegister,
 }: AutoRegisterDialogProps) {
   const [targetId, setTargetId] = useState<string>('');
-  const [sourceId, setSourceId] = useState<string>('');
+  const [sourceIds, setSourceIds] = useState<Set<string>>(new Set());
   const [sceneType, setSceneType] = useState<SceneType>('agriculture');
   const [useHeading, setUseHeading] = useState(true);
   const [anchorMethod, setAnchorMethod] = useState<AnchorMethod>('crown');
@@ -83,7 +85,10 @@ export function AutoRegisterDialog({
       ? clouds.filter(c => initialSelectedIds.has(c.id)).map(c => c.id)
       : [];
     setTargetId(seeded[0] ?? '');
-    setSourceId(seeded[1] ?? '');
+    // Everything else the user had selected moves onto it. Seeding the whole
+    // selection matters: three or more scans unlock the loop check, and a user
+    // who selected four clouds means to register four.
+    setSourceIds(new Set(seeded.slice(1)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
@@ -102,12 +107,19 @@ export function AutoRegisterDialog({
   );
 
   useEffect(() => {
-    if (sourceId && sourceId === targetId) setSourceId('');
-  }, [targetId, sourceId]);
+    if (targetId && sourceIds.has(targetId)) {
+      const next = new Set(sourceIds);
+      next.delete(targetId);
+      setSourceIds(next);
+    }
+  }, [targetId, sourceIds]);
 
   if (!isOpen) return null;
 
-  const canRun = !!targetId && !!sourceId && targetId !== sourceId && !isRunning;
+  const canRun = !!targetId && sourceIds.size > 0 && !isRunning;
+  // Three or more scans form a closed loop, which is the only way a
+  // wrong-but-well-fitting alignment can be detected at all.
+  const validated = sourceIds.size >= 2;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
@@ -127,8 +139,8 @@ export function AutoRegisterDialog({
           <p className="text-xs text-neutral-400">
             Finds the alignment automatically, even when the clouds start far apart or
             rotated. The <span className="text-neutral-200 font-medium">target</span> stays
-            fixed and the <span className="text-neutral-200 font-medium">source</span> moves
-            onto it.
+            fixed and the other scans move onto it. Select three or more and they
+            are registered as a set, each alignment checked against the others.
           </p>
           <ObjectPicker
             data-testid="auto-register-target-picker"
@@ -141,13 +153,30 @@ export function AutoRegisterDialog({
           />
           <ObjectPicker
             data-testid="auto-register-source-picker"
-            label="Source (moves)"
+            label="Scans to move"
             items={sourceItems}
-            selectedIds={sourceId ? new Set([sourceId]) : new Set()}
-            onChange={(s) => setSourceId([...s][0] ?? '')}
-            mode="single"
+            selectedIds={sourceIds}
+            onChange={setSourceIds}
+            mode="multi"
             emptyMessage="No point clouds available."
           />
+
+          {/* State plainly what the extra scans buy, because the difference is
+              not cosmetic: with two scans a wrong alignment is undetectable. */}
+          <p
+            data-testid="auto-register-validation-note"
+            className={`text-[11px] rounded px-2 py-1.5 ${validated
+              ? 'text-emerald-300/90 bg-emerald-500/10'
+              : 'text-amber-300/90 bg-amber-500/10'}`}
+          >
+            {validated
+              ? `Registering ${sourceIds.size + 1} scans together — each alignment is `
+                + 'cross-checked against the others, and any that disagree are reported '
+                + 'rather than applied.'
+              : 'With two scans there is nothing to cross-check against. On a repetitive '
+                + 'planting a wrong alignment can fit better than the right one, so add a '
+                + 'third overlapping scan when you can.'}
+          </p>
 
           <label className="flex items-start gap-2 text-xs text-neutral-300">
             <input
@@ -245,7 +274,7 @@ export function AutoRegisterDialog({
           <button
             data-testid="auto-register-run"
             onClick={() => {
-              onRegister(targetId, sourceId, { sceneType, useHeading, anchorMethod, estimator, voxelSize });
+              onRegister(targetId, [...sourceIds], { sceneType, useHeading, anchorMethod, estimator, voxelSize });
               onClose();
             }}
             disabled={!canRun}

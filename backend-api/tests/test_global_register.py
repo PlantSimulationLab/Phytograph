@@ -872,3 +872,41 @@ def test_registers_across_two_scanner_positions(scanned_canopy):
         "every method displaced two already-co-registered views — "
         + ", ".join(f"{m}: {r:.2f}°/{t:.3f}m (anchors {anchors[m]})"
                     for m, (r, t) in attempts.items()))
+
+
+# --------------------------------------------------------------------------
+# A heading prior must CONSTRAIN the search, not replace it
+# --------------------------------------------------------------------------
+
+def test_yaw_prior_constrains_the_search_instead_of_skipping_it():
+    """A supplied heading must not send the source 180 degrees the wrong way.
+
+    `prefer_refine_with_prior` originally defaulted True, which meant "a prior
+    is available, so skip the coarse search and let plain ICP handle it". That
+    was justified by a measurement against RiSCAN transforms reconstructed from
+    the registration report -- a reconstruction later proved wrong.
+
+    Measured against ground truth recovered exactly (per-return gps_time
+    correspondence, sub-millimetre), skipping the search leaves 3 of 5 real
+    peach-orchard pairs a full 180 degrees flipped: unseeded ICP cannot tell
+    which end of a near-symmetric row it started from, and a flipped row still
+    lands canopy-on-canopy so residual-based checks rate it as fine.
+
+    A single row is the right fixture precisely BECAUSE it is nearly symmetric
+    under a 180-degree turn -- that symmetry is what the prior has to break.
+    """
+    scene = _with_ground(_orchard_row(count=6, spacing=4.0, jitter=0.10))
+    applied = _rigid(_rot_z(170.0), (3.0, -2.0, 0.0))
+    target, source = _independent_views(scene, applied, keep=0.7, seed=3)
+
+    # The scanner reports its heading to within a few degrees; round it hard so
+    # the test does not secretly depend on a perfect prior.
+    result = _register(target, source, yaw_prior_deg=170.0, yaw_search_deg=30.0)
+    assert result["success"], result.get("error")
+
+    _, rot_err = _pose_error(result["transformation_matrix"], applied)
+    # A 180-degree flip is the failure this guards; anything near it must fail.
+    assert rot_err < 15.0, (
+        f"recovered pose is {rot_err:.1f} deg from truth -- a heading prior was "
+        f"supplied, so the search should have been constrained to it, not skipped"
+    )

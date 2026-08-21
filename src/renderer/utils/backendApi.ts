@@ -2981,6 +2981,71 @@ export interface GlobalRegisterResponse extends ICPRegistrationResponse {
  * Longer timeout than plain ICP: the anchor stage may run ground/tree
  * segmentation over both clouds before any matching happens.
  */
+/** Register a SET of scans together, cross-checked by loop closure.
+ *
+ *  Prefer this over repeated `globalRegisterCloudToCloud` calls whenever three
+ *  or more overlapping scans are available. Pairwise registration cannot tell a
+ *  correct pose from a wrong-but-well-fitting one on a repetitive planting — a
+ *  row-shifted alignment lands plant on plant and scores BETTER on residual.
+ *  Composing poses around a closed loop of scans exposes that: the error does
+ *  not cancel around the cycle. */
+export interface MultiScanRegisterRequest {
+  scans?: BackendPointSource[];
+  scan_points?: number[][];
+  /** Index of the scan the others are registered onto; it does not move. */
+  reference?: number;
+  scene_type?: SceneType;
+  scene_type_confirmed?: boolean;
+  /** Try several matching settings and keep whichever yields a self-consistent
+   *  set of alignments. The right setting differs by scene and cannot be picked
+   *  from any single pair. */
+  select_variant?: boolean;
+  refine_icp?: boolean;
+}
+
+export interface MultiScanLoop {
+  scans: number[];
+  translation_error: number;
+  rotation_error: number;
+  closed: boolean;
+}
+
+export interface MultiScanRegisterResponse {
+  success: boolean;
+  error?: string;
+  reference?: number;
+  /** Scan index (as a string key) -> row-major 4x4. Scans that could not be
+   *  placed consistently are ABSENT here and listed in `unresolved_scans`. */
+  transformation_matrices?: Record<string, number[]>;
+  unresolved_scans?: number[];
+  loops?: MultiScanLoop[];
+  loops_checked?: boolean;
+  loops_consistent?: boolean;
+  loops_localised?: boolean;
+  suspect_pairs?: number[][];
+  variant?: { cell: number | null; mode: string; worst_loop: number | null; tried?: unknown[] };
+  /** False when there was no cycle to check (fewer than three scans), so the
+   *  result carries exactly the trust of a pairwise one. */
+  validated?: boolean;
+}
+
+export async function multiScanRegister(
+  request: MultiScanRegisterRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<MultiScanRegisterResponse> {
+  console.log('Multi-scan registration -', (request.scans?.length ?? request.scan_points?.length ?? 0), 'scans');
+  // Every pair is registered, so this is markedly slower than a single pair.
+  try {
+    return await fetchJsonWithProgress<MultiScanRegisterResponse>(
+      '/api/multi/register', request, signal, 1800000, onProgress, onRunId);
+  } catch (error) {
+    console.error('Multi-scan registration failed:', error);
+    throw error;
+  }
+}
+
 export async function globalRegisterCloudToCloud(
   request: GlobalRegisterRequest,
   signal?: AbortSignal,

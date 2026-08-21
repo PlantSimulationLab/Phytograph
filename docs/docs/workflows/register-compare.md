@@ -142,15 +142,20 @@ reliable, and it is on by default.
 The reason is worth knowing. An orchard scanned from within looks much the same
 from several directions, so a search over all possible rotations can find an
 alignment that fits the points *better* than the correct one while being
-completely wrong. Measured against RiSCAN PRO on a real peach orchard, an
-unconstrained search produced a tighter point-to-point fit than RiSCAN's answer
-while sitting 149° away from it. A lower residual does not mean a better
-alignment.
+completely wrong. A lower residual does not mean a better alignment — on a
+regular planting a row-flipped result still lands plant on plant.
 
-Knowing roughly which way the scanner was pointing removes those false matches
-from consideration entirely. Untick the box only if the recorded heading is
-missing or you know it to be wrong — registration then searches every
-orientation, which is slower and more easily fooled on repetitive plantings.
+The heading is used to *narrow the search*, not to skip it. That distinction
+matters: an earlier version treated a known heading as "these clouds are already
+close enough" and went straight to fine alignment. Measured against RiSCAN PRO's
+own registration of a real peach orchard, that left three of five scan pairs a
+full 180° out, because fine alignment on its own cannot tell which end of a
+symmetric row it started from. Narrowing the search to the recorded heading
+instead brought every pair to within 0.1°.
+
+Untick the box only if the recorded heading is missing or you know it to be
+wrong — registration then searches every orientation, which is slower and more
+easily fooled on repetitive plantings.
 
 ### If a run looks wrong
 
@@ -166,6 +171,50 @@ normally use.
 
 If Auto-Register warns that the result may be wrong, the first thing to try is a
 different strategy — they fail in different ways.
+
+### Why three scans beat two
+
+On a regular planting a wrong alignment is not a poor fit. A result shifted by a
+whole number of rows lands plant on plant, so it can score *better* than the
+correct one — measured on a real vineyard, a pose four rows out fitted more
+tightly than the right answer. Nothing measurable from a single pair of clouds
+separates those two cases, so with only two scans a warning is the most honest
+output available.
+
+Three or more overlapping scans break the tie. Going around a closed loop of
+scans has to bring you back where you started, and a row-shifted pose does not
+cancel around that loop even though it fits its own pair well. Measured across
+three orchards: loops whose alignments are all correct close to within about a
+tenth of a metre, while a loop containing a bad one misses by several metres.
+
+Two practical consequences:
+
+- **Scan so the positions overlap in a loop**, not as a chain. Three scans that
+  all see some common ground can validate each other; three in a line cannot.
+- **With four or more scans the culprit is identified**, not just detected. The
+  good alignments close their own loops, so the bad one is the alignment no
+  passing loop vouches for. With exactly three, the problem is detected but any
+  of the three could be responsible.
+
+If a scan cannot be placed consistently, Auto-Register reports it as unresolved
+rather than putting it somewhere plausible-looking.
+
+### Registering a whole set at once
+
+Given three or more scans, registering them **together** rather than one pair at
+a time lets the loop check above do its work. As well as validating the result,
+it can recover scenes that pair-at-a-time registration gets wrong: the matching
+settings that suit a tall orchard are not the ones that suit a low vineyard, and
+the only reliable way to tell which is right for your scene is to try them and
+see which produces a set of alignments that agree with each other.
+
+On a real vineyard this was the difference between failing completely and
+registering to about 0.1 m — the correct settings were not the ones that scored
+best on any individual pair.
+
+The cost is that every pair has to be registered, so time grows with the square
+of the scan count. Expect a few minutes for a handful of scans and appreciably
+longer for a dozen.
 
 ### Choosing what to match on
 

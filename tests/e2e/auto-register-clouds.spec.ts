@@ -160,6 +160,26 @@ test('Auto-Register works with the trunk-bases method on octree-backed clouds', 
     .toBeLessThan(1.0);
 });
 
+test('Auto-Register says whether the scans can validate each other', async () => {
+  const { page } = session;
+  await importBoth(page);
+
+  await runTool(page, 'cloud-auto-register');
+  const dialog = page.getByTestId('auto-register-dialog');
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByTestId('auto-register-target-picker').getByTestId('picker-row').nth(0).click();
+  await dialog.getByTestId('auto-register-source-picker').getByTestId('picker-row').nth(1).click();
+
+  // Two scans cannot cross-check each other: on a repetitive planting a wrong
+  // alignment fits BETTER than the right one, and no measurement on a single
+  // pair can tell them apart. The dialog has to say so rather than imply the
+  // result was verified.
+  const note = dialog.getByTestId('auto-register-validation-note');
+  await expect(note).toBeVisible();
+  await expect(note).toContainText(/nothing to cross-check/i);
+});
+
 test('Auto-Register dialog offers every anchor method and defaults to crowns', async () => {
   const { page } = session;
   await importBoth(page);
