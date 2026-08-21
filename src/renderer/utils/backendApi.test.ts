@@ -23,6 +23,7 @@ import {
   icpRegisterCloudToCloud,
   icpRegisterMeshToCloud,
   icpRegisterMeshToMesh,
+  globalRegisterCloudToCloud,
   importPointCloudLasLaz,
   importPointCloudByPath,
   importTexturedMesh,
@@ -1128,6 +1129,54 @@ describe('alignment / ICP', () => {
         source_indices: [],
       }),
     ).rejects.toThrow('no convergence');
+  });
+
+  it('icpRegisterCloudToCloud forwards init_transform for coarse-to-fine refinement', async () => {
+    const spy = mockFetchOk({ success: true, fitness: 0.95, rmse: 0.01 });
+    const init = [1, 0, 0, 2, 0, 1, 0, 3, 0, 0, 1, 0, 0, 0, 0, 1];
+    await icpRegisterCloudToCloud({
+      target_points: [0, 0, 0], source_points: [1, 0, 0], init_transform: init,
+    });
+    const [, reqInit] = spy.mock.calls[0];
+    // The coarse pose must reach the backend verbatim; a dropped or reshaped
+    // matrix would silently degrade to identity-init ICP, which is exactly the
+    // local-minimum failure Auto-Register exists to avoid.
+    expect(JSON.parse(reqInit?.body as string).init_transform).toEqual(init);
+  });
+
+  it('globalRegisterCloudToCloud POSTs to /api/c2c/global-register with its options', async () => {
+    const spy = mockFetchOk({ success: true, fitness: 0.8, rmse: 0.02, confident: true });
+    const req = {
+      target_points: [0, 0, 0],
+      source_points: [1, 0, 0],
+      anchor_method: 'trunk' as const,
+      estimator: 'fgr' as const,
+      voxel_size: 0.25,
+    };
+    await globalRegisterCloudToCloud(req);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:8008/api/c2c/global-register');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toEqual(req);
+  });
+
+  it('globalRegisterCloudToCloud surfaces the low-confidence flag', async () => {
+    // An unregisterable pair is a normal 200 response with confident=false, not
+    // an error — the UI warns instead of failing.
+    mockFetchOk({
+      success: true, fitness: 0.05, rmse: 1.2,
+      confident: false, num_anchors_target: 1, num_anchors_source: 0,
+    });
+    const res = await globalRegisterCloudToCloud({ target_points: [], source_points: [] });
+    expect(res.success).toBe(true);
+    expect(res.confident).toBe(false);
+  });
+
+  it('globalRegisterCloudToCloud surfaces error', async () => {
+    mockFetchError(500, { detail: 'anchor extraction failed' });
+    await expect(
+      globalRegisterCloudToCloud({ target_points: [], source_points: [] }),
+    ).rejects.toThrow('anchor extraction failed');
   });
 });
 

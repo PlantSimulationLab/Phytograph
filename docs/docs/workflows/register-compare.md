@@ -1,7 +1,14 @@
 # Register & compare
 
 Align two datasets and measure how well they match. Phytograph supports
-three flavors of ICP plus simple multi-cloud stitching.
+automatic registration (no starting guess needed), three flavors of ICP for
+refining an alignment, and simple multi-cloud stitching.
+
+**Which one do I want?**
+
+- Clouds are **far apart or rotated** → [Auto-Register](#auto-register-when-clouds-start-far-apart)
+- Clouds are **nearly aligned already** → [Cloud-to-cloud ICP](#cloud-to-cloud-icp)
+- Clouds are **already correct** and you want one file → [Stitch](#stitch)
 
 ## Stitch
 
@@ -74,10 +81,218 @@ merge itself.
     preserved (attributes present on only some inputs are carried through and
     filled with zeros for the clouds that lacked them).
 
+## Auto-register (when clouds start far apart)
+
+**Align Clouds (ICP)** below can only *polish* a pair that already starts
+close together. **Auto-Register** handles the case it can't: two scans of the
+same plot that are arbitrarily rotated or offset, with no manual
+pre-alignment.
+
+The difference is what gets matched. Matching raw points fails on a planting,
+because every plant's foliage looks like every other plant's — the match
+happily snaps the source onto a *neighbouring* plant, one row-spacing off,
+and still reports a good score.
+
+Auto-Register instead matches the **overall pattern of the planting**: it looks
+down on each cloud from above and finds the rotation and shift that make the two
+patterns line up. Because it uses the whole cloud at once, it does not depend on
+recognising the same individual plants in both scans — which matters, since two
+scan positions typically detect only about half the same plants, the rest being
+hidden behind others.
+
+1. Open **Auto-Register Clouds** from the **Pre-processing** toolbar group
+   (sparkles icon), **Tools → Pre-processing**, or the command palette
+   (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>).
+2. Pick the **target** (stays fixed) and the **source** (moves onto it).
+   Either may be a streamed cloud.
+3. Choose the **scene type** — see below. This is the important one.
+4. For vegetated scenes, choose what to **match on**.
+5. Click **Register**.
+
+### Scene type
+
+This picks the *method*, not a preset, so it is worth getting right:
+
+| Scene type | What it does |
+|------------|--------------|
+| **Crops or orchard** | Matches plant by plant. For plantings set out on a grid or in rows. |
+| **Natural woodland** | Matches plant by plant, tuned for irregular spacing. |
+| **Buildings or built site** | Matches **surface shape** instead. Built scenes have no per-plant landmark to find, so plant matching does not apply. |
+
+If the cloud looks nothing like the type you chose — say you picked *crops* for
+a street of buildings — Phytograph stops and asks before doing the slow work,
+rather than spending a minute producing something wrong. You can switch to what
+it suggests, or keep your choice and continue. It never changes the method on
+its own.
+
+!!! tip "Built scenes: try plain ICP too"
+    For buildings, **Align Clouds (ICP)** below is often all you need. Flat
+    walls, roofs and corners are exactly what ICP is good at — the opposite of
+    the vegetation case, where the lack of such surfaces is what makes
+    Auto-Register necessary. Reach for Auto-Register when a built scene starts
+    badly out of alignment.
+
+### Use the scanner heading
+
+Most terrestrial scanners record their own position and heading (GNSS,
+inclination sensors, compass). When your scans carry that information, leave
+**Use the scanner heading** ticked — it makes registration markedly more
+reliable, and it is on by default.
+
+The reason is worth knowing. An orchard scanned from within looks much the same
+from several directions, so a search over all possible rotations can find an
+alignment that fits the points *better* than the correct one while being
+completely wrong. A lower residual does not mean a better alignment — on a
+regular planting a row-flipped result still lands plant on plant.
+
+The heading is used to *narrow the search*, not to skip it. That distinction
+matters: an earlier version treated a known heading as "these clouds are already
+close enough" and went straight to fine alignment. Measured against RiSCAN PRO's
+own registration of a real peach orchard, that left three of five scan pairs a
+full 180° out, because fine alignment on its own cannot tell which end of a
+symmetric row it started from. Narrowing the search to the recorded heading
+instead brought every pair to within 0.1°.
+
+Untick the box only if the recorded heading is missing or you know it to be
+wrong — registration then searches every orientation, which is slower and more
+easily fooled on repetitive plantings.
+
+### If a run looks wrong
+
+Auto-Register offers three matching strategies. The default (**canopy pattern**)
+is the fastest and the most reliable on real data, and is what you should
+normally use.
+
+| Strategy | When to try it |
+|----------|----------------|
+| **Canopy pattern** (default) | Almost always. Matches the planting's overall layout. |
+| **Plant landmarks** | Sparse, well-separated plants where individual crowns or trunks are cleanly detectable in both scans. |
+| **Surface shape** | Built scenes rather than vegetation. |
+
+If Auto-Register warns that the result may be wrong, the first thing to try is a
+different strategy — they fail in different ways.
+
+### Why three scans beat two
+
+On a regular planting a wrong alignment is not a poor fit. A result shifted by a
+whole number of rows lands plant on plant, so it can score *better* than the
+correct one — measured on a real vineyard, a pose four rows out fitted more
+tightly than the right answer. Nothing measurable from a single pair of clouds
+separates those two cases, so with only two scans a warning is the most honest
+output available.
+
+Three or more overlapping scans break the tie. Going around a closed loop of
+scans has to bring you back where you started, and a row-shifted pose does not
+cancel around that loop even though it fits its own pair well. Measured across
+three orchards: loops whose alignments are all correct close to within about a
+tenth of a metre, while a loop containing a bad one misses by several metres.
+
+Two practical consequences:
+
+- **Scan so the positions overlap in a loop**, not as a chain. Three scans that
+  all see some common ground can validate each other; three in a line cannot.
+- **With four or more scans the culprit is identified**, not just detected. The
+  good alignments close their own loops, so the bad one is the alignment no
+  passing loop vouches for. With exactly three, the problem is detected but any
+  of the three could be responsible.
+
+If a scan cannot be placed consistently, Auto-Register reports it as unresolved
+rather than putting it somewhere plausible-looking.
+
+### Registering a whole set at once
+
+Given three or more scans, registering them **together** rather than one pair at
+a time lets the loop check above do its work. As well as validating the result,
+it can recover scenes that pair-at-a-time registration gets wrong: the matching
+settings that suit a tall orchard are not the ones that suit a low vineyard, and
+the only reliable way to tell which is right for your scene is to try them and
+see which produces a set of alignments that agree with each other.
+
+On a real vineyard this was the difference between failing completely and
+registering to about 0.1 m — the correct settings were not the ones that scored
+best on any individual pair.
+
+The cost is that every pair has to be registered, so time grows with the square
+of the scan count. Expect a few minutes for a handful of scans and appreciably
+longer for a dozen.
+
+### Choosing what to match on
+
+*(Only applies to the **plant landmarks** strategy on vegetated scenes.)*
+
+The right landmark depends on how the data was captured, not on which
+algorithm sounds better:
+
+| Match on | Use when | Notes |
+|----------|----------|-------|
+| **Tree crowns** (default) | Aerial/drone scans, or any data where trunks are hidden by canopy | Needs no visible trunk — the usual choice |
+| **Trunk bases** | Ground-based scans of trees or vines with clear trunks | The most repeatable landmark when trunks *are* visible |
+| **Canopy peaks** | Either of the above finds too few plants | Uses no segmentation at all, so it still works on dense or touching canopies |
+
+If a run looks wrong, switching the match method is the first thing to try —
+they fail in different ways, which is why all three ship.
+
+**Detail size** can normally stay blank; Phytograph sizes it from the cloud.
+Increase it if registration finds nothing; decrease it for small or very
+finely sampled plants.
+
+### Reading the result
+
+Auto-Register always tells you **which method actually ran**. Normally it
+matches the plants it found; if it could not find enough, it says so and
+matches the overall surface shape instead. That fallback still often works, but
+it is the weaker path — worth knowing before you trust the result.
+
+Two warnings are worth acting on:
+
+- **"This planting is too regular to be sure"** — another alignment fits almost
+  as well. On a perfectly regular block, an alignment shifted by one plant (or
+  rotated a quarter turn) can line up just as convincingly as the right one, and
+  no error measurement can tell them apart. Check the result visually, or crop
+  to an area with some irregularity — a gap, an edge, a size difference — and
+  register that first.
+- **"This alignment may be wrong"** — too few plants were matched to be
+  confident. Undo and try a different match method or detail size.
+
+A quiet result means the plants matched unambiguously.
+
+Like ICP, the transform is applied to the source's points *and* its scanner
+origin/trajectory, and a single **Undo** reverts it.
+
+### How accurate is it?
+
+Validated against RiSCAN PRO's automatic registration on a four-position
+terrestrial survey of a real almond orchard (~14 M points per scan, trees to
+~12 m, scanners in a clearing). Registering each scan onto a common reference
+and comparing with RiSCAN's solution:
+
+| Scan | Difference from RiSCAN |
+|------|------------------------|
+| ScanPos002 | 0.16° / 4 cm |
+| ScanPos004 | 1.41° / 33 cm |
+| ScanPos005 | 0.64° / 21 cm |
+
+ScanPos005 is the interesting one: it sits at roughly 170° to the others, and
+Auto-Register recovered it with no starting guess. **Align Clouds (ICP) cannot
+do that** — it needs the clouds to start close together.
+
+Two practical notes from that test. More points is not more accurate: the same
+survey registered slightly *better* at 100 k points per scan than at 400 k,
+because tree positions are what matter and those are already resolved at the
+lower density. And the **trunk-bases** method was the least reliable on this
+data, where crowns and canopy peaks both agreed closely with RiSCAN — if a
+result looks wrong, switching method is the first thing to try.
+
+!!! tip "Auto-register first, then fine-tune"
+    Auto-Register finishes with an ICP refinement pass, so its output is
+    usually final. If you later crop or clean the clouds, running **Align
+    Clouds (ICP)** afterwards will polish the fit further.
+
 ## Cloud-to-cloud ICP
 
 Align one cloud to another by iteratively minimizing point-to-point
-distance.
+distance. Use this to **polish** a pair that is already roughly lined up; if
+the clouds start far apart or rotated, use **Auto-Register** above instead.
 
 1. Open **Align Clouds (ICP)** from the **Pre-processing** toolbar group
    (globe icon) or **Tools → Registration → Align Clouds (ICP)…**.
@@ -187,7 +402,10 @@ ICP finds a *local* minimum, so it needs the inputs to be roughly
 pre-aligned. If RMSE comes back huge, or the result looks visibly
 wrong:
 
-1. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-translate-and-rotate)
+1. **Try [Auto-Register](#auto-register-when-clouds-start-far-apart)** — for
+   two clouds of a planting, this is usually the fix rather than a
+   workaround: it does not need a starting guess at all.
+2. **Pre-align manually** with [Transform](clean-point-cloud.md#transform-translate-and-rotate)
    — translate and rotate to within ~10 cm and a few degrees before running ICP.
 2. **Crop away non-overlapping regions** so the correspondence search isn't
    dominated by geometry the other input doesn't contain.
@@ -195,6 +413,13 @@ wrong:
 The ICP dialogs are deliberately minimal — pick a source, pick a target, run.
 There are no voxel-size or iteration-count settings to tune, so improving a
 bad result means improving the inputs.
+
+!!! warning "A zero-error result is not always a good result"
+    If the two clouds share no overlap at all, ICP can report zero error
+    simply because it found nothing to compare. Phytograph now flags this
+    ("no overlapping points were found") instead of showing it as a perfect
+    fit — if you see that warning, the clouds need a rough pre-alignment or
+    they may not cover the same ground.
 
 For very different inputs (e.g., a sparse cloud and a dense mesh),
 expect higher RMSE than for similar-density inputs.

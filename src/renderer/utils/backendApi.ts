@@ -3385,14 +3385,23 @@ export async function icpRegisterMeshToCloud(
 
 export interface CloudToCloudICPRequest {
   // Each side is flat inline points OR an octree source descriptor, resolved
-  // independently so a flat and an octree cloud can be mixed (the source must
-  // be flat in practice — its transform is baked renderer-side).
+  // independently so a flat and an octree cloud can be mixed. Either side may
+  // be octree-backed: a flat source is baked renderer-side, while an octree
+  // source is transformed on its backend session and the octree rebuilt.
   target_points?: number[];     // Flattened [x, y, z, ...] target (stays fixed); omit when target_source is set
   source_points?: number[];     // Flattened [x, y, z, ...] source (to be moved); omit when source_source is set
   target_source?: BackendPointSource;  // octree-backed target read from disk
   source_source?: BackendPointSource;  // octree-backed source read from disk
   max_correspondence_distance?: number;  // Optional max correspondence distance
   max_iterations?: number;     // Optional max iterations (default 50)
+  /**
+   * Optional starting pose as a row-major flat 4x4 (16 numbers) — the same
+   * layout `transformation_matrix` comes back in. Pass the result of
+   * `globalRegisterCloudToCloud` here to refine a coarse alignment instead of
+   * starting from identity. Omit for the default behaviour (identity init after
+   * centroid pre-alignment).
+   */
+  init_transform?: number[];
 }
 
 /**
@@ -3414,6 +3423,173 @@ export async function icpRegisterCloudToCloud(
       '/api/c2c/icp-register', request, signal, 120000, onProgress, onRunId);
   } catch (error) {
     console.error('Cloud-to-cloud ICP registration failed:', error);
+    throw error;
+  }
+}
+
+// ==================== GLOBAL (COARSE) REGISTRATION API ====================
+
+/** Which per-plant landmark each cloud is reduced to before matching. */
+export type AnchorMethod = 'crown' | 'trunk' | 'chm';
+export type GlobalEstimator = 'correlation' | 'ransac_fpfh' | 'fgr';
+
+/** What kind of scene this is. Not a preset: `urban` selects a structurally
+ *  different algorithm (surface matching) because built scenes have no
+ *  per-plant landmark to find. */
+export type SceneType = 'agriculture' | 'natural' | 'urban';
+
+export interface GlobalRegisterRequest {
+  scene_type?: SceneType;
+  /** Set after the user has dismissed a scene-type mismatch prompt, so the same
+   *  warning cannot block them twice. */
+  scene_type_confirmed?: boolean;
+  target_points?: number[];
+  source_points?: number[];
+  target_source?: BackendPointSource;
+  source_source?: BackendPointSource;
+  anchor_method?: AnchorMethod;
+  estimator?: GlobalEstimator;
+  voxel_size?: number;
+  refine_icp?: boolean;
+  /** Scanner heading in degrees, when known (GNSS/IMU/compass). Constrains the
+   *  coarse yaw search, and when present the backend prefers plain ICP
+   *  refinement over a global search — measured as substantially more accurate
+   *  on GNSS-seeded data. Omit when no heading is available. */
+  yaw_prior_deg?: number | null;
+  yaw_search_deg?: number;
+  prefer_refine_with_prior?: boolean;
+  confidence_threshold?: number;
+}
+
+export interface GlobalRegisterResponse extends ICPRegistrationResponse {
+  /** False when the result should not be trusted without review — too few
+   *  anchors were found, or the coarse match scored below threshold. A matrix
+   *  is still returned; this flags that it may be wrong. */
+  confident?: boolean;
+  anchor_method_used?: AnchorMethod;
+  num_anchors_target?: number;
+  num_anchors_source?: number;
+  /** Score of the coarse stage alone, before ICP refinement. */
+  coarse_fitness?: number;
+  /** Which algorithm actually ran: per-plant landmarks, or raw surface
+   *  matching when too few plants were found. Never left implicit — a user
+   *  judging a result needs to know which method produced it. */
+  match_path?: 'pose-prior-refine' | 'raster-correlation' | 'plant-landmarks' | 'raw-surface';
+  /** True when a rival pose scored nearly as well as the winner, i.e. the
+   *  scene is too symmetric to tell them apart. This is the one failure a
+   *  residual check cannot see: a 180°-flipped orchard is a genuinely good
+   *  fit to the wrong answer. */
+  ambiguous?: boolean;
+  /** How far the winning pose beat the runner-up (0-1). */
+  match_margin?: number | null;
+  /** The heading prior actually used, if any. */
+  yaw_prior_used?: number | null;
+  /** The scene type the run actually used. */
+  scene_type_used?: SceneType;
+  /** A weak scene-type disagreement — worth showing, never worth blocking. */
+  scene_advisory?: string | null;
+
+  // --- Set INSTEAD of a result when the scene looks nothing like the chosen
+  // type. The run stops before the expensive stage so the user can confirm or
+  // switch; re-send with `scene_type_confirmed` to proceed regardless.
+  needs_scene_confirmation?: boolean;
+  observed_scene_type?: SceneType;
+  chosen_scene_type?: SceneType;
+  scene_message?: string;
+  scene_planarity?: number | null;
+}
+
+/**
+ * Coarse (global) cloud-to-cloud registration.
+ *
+ * Unlike `icpRegisterCloudToCloud`, this does NOT require the clouds to start
+ * near each other: both are reduced to sparse per-plant anchors, those are
+ * matched, and the winner is refined with the same point-to-plane ICP. Use it
+ * when two scans are arbitrarily rotated/offset; use plain ICP to polish a pair
+ * that is already roughly aligned.
+ *
+ * Longer timeout than plain ICP: the anchor stage may run ground/tree
+ * segmentation over both clouds before any matching happens.
+ */
+/** Register a SET of scans together, cross-checked by loop closure.
+ *
+ *  Prefer this over repeated `globalRegisterCloudToCloud` calls whenever three
+ *  or more overlapping scans are available. Pairwise registration cannot tell a
+ *  correct pose from a wrong-but-well-fitting one on a repetitive planting — a
+ *  row-shifted alignment lands plant on plant and scores BETTER on residual.
+ *  Composing poses around a closed loop of scans exposes that: the error does
+ *  not cancel around the cycle. */
+export interface MultiScanRegisterRequest {
+  scans?: BackendPointSource[];
+  scan_points?: number[][];
+  /** Index of the scan the others are registered onto; it does not move. */
+  reference?: number;
+  scene_type?: SceneType;
+  scene_type_confirmed?: boolean;
+  /** Try several matching settings and keep whichever yields a self-consistent
+   *  set of alignments. The right setting differs by scene and cannot be picked
+   *  from any single pair. */
+  select_variant?: boolean;
+  refine_icp?: boolean;
+}
+
+export interface MultiScanLoop {
+  scans: number[];
+  translation_error: number;
+  rotation_error: number;
+  closed: boolean;
+}
+
+export interface MultiScanRegisterResponse {
+  success: boolean;
+  error?: string;
+  reference?: number;
+  /** Scan index (as a string key) -> row-major 4x4. Scans that could not be
+   *  placed consistently are ABSENT here and listed in `unresolved_scans`. */
+  transformation_matrices?: Record<string, number[]>;
+  unresolved_scans?: number[];
+  loops?: MultiScanLoop[];
+  loops_checked?: boolean;
+  loops_consistent?: boolean;
+  loops_localised?: boolean;
+  suspect_pairs?: number[][];
+  variant?: { cell: number | null; mode: string; worst_loop: number | null; tried?: unknown[] };
+  /** False when there was no cycle to check (fewer than three scans), so the
+   *  result carries exactly the trust of a pairwise one. */
+  validated?: boolean;
+}
+
+export async function multiScanRegister(
+  request: MultiScanRegisterRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<MultiScanRegisterResponse> {
+  console.log('Multi-scan registration -', (request.scans?.length ?? request.scan_points?.length ?? 0), 'scans');
+  // Every pair is registered, so this is markedly slower than a single pair.
+  try {
+    return await fetchJsonWithProgress<MultiScanRegisterResponse>(
+      '/api/multi/register', request, signal, 1800000, onProgress, onRunId);
+  } catch (error) {
+    console.error('Multi-scan registration failed:', error);
+    throw error;
+  }
+}
+
+export async function globalRegisterCloudToCloud(
+  request: GlobalRegisterRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<GlobalRegisterResponse> {
+  console.log('Global registration - anchor method:', request.anchor_method ?? 'crown',
+    'estimator:', request.estimator ?? 'ransac_fpfh');
+  // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+  try {
+    return await fetchJsonWithProgress<GlobalRegisterResponse>(
+      '/api/c2c/global-register', request, signal, 300000, onProgress, onRunId);
+  } catch (error) {
+    console.error('Global registration failed:', error);
     throw error;
   }
 }

@@ -77,6 +77,10 @@ export const TOOLS_MENU: ToolMenuSection[] = [
     // gathers them under one heading because that's how a user thinks of them.
     label: 'Registration',
     items: [
+      // Auto-Register first: it works from any starting pose, where ICP needs
+      // the clouds already close. That ordering matches which one a user should
+      // reach for by default.
+      { id: 'cloud-auto-register', label: 'Auto-Register Clouds…' },
       { id: 'cloud-align', label: 'Align Clouds (ICP)…' },
       { id: 'mesh-mesh-align', label: 'Align Mesh to Mesh (ICP)…' },
       { id: 'mesh-cloud-icp', label: 'Align Mesh to Cloud (ICP)…' },

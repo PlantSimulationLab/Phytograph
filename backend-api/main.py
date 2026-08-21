@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.70.0"
+BACKEND_VERSION = "0.71.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -20379,6 +20379,14 @@ async def _run_killable(
 
         if tool == "skeleton":
             return result_dict if result_dict is not None else {}
+        if tool == "anchors":
+            # Landmark extraction returns two arrays (positions + per-plant
+            # features), not the per-point label vector the other tools produce.
+            # `_collect` above already loaded output.npy into `labels`, which
+            # for this tool holds the anchor POSITIONS.
+            feats_path = os.path.join(workdir, "features.npy")
+            feats = np.load(feats_path) if os.path.exists(feats_path) else np.empty((0, 2))
+            return labels, feats
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
         if tool == "ground":
@@ -28904,7 +28912,54 @@ def _robust_cloud_diagonal(points: np.ndarray) -> float:
     return diag if np.isfinite(diag) else 0.0
 
 
-def _icp_quality(rmse: float, diagonal: float) -> tuple[Optional[float], Optional[str]]:
+# ICP correspondence window as a multiple of median point spacing. See the
+# derivation note in `_do_c2c_icp`: measured across three real orchards, error
+# grows monotonically with this multiplier, and below ~10x ICP loses the ability
+# to pull in a pose that starts a couple of metres out.
+_CORR_DIST_SPACING_MULTIPLE = 20.0
+
+
+def _median_point_spacing(points: np.ndarray, sample: int = 30000) -> Optional[float]:
+    """Median nearest-neighbour distance, or None if it cannot be measured.
+
+    Sampled rather than exhaustive -- this only needs the scale, and a full
+    all-pairs query on a multi-million-point scan would dominate the ICP it is
+    meant to configure.
+    """
+    if len(points) < 100:
+        return None
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        return None
+    finite = points[np.isfinite(points).all(axis=1)]
+    if len(finite) < 100:
+        return None
+    probe = finite[np.linspace(0, len(finite) - 1,
+                               min(sample, len(finite))).astype(int)]
+    dist, _ = cKDTree(finite).query(probe, k=2)
+    spacing = float(np.median(dist[:, 1]))
+    return spacing if np.isfinite(spacing) and spacing > 0 else None
+
+
+def _auto_correspondence_distance(points: np.ndarray, diagonal: float) -> float:
+    """Correspondence window for ICP, from point spacing with an extent cap.
+
+    Falls back to the historical `diagonal * 0.05` when spacing cannot be
+    measured (too few points, or scipy missing), so behaviour degrades to the
+    previous rule rather than to something arbitrary.
+    """
+    spacing = _median_point_spacing(points)
+    if spacing is None:
+        return diagonal * 0.05
+    # Never exceed the old rule: on a sparse cloud a spacing-derived window can
+    # be larger than the plot, which is the failure this function exists to
+    # avoid.
+    return float(min(spacing * _CORR_DIST_SPACING_MULTIPLE, diagonal * 0.05))
+
+
+def _icp_quality(rmse: float, diagonal: float,
+                 fitness: Optional[float] = None) -> tuple[Optional[float], Optional[str]]:
     """Return (rmse_ratio, quality_warning) for an ICP result.
 
     ICP's `fitness` is the fraction of source points that found a correspondence
@@ -28919,12 +28974,29 @@ def _icp_quality(rmse: float, diagonal: float) -> tuple[Optional[float], Optiona
     The 2% threshold is deliberately permissive: a good tree-scan registration
     lands well under 1% of extent, so this only fires on fits that are visibly
     off rather than second-guessing normal results.
+
+    ZERO CORRESPONDENCES is the opposite trap and must be checked FIRST. When
+    ICP matches nothing at all, Open3D reports fitness=0.0 *and* inlier_rmse=0.0
+    — an RMSE of zero, which reads as a flawless fit. Both of the guards above
+    then wave it through: `run_icp_until_convergence`'s plateau test sees
+    0.0 - 0.0 = 0.0 improvement and prints "converged", and a 0.0 ratio is far
+    under the 2% threshold, so nothing warns. The user is shown a perfect
+    alignment for a registration that completely failed. `rmse == 0` is only
+    physically meaningful when points coincide exactly, so pair it with
+    fitness to tell "identical clouds" apart from "no overlap found".
     """
     if not diagonal or not np.isfinite(diagonal) or diagonal <= 0:
         return None, None
     ratio = float(rmse) / float(diagonal)
     if not np.isfinite(ratio):
         return None, None
+    if fitness is not None and float(fitness) <= 0.0:
+        return ratio, (
+            "Alignment failed: no overlapping points were found between the two "
+            "clouds, so the result is meaningless despite reporting zero error. "
+            "Give them a rough manual pre-alignment (or check they cover the "
+            "same area) and try again."
+        )
     warning = None
     if ratio > 0.02:
         warning = (
@@ -29115,7 +29187,7 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
             progress(1.0, "Done")
 
         rmse_ratio, quality_warning = _icp_quality(
-            float(reg_result.inlier_rmse), diagonal)
+            float(reg_result.inlier_rmse), diagonal, float(reg_result.fitness))
 
         return dict(
             success=True,
@@ -29169,6 +29241,13 @@ class CloudToCloudICPRequest(BaseModel):
     max_iterations: int = 100
     # RMSE convergence threshold
     rmse_threshold: float = 1e-6
+    # Optional coarse pose to start from, as a row-major flat 4x4 (16 floats) —
+    # the same layout `transformation_matrix` comes back in. This is how
+    # /api/c2c/global-register hands its result to the fine stage: ICP refines
+    # the coarse alignment instead of starting from identity. Omit it (the
+    # default) for the original behaviour: identity init after centroid
+    # pre-alignment. Supplying identity explicitly is equivalent to omitting it.
+    init_transform: Optional[List[float]] = None
 
 
 def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
@@ -29238,14 +29317,42 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
         target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
         source_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
 
-        # Determine max correspondence distance if not provided
+        # Spacing-derived window -- see the note in `_do_c2c_icp`. An extent-based
+        # rule opens the correspondence search to ~100x the point spacing, which
+        # on repetitive planting lets points pair with the WRONG plant row.
         if request.max_correspondence_distance is None:
-            max_corr_dist = diagonal * 0.05
+            max_corr_dist = _auto_correspondence_distance(
+                np.asarray(target_pcd.points), diagonal)
         else:
             max_corr_dist = request.max_correspondence_distance
 
+        # Create center alignment matrix (built before ICP so a caller-supplied
+        # init pose can be rebased into the frame ICP actually works in).
+        T_center = np.eye(4)
+        T_center[0, 3] = center_offset[0]
+        T_center[1, 3] = center_offset[1]
+        T_center[2, 3] = center_offset[2]
+
         # --- STEP 2: Run ICP until convergence ---
-        init_transform = np.eye(4)
+        # ICP sees a source that has ALREADY been moved by T_center, and its
+        # result is composed back below as `T_icp @ T_center`. A caller-supplied
+        # `init_transform` M is a WORLD-frame pose for the ORIGINAL source, so it
+        # must be rebased first: we need the starting T_icp that satisfies
+        # `T_icp @ T_center == M`, i.e. `M @ inv(T_center)`. Passing M straight
+        # through would apply the centre offset twice and start ICP in the wrong
+        # place. T_center is a pure translation, so the inverse always exists.
+        if request.init_transform:
+            if len(request.init_transform) != 16:
+                return dict(success=False,
+                            error="init_transform must be 16 floats (a row-major 4x4)")
+            M = np.asarray(request.init_transform, dtype=np.float64).reshape(4, 4)
+            if not np.all(np.isfinite(M)):
+                return dict(success=False,
+                            error="init_transform contains non-finite values")
+            init_transform = M @ np.linalg.inv(T_center)
+        else:
+            init_transform = np.eye(4)
+
         reg_result, iterations = run_icp_until_convergence(
             source_pcd, target_pcd, max_corr_dist, init_transform,
             max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold,
@@ -29256,12 +29363,6 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
         # The sequence is: first translate source to target center (T_center), then apply ICP (T_icp)
         # Combined transform = T_icp @ T_center
         icp_transform = reg_result.transformation
-
-        # Create center alignment matrix
-        T_center = np.eye(4)
-        T_center[0, 3] = center_offset[0]
-        T_center[1, 3] = center_offset[1]
-        T_center[2, 3] = center_offset[2]
 
         # Compose transformations: T_icp @ T_center
         # This correctly handles rotation - ICP transform is applied AFTER center alignment
@@ -29277,7 +29378,7 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
             progress(1.0, "Done")
 
         rmse_ratio, quality_warning = _icp_quality(
-            float(reg_result.inlier_rmse), diagonal)
+            float(reg_result.inlier_rmse), diagonal, float(reg_result.fitness))
 
         return dict(
             success=True,
@@ -29310,6 +29411,957 @@ def icp_register_cloud_to_cloud(request: CloudToCloudICPRequest, http_request: R
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(_do_c2c_icp(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+# ==================== Global (coarse) registration ====================
+#
+# Plain ICP is a LOCAL method: it needs a starting pose already close to the
+# answer. `_do_c2c_icp` only pre-aligns centroids, so a large relative rotation
+# between two scans is never recovered — and on real multi-view vegetation scans
+# (where the two views sample different surfaces rather than sharing points) it
+# fails outright, returning fitness 0.
+#
+# This block adds the missing coarse stage. The hard part on Phytograph's data
+# is that plantings are REPETITIVE: rows of near-identical plants with no broad
+# unique surface. Running FPFH descriptors over raw foliage there is close to
+# useless — every leaf cluster looks like every other, so the correspondence set
+# is dominated by outliers and RANSAC happily locks the source onto a
+# NEIGHBOURING plant, one whole row-spacing off, while reporting a good score.
+#
+# The fix is not a cleverer estimator, it is a better input: reduce each cloud
+# to a sparse set of stable per-plant ANCHORS (one point per tree) and register
+# those instead. With ~30 well-separated points per cloud the outlier ratio
+# collapses and ordinary RANSAC is entirely adequate. Anchors also carry weak
+# per-plant features (height, crown size) so a regular lattice cannot slip by
+# one plant unnoticed. See `anchor_extraction.py` for the extractors.
+
+_SCENE_TYPES = ("agriculture", "natural", "urban")
+_GLOBAL_ANCHOR_METHODS = ("crown", "trunk", "chm")
+_GLOBAL_ESTIMATORS = ("correlation", "ransac_fpfh", "fgr")
+
+
+def _drop_far_outliers(points: np.ndarray, k: float = 20.0) -> np.ndarray:
+    """Remove sky/miss returns — points absurdly far from the bulk of the cloud.
+
+    A miss is a ray that hit nothing, projected ~1 km out along the beam.
+    Session/octree sources are already filtered by `_read_points_from_source`,
+    but an INLINE array posted by a caller is not, and even a handful of misses
+    inflates the extent ~1000x. Everything downstream scales off that extent
+    (voxel size, feature radii, CSF cloth resolution), so leaving them in does
+    not produce a bad answer — it produces a HANG.
+
+    Detect the GAP, not a multiple of the spread. The obvious implementation —
+    "drop anything beyond k x the 99th-percentile distance from the centre" —
+    cannot work, and not because of the constant: once misses are numerous they
+    define that percentile themselves. Measured at 52% misses, the median centre
+    landed at (828, 835, 805), i.e. among the sky points, giving a p99 of 1429 m
+    and a threshold of 28 km. Nothing was ever removed and the extent stayed at
+    2324 m instead of 22 m.
+
+    Real scans separate cleanly instead: the cloud occupies a compact range and
+    the misses sit ~1 km out with nothing in between. Sorting the
+    distance-from-centroid and looking for a large multiplicative jump finds
+    that break regardless of how many points fall on either side.
+    """
+    if len(points) < 8:
+        return points
+
+    # Finding the reference point is the crux. Any centre derived from a
+    # percentile of ALL points fails once misses are the majority: measured at
+    # 52% misses, the median sat at (828, 835, 805) and a "densest half"
+    # centroid at (997, 995, 984) — both inside the sky cluster rather than the
+    # real cloud, so every subsequent distance was measured from the wrong
+    # origin.
+    #
+    # Use the densest CELL instead. Real returns are concentrated (a canopy in a
+    # few tens of metres) while misses are spread thinly over a ~1 km shell, so
+    # the most populated coarse voxel belongs to the real cloud no matter how
+    # many misses there are.
+    span = float(np.percentile(np.abs(points - np.median(points, axis=0)), 95).max())
+    cell = max(span / 32.0, 1e-6)
+    keys = np.floor(points / cell).astype(np.int64)
+    _, inv, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+    centre = points[inv == int(np.argmax(counts))].mean(axis=0)
+
+    d = np.linalg.norm(points - centre, axis=1)
+    order = np.argsort(d)
+    ds = d[order]
+
+    # Largest multiplicative jump between consecutive distances, skipping only
+    # the innermost few points (where tiny absolute gaps give huge ratios).
+    #
+    # The search must NOT start half-way through the sorted distances: when
+    # misses are the majority — routine for a scanner pointed at open sky above
+    # a short canopy — the half-way point is already out among them and the gap
+    # is behind us. Measured with a 50% start: 52%, 70% and 90% miss fractions
+    # all sailed through untouched with a 2324 m extent.
+    lo = max(8, int(0.02 * len(ds)))
+    if lo >= len(ds) - 1:
+        return points
+    seg = ds[lo:]
+    ratios = seg[1:] / np.maximum(seg[:-1], 1e-9)
+    j = int(np.argmax(ratios))
+    # A miss sits orders of magnitude out; require a decisive break so ordinary
+    # sparse tails are never cut.
+    if ratios[j] < 3.0:
+        return points
+
+    cut = seg[j]
+
+    # A big relative gap alone is not proof of misses: two survey blocks 500 m
+    # apart show the same signature, and discarding half of a legitimate scene
+    # would be far worse than the hang this guards against. Misses have a known
+    # ABSOLUTE scale — a ray that hit nothing is projected ~1 km along the beam —
+    # so only cut when the far group is genuinely at sky distance AND the near
+    # group is small by comparison. Anything closer in is treated as real data.
+    far = d[d > cut]
+    if len(far) == 0:
+        return points
+    # 800 m, not a few hundred: a legitimate survey can span 500 m between
+    # blocks (measured — a 300 m bar discarded half of exactly that scene),
+    # while a miss is projected ~1 km out. Anything nearer is treated as real
+    # data. Erring toward keeping points is deliberate: an unfiltered miss
+    # costs a slow run, a discarded block costs the user half their survey.
+    if float(np.min(far)) < 800.0 or float(np.min(far)) < cut * 3.0:
+        return points
+
+    keep = d <= cut
+    return points[keep] if keep.sum() >= 8 else points
+
+
+def _neighbour_scale(points: np.ndarray) -> float:
+    """Median nearest-neighbour distance — the cloud's own sampling scale.
+
+    FPFH radii are conventionally quoted as multiples of the downsampling voxel,
+    which works when the input is a dense surface. It breaks badly on an ANCHOR
+    cloud: anchors sit one-per-plant, metres apart, so voxel-derived radii land
+    far below the spacing and every anchor ends up with an empty neighbourhood.
+    FPFH then returns a degenerate descriptor and RANSAC matches nothing —
+    measured as coarse fitness 0.0000 with anchors correctly extracted.
+
+    Measuring the actual spacing makes the radii adapt to whatever was handed in,
+    dense cloud or sparse landmark set."""
+    if len(points) < 2:
+        return 0.0
+    from scipy.spatial import cKDTree
+
+    d, _ = cKDTree(points[:, :3]).query(points[:, :3], k=2)
+    nn = d[:, 1]
+    nn = nn[np.isfinite(nn) & (nn > 0)]
+    return float(np.median(nn)) if len(nn) else 0.0
+
+
+def _preprocess_for_fpfh(points: np.ndarray, voxel: float):
+    """Downsample + normals + FPFH, the standard Open3D coarse-registration prep.
+
+    Radii are driven by whichever is LARGER: the usual voxel multiples, or the
+    cloud's own neighbour spacing (see `_neighbour_scale`). On a dense cloud the
+    voxel dominates and this behaves conventionally; on a sparse anchor cloud the
+    spacing dominates, so each anchor's descriptor actually covers its
+    neighbours instead of being computed on an empty ball."""
+    import open3d as o3d
+
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    down = pcd.voxel_down_sample(voxel) if voxel > 0 else pcd
+    if len(down.points) < 4:
+        down = pcd
+
+    down_pts = np.asarray(down.points)
+    spacing = _neighbour_scale(down_pts)
+    # A descriptor has to span several neighbours to carry any information;
+    # 3x the spacing reaches the nearest few plants on an anchor cloud.
+    normal_radius = max(voxel * 2.0, spacing * 2.0)
+    feature_radius = max(voxel * 5.0, spacing * 3.0)
+
+    down.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(
+        radius=normal_radius, max_nn=30))
+    fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+        down, o3d.geometry.KDTreeSearchParamHybrid(radius=feature_radius, max_nn=100))
+    return down, fpfh
+
+
+def run_global_registration(target_pts: np.ndarray, source_pts: np.ndarray,
+                            voxel: float, estimator: str = "ransac_fpfh"):
+    """Estimate a coarse rigid transform aligning `source_pts` onto `target_pts`.
+
+    Returns (transform 4x4, fitness, inlier_rmse). No ICP here — this is only
+    the global search; refinement is the caller's job.
+
+    RANSAC gets a `CorrespondenceCheckerBasedOnEdgeLength` alongside the usual
+    distance checker. That edge-length test is the specific guard against the
+    repetitive-planting failure: it requires that the DISTANCES between paired
+    points agree between the two clouds, so a candidate set that maps each tree
+    onto its neighbour (preserving positions but not the pairing) is rejected.
+    """
+    import open3d as o3d
+
+    # FPFH+RANSAC/FGR is a DENSE-SURFACE method. It is used here only for the
+    # raw-surface fallback (and for built scenes, where it is the right tool);
+    # the plant-landmark path uses `anchor_matching` instead, because a surface
+    # descriptor carries no information about a sparse set of tree positions.
+    # Guard the input anyway: FGR has been reported to raise from deep inside
+    # Open3D ("low must be < high") on degenerate tiny inputs, and a C++-level
+    # crash is far harder to diagnose than an explicit refusal here.
+    n_tgt_pts, n_src_pts = len(np.asarray(target_pts)), len(np.asarray(source_pts))
+    if n_tgt_pts < 32 or n_src_pts < 32:
+        raise ValueError(
+            "Surface matching needs a dense cloud on both sides (got "
+            f"{n_tgt_pts} and {n_src_pts} points). That is a landmark-sized "
+            "input - it should have gone to the plant-landmark matcher.")
+
+    src_down, src_fpfh = _preprocess_for_fpfh(source_pts, voxel)
+    tgt_down, tgt_fpfh = _preprocess_for_fpfh(target_pts, voxel)
+    # How close two points must be to count as corresponding. Like the feature
+    # radii this cannot be voxel-only: on an anchor cloud whose landmarks sit
+    # metres apart, a sub-metre threshold rejects every true correspondence
+    # (RANSAC then reports fitness 0). Take the larger of the voxel-derived
+    # value and a fraction of the actual spacing, so a correct pairing survives
+    # while a one-plant-off pairing is still comfortably out of range.
+    spacing = _neighbour_scale(np.asarray(tgt_down.points))
+    dist = max(voxel * 1.5, spacing * 0.5)
+
+    if estimator == "fgr":
+        result = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
+            src_down, tgt_down, src_fpfh, tgt_fpfh,
+            o3d.pipelines.registration.FastGlobalRegistrationOption(
+                maximum_correspondence_distance=dist))
+    else:
+        result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+            src_down, tgt_down, src_fpfh, tgt_fpfh,
+            mutual_filter=True,
+            max_correspondence_distance=dist,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+            ransac_n=3,
+            checkers=[
+                # Pairwise distances must be consistent between clouds — the
+                # lattice-shift guard described above.
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(dist),
+            ],
+            criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999))
+    return (np.asarray(result.transformation, dtype=np.float64),
+            float(result.fitness), float(result.inlier_rmse))
+
+
+class GlobalRegisterRequest(BaseModel):
+    """Request for coarse (global) cloud-to-cloud registration.
+
+    Mirrors `CloudToCloudICPRequest`'s dual input shape: either side may be a
+    flat inline array or an octree/session-backed `PointSource`."""
+    target_points: Optional[List[float]] = None
+    source_points: Optional[List[float]] = None
+    target_source: Optional[PointSource] = None
+    source_source: Optional[PointSource] = None
+    # Which per-plant anchor to reduce each cloud to before matching:
+    #   crown - per-tree crown centroid via tree-instance segmentation. Works
+    #           when trunks are invisible (aerial/ALS), the common case.
+    #   trunk - trunk seeds via ground removal + wood segmentation. Terrestrial
+    #           scans of woody plantings.
+    #   chm   - canopy-height-model local maxima. Needs no segmentation, so it
+    #           is the fallback when instance segmentation is unreliable.
+    # What KIND of scene this is. Not a cosmetic preset — `urban` selects a
+    # structurally different algorithm (match the raw surface with FPFH+RANSAC,
+    # which is what that method is designed for and where it excels) instead of
+    # reducing the cloud to per-plant landmarks, which has no meaning on
+    # buildings. The user picks this explicitly; nothing is auto-detected behind
+    # their back, so the path taken is always their decision.
+    scene_type: str = "agriculture"
+    # Set once the user has seen and dismissed a scene-type mismatch warning, so
+    # the same prompt cannot block them twice.
+    scene_type_confirmed: bool = False
+    anchor_method: str = "crown"
+    estimator: str = "correlation"
+    # Heading prior, in degrees, for the coarse yaw search. A terrestrial
+    # scanner records its own heading (GNSS/IMU/compass) to within a few
+    # degrees, and searching the whole circle throws that away. Measured on a
+    # real peach orchard: an unconstrained sweep found poses with LOWER
+    # point-to-point residual than RiSCAN PRO's (0.06 m vs 0.53 m) that were
+    # nevertheless badly wrong, because an orchard scanned from within is nearly
+    # self-similar under rotation. Restricting the sweep removes those aliases
+    # outright instead of trying to score them away. (The specific "17-149
+    # degrees" figure once quoted here came from a wrong reconstruction of
+    # RiSCAN's transforms; the effect is real, that measurement was not.)
+    #
+    # None means "no heading available" -> full-circle search, and the result
+    # deserves more suspicion.
+    yaw_prior_deg: Optional[float] = None
+    yaw_search_deg: float = 30.0
+    # When a prior is available, USE IT to constrain the coarse search rather
+    # than skipping the search. Skipping was the original behaviour, justified
+    # by a measurement against RiSCAN transforms reconstructed from the
+    # registration report's Euler angles -- a reconstruction that was later
+    # proved wrong. Re-measured against ground truth recovered exactly (via
+    # per-return gps_time correspondence, sub-millimetre), skipping the coarse
+    # stage leaves the source 180 degrees FLIPPED on 3 of 5 peach pairs, because
+    # unseeded ICP has no way to know which end of a near-symmetric orchard row
+    # it is on. Constraining the search to the prior instead fixes every flip:
+    # yaw error drops from ~179 degrees to under 0.9 on all five pairs.
+    #
+    # Set True to restore the old skip-the-search behaviour.
+    prefer_refine_with_prior: bool = False
+    # Downsampling/feature scale. Defaults to a fraction of the robust extent.
+    voxel_size: Optional[float] = None
+    # Run a point-to-plane ICP pass on the coarse result before returning, so a
+    # standalone call yields a directly usable pose.
+    refine_icp: bool = True
+    # Below this RANSAC/FGR fitness the answer is reported but flagged
+    # `confident=False` so the UI can warn instead of silently trusting it.
+    confidence_threshold: float = 0.3
+
+
+def _extract_anchors_killable(points: "np.ndarray", method: str, extent: float,
+                              progress=None, second: "Optional[np.ndarray]" = None):
+    """Run landmark extraction in a KILLABLE child process.
+
+    Extraction drives CSF and TreeIso — the same heavyweight CPU work every
+    other compute endpoint isolates via `_run_killable`/`seg_worker.py`, and for
+    the same two reasons: Cancel must be able to interrupt it, and CSF has been
+    observed to segfault on degenerate geometry, which in-process would kill the
+    whole backend rather than one worker.
+
+    A synchronous twin of `_run_killable` rather than a call to it: this runs
+    inside `_bin_frame_streaming_response`'s off-thread worker, where there is
+    no event loop to await on. Same subprocess protocol, same environment
+    variable, same cancellation checkpoints.
+
+    Falls back to in-process extraction if the worker cannot be spawned at all
+    (e.g. a packaging problem), because a slower registration beats none — but
+    that path is logged, never silent.
+    """
+    import json as _json
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="phyto_anchor_") as workdir:
+        np.save(os.path.join(workdir, "input.npy"), np.ascontiguousarray(points))
+        if second is not None:
+            # Extract BOTH clouds in one worker: startup costs ~4.3 s (it
+            # re-imports main.py and the native library), so a second call would
+            # double that overhead on ~4 s of real work.
+            np.save(os.path.join(workdir, "input2.npy"), np.ascontiguousarray(second))
+        with open(os.path.join(workdir, "request.json"), "w") as f:
+            _json.dump({"tool": "anchors",
+                        "params": {"method": method, "extent": float(extent)}}, f)
+
+        env = os.environ.copy()
+        env["PHYTOGRAPH_SEG_WORKER"] = workdir
+        stderr_log = os.path.join(workdir, "worker_stderr.log")
+
+        try:
+            # `_SegProc` (os.posix_spawn), NOT subprocess.Popen. Popen forks the
+            # current image, and this process has both libhelios (GLFW via the
+            # lidar->visualizer plugin) and open3d (its own GLFW) loaded; forking
+            # that Objective-C/OpenMP runtime crashes the child in the
+            # post-fork/pre-exec window with SIGSEGV (exit -11). Reproduced here
+            # exactly: the worker died -11 under pytest while succeeding when
+            # spawned standalone. posix_spawn never forks the loaded image.
+            proc = _SegProc(_seg_worker_command(), env, stderr_log)
+        except Exception as exc:
+            logger.warning("anchor worker could not be spawned (%s); "
+                           "extracting in-process", exc)
+            from anchor_extraction import extract_anchors
+            first = extract_anchors(points, method, extent)
+            if second is None:
+                return first
+            return first, extract_anchors(second, method, extent)
+
+        # Poll so a cancel between checks can SIGKILL the child mid-compute;
+        # a running C++ segment is not otherwise interruptible.
+        while proc.poll() is None:
+            if progress is not None and getattr(progress, "should_cancel", lambda: False)():
+                proc.kill()
+                proc.wait(timeout=5)
+                raise ScanCancelled()
+            time.sleep(0.25)
+
+        if proc.returncode != 0:
+            err = ""
+            try:
+                with open(stderr_log, "r", errors="replace") as f:
+                    err = f.read().strip()[-500:]
+            except OSError:
+                pass
+            # A crashed extractor is a fallback signal, not a failed request:
+            # the caller drops to raw-surface matching and says so.
+            logger.warning("anchor worker exited %s: %s", proc.returncode, err)
+            blank = (np.empty((0, 3)), np.empty((0, 2)))
+            return blank if second is None else (blank, blank)
+
+        def _read(tag=""):
+            o = os.path.join(workdir, f"output{tag}.npy")
+            g = os.path.join(workdir, f"features{tag}.npy")
+            return (np.load(o) if os.path.exists(o) else np.empty((0, 3)),
+                    np.load(g) if os.path.exists(g) else np.empty((0, 2)))
+
+        if second is None:
+            return _read()
+        return _read(), _read("2")
+
+
+def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict:
+    """Worker for /api/c2c/global-register.
+
+    Progress bands, chosen so the fractions stay monotonic when the optional ICP
+    refinement is appended: anchors 0.05→0.45, coarse search 0.45→0.70, refine
+    0.70→1.0. See _do_c2m_distance for the streaming/cancel/error contract."""
+    try:
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.05, "Reading points")
+
+        if request.anchor_method not in _GLOBAL_ANCHOR_METHODS:
+            return dict(success=False,
+                        error=f"Unknown anchor_method '{request.anchor_method}'. "
+                              f"Expected one of {', '.join(_GLOBAL_ANCHOR_METHODS)}.")
+        if request.scene_type not in _SCENE_TYPES:
+            return dict(success=False,
+                        error=f"Unknown scene_type '{request.scene_type}'. "
+                              f"Expected one of {', '.join(_SCENE_TYPES)}.")
+        if request.estimator not in _GLOBAL_ESTIMATORS:
+            return dict(success=False,
+                        error=f"Unknown estimator '{request.estimator}'. "
+                              f"Expected one of {', '.join(_GLOBAL_ESTIMATORS)}.")
+
+        # Resolve each side independently. `_read_points_from_source` drops
+        # sky/miss returns and re-adds the session world shift, so both clouds
+        # arrive in a common world frame with no ~1 km outliers to blow up the
+        # extent (which would otherwise hang the segmentation-based extractors).
+        if request.target_source is not None:
+            target_points, _, _ = _read_points_from_source(request.target_source)
+        else:
+            target_points = np.array(request.target_points or [], dtype=np.float64).reshape(-1, 3)
+        if request.source_source is not None:
+            source_points, _, _ = _read_points_from_source(request.source_source)
+        else:
+            source_points = np.array(request.source_points or [], dtype=np.float64).reshape(-1, 3)
+
+        if len(target_points) == 0:
+            return dict(success=False, error="No target points provided")
+        if len(source_points) == 0:
+            return dict(success=False, error="No source points provided")
+
+        # Non-finite coordinates must go FIRST. An infinite coordinate makes CSF
+        # size its cloth from an infinite bounding box, the dimension overflows
+        # to a negative int (observed: "width: -2147483645") and the C extension
+        # SEGFAULTS — killing the backend process rather than raising something
+        # catchable. scipy's cKDTree also rejects non-finite input.
+        target_points = target_points[np.isfinite(target_points).all(axis=1)]
+        source_points = source_points[np.isfinite(source_points).all(axis=1)]
+
+        # Inline arrays bypass the reader's miss filter, so guard here too: a
+        # single ~1 km sky return inflates the extent ~1000x and turns the
+        # gridding/KD-tree work below into a hang rather than an error.
+        target_points = _drop_far_outliers(target_points)
+        source_points = _drop_far_outliers(source_points)
+
+        if len(target_points) == 0 or len(source_points) == 0:
+            return dict(success=False,
+                        error="No usable points remain after dropping invalid coordinates")
+
+        extent = _robust_cloud_diagonal(target_points)
+        if not extent or not np.isfinite(extent) or extent <= 0:
+            return dict(success=False, error="Target cloud has no measurable extent")
+
+        # --- Scene-type sanity check, BEFORE any expensive work -------------
+        #
+        # Runs on a subsample in ~0.05 s, so choosing the wrong scene type costs
+        # a moment rather than a minute of CSF and TreeIso. It never changes the
+        # path on its own: the user's choice stands, and a disagreement is
+        # reported back for them to resolve.
+        from scene_classify import classify_scene, check_scene_type
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.08, "Checking scene type")
+        observed = classify_scene(target_points)
+        mismatch = check_scene_type(request.scene_type, observed)
+        if mismatch and mismatch["severity"] == "strong" and not request.scene_type_confirmed:
+            # A strong disagreement means the chosen setting would run a
+            # different ALGORITHM than the geometry calls for — worth stopping
+            # for. A weak one (planted vs natural spacing) only tunes the same
+            # path, so it rides along as a note and never interrupts.
+            return dict(
+                success=True,
+                needs_scene_confirmation=True,
+                observed_scene_type=mismatch["observed"],
+                chosen_scene_type=request.scene_type,
+                scene_message=mismatch["message"],
+                scene_planarity=observed.get("planarity"),
+            )
+
+        # `urban` is a genuinely different pipeline, not a preset: built scenes
+        # have no per-plant landmark to find, and the planes and corners they DO
+        # have are exactly what FPFH+RANSAC was designed for.
+        use_landmarks = request.scene_type != "urban"
+        # Correlation works on the raw cloud, so the expensive landmark stage
+        # (CSF + TreeIso, and the killable worker that hosts them) is skipped
+        # entirely. That is most of why this path is ~1.5 s rather than ~20 s.
+        needs_landmarks = use_landmarks and request.estimator != "correlation"
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.10, f"Extracting {request.anchor_method} anchors"
+                     if use_landmarks else "Preparing surfaces")
+
+        # Extraction runs in a killable child process (CSF + TreeIso), so Cancel
+        # works mid-stage and a CSF segfault cannot take down the backend.
+        if needs_landmarks:
+            (tgt_xyz, tgt_feat), (src_xyz, src_feat) = _extract_anchors_killable(
+                target_points, request.anchor_method, extent, progress,
+                second=source_points)
+        else:
+            # Built scene: no landmark stage at all. Skipping it is most of why
+            # the urban path is fast — no CSF, no TreeIso.
+            tgt_xyz = src_xyz = np.empty((0, 3))
+            tgt_feat = src_feat = np.empty((0, 2))
+
+        n_tgt, n_src = len(tgt_xyz), len(src_xyz)
+
+        # Too few anchors means the extractor could not find separable plants
+        # (dense understory, a single blob, a non-vegetation cloud). Fall back to
+        # matching the raw points rather than failing: sometimes there is enough
+        # structure for a rough answer, but it is never trustworthy, so the
+        # result is always flagged unconfident.
+        anchors_usable = use_landmarks and n_tgt >= 3 and n_src >= 3
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.45, "Matching plants" if anchors_usable else "Matching surfaces")
+
+        ambiguous = False
+        match_margin = None
+        if (request.yaw_prior_deg is not None
+                and request.prefer_refine_with_prior
+                and request.estimator == "correlation"):
+            # OPT-IN ONLY (prefer_refine_with_prior now defaults False).
+            # This path skips the coarse search on the theory that a heading
+            # prior means the clouds are already close enough for plain ICP.
+            # Measured against exact ground truth it is WORSE, not better: on
+            # the peach orchard it leaves 3 of 5 pairs a full 180 degrees out,
+            # because unseeded ICP cannot tell which end of a symmetric row it
+            # started from. The numbers that once justified this as the default
+            # came from a wrong reconstruction of RiSCAN's transforms. Kept as
+            # an escape hatch for clouds already aligned to within ICP's basin.
+            # Deliberately DON'T set a transform here. Handing ICP an explicit
+            # identity would suppress its own centroid pre-alignment (the init
+            # is rebased through inv(T_center)), and that pre-alignment is worth
+            # real accuracy: measured 31.1 degrees from RiSCAN's answer with it
+            # versus 49.8 without. Leaving `transform` as None lets the refine
+            # step below run ICP unseeded, which is exactly the behaviour that
+            # beat the coarse stage.
+            transform = None
+            coarse_fitness = 1.0
+            coarse_rmse = 0.0
+            match_path = "pose-prior-refine"
+            anchors_usable = True
+            n_tgt = n_src = 0
+        elif use_landmarks and request.estimator == "correlation":
+            # Correlate top-down rasters instead of matching per-plant landmarks.
+            # Landmarks are only ~50% repeatable between scan positions (measured
+            # 25/46 on a real vineyard, and the forest literature reports the
+            # same), and triangle congruence cubes that to ~16% usable evidence.
+            # Correlation never picks landmarks, so it never has to pick the same
+            # ones twice. Head-to-head on the real vineyard: correlation 4/4,
+            # landmark triangles 0/4 (which returned identity every time).
+            from raster_correlation import register_by_correlation
+
+            result = register_by_correlation(
+                target_points, source_points,
+                yaw_prior_deg=request.yaw_prior_deg,
+                yaw_search_deg=request.yaw_search_deg)
+            transform = result["transformation"]
+            coarse_fitness = result["score"]
+            coarse_rmse = 0.0
+            ambiguous = bool(result["ambiguous"])
+            # Report the TIGHTER of the two independent margins: the yaw margin
+            # (a rival orientation scored nearly as well on the raster) and the
+            # pose margin (a rival translation fitted nearly as well after ICP).
+            # A result is only as trustworthy as its weakest separation, and on
+            # a uniform planting it is the pose margin that catches a row-shifted
+            # answer -- the yaw margin looks healthy there because the
+            # ORIENTATION really is unambiguous; only the position is not.
+            match_margin = float(result["margin"])
+            pose_margin = result.get("pose_margin")
+            if pose_margin is not None and math.isfinite(pose_margin):
+                match_margin = min(match_margin, float(pose_margin))
+            match_path = "raster-correlation"
+            anchors_usable = True      # this path needs no landmarks at all
+            n_tgt = n_src = 0
+        elif anchors_usable:
+            # Match the landmark sets by their PAIRWISE DISTANCES, not with a
+            # surface descriptor. FPFH was the obvious reuse and it does not
+            # work here: it histograms normal angles over a dense neighbourhood
+            # and discards inter-point distance, which is the only signal a set
+            # of ~15 scattered tree positions carries. Measured on real anchor
+            # clouds its descriptors came out 0.98 mean cosine-similar — the
+            # correspondences were noise, and registration landed 90° or 180°
+            # out on symmetric plantings while reporting a healthy score. See
+            # `anchor_matching` for the triangle-congruence method and the
+            # forest-registration literature it follows.
+            from anchor_matching import match_anchor_sets
+
+            spacing = _neighbour_scale(tgt_xyz)
+            result = match_anchor_sets(tgt_xyz, tgt_feat, src_xyz, src_feat,
+                                       spacing=spacing or None)
+            transform = result["transformation"]
+            coarse_fitness = result["score"]
+            coarse_rmse = 0.0
+            ambiguous = bool(result["ambiguous"])
+            match_margin = float(result["margin"])
+            match_path = "plant-landmarks"
+        else:
+            # No usable landmarks (too few separable plants, or not a planting
+            # at all). Fall back to matching the raw surface with FPFH+RANSAC,
+            # which is what that method is designed for. The caller is told
+            # which path ran via `match_path`, because a silent switch makes a
+            # bad result impossible to reason about.
+            voxel = request.voxel_size or max(extent * 0.03, 1e-6)
+            transform, coarse_fitness, coarse_rmse = run_global_registration(
+                target_points, source_points, voxel, request.estimator)
+            match_path = "raw-surface"
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.70, "Refining alignment")
+
+        fitness, rmse = coarse_fitness, coarse_rmse
+        # Set when ICP refinement converged onto real correspondences — evidence
+        # the coarse pose was close enough to be worth refining, independent of
+        # how the anchor-level RANSAC scored.
+        refined_ok = False
+        if request.refine_icp:
+            # Hand the coarse pose to the existing fine stage. Reuse the c2c
+            # worker rather than re-implementing ICP so both paths share one
+            # convergence loop, quality gate and cancellation behaviour.
+            refined = _do_c2c_icp(CloudToCloudICPRequest(
+                target_points=target_points.ravel().tolist(),
+                source_points=source_points.ravel().tolist(),
+                # None => let ICP centroid-pre-align and start from identity,
+                # which is strictly better than forcing identity through.
+                init_transform=(None if transform is None
+                                else transform.flatten().tolist()),
+            ), progress=None)
+            if refined.get("success") and refined.get("transformation_matrix"):
+                refined_m = np.asarray(refined["transformation_matrix"],
+                                       dtype=np.float64).reshape(4, 4)
+                # Only keep the refinement if it actually found correspondences;
+                # a zero-fitness ICP result is the failure mode fixed in
+                # `_icp_quality` and must not overwrite a good coarse pose.
+                if (refined.get("fitness") or 0.0) > 0.0:
+                    transform = refined_m
+                    fitness = float(refined["fitness"])
+                    rmse = float(refined.get("rmse") or 0.0)
+                    refined_ok = True
+
+        if transform is None:
+            # The pose-prior path leaves this None so ICP can pre-align itself.
+            # If refinement did not produce a usable matrix (no overlap found),
+            # fall back to identity: the clouds are already GNSS-placed, so
+            # "leave them where they are" is the honest answer, not a crash.
+            transform = np.eye(4)
+
+        rmse_ratio, quality_warning = _icp_quality(rmse, extent, fitness)
+        # Confidence is judged on the FINAL fit, not on the coarse score.
+        #
+        # `coarse_fitness` is RANSAC's inlier fraction over the anchor set, so it
+        # falls simply because the two clouds yielded different numbers of
+        # anchors — which happens routinely (a viewpoint sees 7 landmarks where
+        # the other sees 5) without the alignment being any worse. Gating on it
+        # flagged provably-perfect registrations (0.00° residual against a known
+        # transform) as untrustworthy, which trains users to ignore the warning.
+        #
+        # What actually indicates a bad result is the refined fit: overlapping
+        # points found (`fitness > 0`) and a residual that is small relative to
+        # the cloud (`rmse_ratio`, the same signal `_icp_quality` warns on).
+        # Anchor-starved runs still report unconfident via `anchors_usable`,
+        # because there the matrix really is a guess.
+        fit_is_sound = fitness > 0.0 and (rmse_ratio is None or rmse_ratio <= 0.02)
+
+        # AMBIGUITY is the signal that matters, and it is the one no
+        # residual-based check can produce. On a symmetric planting the wrong
+        # pose is not a poor fit — a 180°-flipped orchard genuinely lands plant
+        # on plant, so RMSE is low and ICP fitness is high while the answer is
+        # completely wrong. Measured before this was added: 7 of 12 runs were
+        # 90-180° out and reported confident. The matcher therefore scores the
+        # best *rival* pose as well as the winner, and a near-tie means the
+        # scene cannot distinguish them. Refusing to claim confidence there is
+        # the honest outcome; the user gets a matrix plus a warning, not a
+        # silent coin-flip.
+        # `anchors_usable` is the right requirement only when landmarks were the
+        # PLAN. On a built scene, surface matching is the intended algorithm, so
+        # having no landmarks is expected rather than a shortfall — requiring
+        # them there reported a provably exact urban alignment (0.00 degrees) as
+        # not confident, training users to ignore the flag.
+        path_delivered = anchors_usable or not use_landmarks
+        confident = bool(
+            path_delivered
+            and not ambiguous
+            and fit_is_sound
+            and (coarse_fitness >= request.confidence_threshold or refined_ok)
+        )
+
+        if progress is not None:
+            progress(1.0, "Done")
+
+        translation = [float(transform[0, 3]), float(transform[1, 3]), float(transform[2, 3])]
+        print(f"Global registration complete - method: {request.anchor_method}, "
+              f"anchors: {n_tgt}/{n_src}, coarse fitness: {coarse_fitness:.4f}, "
+              f"final fitness: {fitness:.4f}, confident: {confident}")
+
+        return dict(
+            success=True,
+            translation=translation,
+            transformation_matrix=transform.flatten().tolist(),
+            fitness=fitness,
+            rmse=rmse,
+            iterations=0,
+            rmse_ratio=rmse_ratio,
+            quality_warning=quality_warning,
+            confident=confident,
+            anchor_method_used=request.anchor_method,
+            num_anchors_target=n_tgt,
+            num_anchors_source=n_src,
+            coarse_fitness=coarse_fitness,
+            # Which algorithm actually ran. Never leave this implicit: when the
+            # landmark path is unavailable the code quietly switched to surface
+            # matching, and a user seeing only a low-confidence flag had no way
+            # to tell which method produced the result they are judging.
+            match_path=match_path,
+            yaw_prior_used=request.yaw_prior_deg,
+            scene_type_used=request.scene_type,
+            # A weak disagreement (planted vs natural spacing) never blocks, but
+            # the user should still see it.
+            scene_advisory=(mismatch["message"] if mismatch else None),
+            # True when a rival pose scored nearly as well as the winner, i.e.
+            # the scene is too symmetric to distinguish them.
+            ambiguous=ambiguous,
+            match_margin=match_margin,
+        )
+
+    except ScanCancelled:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return dict(success=False, error=f"Global registration failed: {str(e)}")
+
+
+class MultiScanRegisterRequest(BaseModel):
+    """Register a SET of scans together, using the scan graph to validate itself.
+
+    Pairwise registration cannot tell a correct pose from a wrong-but-well-
+    fitting one on a repetitive planting -- a row-shifted alignment lands plant
+    on plant and scores BETTER by every residual measure. Registering three or
+    more overlapping scans makes the ambiguity resolvable: composing the poses
+    around a closed loop must return you to where you started, and a row-shifted
+    pose does not cancel around that cycle.
+
+    Measured across three real orchards: loops whose poses are all correct close
+    to 0.013-0.106 m, loops containing a wrong pose to 4.2-6.3 m.
+    """
+    # One entry per scan. Either inline points or a session/octree source, the
+    # same dual shape the pairwise endpoints accept.
+    scans: List[PointSource] = []
+    scan_points: Optional[List[List[float]]] = None
+    # Index of the scan every other scan is registered onto. The reference keeps
+    # its own coordinates; everything else moves.
+    reference: int = 0
+    scene_type: str = "agriculture"
+    scene_type_confirmed: bool = False
+    # Try several coarse-stage settings and keep whichever produces a
+    # self-consistent graph. Off => use the single default variant, which is
+    # faster but cannot register a scene whose default setting is wrong for it.
+    select_variant: bool = True
+    refine_icp: bool = True
+
+
+def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) -> dict:
+    """Worker for /api/multi/register. See _do_c2m_distance for the contract."""
+    try:
+        import itertools
+
+        from loop_closure import check_loops, select_variant_by_loops
+        from raster_correlation import register_by_correlation
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.02, "Reading scans")
+
+        clouds: List[np.ndarray] = []
+        if request.scan_points:
+            for flat in request.scan_points:
+                clouds.append(np.asarray(flat, dtype=np.float64).reshape(-1, 3))
+        for src in request.scans:
+            pts, _, _ = _read_points_from_source(src)
+            clouds.append(pts)
+
+        if len(clouds) < 2:
+            return dict(success=False,
+                        error="Multi-scan registration needs at least 2 scans")
+        if not (0 <= request.reference < len(clouds)):
+            return dict(success=False,
+                        error=f"reference index {request.reference} is outside "
+                              f"the {len(clouds)} scans provided")
+
+        cleaned = []
+        for X in clouds:
+            X = X[np.isfinite(X).all(axis=1)]
+            # Sky/miss returns wreck the extent and every scale derived from it.
+            cleaned.append(_drop_far_outliers(X))
+        clouds = cleaned
+        if any(len(X) < 100 for X in clouds):
+            return dict(success=False, error="A scan has too few points to register")
+
+        n = len(clouds)
+        # Cap the work: pairwise cost is quadratic and each pair runs a coarse
+        # search plus ICP. Decimating here rather than inside the loop keeps the
+        # cost predictable regardless of how the caller sized its input.
+        budget = 300_000
+        clouds = [X[np.linspace(0, len(X) - 1, min(budget, len(X))).astype(int)]
+                  for X in clouds]
+
+        def register(a, b, cell, mode):
+            _cancel_checkpoint(progress)
+            result = register_by_correlation(clouds[a], clouds[b],
+                                             mode=mode, cell=cell)
+            return np.asarray(result["transformation"], dtype=np.float64)
+
+        if progress is not None:
+            progress(0.10, "Registering scan pairs")
+
+        if request.select_variant and n >= 3:
+            # Only a graph with a cycle can vote on a variant; with two scans
+            # there is no loop and nothing to select on.
+            chosen = select_variant_by_loops(n, register)
+            pairs, report = chosen["pairs"], chosen["report"]
+            variant = dict(cell=chosen["cell"], mode=chosen["mode"],
+                           worst_loop=chosen["worst_loop"],
+                           tried=chosen["scored"])
+        else:
+            pairs = {}
+            for a, b in itertools.combinations(range(n), 2):
+                pairs[(a, b)] = register(a, b, None, "occupancy")
+            report = check_loops(pairs, n)
+            variant = dict(cell=None, mode="occupancy",
+                           worst_loop=max((lp["translation_error"]
+                                           for lp in report["loops"]),
+                                          default=None),
+                           tried=[])
+
+        _cancel_checkpoint(progress)
+        if progress is not None:
+            progress(0.75, "Checking loop closure")
+
+        ref = request.reference
+        suspect = {tuple(sorted(p)) for p in report.get("suspect_pairs", [])}
+
+        def relative(a, b):
+            """Transform taking scan b into scan a's frame."""
+            if (a, b) in pairs:
+                return pairs[(a, b)]
+            return np.linalg.inv(pairs[(b, a)])
+
+        transforms, unresolved = {}, []
+        for i in range(n):
+            if i == ref:
+                transforms[i] = np.eye(4)
+                continue
+            edge = tuple(sorted((ref, i)))
+            # A pair the loop check blamed is not trustworthy enough to apply.
+            # Saying so beats placing the scan somewhere plausible-looking.
+            if report.get("localised") and edge in suspect:
+                unresolved.append(i)
+                continue
+            transforms[i] = relative(ref, i)
+
+        if request.refine_icp:
+            if progress is not None:
+                progress(0.80, "Refining")
+            for i, M in list(transforms.items()):
+                if i == ref:
+                    continue
+                _cancel_checkpoint(progress)
+                refined = _do_c2c_icp(CloudToCloudICPRequest(
+                    target_points=clouds[ref].ravel().tolist(),
+                    source_points=clouds[i].ravel().tolist(),
+                    init_transform=M.flatten().tolist(),
+                ), progress=None)
+                if (refined.get("success")
+                        and refined.get("transformation_matrix")
+                        and (refined.get("fitness") or 0.0) > 0.0):
+                    transforms[i] = np.asarray(refined["transformation_matrix"],
+                                               dtype=np.float64).reshape(4, 4)
+
+        if progress is not None:
+            progress(1.0, "Done")
+
+        loops = [dict(scans=list(lp["scans"]),
+                      translation_error=lp["translation_error"],
+                      rotation_error=lp["rotation_error"],
+                      closed=lp["closed"])
+                 for lp in report.get("loops", [])]
+
+        return dict(
+            success=True,
+            reference=ref,
+            transformation_matrices={str(i): transforms[i].flatten().tolist()
+                                     for i in sorted(transforms)},
+            unresolved_scans=unresolved,
+            loops=loops,
+            loops_checked=bool(report.get("checked")),
+            loops_consistent=bool(report.get("consistent")),
+            loops_localised=bool(report.get("localised")),
+            suspect_pairs=[list(p) for p in report.get("suspect_pairs", [])],
+            variant=variant,
+            # With fewer than three overlapping scans there is no cycle, so
+            # nothing here has been cross-checked -- say so rather than implying
+            # the same level of validation.
+            validated=bool(report.get("checked")),
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return dict(success=False, error=str(e))
+
+
+@app.post("/api/multi/register")
+def multi_scan_register(request: MultiScanRegisterRequest, http_request: Request):
+    """Register several scans together, validated by loop closure.
+
+    Declared `def`, NOT `async def`: the work is blocking CPU (a coarse search
+    plus ICP for every pair, minutes on a real set), so FastAPI must run it in
+    the worker threadpool. An `async def` handler owns the single event loop for
+    its whole duration and starves every other request behind it -- see
+    tests/test_event_loop_not_blocked.py.
+
+    Prefer this over repeated /api/c2c/global-register calls whenever three or
+    more overlapping scans are available: the extra scans are what make a
+    wrong-but-well-fitting alignment detectable at all.
+    """
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_multi_scan_register(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+@app.post("/api/c2c/global-register")
+def global_register_cloud_to_cloud(request: GlobalRegisterRequest, http_request: Request):
+    """Coarse (global) registration of one point cloud onto another.
+
+    Declared `def` rather than `async def` so the blocking coarse search and ICP
+    run in the worker threadpool instead of holding the event loop.
+
+    Unlike /api/c2c/icp-register this does NOT need the clouds to start close
+    together: it reduces both to sparse per-plant anchors, matches those, and
+    (by default) refines the winner with the same point-to-plane ICP. Streams
+    PHP1 progress markers ahead of the JSON result (cancellable pill).
+    """
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_global_register(request, progress=progress)).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
@@ -29394,9 +30446,28 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
         source_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
 
-        # Determine max correspondence distance if not provided
+        # Determine max correspondence distance if not provided.
+        #
+        # Scaled from the cloud's own POINT SPACING, not its extent. The old rule
+        # (`diagonal * 0.05`) tied the correspondence window to how big the plot
+        # is, which is unrelated to how far a point should have to look for its
+        # true partner -- it worked out to ~100-120x the median nearest-neighbour
+        # spacing on every real dataset here, and that is far too wide.
+        #
+        # Too wide is not merely imprecise, it moves the minimum. On a real
+        # vineyard with 5.2 m rows, ICP started from the CORRECT pose and walked
+        # 2.87 m away at 100x spacing, because dense near-field foliage found
+        # partners in the neighbouring row. Error grew monotonically with the
+        # multiplier on every pair measured across three orchards.
+        #
+        # 20x is the balance point. Tighter is slightly more accurate but loses
+        # pull-in range: at 5x, ICP failed to recover a 2 m starting offset at
+        # all (it sat still), while 10x/20x/40x all recovered it. 20x keeps ICP
+        # fitness in the 0.69-0.88 band -- enough correspondences to be stable --
+        # against 0.14-0.61 at 5x.
         if request.max_correspondence_distance is None:
-            max_corr_dist = diagonal * 0.05
+            max_corr_dist = _auto_correspondence_distance(
+                np.asarray(target_pcd.points), diagonal)
         else:
             max_corr_dist = request.max_correspondence_distance
 
@@ -29433,7 +30504,7 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
             progress(1.0, "Done")
 
         rmse_ratio, quality_warning = _icp_quality(
-            float(reg_result.inlier_rmse), diagonal)
+            float(reg_result.inlier_rmse), diagonal, float(reg_result.fitness))
 
         return dict(
             success=True,
