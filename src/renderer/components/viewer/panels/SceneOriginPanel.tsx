@@ -39,7 +39,7 @@ export function SceneOriginPanel({
 }: SceneOriginPanelProps) {
   return (
     <div
-      className="absolute top-4 right-[280px] bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
       data-testid="scene-origin-panel"
       data-has-origin={isCustom ? 'true' : 'false'}
       data-place-mode={placeMode ? 'true' : 'false'}

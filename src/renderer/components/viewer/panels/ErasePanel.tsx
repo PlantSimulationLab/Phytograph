@@ -62,7 +62,7 @@ export function ErasePanel({
       data-stamp-count={stampCount}
       data-erase-active={eraseActive ? 'true' : 'false'}
       data-erase-projection-kind={eraseProjectionKind}
-      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
         <span className="flex items-center gap-2">

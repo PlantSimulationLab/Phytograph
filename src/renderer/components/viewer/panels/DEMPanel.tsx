@@ -114,7 +114,7 @@ export function DEMPanel({
   const tooFine = totalCells > DEM_MAX_CELLS;
 
   return (
-    <div data-testid="dem-panel" className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
+    <div data-testid="dem-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
           <Mountain className="w-3 h-3" />

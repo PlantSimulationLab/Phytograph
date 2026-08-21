@@ -1989,7 +1989,8 @@ export default function PointCloudViewer({
   const polygonCameraRef = useRef<THREE.Camera | null>(null);
   const polygonCanvasSizeRef = useRef<{ width: number; height: number } | null>(null);
   // The screen-space overlays (crop lasso/rect, trunk seeding) sit at z-10,
-  // under every floating panel (crop/tree panel z-20, right stack z-30, display
+  // under the colorbar/class legend (z-15) and under every floating panel
+  // (tool panels z-20, right stack z-30, display
   // bubble z-55, toasts z-110), so those panels swallow their clicks and
   // mousemoves. `useViewportBlockZone` (below, one per tool) tracks the pointer
   // on the window instead, measures the blockers off this root, and clamps the
@@ -19591,10 +19592,22 @@ export default function PointCloudViewer({
           flush against the colorbar when it grows to the bottom. Laid out in
           one bottom-aligned flex row so any combination of colorbars coexists
           without overlapping each other. */}
+      {/* z-[15]: ABOVE the screen-space overlays (z-10) but BELOW the floating
+          tool panels (z-20). The legend's expanded cards are
+          pointer-events-auto (they open the colormap editor), they are anchored
+          bottom-right, and they grow upward and leftward as entries are added —
+          straight into the `right-[280px]` lane the tool panels occupy. At the
+          legend's old z-20 that was a TIE with the panels, broken by DOM order,
+          and this overlay is rendered LAST — so a tall/wide legend won and ate
+          the panel's own buttons. It swallowed DEM's Run button on CI (the
+          click timed out on "scalar-overlay subtree intercepts pointer
+          events"), while passing locally where the legend was narrower and only
+          covered the button's right edge, leaving the centre Playwright clicks
+          clear. A passive readout must never outrank an interactive panel. */}
       <div
         data-testid="scalar-overlay"
         data-active-scalar={legendColorMode === 'scalar' ? legendScalarField ?? '' : ''}
-        className="absolute bottom-4 right-[296px] z-20 pointer-events-none"
+        className="absolute bottom-4 right-[296px] z-[15] pointer-events-none"
       >
         <LegendStack
           entries={legendEntries}

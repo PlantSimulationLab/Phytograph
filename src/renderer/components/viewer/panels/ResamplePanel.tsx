@@ -36,7 +36,7 @@ export function ResamplePanel({
   const atFull = fraction >= 1.0;
   return (
     <div
-      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64"
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64"
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
       ref={(el) => el?.focus()}

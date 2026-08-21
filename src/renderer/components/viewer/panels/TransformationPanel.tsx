@@ -71,7 +71,7 @@ export function TransformationPanel({
 
   return (
     <div
-      className="absolute top-4 right-[280px] bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
       data-testid="translate-panel"
       data-dirty={isDirty ? 'true' : 'false'}
       data-applying={isApplying ? 'true' : 'false'}

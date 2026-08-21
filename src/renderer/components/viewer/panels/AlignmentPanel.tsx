@@ -23,7 +23,7 @@ export function AlignmentPanel({
   return (
     <div
       data-testid="alignment-panel"
-      className="absolute top-4 right-[280px] bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto"
+      className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-72 max-h-[80vh] overflow-y-auto"
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') onClose(); }}
       ref={(el) => el?.focus()}
