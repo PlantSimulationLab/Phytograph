@@ -81,15 +81,20 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
   const colorMode = page.getByTestId('display-color-mode');
   await expect(colorMode).toBeVisible();
 
-  // Color by the marked categorical field. The slug is "Target_Index".
-  await colorMode.selectOption('scalar:Target_Index');
-  await expect(colorMode).toHaveValue('scalar:Target_Index');
+  // Color by the marked categorical field. "Target Index[]" is a RECOGNISED
+  // multi-return column, so it canonicalises to the slug `target_index` (see
+  // _CANONICAL_NAME_ALIASES) rather than keeping a header-derived spelling —
+  // that is what makes it visible to Backfill Misses and LAD. The other specs
+  // (export-scalar-columns, backfill-misses) already assert the canonical
+  // slug; this one was missed when the vocabulary was consolidated.
+  await colorMode.selectOption('scalar:target_index');
+  await expect(colorMode).toHaveValue('scalar:target_index');
 
   // A categorical field shows the discrete class legend, NOT the continuous
   // colorbar — this is the wizard's categorical mark taking effect end-to-end.
   const legend = page.getByTestId('class-legend');
   await expect(legend).toBeVisible();
-  await expect(legend).toHaveAttribute('data-legend-attribute', 'Target_Index');
+  await expect(legend).toHaveAttribute('data-legend-attribute', 'target_index');
   await expect(page.getByTestId('colorbar')).toBeHidden();
 });
 

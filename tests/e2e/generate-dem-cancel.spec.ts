@@ -32,6 +32,30 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
+    // Dismiss the import's success toast before touching the DEM panel. The
+    // toast stack (components/Toast.tsx) is `fixed bottom-4 right-4 top-4` at
+    // z-[110] — the FULL window height — and its cards are pointer-events-auto,
+    // so a live toast sits on top of the DEM panel's Run button and swallows
+    // the click. Verified by hit-testing the button's centre:
+    // document.elementFromPoint there returns `toast-success` while a toast is
+    // up and `dem-run-button` once it is gone. Success toasts auto-expire after
+    // 4 s, so whether the click lands is a pure race against machine speed —
+    // this spec failed 1 run in 3 locally, and Playwright's own error blames
+    // whichever overlay it walked to rather than the toast.
+    //
+    // (Same hazard the crop tools handle via `data-blocks-viewport`; see
+    // viewport-pick.spec.ts for the other spec that has to clear toasts.)
+    //
+    // Dismiss via a direct DOM click, NOT locator.click(): a toast can expire
+    // between resolving the locator and the click, and Playwright then burns
+    // its full actionability timeout. Firing the DOM event is immediate and a
+    // no-op if the node already went away.
+    await page.evaluate(() => {
+      document.querySelectorAll<HTMLElement>('[data-testid="toast-close"]')
+        .forEach((b) => b.click());
+    });
+    await expect(page.getByTestId('toast-close')).toHaveCount(0, { timeout: 15_000 });
+
     await page.getByTestId('tool-dem').click();
     const panel = page.getByTestId('dem-panel');
     await expect(panel).toBeVisible();
