@@ -30149,6 +30149,21 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
         return dict(success=False, error=f"Global registration failed: {str(e)}")
 
 
+# Refuse an inline `scan_points` payload beyond this many points PER SCAN.
+#
+# A Python list of floats costs ~32 bytes per value against 8 for a numpy array,
+# so a 21 M-point scan is 0.50 GB as an array and 2.0 GB as a list -- and
+# pydantic validates `List[List[float]]` by copying, roughly doubling it again.
+# Measured: sending three full scans this way reached a 45 GB physical footprint
+# with 36 GB swapped, on a machine with 26 GB of swap. `max_points_per_scan`
+# cannot help, because all of that is spent in the CALLER and in validation,
+# before the worker ever sees the request.
+#
+# Session-backed clouds avoid this entirely by sending a `scans` reference, so
+# the guard names that as the fix rather than just refusing.
+_MULTI_MAX_INLINE_POINTS = 2_000_000
+
+
 class MultiScanRegisterRequest(BaseModel):
     """Register a SET of scans together, using the scan graph to validate itself.
 
@@ -30176,6 +30191,115 @@ class MultiScanRegisterRequest(BaseModel):
     # faster but cannot register a scene whose default setting is wrong for it.
     select_variant: bool = True
     refine_icp: bool = True
+    # Working points per scan. Registration matches pattern rather than fine
+    # detail, so more than this buys accuracy that the coarse grid cannot use
+    # while costing memory linearly: a full 10.4 M-point scan measured 2.0 GB.
+    max_points_per_scan: int = 300_000
+    # Reject voxels holding too few returns before registering. Helps a scene
+    # whose scatter dominates the extent; hurts one that registers off sparse
+    # far-field structure. See `_reject_sparse_voxels`.
+    density_filter: bool = False
+
+
+# Density-rejecting voxel decimation for registration inputs.
+#
+# Two different jobs, one pass. A terrestrial scan carries a diffuse cloud of
+# sparse returns well above the canopy -- bird hits, atmospheric scatter,
+# multipath. Measured on a real olive scan: 60k points up to 124 m, only 0.54%
+# of the cloud but spread over a huge volume, so they set the z extent and every
+# scale derived from it.
+#
+# The discriminator is how many points share a voxel. At 0.25 m, a point in the
+# canopy sits in a voxel holding thousands; a noise point sits alone (measured
+# medians: 4685 against 2, and 90% of noise voxels hold a single point). So
+# rejecting voxels below a minimum count removes the scatter almost entirely
+# while barely touching the structure registration keys on.
+#
+# NOT `voxel_down_sample`, which keeps one point per occupied voxel: that
+# PRESERVES sparse scatter and crushes dense canopy (measured 44:1 collapse of
+# canopy against 96.7% retention of noise), turning 0.54% noise into 18.9%.
+# 0.10 m rather than 0.25 m, and a min of 2 rather than 20. Both matter and the
+# sweep that found them was two-dimensional: at a FIXED 0.25 m voxel the best
+# count still made the olive set worse (6 bad pairs of 10 against 2 with no
+# filter at all), because a coarse voxel needs a high count and that strips the
+# sparse far-field structure wide-baseline pairs register against. A fine voxel
+# discriminates on its own: real distant returns still find one neighbour within
+# 0.10 m, while scatter sits alone. Measured on olive, 0.10/2 gives 1 bad pair
+# of 10 -- better than no filter -- where 0.10/3 and 0.25/20 both give 6.
+_DENSITY_VOXEL_M = 0.10
+# Knife edge: min 3 costs five pairs. It is a floor on "this return has a
+# neighbour", not a density estimate, and raising it removes real structure.
+_DENSITY_MIN_PTS = 2
+
+
+def _footprint_extent(points: np.ndarray, percentile: float = 99.0) -> float:
+    """Grid extent for a cloud, measured BEFORE any density filtering.
+
+    Kept separate from `auto_cell_size` so the raster scale is decided by where
+    the survey reaches, not by how many returns survived cleaning. Filtering
+    changes the latter by design and must not silently change the former.
+    """
+    if len(points) < 100:
+        return 0.0
+    centre = np.median(points[:, :2], axis=0)
+    radius = float(np.percentile(np.linalg.norm(points[:, :2] - centre, axis=1),
+                                 percentile))
+    return 2.6 * radius
+
+
+def _reject_sparse_voxels(points: np.ndarray,
+                          voxel: float = _DENSITY_VOXEL_M,
+                          min_points: int = _DENSITY_MIN_PTS) -> np.ndarray:
+    """Drop points whose voxel holds fewer than `min_points` returns.
+
+    Returns the input unchanged when it is too small to judge, or when the rule
+    would discard most of the cloud -- a genuinely sparse survey (a thin ALS
+    strip, a decimated import) must not be emptied by a filter meant for
+    scanner scatter.
+
+    Measured on the olive set: it fixes what it targets (the ScanPos003 pair
+    goes from 4.330 m to 0.034 m) but ScanPos011/012 go from ~0.15 m to 8+ m, so
+    the set still ends 2-of-4 placed -- the same score with a different two
+    scans withheld. Every coarse variant lands those pairs 8-9 m out, so it is
+    not a variant-selection problem.
+
+    Three explanations tried and disproved:
+      * raster scale: filtering collapses the p99 radius 110 m -> 16 m and so
+        the cell 1.59 m -> 0.23 m. Real, and worth fixing on its own (see
+        `_footprint_extent`), but pinning the extent did not recover the pairs.
+      * low overlap on a wide baseline: the five scanners sit 1.6-3.8 m apart.
+      * the filter hitting those scans harder: it removes 2.4-2.7% of EVERY
+        scan, with no outlier.
+
+    What the filter removes that those two pairs depend on is still unknown.
+    """
+    if len(points) < 1000 or voxel <= 0:
+        return points
+    key = np.floor((points - points.min(axis=0)) / voxel).astype(np.int64)
+    _, inverse, counts = np.unique(key, axis=0, return_inverse=True,
+                                   return_counts=True)
+    keep = counts[inverse] >= min_points
+    if keep.sum() < max(1000, int(0.25 * len(points))):
+        return points
+    return points[keep]
+
+
+def _expected_coarse_runs(n_scans: int, select_variant: bool) -> int:
+    """How many coarse searches a run will perform, for the progress bar.
+
+    Approximate on purpose: the variant probe covers a bounded subgraph and the
+    winner then fills the rest, so the exact count depends on how those overlap.
+    A number that moves beats a bar that does not.
+    """
+    import itertools as _it
+
+    from loop_closure import _COARSE_VARIANTS, _probe_edges
+
+    all_pairs = len(list(_it.combinations(range(n_scans), 2)))
+    if not select_variant or n_scans < 3:
+        return all_pairs
+    probe = len(_probe_edges(n_scans))
+    return probe * len(_COARSE_VARIANTS) + max(0, all_pairs - probe)
 
 
 def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) -> dict:
@@ -30183,20 +30307,77 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
     try:
         import itertools
 
-        from loop_closure import check_loops, select_variant_by_loops
+        from loop_closure import (check_loops, select_per_pair_by_loops,
+                                  select_variant_by_loops)
         from raster_correlation import register_by_correlation
 
         _cancel_checkpoint(progress)
         if progress is not None:
             progress(0.02, "Reading scans")
 
+        # Cap the working size per scan. Registration matches PATTERN, not fine
+        # detail, so it needs a representative sample rather than every return:
+        # measured on a real olive set, the full 10.4 M-point cloud costs 2.0 GB
+        # and ~11 s of miss-filtering EACH, and holding five of them at once was
+        # the whole of a ~5 GB peak. Decimating on the way in bounds both.
+        budget = max(int(request.max_points_per_scan or 0), 50_000)
+
+        n_in = len(request.scan_points or []) + len(request.scans)
+        # Reject an oversized inline payload BEFORE touching it: by this point
+        # the caller has already paid to build it, but the worker must not
+        # compound that by decimating a list it could have refused.
+        for k, flat in enumerate(request.scan_points or []):
+            if len(flat) // 3 > _MULTI_MAX_INLINE_POINTS:
+                return dict(
+                    success=False,
+                    error=(f"Scan {k + 1} was sent inline with "
+                           f"{len(flat) // 3:,} points, past the "
+                           f"{_MULTI_MAX_INLINE_POINTS:,} limit for that path. "
+                           "Send session-backed scans instead, or decimate "
+                           "before sending."))
+
         clouds: List[np.ndarray] = []
+        spans: List[float] = []
+
+        def _ingest(X: np.ndarray) -> None:
+            X = X[np.isfinite(X).all(axis=1)]
+            # Reject sparse voxels, but keep the ORIGINAL footprint for scale.
+            #
+            # These two steps fight each other if left alone. `auto_cell_size`
+            # sizes the raster from the cloud's radial spread, and the filter's
+            # whole job is removing the sparse far-field returns that spread is
+            # measured from -- so filtering collapsed the p99 radius from 110 m
+            # to 16 m, the extent from 287 m to 42 m, and the cell from 1.59 m to
+            # 0.23 m. At that resolution the raster resolves individual leaves
+            # instead of plant pattern, and the true peak fell from rank 1 to
+            # rank 110. Pinning the extent to the unfiltered footprint keeps the
+            # scale the pattern needs while still dropping the scatter.
+            span = _footprint_extent(X)
+            # Density filtering is OFF by default. It rescued the olive set
+            # (4/4 with it, 2/4 without) but costs GrapeX everything: measured
+            # best-variant error 15.3 m unfiltered against 18.3 m at 0.10/2 and
+            # 24.3 m at 0.25/20. One dataset's fix is another's regression, and
+            # which is which is not yet predictable from the cloud, so it stays
+            # opt-in until it is.
+            if request.density_filter:
+                X = _reject_sparse_voxels(X)
+            spans.append(span)
+            if len(X) > budget:
+                X = X[np.linspace(0, len(X) - 1, budget).astype(int)]
+            clouds.append(X)
+            if progress is not None and n_in:
+                # Reading is a real fraction of the run on a big set; showing it
+                # move beats a bar frozen at 2% for a minute.
+                progress(0.02 + 0.06 * (len(clouds) / n_in),
+                         f"Reading scan {len(clouds)} of {n_in}")
+
         if request.scan_points:
             for flat in request.scan_points:
-                clouds.append(np.asarray(flat, dtype=np.float64).reshape(-1, 3))
+                _ingest(np.asarray(flat, dtype=np.float64).reshape(-1, 3))
         for src in request.scans:
+            _cancel_checkpoint(progress)
             pts, _, _ = _read_points_from_source(src)
-            clouds.append(pts)
+            _ingest(pts)
 
         if len(clouds) < 2:
             return dict(success=False,
@@ -30206,40 +30387,64 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                         error=f"reference index {request.reference} is outside "
                               f"the {len(clouds)} scans provided")
 
-        cleaned = []
-        for X in clouds:
-            X = X[np.isfinite(X).all(axis=1)]
-            # Sky/miss returns wreck the extent and every scale derived from it.
-            cleaned.append(_drop_far_outliers(X))
-        clouds = cleaned
+        # Sky/miss returns wreck the extent and every scale derived from it, so
+        # they go before anything measures the cloud. Cheap now that the input
+        # is already decimated (~0.3 s against ~11 s on a full scan).
+        clouds = [_drop_far_outliers(X) for X in clouds]
         if any(len(X) < 100 for X in clouds):
             return dict(success=False, error="A scan has too few points to register")
 
         n = len(clouds)
-        # Cap the work: pairwise cost is quadratic and each pair runs a coarse
-        # search plus ICP. Decimating here rather than inside the loop keeps the
-        # cost predictable regardless of how the caller sized its input.
-        budget = 300_000
-        clouds = [X[np.linspace(0, len(X) - 1, min(budget, len(X))).astype(int)]
-                  for X in clouds]
+        # One grid for the whole set: the scans overlap, so a shared scale keeps
+        # every pair comparable. Largest footprint wins so no scan is clipped.
+        grid_extent = max(spans) if spans else None
+
+        # A 5-scan set runs 37 coarse searches (9 probe edges x 4 variants, then
+        # the remaining pairs at the winner). Reporting only the phase left the
+        # bar frozen at 10% for ~9 minutes, which reads as a hang.
+        done = {"n": 0}
+        expected = max(1, _expected_coarse_runs(n, request.select_variant))
 
         def register(a, b, cell, mode):
             _cancel_checkpoint(progress)
             result = register_by_correlation(clouds[a], clouds[b],
-                                             mode=mode, cell=cell)
+                                             mode=mode, cell=cell,
+                                             extent=grid_extent)
+            done["n"] += 1
+            if progress is not None:
+                frac = min(done["n"] / expected, 1.0)
+                progress(0.10 + 0.60 * frac,
+                         f"Registering scan pairs ({done['n']} of ~{expected})")
             return np.asarray(result["transformation"], dtype=np.float64)
 
         if progress is not None:
             progress(0.10, "Registering scan pairs")
 
         if request.select_variant and n >= 3:
-            # Only a graph with a cycle can vote on a variant; with two scans
-            # there is no loop and nothing to select on.
-            chosen = select_variant_by_loops(n, register)
+            # Only a graph with a cycle can vote; with two scans there is no
+            # loop and nothing to select on.
+            #
+            # Choose PER PAIR. Pairwise scores cannot rank these candidates --
+            # measured, a pose 18 m wrong scored better than the truth on inlier
+            # RMSE, ICP fitness, tight-point fraction and truncated least
+            # squares alike, because at low overlap a wrong pose manufactures
+            # more correspondences by sliding the clouds together. Whole-graph
+            # consistency is the one signal that does not reward that, so it
+            # picks each pair's variant rather than merely validating the result.
+            from loop_closure import _COARSE_VARIANTS
+
+            def candidates(a, b):
+                return [register(a, b, cell, mode)
+                        for cell, mode in _COARSE_VARIANTS]
+
+            chosen = select_per_pair_by_loops(n, candidates)
             pairs, report = chosen["pairs"], chosen["report"]
-            variant = dict(cell=chosen["cell"], mode=chosen["mode"],
-                           worst_loop=chosen["worst_loop"],
-                           tried=chosen["scored"])
+            variant = dict(cell=None, mode="per-pair",
+                           worst_loop=max((lp["translation_error"]
+                                           for lp in report.get("loops", [])),
+                                          default=None),
+                           closed=chosen["closed"], total=chosen["total"],
+                           tried=[f"{c}/{m}" for c, m in _COARSE_VARIANTS])
         else:
             pairs = {}
             for a, b in itertools.combinations(range(n), 2):
@@ -30278,12 +30483,16 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             transforms[i] = relative(ref, i)
 
         if request.refine_icp:
-            if progress is not None:
-                progress(0.80, "Refining")
-            for i, M in list(transforms.items()):
-                if i == ref:
-                    continue
+            # Report per scan. A single marker at the start left the pill blank
+            # for the whole stage, which reads as a hang on a set where each
+            # refinement is seconds of blocking ICP.
+            movers = [i for i in transforms if i != ref]
+            for done_n, i in enumerate(movers):
+                M = transforms[i]
                 _cancel_checkpoint(progress)
+                if progress is not None:
+                    progress(0.80 + 0.19 * (done_n / max(len(movers), 1)),
+                             f"Aligning scan {done_n + 1} of {len(movers)}")
                 refined = _do_c2c_icp(CloudToCloudICPRequest(
                     target_points=clouds[ref].ravel().tolist(),
                     source_points=clouds[i].ravel().tolist(),
@@ -30321,6 +30530,11 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # the same level of validation.
             validated=bool(report.get("checked")),
         )
+    except ScanCancelled:
+        # Propagate to the streaming wrapper so the run really stops and its
+        # memory is freed. Catching this below would report a blank-message
+        # failure while the user believes they cancelled.
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()

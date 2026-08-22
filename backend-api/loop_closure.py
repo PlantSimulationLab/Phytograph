@@ -236,6 +236,79 @@ def _probe_edges(n_scans: int, max_edges: int = 9) -> List[Tuple[int, int]]:
     return edges
 
 
+def select_per_pair_by_loops(n_scans: int,
+                             candidates: Callable[[int, int], List[np.ndarray]],
+                             max_passes: int = 5) -> dict:
+    """Choose a coarse-stage variant PER PAIR, judged by whole-graph consistency.
+
+    `candidates(a, b)` returns that pair's candidate transforms, one per variant,
+    in a fixed order.
+
+    Why per-pair rather than one setting for the whole set: measured on the olive
+    orchard, 9 of 10 pairs have SOME variant that registers them, but the working
+    variant differs -- pair (0,2) needs the height raster where every other pair
+    wants occupancy. A single set-wide choice cannot express that, and picking
+    occupancy left (0,2) 4.33 m out.
+
+    The objective is HOW MANY LOOPS CLOSE, not the worst loop error. That
+    distinction is load-bearing. Minimising the worst loop fails whenever one
+    pair is unregisterable by any variant: that pair appears in several loops,
+    dominates the maximum, and the search trades away pairs that were fine
+    chasing it. Measured, that made a good pair go 0.031 m -> 5.632 m while never
+    fixing the broken one. Counting closed loops is robust to an irreparable
+    pair, because the loops that avoid it can still all close.
+
+    Returns {'assignment', 'pairs', 'report', 'closed', 'total'}.
+    """
+    keys = list(itertools.combinations(range(n_scans), 2))
+    table = {k: candidates(*k) for k in keys}
+    table = {k: v for k, v in table.items() if v}
+    if not table:
+        return dict(assignment={}, pairs={}, report={}, closed=0, total=0)
+    keys = list(table)
+    n_variants = min(len(v) for v in table.values())
+
+    def evaluate(assign):
+        pairs = {k: np.asarray(table[k][assign[k]], dtype=np.float64) for k in keys}
+        report = check_loops(pairs, n_scans)
+        closed = [lp for lp in report["loops"] if lp["closed"]]
+        # Fewer-closed sorts worse; ties break on tighter total residual.
+        score = (-len(closed), sum(lp["translation_error"] for lp in closed))
+        return score, report, pairs
+
+    # Seed from the best UNIFORM assignment, so per-pair search only has to
+    # improve on the previous behaviour rather than rediscover it.
+    best = None
+    for v in range(n_variants):
+        assign = {k: v for k in keys}
+        score, _, _ = evaluate(assign)
+        if best is None or score < best[0]:
+            best = (score, dict(assign))
+    assign = best[1]
+
+    for _ in range(max_passes):
+        improved = False
+        for k in keys:
+            current = assign[k]
+            best_score, _, _ = evaluate(assign)
+            for v in range(n_variants):
+                if v == current:
+                    continue
+                assign[k] = v
+                score, _, _ = evaluate(assign)
+                if score < best_score:
+                    best_score, current, improved = score, v, True
+                else:
+                    assign[k] = current
+            assign[k] = current
+        if not improved:
+            break
+
+    score, report, pairs = evaluate(assign)
+    return dict(assignment=assign, pairs=pairs, report=report,
+                closed=-score[0], total=len(report["loops"]))
+
+
 def select_variant_by_loops(n_scans: int,
                             register: Callable[[int, int, Optional[float], str], np.ndarray],
                             variants: Sequence[Tuple[Optional[float], str]] = _COARSE_VARIANTS) -> dict:

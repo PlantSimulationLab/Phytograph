@@ -136,3 +136,41 @@ def test_progress_is_monotonic_and_ends_at_one():
     assert seen, "worker emitted no progress"
     assert seen == sorted(seen), f"progress went backwards: {seen}"
     assert seen[-1] == pytest.approx(1.0)
+
+
+def test_an_oversized_inline_payload_is_refused_not_processed():
+    """Inline points past the limit must be REJECTED, not quietly decimated.
+
+    A Python list of floats costs ~32 bytes per value against 8 for a numpy
+    array, and pydantic copies `List[List[float]]` during validation. Sending
+    three full scans that way was measured at a 45 GB physical footprint with
+    36 GB swapped -- on a machine with 26 GB of swap.
+
+    `max_points_per_scan` cannot prevent that: the cost is paid in the CALLER
+    and in validation, before the worker sees the request. So the worker refuses
+    and names the cheap alternative rather than accepting a payload that already
+    hurt to build.
+    """
+    over = main._MULTI_MAX_INLINE_POINTS + 1000
+    result = main._do_multi_scan_register(main.MultiScanRegisterRequest(
+        scan_points=[[0.0] * (over * 3), [0.0] * 300, [0.0] * 300],
+    ), progress=None)
+
+    assert not result["success"]
+    assert "past the" in result["error"]
+    # The message has to say what to do instead, or it is just a wall.
+    assert "session-backed" in result["error"]
+
+
+def test_an_inline_payload_within_the_limit_is_accepted():
+    """The guard must not block ordinary use.
+
+    A cloud small enough to send inline is exactly the case inline exists for;
+    rejecting it would push every caller to sessions for no reason.
+    """
+    poses = [np.eye(4), _rigid(9.0, [2.0, -1.0, 0.0]), _rigid(-7.0, [-2.0, 2.0, 0.0])]
+    views = _views(_scene(), poses, seed=11)
+    assert all(len(v) < main._MULTI_MAX_INLINE_POINTS for v in views)
+
+    result = main._do_multi_scan_register(_request(views), progress=None)
+    assert result["success"], result.get("error")

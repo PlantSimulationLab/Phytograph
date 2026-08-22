@@ -11230,13 +11230,30 @@ export default function PointCloudViewer({
       // not a mix, so a single inline cloud forces every scan inline. Session
       // sources are far cheaper (no megabytes of JSON), hence the preference.
       const allSourced = payloads.every(p => p.kind === 'source');
+      // Decimate before serialising. A JS number[] costs ~8 bytes per value on
+      // the wire but the BACKEND turns it into a Python list at ~32 bytes each,
+      // and pydantic copies it during validation. Sending three full scans that
+      // way was measured at a 45 GB physical footprint. Registration matches
+      // planting pattern, not fine detail, so an evenly-spaced sample of this
+      // size carries everything the coarse grid can use.
+      const MAX_INLINE_POINTS = 1_000_000;
+      const sampleFlat = (pts: number[][]): number[] => {
+        if (pts.length <= MAX_INLINE_POINTS) return pts.flat();
+        const out = new Array<number>(MAX_INLINE_POINTS * 3);
+        const step = (pts.length - 1) / (MAX_INLINE_POINTS - 1);
+        for (let i = 0; i < MAX_INLINE_POINTS; i++) {
+          const p = pts[Math.round(i * step)];
+          out[i * 3] = p[0]; out[i * 3 + 1] = p[1]; out[i * 3 + 2] = p[2];
+        }
+        return out;
+      };
       const request: MultiScanRegisterRequest = allSourced
         ? { scans: payloads.map(p => (p as Extract<PointSourcePayload, { kind: 'source' }>).source) }
         : {
             scan_points: payloads.map(p => (p.kind === 'source'
               // Mixed set: this cloud has no in-RAM positions to send.
               ? []
-              : collectHitPoints(p.data).points.flat())),
+              : sampleFlat(collectHitPoints(p.data).points))),
           };
       if (!allSourced && request.scan_points?.some(a => a.length === 0)) {
         showToast({ type: 'error', title: 'Auto-Register',

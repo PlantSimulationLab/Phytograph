@@ -60,9 +60,14 @@ import numpy as np
 #
 # Raising K costs time, not accuracy -- peach scores identically at K=8, 16 and
 # 32, because a wrong candidate loses on RMSE rather than crowding out the right
-# one. Each extra candidate is one more short ICP run (~86 s for five peach
-# pairs at K=32 against ~19 s at K=8), so this is the accuracy/latency dial.
-_REFINE_TOP_K = 32
+# one. Each extra candidate is one more short ICP run, so this is the
+# accuracy/latency dial.
+#
+# Lowered 32 -> 8 after measuring the whole graph: on the olive set K=8 took
+# 42.8 s with 1 bad pair of 10, against K=32 at 114.4 s with 2 bad. GrapeX
+# scored identically at every K. Per-pair loop selection now recovers what a
+# longer shortlist used to, so the extra candidates were paying for nothing.
+_REFINE_TOP_K = 8
 
 # Two candidate poses closer than this in XY are the same answer, not rivals.
 # The shortlist's top entries usually converge to the same place, so without
@@ -289,12 +294,18 @@ def _best_by_icp(candidates, target: np.ndarray, source: np.ndarray):
     except ImportError:
         return 0, None, None, 0.0
 
-    def _pc(a, voxel=0.15):
+    # 0.40 m, not the 0.15 m used for a final pose. This ICP only has to RANK
+    # candidates -- the fine stage recomputes the winner at full resolution --
+    # and ranking survives coarse geometry while cost scales with point count:
+    # measured 0.330 s per candidate at 0.15 m against 0.089 s at 0.50 m, so a
+    # 32-candidate shortlist went from ~10.6 s to ~2.8 s per pair.
+    def _pc(a, voxel=0.40):
         p = o3d.geometry.PointCloud()
         p.points = o3d.utility.Vector3dVector(np.asarray(a, dtype=np.float64))
         p = p.voxel_down_sample(voxel)
         p.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.6, max_nn=30))
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=max(0.6, voxel * 6), max_nn=30))
         return p
 
     try:
@@ -371,6 +382,7 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
                             yaw_prior_deg: Optional[float] = None,
                             yaw_search_deg: float = 30.0,
                             strip_ground: bool = True,
+                            extent: Optional[float] = None,
                             refine_top_k: int = _REFINE_TOP_K) -> dict:
     """Coarse-align `source` onto `target`.
 
@@ -428,10 +440,14 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
 
     tgt_centre = np.median(tgt_grid[:, :2], axis=0)
     src_centre = np.median(src_grid[:, :2], axis=0)
+    # An explicit `extent` lets the caller pin the grid to a footprint measured
+    # BEFORE density filtering. Without that, filtering out sparse far-field
+    # returns shrinks the measured spread and silently refines the raster past
+    # the scale plant pattern lives at.
     if cell is None:
-        cell, extent = auto_cell_size(target)
+        cell, extent = auto_cell_size(target, extent)
     else:
-        _, extent = auto_cell_size(target)
+        _, extent = auto_cell_size(target, extent)
 
     tgt_raster = rasterise(tgt_grid, cell, extent, tgt_centre, mode)
     tgt_raster = tgt_raster - tgt_raster.mean()
