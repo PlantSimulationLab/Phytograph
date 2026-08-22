@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.71.0"
+BACKEND_VERSION = "0.72.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -885,8 +885,11 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
 
 
 # Coordinate frame for an imported RIEGL project. "local" keeps each position
-# in its own scanner frame (the only thing a .riproject can offer); "registered"
-# applies the position's SOP so a .PROJ's scans land pre-aligned.
+# in its own scanner frame; "sensor" additionally levels it with the position's
+# own inclinometer (plumb-corrected but NOT aligned to north or to the other
+# positions — the onboard compass is 10-14 deg wrong on measured data, so no
+# heading is applied); "registered" applies the position's SOP so a .PROJ's
+# scans land pre-aligned.
 # Both RIEGL project layouts are directories. `.riproject` is the older
 # on-instrument format; `.PROJ` is what newer instruments (VZ-2000i and friends)
 # write. Matched case-insensitively because the newer one is conventionally
@@ -896,12 +899,13 @@ _RIEGL_PROJECT_EXTS = tuple(s.lstrip('.') for s in _RIEGL_PROJECT_SUFFIXES)
 
 RIEGL_FRAME_LOCAL = "local"
 RIEGL_FRAME_REGISTERED = "registered"
-_RIEGL_FRAMES = (RIEGL_FRAME_LOCAL, RIEGL_FRAME_REGISTERED)
+RIEGL_FRAME_SENSOR = "sensor"
+_RIEGL_FRAMES = (RIEGL_FRAME_LOCAL, RIEGL_FRAME_REGISTERED, RIEGL_FRAME_SENSOR)
 
 # The reader's stream/header version this backend speaks. Bumped whenever the
 # reader's output contract changes, which is how a stale container image is
 # caught (see _read_riegl_header and _require_reader_version).
-_RIEGL_MIN_READER_VERSION = 3
+_RIEGL_MIN_READER_VERSION = 4
 
 
 class RieglProjectInspectRequest(BaseModel):
@@ -1209,11 +1213,18 @@ def riegl_project_extract(
 
     WHICH FRAME THE POINTS ARRIVE IN depends on the request and the layout:
 
-      frame="local" (and every .riproject, which has no other option) — the
-        SCANNER'S OWN FRAME. Raw projects carry no registration (that is what
-        RiSCAN PRO produces), so every position sits at its own origin;
-        `origin_prior` is the GNSS-derived ENU offset for seeding ICP, not a
-        registration.
+      frame="local" — the SCANNER'S OWN FRAME, unrotated. Raw projects carry no
+        registration (that is what RiSCAN PRO produces), so every position sits
+        at its own origin; `origin_prior` is the GNSS-derived ENU offset for
+        seeding ICP, not a registration.
+      frame="sensor" — additionally LEVELLED by the position's own inclinometer,
+        which is survey-grade (agrees with RiSCAN's SOPs to <=0.05 deg on two
+        independent projects). The cloud comes out plumb — so ground/DEM/CSF
+        assumptions hold — but NOT rotated to north and NOT aligned to the other
+        positions: the onboard compass is 10-14 deg wrong on measured data and
+        its own accuracy figure does not predict that, so no heading is applied
+        and ICP still owns the remaining rotation. Positions with no usable
+        inclinometer record import unlevelled rather than failing.
       frame="registered" — each position's SOP is applied, so a .PROJ's scans
         land pre-aligned in the project frame. Per-position `registration` says
         how well: "registered" is the surveyed pose, "prior" is only the
@@ -1330,12 +1341,23 @@ def riegl_project_extract(
             # NO INTERMEDIATE LAS. The arrays are already in RAM and
             # CloudSession's source of truth IS arrays, so writing them out just
             # to read them back cost ~10 s and ~1.6 GB of disk per position.
-            # A registered import places points by the position's SOP; a local
-            # one shifts them by the GNSS prior. They are mutually exclusive —
-            # see _riegl_arrays_to_las_result — so pick exactly one here. The
-            # reader only emits `sop` for a layout that has one, so a .riproject
-            # falls through to the prior no matter what frame was asked for.
-            sop = info.get("sop") if frame == RIEGL_FRAME_REGISTERED else None
+            # A registered import places points by the position's SOP, a sensor
+            # one by its levelling matrix, a local one by the GNSS prior alone.
+            # Matrix and prior are mutually exclusive — see
+            # _riegl_arrays_to_las_result — so pick exactly one here.
+            #
+            # Both matrices are plain 4x4s and take the identical downstream
+            # path; only their provenance differs. The reader emits each only
+            # for a position that has one, so a .riproject asked for
+            # "registered" (no SOP) or a position with no inclinometer reading
+            # (4 of 8 in one real project) falls through to the prior rather
+            # than failing.
+            if frame == RIEGL_FRAME_REGISTERED:
+                sop = info.get("sop")
+            elif frame == RIEGL_FRAME_SENSOR:
+                sop = info.get("sensor_matrix")
+            else:
+                sop = None
             origin_prior = info.get("origin_prior")
             sess_req = CloudSessionCreateRequest(
                 source_path=str(project),

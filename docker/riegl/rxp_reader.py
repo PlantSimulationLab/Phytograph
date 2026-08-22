@@ -62,6 +62,7 @@ import struct
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -75,6 +76,17 @@ _LIB_PATH = os.environ.get("RIVLIB_SO", "/rivlib/lib/libscanifc.so")
 # attributes, which keeps the C->numpy copy amortised without a large resident
 # buffer. Measured throughput at this size is ~2.3 M pts/s under emulation.
 _READ_CHUNK = 200_000
+
+# Which record stream `scanifc_point3dstream_add_demultiplexer` writes out.
+#
+# STATUS is the housekeeping subset (20 record kinds on a VZ-1000): hk_gps_hr,
+# hk_incl, hk_time, power/battery telemetry. ALL is the full record set (46
+# kinds) and is the ONLY place `scanner_pose_hr` (id 72) appears — the
+# instrument's own fused roll/pitch/yaw in degrees. Nothing else needs ALL, and
+# it produces a larger sidecar file, so the pose path opts in explicitly rather
+# than making it the default.
+HK_SELECTOR_STATUS = b"status protocol"
+HK_SELECTOR_ALL = b"all"
 
 # Points whose range is below this are the scanner seeing itself (mount, tripod
 # collar). RiVLib reports them as ordinary returns.
@@ -259,10 +271,23 @@ class _Scanifc:
         )
         return f"{major.value}.{minor.value}.{build.value}"
 
-    def open(self, uri: str, hk_path: str | None = None) -> ctypes.c_void_p:
-        """Open a point stream. When `hk_path` is given, the housekeeping
-        ("status protocol") stream is demultiplexed to that file as points are
-        read — this is the only route to the GNSS records."""
+    def open(
+        self,
+        uri: str,
+        hk_path: str | None = None,
+        selector: bytes = HK_SELECTOR_STATUS,
+    ) -> ctypes.c_void_p:
+        """Open a point stream. When `hk_path` is given, the named record
+        stream is demultiplexed to that file as points are read — this is the
+        only route to the GNSS and pose records.
+
+        `selector` picks WHICH records land in that file, and the choice is not
+        cosmetic: "status protocol" yields 20 record kinds and "all" yields 46.
+        `scanner_pose_hr` — the instrument's own fused roll/pitch/yaw — is in
+        the latter but NOT the former, which is why it went unnoticed for so
+        long. Default stays "status protocol" so existing callers (GNSS,
+        housekeeping inclination) are byte-for-byte unaffected.
+        """
         handle = ctypes.c_void_p()
         self._check(
             self.lib.scanifc_point3dstream_open(
@@ -273,7 +298,7 @@ class _Scanifc:
         if hk_path is not None:
             self._check(
                 self.lib.scanifc_point3dstream_add_demultiplexer(
-                    handle, hk_path.encode(), 0, b"status protocol"
+                    handle, hk_path.encode(), 0, selector
                 ),
                 "add_demultiplexer",
             )
@@ -544,6 +569,53 @@ def decompose_sop(sop: np.ndarray) -> dict:
     return {"yaw_deg": yaw, "pitch_deg": pitch, "roll_deg": roll}
 
 
+def sensor_level_matrix(
+    roll_deg: float,
+    pitch_deg: float,
+    origin: Sequence[float] | None = None,
+) -> np.ndarray:
+    """Build the 4x4 that LEVELS a scan using its own inclinometer.
+
+    ROLL AND PITCH ONLY — the heading is deliberately not applied. See
+    "WHY NO YAW" below; this is a measured decision, not an oversight.
+
+    DIRECTION. roll/pitch describe how the INSTRUMENT is oriented, so levelling
+    the cloud applies the INVERSE of that attitude. The attitude is the same
+    intrinsic Z-Y-X decompose_sop reads back, so with yaw held at zero the
+    attitude is Ry(pitch) @ Rx(roll) and this returns its transpose. Get the
+    direction backwards and the tilt doubles instead of cancelling — which is
+    exactly what test_sensor_level_matrix_inverts_the_attitude pins down.
+
+    WHY NO YAW. The same record carries a compass heading, and it is not good
+    enough to apply. Measured against RiSCAN PRO's own SOPs:
+
+        project          position     yaw_acc_deg    actual yaw error
+        2018-02-23.002   ScanPos001        19.04              10.70
+        2018-02-23.002   ScanPos004         2.98              10.68
+        2017-12-15.001   ScanPos004         0.22              14.14
+
+    The instrument's self-reported accuracy spans 86x while the true error
+    stays flat at 10-14 deg, and the most confident reading is the worst one —
+    so `yaw_acc_deg` cannot gate it either. Roll/pitch from the same record
+    agree with RiSCAN to <=0.05 deg and <=0.008 deg, so the two halves of this
+    pose have completely different trustworthiness. Heading stays ICP's job;
+    yaw is carried in `sensor_pose` as metadata for a future coarse seed.
+    """
+    roll = math.radians(float(roll_deg))
+    pitch = math.radians(float(pitch_deg))
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    attitude = ry @ rx
+
+    out = np.eye(4, dtype=np.float64)
+    out[:3, :3] = attitude.T
+    if origin is not None and len(origin) == 3:
+        out[:3, 3] = [float(v) for v in origin]
+    return out
+
+
 def _pose_gnss(path: str) -> dict | None:
     """Read the GNSS fix out of a .PROJ `final.pose`.
 
@@ -652,15 +724,37 @@ def parse_hk_gps(hk_path: str) -> dict | None:
     return None
 
 
-def parse_hk_inclination(hk_path: str) -> dict | None:
-    """Extract the first inclination reading, if present.
+# hk_incl's raw int16 counts are MILLIDEGREES. RiVLib's own data spec says so
+# outright — `include/riegl/ridataspec.hpp`, struct hk_incl (id_main = 10006):
+#
+#     int16_t ROLL;   //!<  inclination angle along x-axis   [0.001 deg ]
+#     int16_t PITCH;  //!<  inclination angle along y-axis   [0.001 deg ]
+#
+# corroborated by RIEGL's SDK consumer rivlib-utils, which applies
+# `arg.ROLL * 0.001` in src/inclination.cpp. An earlier revision of this file
+# said the units were unconfirmed and passed the counts through untouched;
+# that was wrong, and the check was a grep of the vendored headers away.
+_HK_INCL_TO_DEG = 0.001
 
-    Format is `hk_incl (10006.0), <roll>, <pitch>, <t1>, <t2>`. Units are not
-    confirmed against RIEGL's documentation, so the raw values are passed
-    through under clearly-raw key names rather than being presented as degrees.
-    Levelling the cloud with these would remove two rotational DOF before ICP,
-    but that is Phase 6 work and needs the units pinned down first.
+
+def parse_hk_inclination(hk_path: str) -> dict | None:
+    """Average the scan's inclination readings, in degrees.
+
+    Format is `hk_incl (10006.0), <roll>, <pitch>, <t1>, <t2>`, emitted at ~1 Hz
+    for the duration of the scan (~162 records over ~90 s).
+
+    We AVERAGE rather than take the first, which is the opposite of
+    parse_hk_gps's deliberate first-fix rule. The reasoning differs because the
+    signals differ: a GNSS receiver wanders ~1 m over a scan, so averaging
+    blends a moving estimate, whereas a levelled tripod does not drift and the
+    ~0.01 deg spread between inclinometer records is pure sensor noise. Taking
+    one sample throws away a 160x noise reduction for nothing.
+
+    Verified against RiSCAN PRO's own SOPs on two independent projects: the
+    resulting roll/pitch agree to <=0.05 deg and <=0.008 deg respectively.
     """
+    rolls: list[float] = []
+    pitches: list[float] = []
     try:
         with open(hk_path, encoding="latin-1", errors="replace") as handle:
             for line in handle:
@@ -671,12 +765,120 @@ def parse_hk_inclination(hk_path: str) -> dict | None:
                 if len(fields) < 2:
                     continue
                 try:
-                    return {"roll_raw": int(fields[0]), "pitch_raw": int(fields[1])}
+                    rolls.append(int(fields[0]) * _HK_INCL_TO_DEG)
+                    pitches.append(int(fields[1]) * _HK_INCL_TO_DEG)
                 except ValueError:
                     continue
     except OSError:
         return None
+    if not rolls:
+        return None
+    return {
+        "roll_deg": sum(rolls) / len(rolls),
+        "pitch_deg": sum(pitches) / len(pitches),
+        "sample_count": len(rolls),
+    }
+
+
+# scanner_pose_hr (id_main = 72) field order, fixed by the bit offsets in
+# RiVLib's ridataspec.hpp (0/64/128/192 for the doubles, then 256..480 for the
+# floats — contiguous, no padding):
+_POSE_HR_FIELDS = (
+    "latitude", "longitude", "height_m", "hmsl_m",
+    "roll_deg", "pitch_deg", "yaw_deg",
+    "h_acc_m", "v_acc_m", "roll_acc_deg", "pitch_acc_deg", "yaw_acc_deg",
+)
+
+
+def parse_scanner_pose_hr(hk_path: str) -> dict | None:
+    """Read the instrument's own fused attitude, if the scan recorded one.
+
+    `scanner_pose_hr` is the VZ-1000's GNSS + inclinometer + compass solution,
+    already in DEGREES under the convention RIEGL documents in its own ROS2
+    package (riegl_vz/pose.py): roll about +X, pitch about +Y, yaw about +Z,
+    all counter-clockwise, composed intrinsic Z-Y-X. That is exactly what
+    decompose_sop produces, so the two paths agree without conversion.
+
+    Only reachable through the "all" demultiplexer selector, not the
+    "status protocol" one the rest of this module uses.
+
+    TWO REAL-DATA HAZARDS, both observed on VZ-1000 captures:
+
+      * The FIRST record is routinely all-NaN — a pose row written before the
+        GNSS fix resolves. Every field, not just the position ones.
+      * Some positions emit ONLY NaN rows (4 of 8 in one project). A scan
+        position legitimately having no pose is not an error; the caller falls
+        back to hk_incl and then to no levelling at all.
+
+    So this scans for the first row that is finite THROUGHOUT, and returns None
+    rather than raising when there is none.
+    """
+    try:
+        with open(hk_path, encoding="latin-1", errors="replace") as handle:
+            for line in handle:
+                if not line.startswith("scanner_pose_hr"):
+                    continue
+                _, _, rest = line.partition(",")
+                fields = [f.strip() for f in rest.split(",") if f.strip()]
+                if len(fields) < len(_POSE_HR_FIELDS):
+                    continue
+                try:
+                    values = [
+                        float(f) for f in fields[: len(_POSE_HR_FIELDS)]
+                    ]
+                except ValueError:
+                    continue
+                if not all(math.isfinite(v) for v in values):
+                    continue
+                return dict(zip(_POSE_HR_FIELDS, values))
+    except OSError:
+        return None
     return None
+
+
+def attach_sensor_pose(entry: dict, hk_path: str) -> None:
+    """Record whatever attitude this scan position measured, if any.
+
+    Writes `entry["sensor_pose"]` with roll/pitch in degrees plus a `source`
+    naming where they came from, and leaves the entry untouched when the
+    position measured nothing.
+
+    PRECEDENCE, best first:
+      "scanner_pose_hr" — the instrument's own fused solution. Also carries a
+                          heading, kept as metadata but never applied (see
+                          sensor_level_matrix).
+      "hk_incl"         — the raw inclinometer, averaged over the scan. No
+                          heading at all.
+      (absent)          — the position has neither, and imports unlevelled.
+
+    That last case is ordinary, not exceptional: 4 of 8 positions in one real
+    project emit only NaN pose rows. Callers must treat a missing `sensor_pose`
+    as "no levelling available" rather than as an error.
+    """
+    pose = parse_scanner_pose_hr(hk_path)
+    if pose is not None:
+        entry["sensor_pose"] = {
+            "roll_deg": pose["roll_deg"],
+            "pitch_deg": pose["pitch_deg"],
+            # Carried for a future coarse-ICP seed. NOT applied — the compass
+            # is 10-14 deg wrong on measured data and its own accuracy figure
+            # does not predict that.
+            "yaw_deg": pose["yaw_deg"],
+            "yaw_acc_deg": pose["yaw_acc_deg"],
+            "roll_acc_deg": pose["roll_acc_deg"],
+            "pitch_acc_deg": pose["pitch_acc_deg"],
+            "source": "scanner_pose_hr",
+        }
+        return
+
+    incl = parse_hk_inclination(hk_path)
+    if incl is not None:
+        entry["sensor_pose"] = {
+            "roll_deg": incl["roll_deg"],
+            "pitch_deg": incl["pitch_deg"],
+            "sample_count": incl["sample_count"],
+            "source": "hk_incl",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -896,8 +1098,13 @@ def read_scan(
     stream is written as a SIDE EFFECT of reading the point stream — RiVLib does
     not expose it independently. So a metadata-only inspect still has to pull
     some points to get a GNSS fix; `max_points` bounds that work.
+
+    The sidecar uses the ALL selector rather than "status protocol" because
+    `scanner_pose_hr` — the instrument's own attitude — appears only there. It
+    costs a larger sidecar file and no extra decoding, since the records ride
+    the same pass over the points.
     """
-    handle = ifc.open(_uri(rxp_path), hk_path=hk_path)
+    handle = ifc.open(_uri(rxp_path), hk_path=hk_path, selector=HK_SELECTOR_ALL)
     try:
         meta = ifc.meta(handle)
 
@@ -1196,7 +1403,7 @@ def extract_scan(
     """
     import laspy  # imported lazily so `inspect` works without laspy present
 
-    handle = ifc.open(_uri(rxp_path), hk_path=hk_path)
+    handle = ifc.open(_uri(rxp_path), hk_path=hk_path, selector=HK_SELECTOR_ALL)
     try:
         meta = ifc.meta(handle)
 
@@ -1390,7 +1597,11 @@ _STREAM_MAGIC = b"PHRX"
 # 3: added the .PROJ layout — per-scan `registration`/`sop`, project `layout`,
 #    and the `--frame` option. The bump is what makes a stale reader image fail
 #    loudly ("Rebuild the reader image") instead of reporting a .PROJ as empty.
-_STREAM_VERSION = 3
+# 4: added the `sensor` frame — per-scan `sensor_pose` / `sensor_matrix` from
+#    the instrument's own inclinometer. Bumped for the same reason: a v3 image
+#    silently omits both, so a "levelled" import would quietly not be levelled,
+#    which is far worse than an error because the cloud still looks fine.
+_STREAM_VERSION = 4
 
 # (filename, dtype, columns-per-point)
 _ARRAY_SPEC = (
@@ -1462,7 +1673,7 @@ def stream_scan(
     grouping. That is the same peak as the LAS path had; the saving is the
     encode, not the buffering.
     """
-    handle = ifc.open(_uri(rxp_path), hk_path=hk_path)
+    handle = ifc.open(_uri(rxp_path), hk_path=hk_path, selector=HK_SELECTOR_ALL)
     try:
         meta = ifc.meta(handle)
 
@@ -1635,6 +1846,10 @@ def stream_scan(
 
 FRAME_REGISTERED = "registered"
 FRAME_LOCAL = "local"
+# Levelled by the position's own inclinometer: plumb-corrected but NOT rotated
+# to north and NOT aligned to the other positions. The only frame a .riproject
+# can offer beyond raw local, since it carries no registration.
+FRAME_SENSOR = "sensor"
 
 # A sweep this wide is a full circle, and rotating a full circle is a no-op — so
 # it is left at 0..360 rather than shifted into a arbitrary-looking window.
@@ -1675,11 +1890,20 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
     Which origin depends on the frame:
 
       FRAME_LOCAL      — the GNSS-derived ENU offset when we have a fix, and the
-                         scanner's own origin (0,0,0) when we don't. This is the
-                         only option for a .riproject, which carries no pose.
+                         scanner's own origin (0,0,0) when we don't. No rotation
+                         of any kind.
+      FRAME_SENSOR     — the same origin, plus the instrument's own inclinometer
+                         applied as a levelling rotation. Emits the tilt but
+                         NEVER a heading; see below.
       FRAME_REGISTERED — the SOP translation, i.e. where the instrument actually
                          stood in PRCS, with the rotation split across
                          azimuth_offset_deg and the tilt fields.
+
+    THESE FIELDS DESCRIBE A ROTATION THE POINTS ALREADY RECEIVED. They are not
+    an instruction to rotate anything — the cloud is transformed backend-side in
+    _riegl_arrays_to_las_result. The marker mesh, the coverage shell and a
+    Helios re-export all read them, so emitting an angle the points did not get
+    (or omitting one they did) silently desynchronises the three.
     """
     params = entry.get("scan_params")
     if params is None:
@@ -1689,6 +1913,7 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
         entry["scan_params"] = params
 
     sop = entry.get("sop")
+    pose = entry.get("sensor_pose")
     if frame == FRAME_REGISTERED and sop is not None:
         matrix = np.asarray(sop, dtype=np.float64)
         params["origin"] = [float(v) for v in matrix[:3, 3]]
@@ -1700,6 +1925,23 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
         # decompose_sop for why this diverges from the PTX rule.
         params["tilt_roll_deg"] = ypr["roll_deg"]
         params["tilt_pitch_deg"] = ypr["pitch_deg"]
+    elif frame == FRAME_SENSOR and pose is not None:
+        origin = entry.get("origin_prior") or [0.0, 0.0, 0.0]
+        params["origin"] = origin
+        params["tilt_roll_deg"] = float(pose["roll_deg"])
+        params["tilt_pitch_deg"] = float(pose["pitch_deg"])
+        # The 4x4 the backend applies to the points. Emitted here, beside the
+        # angles that describe it, so the two can never disagree.
+        entry["sensor_matrix"] = [
+            [float(v) for v in row]
+            for row in sensor_level_matrix(
+                pose["roll_deg"], pose["pitch_deg"], origin
+            )
+        ]
+        # NO azimuth_offset_deg and NO _rotate_phi_window: levelling applies no
+        # heading, so the sweep still describes the scanner's own frame. The
+        # pose's yaw stays in `sensor_pose` as metadata — it is 10-14 deg wrong
+        # on measured data (see sensor_level_matrix).
     else:
         params["origin"] = entry.get("origin_prior") or [0.0, 0.0, 0.0]
 
@@ -1809,9 +2051,7 @@ def _inspect_riproject(args, ifc, positions: list[dict]) -> tuple[list[dict], li
             entry["scan_params"] = params
         fix = parse_hk_gps(hk_path)
         entry["gnss"] = fix
-        incl = parse_hk_inclination(hk_path)
-        if incl:
-            entry["inclination_raw"] = incl
+        attach_sensor_pose(entry, hk_path)
         fixes.append(fix)
         scans.append(entry)
     return scans, fixes
@@ -1954,9 +2194,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
             entry["scan_params"] = params
         fix = parse_hk_gps(hk_path)
         entry["gnss"] = fix
-        incl = parse_hk_inclination(hk_path)
-        if incl:
-            entry["inclination_raw"] = incl
+        attach_sensor_pose(entry, hk_path)
         fixes.append(fix)
         scans.append(entry)
 
@@ -2072,9 +2310,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
             except RxpError as exc:
                 entry["error"] = str(exc)
             fix = parse_hk_gps(hk_path)
-            incl = parse_hk_inclination(hk_path)
-            if incl:
-                entry["inclination_raw"] = incl
+            attach_sensor_pose(entry, hk_path)
         params = scan_params_for(pos)
         if params:
             entry["scan_params"] = params
@@ -2187,7 +2423,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     inspect.add_argument(
         "--frame",
-        choices=(FRAME_REGISTERED, FRAME_LOCAL),
+        choices=(FRAME_REGISTERED, FRAME_LOCAL, FRAME_SENSOR),
         default=FRAME_LOCAL,
         help='Coordinate frame for the emitted points. "registered" applies each position\'s SOP so scans land pre-aligned in the project frame (.PROJ only); "local" keeps scanner-local coordinates, which is the only option a .riproject supports.',
     )
@@ -2233,7 +2469,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     stream.add_argument(
         "--frame",
-        choices=(FRAME_REGISTERED, FRAME_LOCAL),
+        choices=(FRAME_REGISTERED, FRAME_LOCAL, FRAME_SENSOR),
         default=FRAME_LOCAL,
         help='Coordinate frame for the emitted points. "registered" applies each position\'s SOP so scans land pre-aligned in the project frame (.PROJ only); "local" keeps scanner-local coordinates, which is the only option a .riproject supports.',
     )

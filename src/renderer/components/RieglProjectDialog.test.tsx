@@ -383,3 +383,98 @@ describe('RieglProjectDialog layering', () => {
     expect(z).toBeGreaterThan(50);
   });
 });
+
+describe('RieglProjectDialog sensor levelling', () => {
+  // A .riproject where only SOME positions recorded an attitude — the real
+  // shape of the data (4 of 8 in 2017-12-15.001 had no usable pose record).
+  const LEVELABLE = {
+    ...PROJECT,
+    scans: [
+      { ...PROJECT.scans[0], sensor_pose: { roll_deg: 1.526, pitch_deg: 0.134, yaw_deg: 58.02, source: 'scanner_pose_hr' } },
+      { ...PROJECT.scans[1] },
+      PROJECT.scans[2],
+    ],
+  };
+
+  it('offers levelling for a .riproject that measured its own tilt', async () => {
+    vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
+    render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />);
+    const toggle = await screen.findByTestId('riegl-level-toggle');
+    // On by default: an unlevelled cloud silently breaks ground/DEM work.
+    expect(toggle.getAttribute('data-level-scans')).toBe('true');
+    // The claim must stay narrow — levelled is not aligned.
+    expect(toggle.textContent).toMatch(/does not align the scans/i);
+  });
+
+  it('imports in the sensor frame when levelling is on', async () => {
+    vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
+    const onResolve = vi.fn();
+    render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={onResolve} />);
+    await screen.findByTestId('riegl-level-toggle');
+    await userEvent.click(screen.getByTestId('riegl-dialog-import'));
+    expect(onResolve).toHaveBeenCalledWith(
+      expect.objectContaining({ frame: 'sensor' }),
+    );
+  });
+
+  it('falls back to the local frame when levelling is switched off', async () => {
+    vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
+    const onResolve = vi.fn();
+    render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={onResolve} />);
+    await screen.findByTestId('riegl-level-toggle');
+    await userEvent.click(screen.getByTestId('riegl-level-scans'));
+    await userEvent.click(screen.getByTestId('riegl-dialog-import'));
+    expect(onResolve).toHaveBeenCalledWith(
+      expect.objectContaining({ frame: 'local' }),
+    );
+  });
+
+  it('says how many selected positions recorded no tilt', async () => {
+    vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
+    render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />);
+    const toggle = await screen.findByTestId('riegl-level-toggle');
+    // ScanPos002 has no sensor_pose (ScanPos003 errored and is unselectable),
+    // so the user is told it imports unlevelled rather than finding out later.
+    expect(toggle.textContent).toMatch(/1 of the 2 selected positions recorded no tilt/i);
+  });
+
+  it('resets to levelling-on when the dialog is reopened', async () => {
+    // A choice made for one project must not silently carry into the next —
+    // the same rule keepLocal follows.
+    vi.mocked(inspectRieglProject).mockResolvedValue(LEVELABLE as never);
+    const { rerender } = render(
+      <RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />,
+    );
+    await screen.findByTestId('riegl-level-toggle');
+    await userEvent.click(screen.getByTestId('riegl-level-scans'));
+    expect(
+      screen.getByTestId('riegl-level-toggle').getAttribute('data-level-scans'),
+    ).toBe('false');
+
+    rerender(<RieglProjectDialog projectPath={null} rivlibPath="/riv" onResolve={vi.fn()} />);
+    rerender(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />);
+    const reopened = await screen.findByTestId('riegl-level-toggle');
+    expect(reopened.getAttribute('data-level-scans')).toBe('true');
+  });
+
+  it('hides the option when no position measured anything', async () => {
+    // Every position lacking a pose is ordinary, not an error state.
+    vi.mocked(inspectRieglProject).mockResolvedValue(PROJECT as never);
+    render(<RieglProjectDialog projectPath="/p.riproject" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-scan-row-ScanPos001')).toBeTruthy());
+    expect(screen.queryByTestId('riegl-level-toggle')).toBeNull();
+  });
+
+  it('never offers levelling for a .PROJ, which has real registration', async () => {
+    vi.mocked(inspectRieglProject).mockResolvedValue({
+      ...PROJ,
+      scans: PROJ.scans.map((s) => ({
+        ...s,
+        sensor_pose: { roll_deg: 1.0, pitch_deg: 0.5, source: 'hk_incl' },
+      })),
+    } as never);
+    render(<RieglProjectDialog projectPath="/p.PROJ" rivlibPath="/riv" onResolve={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('riegl-frame-toggle')).toBeTruthy());
+    expect(screen.queryByTestId('riegl-level-toggle')).toBeNull();
+  });
+});

@@ -439,3 +439,225 @@ def test_pose_gnss_rejects_nonsense(tmp_path):
     pose.write_text(json.dumps({"navigation": {}}))
     assert R._pose_gnss(str(pose)) is None
     assert R._pose_gnss(str(tmp_path / "nope.pose")) is None
+
+
+# ---------------------------------------------------------------------------
+# The sensor frame: levelling a .riproject with its own inclinometer
+# ---------------------------------------------------------------------------
+#
+# Ground truth is RiSCAN PRO's own SOP for the same scan position, so these
+# assert against the instrument's surveyed answer rather than against our own
+# arithmetic. See the fixture's `_baseline_note` for why the final SOP is the
+# right baseline even though that project ran Multi-Station Adjustment.
+
+POSE_FIXTURE = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "riegl_pose_hr.json").read_text()
+)
+
+
+def _write_hk(path: Path, lines) -> str:
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_scanner_pose_hr_is_parsed_in_degrees(tmp_path):
+    entry = POSE_FIXTURE["positions"]["peach_2018_ScanPos001"]
+    hk = _write_hk(tmp_path / "hk.txt", [entry["raw"]])
+    pose = R.parse_scanner_pose_hr(hk)
+    assert pose is not None
+    # Already degrees on the wire — no scaling, unlike hk_incl's millidegrees.
+    assert pose["roll_deg"] == pytest.approx(1.5258935689926147)
+    assert pose["pitch_deg"] == pytest.approx(0.13434524834156036)
+    assert pose["yaw_deg"] == pytest.approx(58.019416809082031)
+    # The accuracy fields sit AFTER the two position accuracies. Reading them
+    # positionally without that offset yields rAcc/pAcc of 1.19/1.56 and a yAcc
+    # of 0.008 — a plausible-looking but exactly wrong answer, which is why the
+    # field order is pinned here.
+    assert pose["roll_acc_deg"] == pytest.approx(0.008, abs=1e-4)
+    assert pose["pitch_acc_deg"] == pytest.approx(0.008, abs=1e-4)
+    assert pose["yaw_acc_deg"] == pytest.approx(19.04, abs=0.01)
+
+
+def test_the_leading_all_nan_pose_record_is_skipped(tmp_path):
+    entry = POSE_FIXTURE["positions"]["peach_2018_ScanPos001"]
+    hk = _write_hk(tmp_path / "hk.txt", [POSE_FIXTURE["nan_row"], entry["raw"]])
+    pose = R.parse_scanner_pose_hr(hk)
+    assert pose is not None
+    assert pose["roll_deg"] == pytest.approx(1.5258935689926147)
+
+
+def test_a_position_whose_pose_is_only_nan_has_none(tmp_path):
+    # Not hypothetical: 4 of 8 positions in 2017-12-15.001 are like this.
+    hk = _write_hk(tmp_path / "hk.txt", [POSE_FIXTURE["nan_row"]] * 5)
+    assert R.parse_scanner_pose_hr(hk) is None
+
+
+def test_hk_incl_counts_are_millidegrees_and_averaged(tmp_path):
+    # ridataspec.hpp, struct hk_incl: ROLL/PITCH are int16 in [0.001 deg].
+    hk = _write_hk(tmp_path / "hk.txt", [
+        "hk_incl (10006.0), 1520, 130, 0, 0",
+        "hk_incl (10006.0), 1540, 150, 0, 0",
+    ])
+    incl = R.parse_hk_inclination(hk)
+    assert incl["roll_deg"] == pytest.approx(1.530)
+    assert incl["pitch_deg"] == pytest.approx(0.140)
+    # Averaged, not first-sampled: one reading throws away a ~160x noise
+    # reduction that a non-drifting sensor gives for free.
+    assert incl["sample_count"] == 2
+
+
+def test_the_two_inclinometer_sources_agree(tmp_path):
+    """hk_incl and scanner_pose_hr measure the same physical tilt.
+
+    They are independent records off the same sensor, so a misparse of either
+    (wrong scale, wrong field offset) shows up as disagreement here.
+    """
+    entry = POSE_FIXTURE["positions"]["peach_2018_ScanPos001"]
+    hk = _write_hk(tmp_path / "hk.txt", [entry["raw"]])
+    pose = R.parse_scanner_pose_hr(hk)
+    ref = entry["hk_incl_mean"]
+    assert pose["roll_deg"] == pytest.approx(ref["roll_deg"], abs=0.2)
+    assert pose["pitch_deg"] == pytest.approx(ref["pitch_deg"], abs=0.2)
+
+
+def test_sensor_level_matrix_cancels_the_tilt_rather_than_doubling_it():
+    """The matrix must INVERT the instrument attitude, not repeat it.
+
+    Getting the direction backwards is the one error that still produces a
+    plausible-looking cloud — it just tilts twice as far.
+    """
+    roll, pitch = 1.526, 0.134
+    rx = np.array([[1, 0, 0],
+                   [0, math.cos(math.radians(roll)), -math.sin(math.radians(roll))],
+                   [0, math.sin(math.radians(roll)), math.cos(math.radians(roll))]])
+    ry = np.array([[math.cos(math.radians(pitch)), 0, math.sin(math.radians(pitch))],
+                   [0, 1, 0],
+                   [-math.sin(math.radians(pitch)), 0, math.cos(math.radians(pitch))]])
+    attitude = ry @ rx
+    tilted_up = attitude @ np.array([0.0, 0.0, 1.0])
+    assert math.degrees(math.acos(tilted_up[2])) == pytest.approx(1.532, abs=0.01)
+
+    levelled = R.sensor_level_matrix(roll, pitch)[:3, :3] @ tilted_up
+    assert levelled[2] == pytest.approx(1.0, abs=1e-12)
+
+
+def test_sensor_level_matrix_applies_no_heading():
+    """Levelling must not rotate the cloud in azimuth.
+
+    A horizontal vector may swing by the small amount implied by tipping the
+    frame upright, but nothing resembling the 10-14 deg the compass would add.
+    """
+    matrix = R.sensor_level_matrix(1.526, 0.134)[:3, :3]
+    worst = 0.0
+    for az in range(0, 360, 5):
+        v = np.array([math.cos(math.radians(az)), math.sin(math.radians(az)), 0.0])
+        w = matrix @ v
+        before = math.degrees(math.atan2(v[1], v[0]))
+        after = math.degrees(math.atan2(w[1], w[0]))
+        worst = max(worst, abs((after - before + 180.0) % 360.0 - 180.0))
+    assert worst < 0.05
+
+
+def test_sensor_level_matrix_carries_the_origin():
+    matrix = R.sensor_level_matrix(0.5, 0.25, [1.5, -2.5, 3.0])
+    assert matrix[:3, 3].tolist() == pytest.approx([1.5, -2.5, 3.0])
+    assert matrix[3].tolist() == [0.0, 0.0, 0.0, 1.0]
+
+
+# A NOTE ON ScanPos002 OF 2017-12-15.001, which does NOT match RiSCAN.
+#
+# That position holds TWO captures — 171215_152137.rxp and 171215_152751.rxp —
+# and they are different tripod setups, not one scan split in two:
+#
+#     171215_152137  roll +0.502  pitch +0.436   <- _main_rxp picks this
+#     171215_152751  roll +1.492  pitch +1.101   <- RiSCAN registered this
+#     RiSCAN SOP     roll +1.496  pitch +1.070
+#
+# Each file's own inclinometer series is internally tight; the levelling code
+# is right and the ~1 deg gap is a scan-SELECTION mismatch. `_main_rxp` takes
+# the alphabetically first .rxp, so for a re-scanned position we import the
+# earlier abandoned capture — which affects the POINTS as much as the tilt.
+# Pre-existing and out of scope here; recorded so it is not rediscovered as a
+# levelling bug.
+
+
+def test_levelling_reproduces_riscans_own_attitude():
+    """THE regression that matters: our levelling vs RiSCAN PRO's surveyed SOP.
+
+    ScanPos004 of 2017-12-15.001 is the one position carrying both a finite
+    scanner_pose_hr and a RiSCAN SOP. If the sign, axis order, or inverse
+    direction were wrong, the roll/pitch would diverge by degrees.
+    """
+    entry = POSE_FIXTURE["positions"]["peach_2017_ScanPos004"]
+    truth = R.decompose_sop(np.asarray(entry["riscan_sop"], dtype=np.float64))
+    pose = entry["pose"]
+    assert pose["roll_deg"] == pytest.approx(truth["roll_deg"], abs=0.1)
+    assert pose["pitch_deg"] == pytest.approx(truth["pitch_deg"], abs=0.1)
+
+
+def test_the_compass_heading_is_not_trustworthy_and_stays_unapplied():
+    """Pins the measurement that justifies dropping yaw.
+
+    If a future change starts applying the heading, this fails and points at
+    the evidence rather than at a style preference.
+    """
+    entry = POSE_FIXTURE["positions"]["peach_2017_ScanPos004"]
+    truth = R.decompose_sop(np.asarray(entry["riscan_sop"], dtype=np.float64))
+    pose = entry["pose"]
+    error = abs((truth["yaw_deg"] - pose["yaw_deg"] + 180.0) % 360.0 - 180.0)
+    # ~14 deg wrong while the instrument self-reports 0.22 deg accuracy, so the
+    # accuracy field cannot gate it either.
+    assert error > 5.0
+    assert pose["yaw_acc_deg"] < 1.0
+
+
+def test_sensor_frame_emits_tilt_but_never_a_heading():
+    entry = {
+        "scan_params": {"phi_min": 10.0, "phi_max": 100.0},
+        "sop": None,
+        "origin_prior": [1.0, 2.0, 3.0],
+        "sensor_pose": {"roll_deg": 1.5, "pitch_deg": -0.5,
+                        "yaw_deg": 58.0, "source": "scanner_pose_hr"},
+    }
+    R._attach_scan_params_extras(entry, R.FRAME_SENSOR)
+    sp = entry["scan_params"]
+    assert sp["origin"] == [1.0, 2.0, 3.0]
+    assert sp["tilt_roll_deg"] == pytest.approx(1.5)
+    assert sp["tilt_pitch_deg"] == pytest.approx(-0.5)
+    # No heading was applied to the points, so none is reported and the sweep
+    # still describes the scanner's own frame.
+    assert "azimuth_offset_deg" not in sp
+    assert sp["phi_min"] == pytest.approx(10.0)
+    assert sp["phi_max"] == pytest.approx(100.0)
+    # The 4x4 the backend will apply, emitted beside the angles describing it.
+    assert np.asarray(entry["sensor_matrix"]).shape == (4, 4)
+
+
+def test_a_position_with_no_sensor_pose_imports_unlevelled():
+    entry = {"scan_params": {"phi_min": 0.0, "phi_max": 360.0},
+             "sop": None, "origin_prior": [3.0, 4.0, 5.0]}
+    R._attach_scan_params_extras(entry, R.FRAME_SENSOR)
+    sp = entry["scan_params"]
+    assert sp["origin"] == [3.0, 4.0, 5.0]
+    assert "tilt_roll_deg" not in sp
+    assert "sensor_matrix" not in entry
+
+
+def test_attach_sensor_pose_prefers_the_fused_pose_then_falls_back(tmp_path):
+    raw = POSE_FIXTURE["positions"]["peach_2018_ScanPos001"]["raw"]
+    incl = "hk_incl (10006.0), 1520, 130, 0, 0"
+
+    both = {}
+    R.attach_sensor_pose(both, _write_hk(tmp_path / "both.txt", [raw, incl]))
+    assert both["sensor_pose"]["source"] == "scanner_pose_hr"
+
+    only_incl = {}
+    R.attach_sensor_pose(only_incl, _write_hk(tmp_path / "incl.txt", [incl]))
+    assert only_incl["sensor_pose"]["source"] == "hk_incl"
+    assert only_incl["sensor_pose"]["roll_deg"] == pytest.approx(1.520)
+    # hk_incl has no compass at all.
+    assert "yaw_deg" not in only_incl["sensor_pose"]
+
+    neither = {}
+    R.attach_sensor_pose(neither, _write_hk(tmp_path / "none.txt", ["hk_time (40.0), 1"]))
+    assert "sensor_pose" not in neither

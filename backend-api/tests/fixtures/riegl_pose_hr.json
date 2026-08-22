@@ -1,0 +1,55 @@
+{
+ "_note": "Real VZ-1000 scanner_pose_hr (id_main=72) records and the RiSCAN PRO SOPs for the same scan positions. Field order is fixed by the bit offsets in RiVLib ridataspec.hpp. The leading all-NaN row is verbatim from the instrument, not an artefact: it is a pose written before the GNSS fix resolves and every position emits one.",
+ "_baseline_note": "riscan_sop is the FINAL SOP from project.rsp, not the SOPV. That project ran plane-based Multi-Station Adjustment, but MSA applied ONE shared VOP to the whole block (V = SOP @ inv(SOPV) identical across all three registered positions to 2.7e-15), so it re-framed rather than re-solving any position's attitude. The final SOP therefore still carries the instrument's true attitude; comparing against SOPV instead shows a spurious 0.7-0.9 deg roll/pitch error.",
+ "nan_row": "scanner_pose_hr (72.0), nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan",
+ "positions": {
+  "peach_2018_ScanPos001": {
+   "raw": "scanner_pose_hr (72.0), 3.8325391668924880e+01, -1.2157789045750071e+02, -2.7081157684326172e+01, 8.8684284687042236e-01, 1.5258935689926147e+00, 1.3434524834156036e-01, 5.8019416809082031e+01, 1.1879999637603760e+00, 1.5599999427795410e+00, 8.0000003799796104e-03, 8.0000003799796104e-03, 1.9040145874023438e+01",
+   "hk_incl_mean": {
+    "roll_deg": 1.5313,
+    "pitch_deg": 0.137,
+    "sample_count": 162
+   }
+  },
+  "peach_2017_ScanPos004": {
+   "pose": {
+    "roll_deg": 0.52,
+    "pitch_deg": 0.084,
+    "yaw_deg": -54.877,
+    "yaw_acc_deg": 0.22,
+    "roll_acc_deg": 0.008,
+    "pitch_acc_deg": 0.008
+   },
+   "hk_incl_mean": {
+    "roll_deg": 0.54,
+    "pitch_deg": 0.1
+   },
+   "riscan_sop": [
+    [
+     0.35817839718772043,
+     0.9336193298475347,
+     -0.007948756070962047,
+     3.428987273727705
+    ],
+    [
+     -0.9336522263720995,
+     0.3581529721947482,
+     -0.004468634969375732,
+     -6.251725552167665
+    ],
+    [
+     -0.0013251333733757251,
+     0.009021942313490456,
+     0.9999584234249117,
+     -9.391498386890834
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ]
+  }
+ }
+}

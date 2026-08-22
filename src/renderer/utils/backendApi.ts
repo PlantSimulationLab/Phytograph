@@ -434,7 +434,21 @@ export async function buildRieglImage(
  */
 export type RieglRegistration = 'registered' | 'prior' | 'none';
 
-export type RieglFrame = 'local' | 'registered';
+/**
+ * Which frame an imported RIEGL scan position lands in.
+ *
+ * - `local` — the scanner's own frame, unrotated. Origin from the GNSS prior
+ *   when there is a fix.
+ * - `sensor` — additionally levelled by the position's own inclinometer, which
+ *   is survey-grade (agrees with RiSCAN PRO's SOPs to ≤0.05°). The cloud comes
+ *   out plumb, so ground/DEM assumptions hold — but it is NOT turned to north
+ *   and NOT aligned to the other positions: the onboard compass is 10–14° wrong
+ *   on measured data, so no heading is applied and ICP still owns the rest.
+ *   A position with no usable inclinometer record imports unlevelled.
+ * - `registered` — the position's SOP is applied, so a .PROJ's scans land
+ *   pre-aligned in the project frame.
+ */
+export type RieglFrame = 'local' | 'registered' | 'sensor';
 
 export interface RieglScanPosition {
   name: string;
@@ -446,6 +460,24 @@ export interface RieglScanPosition {
    * is here so the UI can describe the placement.
    */
   sop?: number[][];
+  /**
+   * What the instrument measured about its own attitude, when it measured
+   * anything. `source` says which record it came from: `scanner_pose_hr` is
+   * the fused GNSS/inclinometer/compass solution, `hk_incl` the raw
+   * inclinometer averaged over the scan.
+   *
+   * Its presence is what makes the `sensor` frame available for a position —
+   * and it is genuinely per-position (4 of 8 in one real project have no
+   * usable record). `yaw_deg` is carried for a future coarse-ICP seed and is
+   * deliberately NOT applied; see RieglFrame.
+   */
+  sensor_pose?: {
+    roll_deg: number;
+    pitch_deg: number;
+    yaw_deg?: number;
+    yaw_acc_deg?: number;
+    source: 'scanner_pose_hr' | 'hk_incl';
+  };
   /**
    * project.json's own verdict on this position's registration, kept distinct
    * from `registration`: a position can be absent from the manifest entirely

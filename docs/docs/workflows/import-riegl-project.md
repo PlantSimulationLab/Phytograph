@@ -130,6 +130,38 @@ instrument's built-in GNSS is metres-accurate, not survey-grade. Use it to seed
 Where a position has **no fix**, it imports at the origin — so several such
 positions will sit on top of one another until you register them.
 
+#### …but it can still be levelled
+
+Even without registration, the scanner recorded **which way was down**. A
+V-Line instrument writes its dual-axis inclinometer into the scan, and that
+reading is genuinely precise: checked against RiSCAN PRO's own transforms on
+two separate projects, it agrees to within a few hundredths of a degree.
+
+The picker therefore offers **Level using the onboard inclination sensor**,
+which is **on by default**. It rotates each position upright using its own tilt
+reading — typically 1–3°, occasionally 4°, depending on how carefully the
+tripod was levelled.
+
+This matters more than it sounds. Ground segmentation, [DEM
+generation](generate-dem.md) and any slope measurement all assume the cloud is
+plumb. A 3° tilt displaces a point 50 m away by about 2.6 m vertically, which
+is enough to bend a "ground" surface that should be flat.
+
+!!! warning "Levelled is not aligned"
+
+    Levelling fixes tilt and **nothing else**. It does not rotate scans to
+    north and it does not align them to each other — you still need
+    [ICP registration](register-compare.md) for that.
+
+    The instrument does record a compass heading, and Phytograph deliberately
+    **ignores it**. Measured against RiSCAN's transforms it was 10–14° wrong,
+    and the scanner's own confidence figure did not predict the error — a
+    reading claiming 0.22° accuracy was 14° out. A heading that wrong is worse
+    than none, because it looks aligned.
+
+Positions that recorded no usable tilt simply import unlevelled; the picker
+says how many, and the rest are still levelled.
+
 #### A `.PROJ` usually is, but only partly
 
 A newer instrument registers on board as it goes, and stores the result per

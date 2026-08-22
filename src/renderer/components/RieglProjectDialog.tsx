@@ -86,6 +86,9 @@ export function RieglProjectDialog({
   // use them by default, and the user who wants the exact scanner-local LAD
   // raster is the one making the deliberate choice.
   const [keepLocal, setKeepLocal] = useState(false);
+  // Levelling a .riproject is ON by default: the inclinometer is survey-grade
+  // and an unlevelled cloud silently breaks ground/DEM assumptions.
+  const [levelScans, setLevelScans] = useState(true);
 
   useEffect(() => {
     if (!projectPath) {
@@ -93,6 +96,9 @@ export function RieglProjectDialog({
       setError(null);
       setSelected(new Set());
       setKeepLocal(false);
+      // Back to the default too, matching keepLocal: a choice made for one
+      // project should not silently carry into the next one.
+      setLevelScans(true);
       return;
     }
     const controller = new AbortController();
@@ -152,8 +158,26 @@ export function RieglProjectDialog({
     (s) => s.registration === 'registered',
   ).length;
   // A .PROJ is imported registered unless the user opts out; a .riproject has
-  // no pose to apply, so it is always scanner-local whatever the checkbox says.
+  // no registration to apply, so it is never "registered" whatever is ticked.
   const useRegistered = isProj && !keepLocal;
+  // ...but a .riproject CAN still be levelled by each position's own
+  // inclinometer, which is a different and much weaker claim than registration:
+  // plumb-correct, not aligned. Only offered when at least one selected
+  // position actually measured an attitude — several real projects have
+  // positions that recorded none.
+  const levelableNames = new Set(
+    scans.filter((s) => s.sensor_pose).map((s) => s.name),
+  );
+  const canLevel = !isProj && levelableNames.size > 0;
+  const levelableSelected = [...selected].filter((n) =>
+    levelableNames.has(n),
+  ).length;
+  const useSensor = canLevel && levelScans;
+  const frame: RieglFrame = useRegistered
+    ? 'registered'
+    : useSensor
+      ? 'sensor'
+      : 'local';
   // Positions that CAN be imported. A failed read is shown (so its error is
   // visible) but is never selectable, so it must not count toward "all".
   const selectableNames = scans.filter((s) => !s.error).map((s) => s.name);
@@ -375,6 +399,51 @@ export function RieglProjectDialog({
                 )}
               </div>
 
+              {/* A .riproject has no registration, but it does carry the
+                  instrument's own inclinometer — enough to stand the cloud
+                  upright, not to align it. Kept verbally distinct from the
+                  .PROJ toggle below so "levelled" is never read as "placed". */}
+              {canLevel && (
+                <label
+                  data-testid="riegl-level-toggle"
+                  data-level-scans={levelScans ? 'true' : 'false'}
+                  className="mt-4 flex items-start gap-2 px-2 py-2 rounded bg-neutral-900/50 border border-neutral-700/60 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    data-testid="riegl-level-scans"
+                    checked={levelScans}
+                    onChange={(e) => setLevelScans(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span className="text-[11px] text-neutral-400">
+                    <span className="text-neutral-300">
+                      Level using the onboard inclination sensor
+                    </span>
+                    <span className="block mt-0.5">
+                      Stands each position upright using its own tilt reading,
+                      which is accurate to a few hundredths of a degree. Ground
+                      segmentation, DEM and terrain slope all assume a plumb
+                      cloud, so this is worth leaving on.{' '}
+                      <span className="text-neutral-300">
+                        It does not align the scans to each other or to north
+                      </span>{' '}
+                      — the scanner&rsquo;s compass is far too coarse for that,
+                      so you still need ICP.
+                      {levelableSelected < selected.size && (
+                        <>
+                          {' '}
+                          {selected.size - levelableSelected} of the{' '}
+                          {selected.size} selected position
+                          {selected.size === 1 ? '' : 's'} recorded no tilt and
+                          will import unlevelled.
+                        </>
+                      )}
+                    </span>
+                  </span>
+                </label>
+              )}
+
               {/* Only a .PROJ has poses to apply, so the choice is only shown
                   where it exists. Offering it on a .riproject would imply an
                   alignment that raw scanner data simply does not carry. */}
@@ -430,7 +499,9 @@ export function RieglProjectDialog({
                       These scans are <strong>not registered</strong>.
                       {isProj
                         ? ' The project\u2019s registration is being skipped at your request, so each position imports into its own frame'
-                        : ' Raw scanner data has no alignment, so each position imports into its own frame'}
+                        : useSensor
+                          ? ' Raw scanner data carries no alignment. Each position is stood upright by its own tilt sensor, but imports into its own frame'
+                          : ' Raw scanner data has no alignment, so each position imports into its own frame'}
                       {anyGnss
                         ? ', offset by its GNSS fix — a metres-level starting point for ICP, not a placement.'
                         : '. No GNSS fix was found, so all positions import at the origin.'}
@@ -464,7 +535,7 @@ export function RieglProjectDialog({
               onClick={() =>
                 onResolve({
                   scans: [...selected],
-                  frame: useRegistered ? 'registered' : 'local',
+                  frame,
                 })
               }
               className="px-3 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"

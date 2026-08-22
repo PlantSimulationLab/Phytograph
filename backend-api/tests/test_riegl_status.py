@@ -12,6 +12,7 @@ machine running them happens to have Docker up or a RiVLib download present.
 """
 
 import json
+import math
 import os
 
 import pytest
@@ -1051,9 +1052,41 @@ def test_a_malformed_pose_is_refused_rather_than_broadcast():
 def test_frame_validation_rejects_an_unknown_frame():
     assert main._validate_riegl_frame(None) == main.RIEGL_FRAME_LOCAL
     assert main._validate_riegl_frame("registered") == main.RIEGL_FRAME_REGISTERED
+    assert main._validate_riegl_frame("sensor") == main.RIEGL_FRAME_SENSOR
     with pytest.raises(HTTPException) as exc:
         main._validate_riegl_frame("prcs")
     assert exc.value.status_code == 400
+
+
+def test_a_levelling_matrix_takes_the_same_path_as_a_sop():
+    """The sensor frame reuses the SOP transform wholesale.
+
+    A levelling matrix is an ordinary 4x4, so hits and miss directions must
+    turn together exactly as they do under a registration SOP — the frame only
+    changes where the matrix came from, never how it is applied.
+    """
+    import numpy as np
+
+    dirs = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+    arrays = _riegl_arrays(n_hit=2, dirs=dirs)
+    # A 2 deg roll about +X, inverted, with the scanner at the origin prior.
+    roll = math.radians(2.0)
+    att = np.array([[1.0, 0.0, 0.0],
+                    [0.0, math.cos(roll), -math.sin(roll)],
+                    [0.0, math.sin(roll), math.cos(roll)]])
+    level = np.eye(4)
+    level[:3, :3] = att.T
+    level[:3, 3] = [1.0, 2.0, 3.0]
+
+    res = main._riegl_arrays_to_las_result(arrays, sop=level.tolist())
+
+    m = res.extras["is_miss"] == 1
+    scanner = np.array([1.0, 2.0, 3.0])
+    assert np.linalg.norm(res.positions[m] - scanner, axis=1) == pytest.approx(
+        20000.0, rel=1e-9
+    )
+    rotated = (att.T @ dirs.T).T
+    assert res.positions[m] - scanner == pytest.approx(rotated * 20000.0, rel=1e-9)
 
 
 def test_a_stale_reader_image_is_named_as_the_problem():
