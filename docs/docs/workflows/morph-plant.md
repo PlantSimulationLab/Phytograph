@@ -1,8 +1,20 @@
 # Morph a plant
 
-Edit a generated plant's growth parameters and watch the geometry update.
-Use morphing to fit a model to a specific cultivar, run sensitivity
-studies, or build a library of parameter presets.
+Adjust a generated plant's growth parameters, then rebuild it at the same
+age with the new values. Use this to fit a model to a specific cultivar, run
+sensitivity studies, or build a library of parameter presets.
+
+!!! info "What morphing does and doesn't do"
+    Morphing does **not** interpolate or deform the existing geometry — there
+    is no animation between an old shape and a new one. Clicking **Regrow**
+    regenerates the plant from scratch from the modified parameters, at its
+    current age, and replaces the mesh.
+
+    It is also the *only* place these parameters are reachable.
+    [Generate a plant](generate-plant.md) asks for species, age, position, and
+    seed — internode length, insertion angle, girth, curvature, and tortuosity
+    are not exposed there. So the sequence is always **generate first, tune
+    second**, even when you know from the outset what values you want.
 
 ## Prerequisite
 

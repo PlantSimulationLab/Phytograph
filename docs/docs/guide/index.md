@@ -5,7 +5,7 @@ analyzing your own plant scans.
 
 If you've never used the app before, read these three pages in order:
 
-1. **[Install Phytograph](install.md)** — download and open the app on macOS or Windows.
+1. **[Install Phytograph](install.md)** — download and open the app on macOS, Windows, or Linux.
 2. **[Your first import](first-import.md)** — load an example dataset and see your scan in 3D.
 3. **[Tour of the interface](interface-tour.md)** — what every panel, toolbar, and color-coded button does.
 

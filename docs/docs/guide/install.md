@@ -5,15 +5,22 @@ Linux (x64).
 
 ## Download
 
-Get the latest installer from the
-[GitHub Releases page](https://github.com/PlantSimulationLab/Phytograph/releases/latest).
+Download the installer for your platform — each link always fetches the
+newest release:
 
-| Platform | File |
+| Platform | Download |
 |---|---|
-| macOS (Apple Silicon, M1/M2/M3/M4) | `Phytograph-arm64.dmg` |
-| macOS (Intel) | `Phytograph-x64.dmg` |
-| Windows 10/11 | `Phytograph-Setup.exe` |
-| Linux (x64) | `Phytograph-x86_64.AppImage` |
+| macOS (Apple Silicon, M1/M2/M3/M4) | [:material-download: `Phytograph-arm64.dmg`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-arm64.dmg) |
+| macOS (Intel) | [:material-download: `Phytograph-x64.dmg`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-x64.dmg) |
+| Windows 10/11 | [:material-download: `Phytograph-Setup.exe`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-Setup.exe) |
+| Linux (x64) | [:material-download: `Phytograph-x86_64.AppImage`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-x86_64.AppImage) |
+
+Not sure which macOS build you need? Apple menu → **About This Mac**: a
+*Chip* line starting with "Apple" means Apple Silicon; an *Intel* processor
+means the Intel build.
+
+For older versions, release notes, and checksums, see the
+[GitHub Releases page](https://github.com/PlantSimulationLab/Phytograph/releases/latest).
 
 ## Install on macOS
 

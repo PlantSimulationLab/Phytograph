@@ -30,11 +30,29 @@ by the four stages of a typical processing pipeline.
 
 <div class="grid cards" markdown>
 
-- :material-broom: **[Clean a point cloud](clean-point-cloud.md)** — translate, crop, erase, filter, resample. Get a scan ready for analysis.
+- :material-broom: **[Clean a point cloud](clean-point-cloud.md)** — the whole cleaning pass, in the order to do it.
 
-- :material-weather-fog: **[Backfill misses](backfill-misses.md)** — recover the sky/miss rays that LAD needs from a scan that dropped them.
+- :phytograph-transform: **[Transform](clean-point-cloud.md#transform-translate-and-rotate)** — move and rotate a cloud, and set the scene origin.
 
-- :material-compare: **[Register & compare](register-compare.md)** — align clouds with ICP and stitch overlapping scans into one.
+- :phytograph-crop: **[Crop](clean-point-cloud.md#crop)** — keep or discard a region with a box, rectangle, or freeform polygon.
+
+- :phytograph-erase: **[Erase](clean-point-cloud.md#erase)** — paint away stray points with a brush.
+
+- :phytograph-filter: **[Filter](clean-point-cloud.md#filter)** — keep points by scalar range or by class.
+
+- :phytograph-resample: **[Resample](clean-point-cloud.md#resample)** — thin a dense cloud to a fraction of its points.
+
+- :phytograph-cross-section: **[Cross-section](clean-point-cloud.md)** — clip the view to a slab and traverse it.
+
+- :phytograph-backfill: **[Backfill misses](backfill-misses.md)** — recover the sky/miss rays that LAD needs from a scan that dropped them.
+
+- :phytograph-auto-register: **[Auto-register clouds](register-compare.md#auto-register-when-clouds-start-far-apart)** — align scans that start far apart, validated by loop closure.
+
+- :phytograph-align-icp: **[Align with ICP](register-compare.md#cloud-to-cloud-icp)** — refine cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh alignment.
+
+- :phytograph-stitch: **[Stitch clouds](register-compare.md#stitch)** — merge overlapping scans into one cloud.
+
+- :material-ruler: **[Cloud-to-mesh distance](register-compare.md#cloud-to-mesh-distance)** — measure how far a cloud sits from a reference surface.
 
 </div>
 
@@ -42,13 +60,13 @@ by the four stages of a typical processing pipeline.
 
 <div class="grid cards" markdown>
 
-- :material-terrain: **[Segment ground points](segment-ground.md)** — classify and remove the ground with the Cloth Simulation Filter.
+- :phytograph-segment-ground: **[Segment ground points](segment-ground.md)** — classify and remove the ground with the Cloth Simulation Filter.
 
-- :material-leaf: **[Separate leaf and wood](segment-wood.md)** — split a scan into woody and foliage points by local geometry.
+- :phytograph-segment-wood: **[Separate leaf and wood](segment-wood.md)** — split a scan into woody and foliage points by local geometry.
 
-- :material-forest: **[Segment individual trees](segment-trees.md)** — separate a multi-tree cloud into per-tree instances.
+- :phytograph-segment-trees: **[Segment individual trees](segment-trees.md)** — separate a multi-tree cloud into per-tree instances.
 
-- :material-brush: **[Label points by hand](label-points.md)** — assign your own classes with a lasso, to correct a classifier or build ground truth.
+- :phytograph-label-points: **[Label points by hand](label-points.md)** — assign your own classes with a lasso, to correct a classifier or build ground truth.
 
 </div>
 
@@ -56,21 +74,19 @@ by the four stages of a typical processing pipeline.
 
 <div class="grid cards" markdown>
 
-- :material-vector-triangle: **[Triangulate a mesh](triangulate.md)** — Delaunay, Ball Pivot, Poisson, and Helios multi-scan triangulation.
+- :phytograph-triangulate: **[Triangulate a mesh](triangulate.md)** — fit leaf surfaces to measure the leaf-angle distribution and *G(θ)*, or reconstruct a surface with Ball Pivot, Poisson, Alpha Shape, or Delaunay.
 
-- :material-tree: **[Fit a crown & metrics](fit-crown.md)** — wrap the canopy in a fitted shape and read off height, volume, and width.
+- :phytograph-fit-crown: **[Fit a crown & metrics](fit-crown.md)** — wrap the canopy in a fitted shape and read off height, volume, and width.
 
-- :material-terrain: **[Generate a DEM](generate-dem.md)** — build a bare-earth DTM, a top-of-canopy DSM, or a canopy height model.
+- :phytograph-dem: **[Generate a DEM](generate-dem.md)** — build a bare-earth DTM, a top-of-canopy DSM, or a canopy height model.
 
-- :material-graph: **[Extract a skeleton](extract-skeleton.md)** — pull branch topology out of a woody scan.
+- :phytograph-skeleton: **[Extract a skeleton](extract-skeleton.md)** — pull branch topology out of a woody scan.
 
 - :phytograph-qsm: **[Build a QSM](build-qsm.md)** — reconstruct a dormant tree as connected cylinders with radii, continuous shoots, and shoot rank.
 
-- :material-flower: **[Add leaves to a QSM](add-leaves.md)** — place leaves on terminal shoots using phyllotaxis.
+- :material-flower: **[Add leaves to a QSM](add-leaves.md)** — place leaves on terminal shoots using phyllotaxis, then [match them to a measured leaf-angle distribution](adjust-leaf-angles.md).
 
-- :material-angle-acute: **[Adjust leaf angles](adjust-leaf-angles.md)** — match a measured leaf-angle distribution on a foliated QSM.
-
-- :material-grid: **[Estimate leaf area density](estimate-leaf-area-density.md)** — invert overlapping scans against a voxel grid into an LAD grid (m²/m³).
+- :phytograph-lad: **[Estimate leaf area density](estimate-leaf-area-density.md)** — invert overlapping scans against a voxel grid into an LAD grid (m²/m³).
 
 </div>
 
@@ -78,10 +94,10 @@ by the four stages of a typical processing pipeline.
 
 <div class="grid cards" markdown>
 
-- :material-sprout: **[Generate a plant](generate-plant.md)** — produce a procedural plant from species, age, and position.
+- :phytograph-generate-plant: **[Generate a plant](generate-plant.md)** — produce a procedural plant from species, age, and position.
 
-- :material-dna: **[Morph a plant](morph-plant.md)** — edit geometry parameters interactively and regrow.
+- :material-dna: **[Tune plant parameters](morph-plant.md)** — adjust a generated plant's growth parameters — internode length, insertion angle, girth, curvature, tortuosity — and rebuild it at the same age.
 
-- :material-radar: **[Simulate a LiDAR scan](simulate-scan.md)** — place a virtual scanner and synthesize the point cloud it would produce.
+- :phytograph-simulate-scan: **[Simulate a LiDAR scan](simulate-scan.md)** — place a virtual scanner, set its field of view, resolution and beam optics, and synthesize the point cloud it would produce — from a fixed position or along a drone, robot, or tractor trajectory.
 
 </div>

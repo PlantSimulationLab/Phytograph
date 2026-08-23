@@ -1,18 +1,44 @@
 # Triangulate a mesh
 
-Triangulation builds a surface mesh from a point cloud. Phytograph
-offers five methods; pick based on your data and what you want to do
-with the result.
+Triangulation fits triangles to a point cloud. It serves **two quite different
+jobs**, and which one you're doing decides everything else on this page —
+which method to pick, and whether the mesh's *shape* or its *triangle
+orientations* is the thing that has to be right.
+
+<div class="grid cards" markdown>
+
+- :material-angle-acute: **Measure leaf angles** *(the usual reason)*
+
+    The triangles stand in for leaf surfaces, and their **normals** are the
+    measurement. This is what feeds the leaf-angle distribution, the *G(θ)*
+    used by [leaf area density](estimate-leaf-area-density.md), and
+    [Adjust leaf angles](adjust-leaf-angles.md). Use **Helios**.
+
+- :material-vector-triangle: **Reconstruct a surface**
+
+    You want the mesh itself — a branch surface, a watertight solid, a
+    tight wrap around a shape — to look at, export, or measure against.
+    Triangle orientations don't have to be individually meaningful.
+
+</div>
+
+!!! warning "The two goals pull in opposite directions"
+    Methods that produce a *better-looking* surface do so by resampling and
+    smoothing — and that is exactly what destroys leaf-orientation statistics.
+    The dropdown says so out loud: Poisson, Alpha Shape, and Delaunay are
+    each labelled **"not recommended for leaf angle"**. A watertight Poisson
+    mesh can be the right answer for reconstruction and the wrong answer for
+    measurement, from the same cloud.
 
 ## Quick decision
 
-| Your data | Use |
+| What you're doing | Use |
 |---|---|
-| Dense scan of a leaf or other roughly-flat surface | **Delaunay** |
-| Branch surfaces, consistent density | **Ball Pivot** |
-| Dense whole-plant scan, need a watertight surface | **Poisson** |
-| Concave shapes you want to wrap tightly | **Alpha Shape** |
-| Multi-scan TLS data with scanner positions | **Helios** |
+| **Measuring leaf angles, or computing LAD** — multi-scan TLS with scanner positions | **Helios** |
+| Reconstructing branch surfaces, consistent density | **Ball Pivot** |
+| Reconstructing a watertight surface from a dense whole-plant scan | **Poisson** |
+| Wrapping a concave shape tightly | **Alpha Shape** |
+| A single roughly-flat surface (one leaf, a panel) | **Delaunay** |
 
 This page uses the short names above. In the **Method** dropdown they appear
 in full as *Bailey & Mahaffee / Helios (recommended)*, *Ball Pivoting*,
@@ -171,27 +197,14 @@ Each mesh row supports a few quick edits:
     **Performance → Triangulate max points** for more surface detail at the cost
     of more memory.
 
-## Plot leaf angles (any method)
-
-The **Leaf angles…** tool works on **every** triangulated mesh — the cloud
-methods (ball-pivoting, Poisson, alpha-shape, Delaunay) as well as Helios. The
-**Filter** controls (Lmax / aspect) are **Helios-only** — see [Helios
-method](#helios-method) below. Expand a mesh's row to reach the tool:
-
-- **Leaf angles…** — opens the leaf-angle distribution plot (inclination PDF,
-  azimuth rose, and a de Wit archetype + Beta fit). It reads the mesh's triangle
-  normals directly, area-weighted, so it works on any triangulated surface. A
-  mesh built with a voxel grid splits the distribution per cell; a mesh with no
-  grid (every cloud mesh, and an auto-grid Helios mesh) shows a single **Whole
-  mesh** distribution. See
-  [Estimate leaf area density](estimate-leaf-area-density.md) for the related
-  per-voxel inversion.
-
 ## Helios method
 
-The **Helios** method uses the scanner geometry to triangulate only the
-rays that actually returned, producing more accurate branch surfaces
-than cloud-only methods. Every selected scan must carry both point
+The **Helios** method triangulates in the **scanner's angular frame**, using
+only the rays that actually returned. That is why it's the method to use when
+you're measuring: triangle orientations stay faithful to the surfaces the beam
+actually hit, rather than being smoothed toward a fitted surface the way the
+cloud methods do. It also produces more accurate branch surfaces than
+cloud-only methods. Every selected scan must carry both point
 data **and** scan parameters (the scanner origin); scans missing
 parameters are listed but can't be selected, with a note telling you to
 add them.
@@ -326,37 +339,25 @@ For most TLS data of stone-fruit trees the auto Lmax works; nudge it down
     product. If canopy density is what you're after, use that workflow
     instead of meshing directly.
 
-## Color a mesh by surface geometry
+## Plot leaf angles (any method)
 
-A triangulated mesh — one built by triangulating a point cloud, including
-Helios meshes — can be pseudocolored per triangle to inspect its surface,
-handy for checking a reconstruction or reading leaf/branch orientation.
-In the **Meshes** panel, click the chevron (▸) on the mesh's row to
-expand its **Color by** options (the chevron only appears on
-triangulation-generated meshes, not plants, shapes, or imported meshes):
+You have a mesh; now read its angles. Where this goes next: the distribution
+itself, or *G(θ)* for [leaf area density](estimate-leaf-area-density.md), or a
+target for [Adjust leaf angles](adjust-leaf-angles.md).
 
-- **Inclination** — zenith angle of each triangle's normal, folded to
-  0–90° (a horizontal facet reads 0°, a vertical one 90°). Up- and
-  down-facing facets read the same.
-- **Azimuth** — compass bearing the triangle's normal points, 0–360°.
-  Triangulated surfaces have no consistent facet winding, so the outward
-  direction must be inferred. For **Helios meshes** each facet's normal is
-  oriented toward the scanner that saw it, giving the true outward bearing —
-  so a scanned closed surface (e.g. a sphere) reads a *continuous* azimuth
-  rather than flipping 180° between its upper and lower halves. For meshes
-  with no scan provenance the normal is folded into the upper hemisphere
-  instead (deterministic, but a closed surface will show a seam at its
-  equator).
-- **Triangle area** — surface area of each triangle.
-- **Source scan** — *(Helios meshes only)* colors each triangle by the
-  scan it was reconstructed from, using that scan's swatch color. Helios
-  triangulates each scan independently, so every triangle belongs to one
-  scan. A legend lists the contributing scans and their triangle counts.
+The **Leaf angles…** tool works on **every** triangulated mesh — the cloud
+methods (ball-pivoting, Poisson, alpha-shape, Delaunay) as well as Helios. The
+**Filter** controls (Lmax / aspect) are **Helios-only** — see [Helios
+method](#helios-method) above. Expand a mesh's row to reach the tool:
 
-For the scalar modes, pick the gradient with the colormap dropdown that
-appears below; a colorbar in the bottom-right shows the value range. The
-**Source scan** mode shows a per-scan legend instead. Choose **Solid
-color** to go back to the flat mesh color.
+- **Leaf angles…** — opens the leaf-angle distribution plot (inclination PDF,
+  azimuth rose, and a de Wit archetype + Beta fit). It reads the mesh's triangle
+  normals directly, area-weighted, so it works on any triangulated surface. A
+  mesh built with a voxel grid splits the distribution per cell; a mesh with no
+  grid (every cloud mesh, and an auto-grid Helios mesh) shows a single **Whole
+  mesh** distribution. See
+  [Estimate leaf area density](estimate-leaf-area-density.md) for the related
+  per-voxel inversion.
 
 ## Plot the leaf angle distribution
 
@@ -461,6 +462,38 @@ Tick **Show Beta fit** above the chart to overlay each cell's fitted Beta curve
 as a dashed line in the cell's color. It's off by default to keep the plot
 readable when many cells are visible, and is disabled while the combined view is
 active (more than 24 cells visible).
+
+## Color a mesh by surface geometry
+
+A triangulated mesh — one built by triangulating a point cloud, including
+Helios meshes — can be pseudocolored per triangle to inspect its surface,
+handy for checking a reconstruction or reading leaf/branch orientation.
+In the **Meshes** panel, click the chevron (▸) on the mesh's row to
+expand its **Color by** options (the chevron only appears on
+triangulation-generated meshes, not plants, shapes, or imported meshes):
+
+- **Inclination** — zenith angle of each triangle's normal, folded to
+  0–90° (a horizontal facet reads 0°, a vertical one 90°). Up- and
+  down-facing facets read the same.
+- **Azimuth** — compass bearing the triangle's normal points, 0–360°.
+  Triangulated surfaces have no consistent facet winding, so the outward
+  direction must be inferred. For **Helios meshes** each facet's normal is
+  oriented toward the scanner that saw it, giving the true outward bearing —
+  so a scanned closed surface (e.g. a sphere) reads a *continuous* azimuth
+  rather than flipping 180° between its upper and lower halves. For meshes
+  with no scan provenance the normal is folded into the upper hemisphere
+  instead (deterministic, but a closed surface will show a seam at its
+  equator).
+- **Triangle area** — surface area of each triangle.
+- **Source scan** — *(Helios meshes only)* colors each triangle by the
+  scan it was reconstructed from, using that scan's swatch color. Helios
+  triangulates each scan independently, so every triangle belongs to one
+  scan. A legend lists the contributing scans and their triangle counts.
+
+For the scalar modes, pick the gradient with the colormap dropdown that
+appears below; a colorbar in the bottom-right shows the value range. The
+**Source scan** mode shows a per-scan legend instead. Choose **Solid
+color** to go back to the flat mesh color.
 
 ## Produce a point cloud from a mesh
 

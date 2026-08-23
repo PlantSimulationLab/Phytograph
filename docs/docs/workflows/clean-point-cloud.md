@@ -13,8 +13,11 @@ bring it to the origin, level a tilted scan, or line it up with another
 cloud before registration.
 
 Opening the tool shows a **Transform** panel with **Position** and
-**Rotation (°)** sections, plus translation arrows and rotation rings at
-the cloud. Set the change any of these ways — all update the viewport
+**Rotation (°)** sections, plus translation arrows and rotation rings drawn
+together at the **scene origin** — the point rotation pivots about, marked by
+the red-and-white ring. The gizmo keeps a fixed size on screen, so it stays
+the same size to grab whether you are looking at a whole survey or zoomed
+into one branch. Set the change any of these ways — all update the viewport
 **live** so you can see the result before committing:
 
 - Type exact **X / Y / Z** values (metres for position, degrees for

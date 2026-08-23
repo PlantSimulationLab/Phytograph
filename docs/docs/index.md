@@ -11,15 +11,39 @@ hide:
 <p style="font-size: 1.15rem; max-width: 42rem;">
 A desktop application for measuring, comparing, and modeling plant
 architecture from LiDAR scans — built for plant scientists who work with
-point clouds, meshes, and procedural plant models.
+point clouds, meshes, skeletons, and procedural plant models.
 </p>
 
 <div class="grid cards" markdown>
 
 - :material-cube-scan: **Import LiDAR scans**
 
-    Drag and drop `.las`, `.laz`, `.xyz`, `.ply`, or `.csv` point clouds into
-    a 3D viewer that handles tens of millions of points.
+    Drag and drop `.las`, `.laz`, `.e57`, `.ptx`, `.ply`, `.pcd`, or ASCII
+    (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) point clouds into a 3D viewer
+    that handles tens of millions of points. RIEGL `.riproject` and `.PROJ`
+    scanner projects import directly.
+
+- :material-broom: **Clean and prepare**
+
+    Transform, crop, erase, filter, resample, and cross-section a cloud —
+    then backfill the sky/miss rays that leaf area density depends on.
+
+- :material-compare: **Register and compare**
+
+    Auto-register rotated scans, refine with ICP, and stitch overlaps into
+    one cloud — with cloud-to-mesh distance statistics (mean, median,
+    percentiles, and coverage at fractions of the bounding-box diagonal).
+
+- :material-layers: **Segment scans**
+
+    Classify ground with a cloth simulation filter, separate wood from
+    leaf, and split a plot into individual trees — then carry the labels
+    through the rest of the pipeline.
+
+- :material-brush: **Label points by hand**
+
+    Paint your own classes with a lasso or brush to correct a classifier
+    or build ground truth, with per-class counts and undo.
 
 - :material-vector-triangle: **Reconstruct meshes**
 
@@ -36,30 +60,19 @@ point clouds, meshes, and procedural plant models.
 
     Reconstruct dormant trees as connected cylinders with fitted radii,
     segment continuous shoots, and classify them by shoot rank — with
-    woody volume, trunk diameter, and per-rank metrics.
-
-- :material-sprout: **Generate procedural plants**
-
-    Grow Helios plant models — trees, vines, cereals, vegetables — to a
-    target age, then morph their parameters interactively.
-
-- :material-layers: **Segment scans**
-
-    Classify ground, separate wood from leaf, and split a plot into
-    individual trees — then carry the labels through the rest of the
-    pipeline.
+    woody volume, trunk diameter, and per-rank metrics. Add leaves by
+    phyllotaxis and match a measured leaf-angle distribution.
 
 - :material-grid: **Measure canopy structure**
 
     Invert overlapping scans into a voxel grid of leaf area density
-    (m²/m³), fit crown shapes for height and volume, and build DTM / DSM
-    / canopy-height surfaces.
+    (m²/m³), fit crown shapes (ellipsoid, prism, cone, alpha shape) for
+    height and volume, and build DTM / DSM / canopy-height surfaces.
 
-- :material-compare: **Register and compare**
+- :material-sprout: **Generate procedural plants**
 
-    Cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh ICP with RMSE, plus
-    cloud-to-mesh distance statistics (mean / median / percentiles and
-    coverage within 1 / 5 / 10 mm).
+    Grow Helios plant models — trees, vines, cereals, vegetables, weeds —
+    to a target age, then morph their parameters interactively.
 
 - :material-radar: **Simulate a scan**
 
