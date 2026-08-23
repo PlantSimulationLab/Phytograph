@@ -4,9 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { startBackend, stopBackend, setBackendWindowGetter, setBackendFailedHandler } from './backend.js';
 import { registerIpc } from './ipc.js';
 import { authorizeOpenPaths, extractFilePathsFromArgv } from './openPaths.js';
-import { installApplicationMenu } from './menu.js';
+import { installApplicationMenu, applyMenuState } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
-import { IPC, type FileDropPayload } from '../shared/ipc.js';
+import { IPC, type FileDropPayload, type MenuStatePayload } from '../shared/ipc.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
 import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler, log } from './logger.js';
@@ -406,6 +406,14 @@ app.whenReady().then(async () => {
       mainWindow.webContents.send(IPC.OpenFiles, { paths: pendingOpenPaths });
       pendingOpenPaths = [];
     }
+  });
+
+  // Menu items whose enabled state depends on the scene (e.g. Reset
+  // Registration, dead unless something has actually been registered). The
+  // native menu is built here and cannot see renderer state, so the renderer
+  // pushes it.
+  ipcMain.on(IPC.MenuState, (_e, payload: MenuStatePayload) => {
+    applyMenuState(payload);
   });
 
   // Windows/Linux: a second launch (e.g. double-clicking a file while the app is

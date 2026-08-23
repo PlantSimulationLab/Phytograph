@@ -30,6 +30,123 @@ export interface Scan {
   // covers the legacy 6/7-column conventions but may misread a file
   // that uses non-default column ordering.
   asciiFormat?: string | null;
+  // Set when Auto-Register moved this scan onto another one. Auto-Register
+  // BAKES its matrix into the geometry (a session transform, or new in-RAM
+  // positions), so nothing about the resulting cloud says it was registered —
+  // the record has to be kept here or the fact is lost the moment the toast
+  // fades. Two things read it: the Scans panel, which badges the row, and
+  // "Reset Registration", which needs the matrix to undo the move.
+  registration?: ScanRegistration;
+}
+
+/** What Auto-Register did to a scan, kept so it can be shown and reversed.
+ *
+ *  `matrix` is the ACCUMULATED world-frame rigid transform (row-major 4x4,
+ *  the layout the backend's ICP response and `/session/{id}/transform` use):
+ *  registering an already-registered scan composes onto it (`M_new · M_old`)
+ *  rather than replacing it, so the inverse always returns the cloud to where
+ *  it sat before the FIRST registration. Without composing, a second pass
+ *  would strand the cloud at the first pass's result on reset. */
+export interface ScanRegistration {
+  /** Accumulated row-major 4x4, world frame. */
+  matrix: number[];
+  /** Scan this one was registered ONTO, for the panel readout. Not a hard
+   *  reference — the target may since have been deleted or renamed, so the
+   *  label is snapshotted alongside the id rather than looked up. */
+  targetId: string;
+  targetLabel: string;
+  /** How many Auto-Register passes are folded into `matrix`. */
+  passes: number;
+}
+
+/** Compose a newly applied registration onto whatever a scan already carried. */
+export function composeRegistration(
+  prev: ScanRegistration | undefined,
+  applied: number[],
+  targetId: string,
+  targetLabel: string,
+): ScanRegistration {
+  return {
+    matrix: prev ? multiply4x4(applied, prev.matrix) : [...applied],
+    targetId,
+    targetLabel,
+    passes: (prev?.passes ?? 0) + 1,
+  };
+}
+
+/** Row-major 4x4 product a·b. Kept here (rather than reaching for three.js)
+ *  so the registration bookkeeping stays testable without a renderer. */
+export function multiply4x4(a: number[], b: number[]): number[] {
+  const out = new Array<number>(16).fill(0);
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 4; c++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[r * 4 + k] * b[k * 4 + c];
+      out[r * 4 + c] = sum;
+    }
+  }
+  return out;
+}
+
+/** Inverse of a RIGID row-major 4x4 (rotation + translation only): the
+ *  transpose of the rotation block, applied to the negated translation.
+ *
+ *  Not a general 4x4 inverse on purpose. Registration matrices are rigid by
+ *  construction, and this form is both exact and free of the conditioning
+ *  problems a general inverse hits on the near-singular matrices a degenerate
+ *  fit can produce — reversing a registration must never itself distort the
+ *  cloud. */
+export function invertRigid4x4(m: number[]): number[] {
+  const rt = [
+    m[0], m[4], m[8],
+    m[1], m[5], m[9],
+    m[2], m[6], m[10],
+  ];
+  const t = [m[3], m[7], m[11]];
+  const it = [
+    -(rt[0] * t[0] + rt[1] * t[1] + rt[2] * t[2]),
+    -(rt[3] * t[0] + rt[4] * t[1] + rt[5] * t[2]),
+    -(rt[6] * t[0] + rt[7] * t[1] + rt[8] * t[2]),
+  ];
+  return [
+    rt[0], rt[1], rt[2], it[0],
+    rt[3], rt[4], rt[5], it[1],
+    rt[6], rt[7], rt[8], it[2],
+    0, 0, 0, 1,
+  ];
+}
+
+/** Scans carrying an Auto-Register record — the set "Reset Registration" acts
+ *  on, and the reason that command is disabled on an unregistered project. */
+export function registeredScans(scans: Scan[]): (Scan & { registration: ScanRegistration })[] {
+  return scans.filter(
+    (s): s is Scan & { registration: ScanRegistration } => s.registration != null,
+  );
+}
+
+/** Ids of the scans that others were registered ONTO — the references.
+ *
+ *  DERIVED from the movers' `registration.targetId` rather than stored on the
+ *  reference itself, and deliberately so. A reference is only a reference for
+ *  as long as something is still registered onto it: reset that mover, or
+ *  delete it, and the reference is once again an ordinary unregistered scan. A
+ *  stored flag would have to be swept on every reset and every delete to stay
+ *  true, and would quietly outlive the registration it describes when either
+ *  sweep was missed. Deriving it cannot go stale.
+ *
+ *  A reference is NOT itself moved by Auto-Register, so it carries no matrix
+ *  and "Reset Registration" never touches it — which is exactly why it needs a
+ *  DIFFERENT marker from a mover rather than sharing one. */
+export function referenceScanIds(scans: Scan[]): Set<string> {
+  const ids = new Set<string>();
+  const present = new Set(scans.map(s => s.id));
+  for (const s of scans) {
+    const target = s.registration?.targetId;
+    // Skip a target that has since been deleted: nothing in the panel could
+    // show the badge anyway, and a self-reference would be a bug elsewhere.
+    if (target && target !== s.id && present.has(target)) ids.add(target);
+  }
+  return ids;
 }
 
 export function hasData(scan: Scan): scan is Scan & { data: PointCloudData } {

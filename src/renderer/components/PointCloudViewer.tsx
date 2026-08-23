@@ -79,7 +79,7 @@ import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
 import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin } from '../lib/scan';
+import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -122,7 +122,7 @@ import {
   fuzzyMatch,
   generateShapeMesh,
   octreeScalarFieldOptions,
-  importedColumnsFor,
+  partitionImportedColumns,
   displayLabelFor,
   assembleScanScalarFields,
   voxelMeshToHeliosGrid,
@@ -393,6 +393,11 @@ interface PointCloudViewerProps {
   onSetScanSelection?: (ids: Set<string>) => void;
   onUpdateScanData: (id: string, data: PointCloudData) => void;
   onUpdateScanParams: (id: string, params: ScanParameters | undefined) => void;
+  // Record (or, with `undefined`, clear) a scan's Auto-Register provenance.
+  // Separate from onUpdateScanData because the two must not travel together:
+  // onUpdateScanData drops `sourcePath` on every call, and the registration is
+  // also set on the flat-cloud path where the data update carries no octree.
+  onUpdateScanRegistration?: (id: string, registration: ScanRegistration | undefined) => void;
   onUpdateScanLabel?: (id: string, label: string) => void;
   onUpdateScanColor?: (id: string, color: string) => void;
   onSave: (data: PointCloudData, fileName: string) => void;
@@ -528,6 +533,7 @@ export default function PointCloudViewer({
   onSetScanSelection,
   onUpdateScanData,
   onUpdateScanParams,
+  onUpdateScanRegistration,
   onUpdateScanLabel,
   onUpdateScanColor,
   onSave: _onSave,
@@ -1080,6 +1086,15 @@ export default function PointCloudViewer({
     ids: string[];
     label: string;
   } | null>(null);
+
+  // "Reset Registration" confirmation. Held as the list of scans that WOULD be
+  // moved rather than a bare boolean, so the prompt can name them: the command
+  // acts on the whole project, and a user who registered one pair among six
+  // scans needs to see which ones are about to move before agreeing.
+  const [resetRegistrationConfirm, setResetRegistrationConfirm] = useState<
+    { id: string; name: string; target: string }[] | null
+  >(null);
+  const [isResettingRegistration, setIsResettingRegistration] = useState(false);
 
   // Command palette state
   const [showCommandPalette, setShowCommandPalette] = useState(false);
@@ -1814,6 +1829,30 @@ export default function PointCloudViewer({
   // Per-row expansion state for the scans panel. Held in-memory only; resets
   // on app reload.
   const [expandedScanIds, setExpandedScanIds] = useState<Set<string>>(new Set());
+  // Hits-only extent for the expanded row's "extent:" line, computed once per
+  // expansion rather than per render. On an octree cloud this is a field read
+  // (`robustExtent`), but a FLAT cloud carrying a miss column has to be scanned
+  // point by point — cheap once, not cheap on every viewer frame.
+  const expandedScanExtents = useMemo(() => {
+    const out = new Map<string, { x: number; y: number; z: number }>();
+    for (const scan of scansAll) {
+      if (!expandedScanIds.has(scan.id) || !hasData(scan)) continue;
+      const e = extentForParameterSeeding(scan.data);
+      if (e) out.set(scan.id, e);
+    }
+    return out;
+  }, [expandedScanIds, scansAll]);
+
+  // Which scans are the REFERENCE of a registration — i.e. something else was
+  // registered onto them. Derived once per scan-list change rather than per
+  // row, since the answer needs the whole list (see referenceScanIds).
+  const registrationReferenceIds = useMemo(() => referenceScanIds(scansAll), [scansAll]);
+
+  // Whether anything is registered at all — gates "Reset Registration" in the
+  // palette and (pushed over IPC) in the native menu bar. Reactive state rather
+  // than a `scansRef` read, because the command registry memo has to RECOMPUTE
+  // when it flips or the greyed-out state would never update.
+  const anyScanRegistered = useMemo(() => scansAll.some(s => s.registration != null), [scansAll]);
 
   // Edit mode and per-cloud edit states
   const [editMode, setEditMode] = useState<EditMode>('none');
@@ -6416,6 +6455,27 @@ export default function PointCloudViewer({
       { id: 'cloud-align', name: 'Align Clouds (ICP)', keywords: ['register', 'icp', 'alignment', 'fit'], action: () => setShowAlignDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Globe, multiInput: true },
       { id: 'cloud-auto-register', name: 'Auto-Register Clouds', keywords: ['register', 'registration', 'global', 'coarse', 'automatic', 'align', 'rotated', 'match'], action: () => setShowAutoRegisterDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Sparkles, testId: 'tool-auto-register', multiInput: true },
       { id: 'cloud-stitch', name: 'Stitch Clouds', keywords: ['merge', 'combine', 'join'], action: () => setShowStitchDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Merge, multiInput: true },
+      // Menu-bar and palette only — deliberately NO `toolGroup` and NO `icon`,
+      // so it never takes a slot in the Tools palette. It is a project-wide
+      // corrective, not something reached for mid-workflow, and a toolbar
+      // button next to Auto-Register would invite the misclick it exists to
+      // repair.
+      //
+      // `requires: null` because it acts on whatever is registered rather than
+      // on the selection; `isDisabled` is what actually gates it, on whether
+      // ANY scan carries a registration. That predicate greys it out in the
+      // Cmd+K palette AND is pushed to the native menu (see the MenuState
+      // effect below), so the item is dead in both places rather than live-
+      // looking and then reporting that it had nothing to do.
+      { id: 'cloud-unregister', name: 'Reset Registration', keywords: ['unregister', 'registration', 'reset', 'undo', 'revert', 'auto-register', 'realign', 'restore'], action: () => {
+        const targets = registeredScans(scansRef.current);
+        // Defensive: isDisabled should have made this unreachable, and the
+        // dispatch bridge guards on it too.
+        if (targets.length === 0) return;
+        setResetRegistrationConfirm(targets.map(s => ({
+          id: s.id, name: scanDisplayName(s), target: s.registration.targetLabel,
+        })));
+      }, category: 'Point Cloud', requires: null, isDisabled: () => !anyScanRegistered },
 
       // ── Segmentation ────────────────────────────────────────────────
       { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => setShowSectionPanel(v => !v), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
@@ -6485,7 +6545,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings]);
+  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
   // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool
@@ -6529,6 +6589,21 @@ export default function PointCloudViewer({
     };
     return () => { delete (window as any).__runToolCommand; };
   }, []);
+
+  // Push the enabled state of scene-dependent menu items to the main process,
+  // which owns the native menu and cannot read renderer state.
+  //
+  // Only ids that genuinely vary on scene state belong here. The rest of the
+  // menu is gated by the dispatch bridge's isCommandAvailable check, which is
+  // adequate for selection-driven tools: those open a dialog that explains what
+  // is missing. "Reset Registration" has no dialog to explain anything, so a
+  // live-looking item that silently does nothing is the failure mode this
+  // avoids.
+  useEffect(() => {
+    window.electronAPI?.setMenuState?.({
+      enabled: { 'cloud-unregister': anyScanRegistered },
+    });
+  }, [anyScanRegistered]);
 
   // Current selection state, shared by the static Toolbar, the Tools menu, and
   // the Cmd+K palette so all three derive availability identically.
@@ -10878,6 +10953,13 @@ export default function PointCloudViewer({
        *  scan would bury the summary that actually matters. Errors still
        *  surface: a failure the user cannot see is a different problem. */
       silent?: boolean;
+      /** Stamp the applied matrix onto the SOURCE scan as Auto-Register
+       *  provenance, so the Scans panel can badge it and "Reset Registration"
+       *  can reverse it. Set by the Auto-Register callers only: plain ICP is a
+       *  manual nudge of an already-close pair, and folding it into the same
+       *  record would make the reset undo a hand alignment the user never
+       *  asked to lose. */
+      recordRegistration?: boolean;
     },
   ) => {
     // Inputs come from the Align dialog (explicit target/source) or, as a
@@ -11024,6 +11106,14 @@ export default function PointCloudViewer({
           };
         };
 
+        // The matrix that ends up BAKED into the geometry, filled in by
+        // whichever branch below runs. It is NOT the bare ICP `matrix`: both
+        // branches fold in the pending edit translation they also consume and
+        // then zero, so a registration record built from `matrix` alone would
+        // leave that translation stranded and "Reset Registration" would
+        // restore the cloud to a pose it never actually held.
+        let appliedMatrix: THREE.Matrix4 | null = null;
+
         const sourceOctree = sourceCloud.data.octree;
         if (sourceOctree?.sessionId) {
           // Octree-backed source: geometry lives in the backend session (in-RAM
@@ -11038,6 +11128,7 @@ export default function PointCloudViewer({
           const sessionMatrix = matrix.clone().multiply(
             new THREE.Matrix4().makeTranslation(tr.x, tr.y, tr.z),
           );
+          appliedMatrix = sessionMatrix;
           // The backend reads a ROW-MAJOR flat 4x4. THREE.Matrix4.elements /
           // toArray() are COLUMN-major, so transpose before flattening (matches
           // the row-major layout the ICP response used).
@@ -11111,6 +11202,7 @@ export default function PointCloudViewer({
               sourceState.translation.x, sourceState.translation.y, sourceState.translation.z,
             ),
           );
+          appliedMatrix = flatMatrix;
           const moveScanOrigin = transformSourceOrigin(flatMatrix, quaternion);
           onUpdateCloud(sourceCloud.id, {
             ...sourceCloud.data,
@@ -11129,6 +11221,22 @@ export default function PointCloudViewer({
             next.set(sourceCloud.id, { ...state, translation: { x: 0, y: 0, z: 0 } });
             return next;
           });
+        }
+
+        if (options?.recordRegistration && appliedMatrix) {
+          // Read the previous record through `scansRef`, not the closed-over
+          // `scans`: multi-scan registration applies several pairs inside ONE
+          // render, so the captured array never updates and a second pass onto
+          // the same scan would compose onto a stale (or absent) record.
+          onUpdateScanRegistration?.(sourceCloud.id, composeRegistration(
+            scansRef.current.find(sc => sc.id === sourceCloud.id)?.registration,
+            // THREE.Matrix4 stores COLUMN-major; the record is ROW-major (the
+            // layout the backend transform and the ICP response both use), so
+            // transpose on the way in.
+            appliedMatrix.clone().transpose().toArray(),
+            targetCloud.id,
+            targetCloud.data.fileName || tId,
+          ));
         }
 
         console.log(`Cloud-to-cloud ICP result - position: [${position.x.toFixed(4)}, ${position.y.toFixed(4)}, ${position.z.toFixed(4)}], rotation: [${(euler.x * 180/Math.PI).toFixed(2)}°, ${(euler.y * 180/Math.PI).toFixed(2)}°, ${(euler.z * 180/Math.PI).toFixed(2)}°], fitness: ${response.fitness?.toFixed(4)}, rmse: ${response.rmse?.toFixed(6)}`);
@@ -11165,7 +11273,7 @@ export default function PointCloudViewer({
       icpAbortRef.current = null;
       icpRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, onUpdateCloud, onUpdateScanParams, buildPointSource, getEditState, setEditStates, buildSessionOctreeData]);
+  }, [selectedIds, clouds, onUpdateCloud, onUpdateScanParams, onUpdateScanRegistration, buildPointSource, getEditState, setEditStates, buildSessionOctreeData]);
 
   // Auto-Register: coarse global registration, then ICP refinement.
   //
@@ -11183,6 +11291,7 @@ export default function PointCloudViewer({
     let confidenceNote = '';
     await handleCloudToCloudICP(targetId, sourceId, {
       label: 'Auto-Register',
+      recordRegistration: true,
       runRegistration: async ({ targetPayload, sourcePayload, signal, onProgress, onRunId }) => {
         const sceneType = confirmedSceneType ?? opts.sceneType;
         const response = await globalRegisterCloudToCloud({
@@ -11372,6 +11481,7 @@ export default function PointCloudViewer({
             transformation_matrix: flat,
           } as ICPRegistrationResponse),
           silent: true,
+          recordRegistration: true,
         });
         applied++;
       }
@@ -11417,6 +11527,154 @@ export default function PointCloudViewer({
       icpRunIdRef.current = null;
     }
   }, [clouds, buildPointSource, handleCloudToCloudICP, showToast]);
+
+  // Reset Registration — put every Auto-Registered scan back where it started.
+  //
+  // Auto-Register BAKES its matrix into the geometry (a backend session
+  // transform, or rewritten in-RAM positions), which is a deliberate undo
+  // boundary: no multi-megabyte Float32Array ever enters the history stack, so
+  // Cmd+Z cannot reach across it. That makes this the ONLY way back, and it is
+  // why the matrix is recorded on the scan in the first place.
+  //
+  // The reversal is the inverse of the ACCUMULATED matrix, applied through the
+  // same two paths the forward registration used, so the session/flat branches,
+  // the scanner-origin update and the boundary all behave identically. Scans are
+  // processed one at a time: each session transform triggers a PotreeConverter
+  // rebuild, and running N concurrently would contend on the converter and
+  // multiply peak memory (see the OOM notes in CLAUDE.md).
+  const handleResetRegistration = useCallback(async () => {
+    const targets = registeredScans(scansRef.current);
+    if (targets.length === 0) return;
+
+    setIsResettingRegistration(true);
+    const failures: string[] = [];
+    let reset = 0;
+
+    try {
+      for (const scan of targets) {
+        // Re-read per iteration: the loop awaits a rebuild per scan, so the
+        // captured array is stale by the second pass, and a scan deleted
+        // mid-run must be skipped rather than resurrected.
+        const live = scansRef.current.find(s => s.id === scan.id);
+        if (!live?.registration || !live.data) continue;
+
+        const inverse = invertRigid4x4(live.registration.matrix);
+        // THREE consumes ROW-major via .set() but stores column-major; build the
+        // Matrix4 for the flat path from the row-major inverse directly.
+        const inv = new THREE.Matrix4();
+        inv.set(
+          inverse[0], inverse[1], inverse[2], inverse[3],
+          inverse[4], inverse[5], inverse[6], inverse[7],
+          inverse[8], inverse[9], inverse[10], inverse[11],
+          inverse[12], inverse[13], inverse[14], inverse[15],
+        );
+        const invQuat = new THREE.Quaternion().setFromRotationMatrix(inv);
+
+        // The scanner origin and trajectory rode the forward matrix (see
+        // transformSourceOrigin in handleCloudToCloudICP); they must ride the
+        // inverse too, or the recorded scanner position is stranded and every
+        // origin-dependent op reads a pose the cloud no longer holds.
+        const moveOrigin = (o: [number, number, number] | null | undefined) => {
+          if (!o) return o;
+          const v = new THREE.Vector3(o[0], o[1], o[2]).applyMatrix4(inv);
+          return [v.x, v.y, v.z] as [number, number, number];
+        };
+        const restoreScanParams = () => {
+          const p = live.params;
+          if (!p) return;
+          const v = new THREE.Vector3(p.origin.x, p.origin.y, p.origin.z).applyMatrix4(inv);
+          onUpdateScanParams(live.id, {
+            ...p,
+            origin: { x: v.x, y: v.y, z: v.z },
+            trajectory: p.trajectory
+              ? transformPoseStream(
+                  p.trajectory,
+                  inv.clone().transpose().toArray(),
+                  { x: invQuat.x, y: invQuat.y, z: invQuat.z, w: invQuat.w },
+                )
+              : p.trajectory,
+          });
+        };
+
+        const octreeInfo = live.data.octree;
+        try {
+          if (octreeInfo?.sessionId) {
+            const result = await sessionTransform(octreeInfo.sessionId, inverse);
+            // The rebuild took seconds; skip a scan deleted meanwhile rather
+            // than resurrecting a ghost row via onUpdateCloud.
+            if (!scansRef.current.some(s => s.id === live.id)) continue;
+            const movedOctree = { ...octreeInfo, scanOrigin: moveOrigin(octreeInfo.scanOrigin) };
+            onUpdateCloud(live.id, buildSessionOctreeData(
+              result, movedOctree, live.data.fileName ?? live.id,
+              // Still diverged: the cloud is back at its pre-registration pose,
+              // but the session has been through two bakes and any edits made
+              // while registered are still in it. The source file is not a
+              // valid rebuild source either way.
+              undefined, { diverged: true },
+            ));
+          } else {
+            const src = live.data;
+            const positions = new Float32Array(src.positions.length);
+            const point = new THREE.Vector3();
+            let minX = Infinity, minY = Infinity, minZ = Infinity;
+            let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+            for (let i = 0; i < src.positions.length; i += 3) {
+              point.set(src.positions[i], src.positions[i + 1], src.positions[i + 2]);
+              point.applyMatrix4(inv);
+              positions[i] = point.x; positions[i + 1] = point.y; positions[i + 2] = point.z;
+              if (point.x < minX) minX = point.x; if (point.x > maxX) maxX = point.x;
+              if (point.y < minY) minY = point.y; if (point.y > maxY) maxY = point.y;
+              if (point.z < minZ) minZ = point.z; if (point.z > maxZ) maxZ = point.z;
+            }
+            onUpdateCloud(live.id, {
+              ...src,
+              positions,
+              bounds: {
+                min: new THREE.Vector3(minX, minY, minZ),
+                max: new THREE.Vector3(maxX, maxY, maxZ),
+                center: new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2),
+                size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
+              },
+              octree: src.octree
+                ? { ...src.octree, scanOrigin: moveOrigin(src.octree.scanOrigin) }
+                : src.octree,
+            });
+          }
+          restoreScanParams();
+          // Clear the record ONLY after the geometry actually moved. Clearing
+          // first would strand a failed scan in its registered pose with no
+          // matrix left to retry from — the badge is the handle on the undo.
+          onUpdateScanRegistration?.(live.id, undefined);
+          // Another permanent geometry change, so it is a boundary of its own:
+          // an erase-undo must not reach back across the reset either.
+          scene.boundary([live.id]);
+          reset++;
+        } catch (err) {
+          failures.push(`${scanDisplayName(live)}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      if (failures.length > 0) {
+        showToast({
+          type: reset > 0 ? 'warning' : 'error',
+          title: 'Reset Registration',
+          message: (reset > 0 ? `Reset ${reset} scan${reset === 1 ? '' : 's'}. ` : '')
+            + `${failures.length} could not be reset and ${failures.length === 1 ? 'is' : 'are'} still registered — `
+            + failures.join('; '),
+          duration: 0,
+        });
+      } else {
+        showToast({
+          type: 'success',
+          title: 'Reset Registration',
+          message: `Returned ${reset} scan${reset === 1 ? '' : 's'} to ${reset === 1 ? 'its' : 'their'} pre-registration position.`,
+        });
+      }
+    } finally {
+      setIsResettingRegistration(false);
+      setResetRegistrationConfirm(null);
+    }
+  }, [onUpdateCloud, onUpdateScanParams, onUpdateScanRegistration, buildSessionOctreeData, scene, showToast]);
 
   // Mesh-to-mesh ICP alignment
   // Mesh-to-mesh ICP. Inputs are picked in the MeshAlignDialog and passed in
@@ -17925,6 +18183,9 @@ export default function PointCloudViewer({
                 : 0;
               const displayName = scanDisplayName(scan);
               const isExpanded = expandedScanIds.has(scan.id);
+              // Anything with data has a details block worth reading (extent,
+              // source, fields), so both kinds of row expand.
+              const scanExpandable = scanHasParams || scanHasData;
 
               // Build subtitle text based on which fields the scan carries. A
               // moving-platform scan (params.trajectory set) shows a "moving"
@@ -17944,6 +18205,49 @@ export default function PointCloudViewer({
               const trajText = isMovingScanRow
                 ? `${scan.params.trajectory!.poses.length} poses`
                 : null;
+              // Auto-Register provenance. This rides LINE 1 beside the name
+              // rather than the subtitle: the subtitle already shares its line
+              // with the action icons and ellipsises on a long origin readout,
+              // and "was this scan moved by the registration tool?" is exactly
+              // the question that must not be hidden behind a hover. Auto-
+              // Register bakes its matrix into the geometry, so without this
+              // badge the fact is unrecoverable once the toast fades.
+              const registration = scan.registration;
+              // A scan is in one of THREE registration states, and collapsing
+              // the last two loses the distinction that matters:
+              //   • moved     — Auto-Register transformed it; Reset moves it back
+              //   • reference — others were registered ONTO it; it never moved,
+              //                 and Reset leaves it exactly where it is
+              //   • neither   — untouched by registration
+              // Without a reference marker a scan in the middle state looks
+              // identical to one in the last, so a user cannot tell an aligned
+              // project from an unaligned one by looking at the reference.
+              const isReference = !registration && registrationReferenceIds.has(scan.id);
+              const registeredBadge = registration ? (
+                <span
+                  data-testid="scan-row-registered"
+                  data-registration-target={registration.targetId}
+                  data-registration-passes={String(registration.passes)}
+                  className="flex-shrink-0 px-1 rounded bg-sky-500/20 text-sky-300 text-[10px] font-medium"
+                  title={`Auto-Registered onto "${registration.targetLabel}"`
+                    + (registration.passes > 1 ? ` (${registration.passes} passes)` : '')
+                    + ' — reverse it with Tools ▸ Registration ▸ Reset Registration'}
+                >
+                  registered
+                </span>
+              ) : isReference ? (
+                // Deliberately a quieter treatment than the mover's badge
+                // (outline, not filled): this scan did not move and is not
+                // affected by Reset Registration, so it should read as context
+                // rather than as something that was done TO the scan.
+                <span
+                  data-testid="scan-row-reference"
+                  className="flex-shrink-0 px-1 rounded border border-sky-500/40 text-sky-400/80 text-[10px] font-medium"
+                  title="Other scans were auto-registered onto this one. It has not been moved, and Reset Registration leaves it where it is."
+                >
+                  reference
+                </span>
+              ) : null;
               // Plain-text twin of `subtitle`, used as the row's tooltip: the
               // subtitle shares its line with the action icons, so a long origin
               // readout ellipsises — hovering still shows the whole thing.
@@ -17987,6 +18291,8 @@ export default function PointCloudViewer({
                     data-has-data={scanHasData ? 'true' : 'false'}
                     data-has-params={scanHasParams ? 'true' : 'false'}
                     data-moving={isMovingScanRow ? 'true' : 'false'}
+                    data-registered={registration ? 'true' : 'false'}
+                    data-registration-reference={isReference ? 'true' : 'false'}
                     data-octree={scanHasData && scan.data?.octree ? 'true' : 'false'}
                     data-octree-cache-id={scan.data?.octree?.cacheId ?? ''}
                     // World-frame bounding box as "minx,miny,minz,maxx,maxy,maxz"
@@ -18027,10 +18333,49 @@ export default function PointCloudViewer({
                       isSelected ? 'bg-blue-600/30 border border-blue-500/50' : 'hover:bg-neutral-700/50'
                     }`}
                   >
-                    {/* Line 1 — colour swatch + the name, on a row of its own. The name used
-                        to share a line with the action icons, which in a 256px panel left it
-                        only a few characters before the ellipsis. */}
+                    {/* Line 1 — disclosure chevron + colour swatch + the name, on a row of
+                        its own. The name used to share a line with the action icons, which in
+                        a 256px panel left it only a few characters before the ellipsis. */}
                     <div className="flex items-center gap-1.5 min-w-0">
+                      {/* Disclosure chevron — LEADING, not in the line-2 icon strip.
+                          It has to be somewhere that is never the row's visual centre:
+                          the row's own click selects the scan, Playwright and users
+                          both aim at the centre, and this button stops propagation. In
+                          the strip it sat immediately after a `flex-1` subtitle, so on a
+                          short subtitle ("60 pts") it drifted inward and landed exactly
+                          on the centre — swallowing the selection click. Leading is also
+                          where a disclosure triangle belongs, and it keeps the chevron
+                          in the SAME place on every row instead of moving with the
+                          subtitle's width.
+
+                          A scan without parameters expands too: a plain .laz/.txt import
+                          still has a point count, extent, source file, and — the thing
+                          there is no other way to check — which scalar fields actually
+                          came through the importer. */}
+                      {scanExpandable ? (
+                        <button
+                          data-testid={`scan-expand-${scan.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedScanIds(prev => {
+                              const next = new Set(prev);
+                              if (next.has(scan.id)) next.delete(scan.id); else next.add(scan.id);
+                              return next;
+                            });
+                          }}
+                          className="flex-shrink-0 -ml-1 p-0.5 hover:bg-neutral-600 rounded"
+                          title={isExpanded ? 'Collapse' : 'Expand'}
+                        >
+                          {isExpanded ? (
+                            <ChevronDown className="w-3 h-3 text-neutral-400" />
+                          ) : (
+                            <ChevronRight className="w-3 h-3 text-neutral-400" />
+                          )}
+                        </button>
+                      ) : (
+                        // Keep the swatch and name aligned with the expandable rows'.
+                        <div className="flex-shrink-0 -ml-1 w-4" />
+                      )}
                       {onUpdateScanColor ? (
                         <button
                           data-testid="scan-color-swatch"
@@ -18059,34 +18404,13 @@ export default function PointCloudViewer({
                       >
                         {displayName}
                       </div>
+                      {registeredBadge}
                     </div>
                     {/* Line 2 — subtitle + the per-row action icons. */}
                     <div className="flex items-center gap-1.5 min-w-0">
                       <div className="flex-1 min-w-0 text-[10px] text-neutral-500 truncate" data-testid="scan-row-subtitle" title={subtitleText}>
                         {subtitle}
                       </div>
-                      {/* Expand chevron — only useful when there's something to show. */}
-                      {scanHasParams && (
-                        <button
-                          data-testid={`scan-expand-${scan.id}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setExpandedScanIds(prev => {
-                              const next = new Set(prev);
-                              if (next.has(scan.id)) next.delete(scan.id); else next.add(scan.id);
-                              return next;
-                            });
-                          }}
-                          className="p-1 hover:bg-neutral-600 rounded"
-                          title={isExpanded ? 'Collapse' : 'Expand'}
-                        >
-                          {isExpanded ? (
-                            <ChevronDown className="w-3 h-3 text-neutral-400" />
-                          ) : (
-                            <ChevronRight className="w-3 h-3 text-neutral-400" />
-                          )}
-                        </button>
-                      )}
                       <button
                         onClick={(e) => { e.stopPropagation(); onToggleVisibility(scan.id); }}
                         className="p-1 hover:bg-neutral-600 rounded"
@@ -18295,26 +18619,154 @@ export default function PointCloudViewer({
                     </div>
                   )}
 
+                  {/* Cloud provenance — shown for EVERY expanded scan that
+                      carries points, with or without scan parameters. A plain
+                      .laz/.txt/.xyz import has no parameters block, but the same
+                      questions still need answering: how many points came in,
+                      how big is the thing, where did it come from, and was a
+                      global shift applied at import. */}
+                  {isExpanded && scanHasData && (
+                    <div
+                      data-testid={`scan-cloud-info-${scan.id}`}
+                      className="pl-6 pr-2 pb-1 pt-1 text-[10px] text-neutral-400 space-y-0.5"
+                    >
+                      <div>
+                        points: <span className="font-mono text-neutral-300">{effectivePointCount.toLocaleString()}</span>
+                        {hasCloudEdits && (
+                          <span className="ml-1 text-amber-400" title="Unapplied edits — translation and/or erased points">
+                            (edited)
+                          </span>
+                        )}
+                        {scan.data.octree?.hasMisses && (
+                          <>
+                            <span className="mx-1">·</span>
+                            <span className="text-neutral-300">has sky/miss returns</span>
+                          </>
+                        )}
+                      </div>
+                      {/* Extent, not the raw bounding box: a sky/miss point is
+                          drawn ~1 km out and would set the number single-handedly
+                          (a real scan measured 29 m as 64 km). */}
+                      {(() => {
+                        const e = expandedScanExtents.get(scan.id);
+                        if (!e) return null;
+                        return (
+                          <div>
+                            extent: <span className="font-mono text-neutral-300">
+                              {e.x.toFixed(2)} × {e.y.toFixed(2)} × {e.z.toFixed(2)} m
+                            </span>
+                          </div>
+                        );
+                      })()}
+                      {(() => {
+                        const shift = scan.data.octree?.worldShift;
+                        if (!shift || (shift[0] === 0 && shift[1] === 0 && shift[2] === 0)) return null;
+                        return (
+                          <div title="Subtracted from every point at import to keep coordinates precision-friendly; world = shown + shift">
+                            global shift: <span className="font-mono text-neutral-300">
+                              {shift.map(v => v.toFixed(2)).join(', ')}
+                            </span>
+                          </div>
+                        );
+                      })()}
+                      {(() => {
+                        const src = scan.sourcePath || scan.data.octree?.sourceXyzPath;
+                        if (!src) return null;
+                        const base = src.split(/[\\/]/).pop() || src;
+                        return (
+                          <div className="truncate" title={src}>
+                            source: <span className="font-mono text-neutral-300">{base}</span>
+                          </div>
+                        );
+                      })()}
+                      {/* Registration provenance, spelled out. The row badge
+                          answers "was this registered?"; this answers "onto
+                          what, and how far did it move?" — the displacement is
+                          what tells a user whether the alignment they are
+                          looking at was a nudge or a 90° recovery. */}
+                      {registration && (() => {
+                        const m = registration.matrix;
+                        const shift = Math.hypot(m[3], m[7], m[11]);
+                        return (
+                          <div
+                            data-testid={`scan-registration-${scan.id}`}
+                            data-registration-shift={shift.toFixed(3)}
+                          >
+                            registered: onto{' '}
+                            <span className="text-neutral-300">{registration.targetLabel}</span>
+                            <span className="mx-1">·</span>
+                            moved <span className="font-mono text-neutral-300">{shift.toFixed(2)} m</span>
+                            {registration.passes > 1 && (
+                              <>
+                                <span className="mx-1">·</span>
+                                <span>{registration.passes} passes</span>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })()}
+                      {/* The reference side of the same relationship. Naming the
+                          scans that were registered onto this one is what makes
+                          the "reference" badge actionable: it says which rows
+                          would move if the registration were reset, from the row
+                          that will not move itself. */}
+                      {isReference && (() => {
+                        const movers = scansAll.filter(s => s.registration?.targetId === scan.id);
+                        return (
+                          <div
+                            data-testid={`scan-reference-${scan.id}`}
+                            data-reference-count={String(movers.length)}
+                          >
+                            reference for:{' '}
+                            <span className="text-neutral-300">
+                              {movers.map(scanDisplayName).join(', ')}
+                            </span>
+                            <span className="mx-1">·</span>
+                            <span>not moved</span>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+
                   {/* Which scalar columns this cloud actually carries.
                       The Color-by dropdown is a lossy proxy for this: it hides
                       `intensity` (own mode), every LAS builtin, and anything
                       constant-valued — so an importer that silently dropped a
                       column looked identical to one that kept it. Listing them
                       here is the only direct answer to "what did I import?". */}
-                  {isExpanded && scanHasData && importedColumnsFor(scan).length > 0 && (
-                    <div
-                      data-testid={`scan-columns-${scan.id}`}
-                      className="pl-6 pr-2 pb-2 text-[10px] text-neutral-400"
-                    >
-                      <span>fields: </span>
-                      <span
-                        className="font-mono text-neutral-300"
-                        data-columns={importedColumnsFor(scan).join(',')}
+                  {isExpanded && scanHasData && (() => {
+                    const { present, padding } = partitionImportedColumns(scan);
+                    return (
+                      <div
+                        data-testid={`scan-columns-${scan.id}`}
+                        className="pl-6 pr-2 pb-2 text-[10px] text-neutral-400 space-y-0.5"
                       >
-                        {importedColumnsFor(scan).join(', ')}
-                      </span>
-                    </div>
-                  )}
+                        <div>
+                          <span>fields: </span>
+                          <span
+                            className={present.length > 0 ? 'font-mono text-neutral-300' : 'italic text-neutral-500'}
+                            data-columns={present.join(',')}
+                          >
+                            {present.length > 0 ? present.join(', ') : 'none (XYZ only)'}
+                          </span>
+                        </div>
+                        {/* The LAS schema dimensions the octree writer emits for
+                            every source, listed separately because they are
+                            empty here — the file never had them. Shown rather
+                            than hidden: "this column exists but is all zeros" is
+                            itself the answer to a question users ask. */}
+                        {padding.length > 0 && (
+                          <div className="text-neutral-500">
+                            <span>empty: </span>
+                            <span className="font-mono" data-empty-columns={padding.join(',')}>
+                              {padding.join(', ')}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -20369,6 +20821,57 @@ export default function PointCloudViewer({
         </div>
       )}
 
+      {/* Reset Registration confirmation.
+          Confirmed rather than fired outright because it is BOTH destructive
+          and non-undoable: it moves geometry permanently and clears the very
+          matrix that would let it be redone, so a misclick costs the whole
+          registration. The affected scans are listed by name — the command is
+          project-wide, and a user with six scans and one registered pair should
+          not have to guess which two are about to move. */}
+      {resetRegistrationConfirm && (
+        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-neutral-800 rounded-lg p-4 shadow-xl max-w-sm mx-4" data-testid="reset-registration-confirm">
+            <div className="text-sm font-medium text-neutral-200 mb-2">
+              Reset registration?
+            </div>
+            <div className="text-xs text-neutral-400 mb-3">
+              {resetRegistrationConfirm.length === 1
+                ? 'This scan will move back to where it sat before Auto-Register:'
+                : `These ${resetRegistrationConfirm.length} scans will move back to where they sat before Auto-Register:`}
+            </div>
+            <ul className="text-xs text-neutral-300 mb-3 space-y-0.5 max-h-32 overflow-y-auto">
+              {resetRegistrationConfirm.map(s => (
+                <li key={s.id} data-testid="reset-registration-scan" data-scan-id={s.id} className="truncate">
+                  • {s.name} <span className="text-neutral-500">(onto {s.target})</span>
+                </li>
+              ))}
+            </ul>
+            <div className="text-xs text-amber-400/90 mb-4">
+              This cannot be undone with {navigator.platform.includes('Mac') ? '⌘Z' : 'Ctrl+Z'} — you would need to run Auto-Register again.
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                data-testid="reset-registration-cancel"
+                disabled={isResettingRegistration}
+                onClick={() => setResetRegistrationConfirm(null)}
+                className="px-3 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 disabled:opacity-50 text-neutral-200 rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                data-testid="reset-registration-confirm-button"
+                disabled={isResettingRegistration}
+                onClick={() => void handleResetRegistration()}
+                className="px-3 py-1.5 text-xs bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded transition-colors flex items-center gap-1.5"
+              >
+                {isResettingRegistration && <Loader2 className="w-3 h-3 animate-spin" />}
+                {isResettingRegistration ? 'Resetting…' : 'Reset'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Command Palette Modal */}
       {showCommandPalette && (
         <>
@@ -20426,6 +20929,9 @@ export default function PointCloudViewer({
                   {filteredCommands.map((cmd, index) => (
                     <button
                       key={cmd.id}
+                      data-testid="command-palette-item"
+                      data-command-id={cmd.id}
+                      data-available={cmd.available ? 'true' : 'false'}
                       onClick={() => {
                         if (cmd.available) {
                           cmd.action();
@@ -20446,6 +20952,16 @@ export default function PointCloudViewer({
                             Select {cmd.requires === 'multiple-clouds' ? 'multiple point clouds' :
                                    cmd.requires === 'multiple-meshes' ? 'multiple meshes' :
                                    cmd.requires === 'plant' ? 'a plant' : `a ${cmd.requires}`} to {cmd.name.toLowerCase()}
+                          </span>
+                        )}
+                        {/* A command gated by `isDisabled` rather than `requires`
+                            has no selection to fix, so the hint above says
+                            nothing. Without this it greys out with no reason
+                            given — the exact dead-item problem the greying is
+                            meant to solve. */}
+                        {!cmd.available && !cmd.requires && cmd.id === 'cloud-unregister' && (
+                          <span className="text-[10px] text-neutral-500 italic" data-testid="command-unavailable-reason">
+                            Nothing has been auto-registered
                           </span>
                         )}
                       </div>

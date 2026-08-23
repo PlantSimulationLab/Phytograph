@@ -1,5 +1,5 @@
 import { BrowserWindow, Menu, MenuItemConstructorOptions, app, shell } from 'electron';
-import { IPC, type MenuCommandPayload, type SnapViewDirection } from '../shared/ipc.js';
+import { IPC, type MenuCommandPayload, type MenuStatePayload, type SnapViewDirection } from '../shared/ipc.js';
 import { DOCS_URL, REPO_URL } from '../shared/constants.js';
 import { TOOLS_MENU, CREATE_MENU, SIMULATE_MENU, type ToolMenuItem } from '../shared/toolMenu.js';
 import { checkForUpdatesManually } from './updater.js';
@@ -30,10 +30,17 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
   // (src/shared/toolMenu.ts) rather than hand-listed here, so a tool added to
   // the renderer's registry can't be left out of the menu bar — a parity test
   // checks the manifest against the registry.
+  // `id` is set to the registry tool id so applyMenuState can find the item
+  // again via Menu.getMenuItemById — the native menu is rebuilt from a template
+  // and there is no other stable handle on an individual item.
   const toolItem = (item: ToolMenuItem | null): MenuItemConstructorOptions =>
     item === null
       ? { type: 'separator' }
-      : { label: item.label, click: () => send({ kind: 'tool', toolId: item.id }) };
+      : {
+          id: item.id,
+          label: item.label,
+          click: () => send({ kind: 'tool', toolId: item.id }),
+        };
 
   const template: MenuItemConstructorOptions[] = [
     // macOS app menu (the first menu, always labeled "Phytograph").
@@ -256,4 +263,40 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  // Re-apply whatever the renderer last reported. installApplicationMenu can run
+  // again (a rebuild replaces every MenuItem object), and without this the new
+  // items would come back enabled while the renderer, having already sent its
+  // state, has no reason to send it again.
+  applyMenuState(lastMenuState);
+}
+
+// Last state the renderer pushed, so a menu rebuild can restore it. Module-level
+// because the menu itself is global to the app.
+let lastMenuState: MenuStatePayload = { enabled: {} };
+
+/** The retained state a menu rebuild replays. Exported for tests, which need to
+ *  assert that state pushed BEFORE a menu existed survives to be applied to it —
+ *  the case where retention is actually load-bearing. */
+export function retainedMenuState(): MenuStatePayload {
+  return lastMenuState;
+}
+
+/**
+ * Grey out (or re-enable) the menu items the renderer reports on.
+ *
+ * Only ids present in `enabled` are touched: an item that has never been
+ * reported keeps whatever the template gave it. That asymmetry is deliberate —
+ * a wrongly-greyed item is unreachable with no explanation, whereas a wrongly-
+ * enabled one still runs its action, which reports why it did nothing.
+ */
+export function applyMenuState(payload: MenuStatePayload): void {
+  lastMenuState = payload;
+  const menu = Menu.getApplicationMenu();
+  // Null under E2E (the suite installs an inert chrome) and for a moment during
+  // startup. Nothing to do, and the state is retained for the next build.
+  if (!menu) return;
+  for (const [id, isEnabled] of Object.entries(payload.enabled)) {
+    const item = menu.getMenuItemById(id);
+    if (item) item.enabled = isEnabled;
+  }
 }

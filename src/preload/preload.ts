@@ -7,6 +7,7 @@ import {
   type LogExportResult,
   type LogLevel,
   type MenuCommandPayload,
+  type MenuStatePayload,
   type MessageBoxOptions,
   type MessageBoxResult,
   type OpenDialogOptions,
@@ -93,6 +94,10 @@ const api = {
   // Tell main the renderer has mounted and can receive OpenFiles; main flushes
   // any paths queued before this (the window/backend take ~10-20s to come up).
   notifyRendererReady: (): void => ipcRenderer.send(IPC.RendererReady),
+  // Push which scene-dependent menu items should be clickable. The native menu
+  // lives in main and cannot read renderer state, so this is the only way an
+  // item like "Reset Registration" can grey out when there is nothing to reset.
+  setMenuState: (payload: MenuStatePayload): void => ipcRenderer.send(IPC.MenuState, payload),
   onBackendStatus: (handler: (payload: BackendStatusPayload) => void): (() => void) => {
     const listener = (_e: unknown, payload: BackendStatusPayload) => handler(payload);
     ipcRenderer.on(IPC.BackendStatus, listener);

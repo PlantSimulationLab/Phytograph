@@ -85,6 +85,14 @@ export const TOOLS_MENU: ToolMenuSection[] = [
       { id: 'mesh-mesh-align', label: 'Align Mesh to Mesh (ICP)…' },
       { id: 'mesh-cloud-icp', label: 'Align Mesh to Cloud (ICP)…' },
       { id: 'mesh-cloud-align', label: 'Cloud-to-Mesh Distance…' },
+      null,
+      // Menu-bar (and palette) only: the registry entry carries no `toolGroup`
+      // and no `icon`, so it never appears in the Tools palette. It undoes
+      // Auto-Register across the whole project, which is a corrective rather
+      // than a step in a workflow — and a toolbar button beside Auto-Register
+      // would invite exactly the misclick it exists to repair. Separated from
+      // the alignment tools above because it REVERSES them.
+      { id: 'cloud-unregister', label: 'Reset Registration…' },
     ],
   },
 ];

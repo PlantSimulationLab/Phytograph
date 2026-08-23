@@ -252,12 +252,66 @@ Two warnings are worth acting on:
   to an area with some irregularity — a gap, an edge, a size difference — and
   register that first.
 - **"This alignment may be wrong"** — too few plants were matched to be
-  confident. Undo and try a different match method or detail size.
+  confident. Run [Reset Registration](#undoing-a-registration), then try a
+  different match method or detail size.
 
 A quiet result means the plants matched unambiguously.
 
 Like ICP, the transform is applied to the source's points *and* its scanner
-origin/trajectory, and a single **Undo** reverts it.
+origin/trajectory.
+
+### Seeing what has been registered
+
+A scan that Auto-Register moved is marked **registered** in the Scans panel,
+next to its name. This matters because the alignment is baked into the points
+themselves — without the marker there is nothing about the scan afterwards to
+show it was ever moved.
+
+Expand the scan's row for the detail: which scan it was registered onto, how far
+it travelled, and how many registration passes have been applied to it.
+
+The scan you registered *onto* is marked too, but differently — as
+**reference**, in a lighter outline. It did not move, and resetting the
+registration will not move it. Expanding a reference scan lists the scans that
+were registered onto it.
+
+So a scan is in one of three states:
+
+| Marker | Meaning | Affected by Reset Registration? |
+|--------|---------|---------------------------------|
+| **registered** | Auto-Register moved this scan | Yes — it moves back |
+| **reference** | Others were registered onto it; it never moved | No |
+| *(none)* | Untouched by registration | No |
+
+The **reference** marker is derived from the scans currently registered onto it,
+so it disappears on its own once those are reset or deleted.
+
+### Undoing a registration
+
+Registration is **not** covered by **Undo**. It permanently rewrites the scan's
+points, and Phytograph deliberately keeps changes of that size off the undo
+stack (the same is true of cropping, baking a transform, and segmentation).
+
+To reverse one, use **Tools ▸ Registration ▸ Reset Registration…**. It returns
+every registered scan — and its scanner origin and trajectory — to the position
+it held before Auto-Register ran, and clears the *registered* marker. If a scan
+has been registered more than once, the reset undoes all of the passes at once,
+returning it to where it started.
+
+The command lives in the menu bar only, not the toolbar: it acts on the whole
+project rather than the current selection, and it is a corrective rather than a
+step in a workflow. It is **greyed out** until something has actually been
+registered, so the menu tells you whether there is anything to reset without
+your having to open it.
+
+It confirms first, listing the scans that are about to move, because the reset
+itself cannot be undone — recovering the alignment afterwards means running
+Auto-Register again. Reference scans are not listed: they never moved.
+
+!!! warning "Reset restores position, not edits"
+    Reset Registration moves the points back. It does not roll back anything
+    else you did while the scan was registered — crops, erased points, labels
+    and segmentation results all stay as they are.
 
 ### How accurate is it?
 

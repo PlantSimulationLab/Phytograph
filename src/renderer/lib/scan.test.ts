@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import {
   duplicateScanName, derivedScanName, hasData, hasParams, scanDisplayName,
   columnSlugs, missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, missReconSources, type Scan,
+  composeRegistration, invertRigid4x4, multiply4x4, registeredScans, referenceScanIds,
 } from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
 import type { PointCloudData, OctreeRef, ScalarField } from './pointCloudTypes';
@@ -284,5 +285,210 @@ describe('the time column is recognised under either octree spelling', () => {
     } as never;
     expect(missColumnsAvailable(s)).toBe(false);
     expect(isBackfillEligible(s)).toBe(false);
+  });
+});
+
+// ── Auto-Register bookkeeping ───────────────────────────────────────────────
+//
+// The matrices below are exercised as TRANSFORMS applied to points, not
+// compared entry-by-entry: what "Reset Registration" has to get right is that a
+// registered cloud lands back on the coordinates it occupied before, and an
+// entrywise expectation on a 16-float matrix passes just as happily on a
+// transposed or column-major convention that puts the cloud somewhere else.
+
+/** Apply a row-major 4x4 to a point — the same convention the backend's
+ *  `/session/{id}/transform` uses on the geometry it bakes. */
+function applyRowMajor(m: number[], p: [number, number, number]): [number, number, number] {
+  return [
+    m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
+    m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
+    m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+  ];
+}
+
+/** Rotation about Z by `deg`, then translation — a rigid pose in the shape
+ *  Auto-Register actually returns (the E2E fixture pair is 90° + a shift). */
+function rigidZ(deg: number, t: [number, number, number]): number[] {
+  const r = (deg * Math.PI) / 180;
+  const c = Math.cos(r), s = Math.sin(r);
+  return [
+    c, -s, 0, t[0],
+    s, c, 0, t[1],
+    0, 0, 1, t[2],
+    0, 0, 0, 1,
+  ];
+}
+
+function expectClose(a: number[], b: number[], eps = 1e-9) {
+  expect(a.length).toBe(b.length);
+  a.forEach((v, i) => expect(Math.abs(v - b[i])).toBeLessThan(eps));
+}
+
+describe('invertRigid4x4', () => {
+  it('returns a point to where it started', () => {
+    const m = rigidZ(90, [2, -1.5, 0]);
+    const p: [number, number, number] = [3, 7, 1.25];
+    const moved = applyRowMajor(m, p);
+    // Sanity: the transform actually moved it, so the round trip below is not
+    // trivially satisfied by an identity matrix.
+    expect(Math.hypot(moved[0] - p[0], moved[1] - p[1], moved[2] - p[2])).toBeGreaterThan(1);
+    expectClose(applyRowMajor(invertRigid4x4(m), moved), p);
+  });
+
+  it('inverts a rotation about a non-principal axis', () => {
+    // A registration matrix is rarely a clean single-axis spin; a tilted axis
+    // catches an inverse that transposes only part of the rotation block.
+    const axis = new THREE.Vector3(0.3, -0.6, 0.74).normalize();
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, 1.1);
+    const e = new THREE.Matrix4().makeRotationFromQuaternion(q).elements; // column-major
+    const m = [
+      e[0], e[4], e[8], -4.2,
+      e[1], e[5], e[9], 0.75,
+      e[2], e[6], e[10], 11.5,
+      0, 0, 0, 1,
+    ];
+    const p: [number, number, number] = [-2, 5, 0.5];
+    expectClose(applyRowMajor(invertRigid4x4(m), applyRowMajor(m, p)), p, 1e-9);
+  });
+
+  it('inverts the identity to the identity', () => {
+    const id = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    expectClose(invertRigid4x4(id), id);
+  });
+});
+
+describe('multiply4x4', () => {
+  it('composes in APPLY order — multiply4x4(second, first)', () => {
+    // The order is the whole point: a·b must mean "b first, then a", matching
+    // how composeRegistration folds a new pass onto an older one. Reversed, a
+    // second registration pass would reset the cloud to the wrong place.
+    const first = rigidZ(30, [1, 0, 0]);
+    const second = rigidZ(45, [0, 2, -1]);
+    const p: [number, number, number] = [4, 1, 3];
+    expectClose(
+      applyRowMajor(multiply4x4(second, first), p),
+      applyRowMajor(second, applyRowMajor(first, p)),
+    );
+  });
+});
+
+describe('composeRegistration', () => {
+  it('records the first pass verbatim', () => {
+    const m = rigidZ(90, [2, -1.5, 0]);
+    const reg = composeRegistration(undefined, m, 't1', 'Target');
+    expect(reg.matrix).toEqual(m);
+    expect(reg.passes).toBe(1);
+    expect(reg.targetId).toBe('t1');
+    expect(reg.targetLabel).toBe('Target');
+  });
+
+  it('does not alias the matrix it was handed', () => {
+    // The caller's array is the live ICP response; keeping a reference would
+    // let a later mutation silently rewrite history.
+    const m = rigidZ(10, [1, 1, 1]);
+    const reg = composeRegistration(undefined, m, 't1', 'Target');
+    m[3] = 999;
+    expect(reg.matrix[3]).toBe(1);
+  });
+
+  it('folds a second pass so the inverse undoes BOTH', () => {
+    const first = rigidZ(90, [2, -1.5, 0]);
+    const second = rigidZ(-12, [0.4, 0.1, 0]);
+    const p: [number, number, number] = [3, 7, 1.25];
+
+    const afterFirst = applyRowMajor(first, p);
+    const afterSecond = applyRowMajor(second, afterFirst);
+
+    const reg1 = composeRegistration(undefined, first, 't1', 'Target');
+    const reg2 = composeRegistration(reg1, second, 't1', 'Target');
+    expect(reg2.passes).toBe(2);
+
+    // The accumulated matrix must reproduce both passes...
+    expectClose(applyRowMajor(reg2.matrix, p), afterSecond);
+    // ...and its inverse must return the cloud to the ORIGINAL pose, not to
+    // where the first pass left it.
+    expectClose(applyRowMajor(invertRigid4x4(reg2.matrix), afterSecond), p);
+  });
+
+  it('updates the target when a scan is re-registered onto a different one', () => {
+    const reg1 = composeRegistration(undefined, rigidZ(5, [0, 0, 0]), 't1', 'First');
+    const reg2 = composeRegistration(reg1, rigidZ(5, [0, 0, 0]), 't2', 'Second');
+    expect(reg2.targetId).toBe('t2');
+    expect(reg2.targetLabel).toBe('Second');
+  });
+});
+
+describe('registeredScans', () => {
+  const reg = composeRegistration(undefined, rigidZ(90, [1, 0, 0]), 't', 'T');
+
+  it('picks out only the scans carrying a record', () => {
+    const scans: Scan[] = [
+      { id: 'a', label: 'A', visible: true, color: '#fff' },
+      { id: 'b', label: 'B', visible: true, color: '#fff', registration: reg },
+      { id: 'c', label: 'C', visible: true, color: '#fff' },
+    ];
+    expect(registeredScans(scans).map(s => s.id)).toEqual(['b']);
+  });
+
+  it('is empty on an unregistered project', () => {
+    expect(registeredScans([
+      { id: 'a', label: 'A', visible: true, color: '#fff' },
+    ])).toEqual([]);
+  });
+});
+
+describe('referenceScanIds', () => {
+  const regOnto = (targetId: string) =>
+    composeRegistration(undefined, rigidZ(90, [1, 0, 0]), targetId, targetId);
+
+  const scan = (id: string, registration?: ReturnType<typeof regOnto>): Scan =>
+    ({ id, label: id, visible: true, color: '#fff', ...(registration ? { registration } : {}) });
+
+  it('names the scan others were registered onto', () => {
+    const ids = referenceScanIds([scan('a'), scan('b', regOnto('a'))]);
+    expect([...ids]).toEqual(['a']);
+  });
+
+  it('is empty when nothing has been registered', () => {
+    expect(referenceScanIds([scan('a'), scan('b')]).size).toBe(0);
+  });
+
+  it('does not mark a mover as a reference', () => {
+    // The distinction is the whole point of the separate badge: a mover is
+    // reset by Reset Registration, a reference is not.
+    const ids = referenceScanIds([scan('a'), scan('b', regOnto('a'))]);
+    expect(ids.has('b')).toBe(false);
+  });
+
+  it('reports one reference once when several scans register onto it', () => {
+    const ids = referenceScanIds([
+      scan('a'), scan('b', regOnto('a')), scan('c', regOnto('a')),
+    ]);
+    expect([...ids]).toEqual(['a']);
+  });
+
+  it('handles two independent pairs', () => {
+    const ids = referenceScanIds([
+      scan('a'), scan('b', regOnto('a')), scan('c'), scan('d', regOnto('c')),
+    ]);
+    expect([...ids].sort()).toEqual(['a', 'c']);
+  });
+
+  it('stops naming a reference once its mover is reset', () => {
+    // Reset clears the mover's record, and with it the only thing that made
+    // the other scan a reference — the badge must vanish on its own.
+    const after = referenceScanIds([scan('a'), scan('b')]);
+    expect(after.size).toBe(0);
+  });
+
+  it('stops naming a reference once its mover is deleted', () => {
+    expect(referenceScanIds([scan('a')]).size).toBe(0);
+  });
+
+  it('ignores a target that no longer exists', () => {
+    // The reference was deleted but the mover kept its record: there is no row
+    // to badge, and the dangling id must not leak out as a phantom reference.
+    const ids = referenceScanIds([scan('b', regOnto('deleted-scan'))]);
+    expect(ids.size).toBe(0);
   });
 });

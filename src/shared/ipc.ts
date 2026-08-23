@@ -46,6 +46,11 @@ export const IPC = {
   // Renderer -> main (one-way): the renderer has mounted and can receive
   // OpenFiles. Main queues any paths that arrive before this and flushes on it.
   RendererReady: 'app:rendererReady',
+  // Renderer -> main (one-way): which menu items should currently be clickable.
+  // The native menu is built in the main process and cannot see renderer state,
+  // so anything that greys out on a scene condition has to be pushed here. Sent
+  // on change (and coalesced by the sender), not polled.
+  MenuState: 'menu:state',
   // Backend supervisor status (main -> renderer): crash/restart lifecycle
   BackendStatus: 'backend:status',
   // Auto-updater download status (main -> renderer). The installer is a few
@@ -171,3 +176,15 @@ export type MenuCommandPayload =
   // Toggle the scan-pattern wireframe overlay. The View-menu checkbox is the
   // single source of truth; `show` is its post-click checked state.
   | { kind: 'toggle-scan-wireframes'; show: boolean };
+
+/** Menu items whose enabled state depends on renderer-side scene state.
+ *
+ *  Keyed by the registry tool id so main never has to know WHY an item is
+ *  disabled — only that the renderer says it is. Absent key → leave enabled,
+ *  so a menu item that has never been reported stays clickable (the safe
+ *  default: a wrongly-greyed item is unreachable, a wrongly-live one merely
+ *  reports why it did nothing). */
+export interface MenuStatePayload {
+  /** Registry tool id → whether the item can currently act. */
+  enabled: Record<string, boolean>;
+}

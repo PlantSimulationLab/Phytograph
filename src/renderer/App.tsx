@@ -5,7 +5,7 @@ import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
 import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
-import { scanDisplayName, type Scan, allocateScanColor } from "./lib/scan";
+import { scanDisplayName, type Scan, type ScanRegistration, allocateScanColor } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
 import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
@@ -1331,6 +1331,18 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     ));
   }, []);
 
+  // Record or clear a scan's Auto-Register provenance. Not routed through
+  // scene.commit: the registration it describes is a baked geometry change and
+  // therefore an explicit undo BOUNDARY (see sceneActions' header), so putting
+  // the flag alone on the history stack would let an undo strip the badge off a
+  // cloud that is still sitting in its registered pose. "Reset Registration" is
+  // the reversal path, and it moves the geometry back as well as clearing this.
+  const handleUpdateScanRegistration = useCallback((id: string, registration: ScanRegistration | undefined) => {
+    setScans(prev => prev.map(s =>
+      s.id === id ? { ...s, registration } : s
+    ));
+  }, []);
+
   const handleUpdateScanLabel = useCallback((id: string, label: string) => {
     const before = scene.state.scans.find(s => s.id === id)?.label;
     if (before === label) return;
@@ -2112,6 +2124,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onSetScanSelection={handleSetScanSelection}
           onUpdateScanData={handleUpdateScanData}
           onUpdateScanParams={handleUpdateScanParams}
+          onUpdateScanRegistration={handleUpdateScanRegistration}
           onUpdateScanLabel={handleUpdateScanLabel}
           onUpdateScanColor={handleUpdateScanColor}
           onSave={handleSavePointCloud}

@@ -110,13 +110,41 @@ stays pinned to that point as you orbit. See
 Three stacked lists — **Scans**, **Meshes**, **Skeletons**.
 Each scan entry shows:
 
+- an expand chevron on the left that reveals the scan's details
 - a color dot (also acts as a selection indicator); click it to pick a
   custom per-scan color, which drives the **Per-scan color** mode
 - the scan label and a subtitle (point count, scanner origin, or both)
+- a **registered** marker beside the label if
+  [Auto-Register](../workflows/register-compare.md#auto-register-when-clouds-start-far-apart)
+  moved this scan, or **reference** if other scans were registered onto it
+  (a reference scan is never moved)
 - visibility, duplicate, and remove controls
 - a paperclip to attach point data (if the scan only has parameters)
 - a radio icon to add scan parameters (if the scan only has data)
-- an expand chevron that reveals the full parameter readout
+
+Expanding a scan shows whatever that scan actually carries:
+
+- **Scan parameters**, when it has them — scanner model, origin (or
+  trajectory summary for a moving scan), pattern and grid size, angular
+  sweep, return mode, beam diameter and divergence, and tilt.
+- **Cloud details**, when it has point data — the point count (flagged
+  when there are unapplied edits, and noting whether the scan carries
+  sky/miss returns), the extent in metres, the global shift applied at
+  import if any, the source file it was read from, and — for a registered
+  scan — which scan it was registered onto and how far it moved (or, for a
+  reference scan, which scans were registered onto it).
+- **Fields** — every scalar column the cloud actually carries. LAS
+  schema dimensions that are present but entirely zero (because the
+  source file never had them) are listed separately on an **empty**
+  line, so they don't bury the columns you really imported.
+
+That last line is worth knowing about: it is the direct answer to "what
+did my import produce?". The **Color by** dropdown is a lossy substitute,
+since it hides intensity, the LAS built-in dimensions, and any column
+whose values are all the same — so a column that was silently dropped
+looks identical there to one that came through fine. A plain `.laz` /
+`.txt` / `.xyz` import has no scan parameters, but it still expands to
+show these last two blocks.
 
 The **duplicate** button (a copy icon) makes an independent copy of the
 scan — its point data *and* any scan-parameter metadata — named
