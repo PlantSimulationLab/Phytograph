@@ -1601,6 +1601,65 @@ export function resampleCloud(
   } as PointCloudData;
 }
 
+// Split a cloud's columns into the ones carrying DATA and the ones that are
+// only LAS schema padding, for the expanded scan row's "fields:" line.
+//
+// The problem this solves: PotreeConverter writes the full LAS point schema for
+// EVERY source, so a three-column ASCII file comes back reporting eleven fields
+// — `classification`, `user data`, `point source id`, `scan angle rank`,
+// `return number`, `number of returns` — all of them identically zero because
+// the file never had them. Listing all eleven as one flat run buries the three
+// the user actually imported, which is the exact question the line exists to
+// answer.
+//
+// The split is by OBSERVED RANGE, not by name: a builtin is padding only when
+// it is degenerate (min == max == 0). A real LAS file's populated
+// `point source id` has a non-zero range and stays in the primary list where it
+// belongs; a name-based filter would have hidden it.
+//
+// `classification` is not in OCTREE_BUILTIN_ATTRIBUTES at all, so it is never
+// padding even when empty — the same deliberate exception `octreeScalarFieldOptions`
+// makes, and for the same reason: it is where segmentation results land, so an
+// empty class column is an available field rather than an absent one.
+//
+// `padding` is returned rather than dropped — a column being empty is itself
+// worth being able to see, and hiding it silently is the failure mode
+// `importedColumnsFor` was written to avoid in the first place.
+export function partitionImportedColumns(scan: {
+  data?: {
+    octree?: {
+      attributeRanges?: Record<string, { min: number[]; max: number[] }>;
+      attributeLabels?: Record<string, string>;
+    };
+    scalarFields?: Record<string, unknown>;
+  };
+}): { present: string[]; padding: string[] } {
+  const ranges = scan.data?.octree?.attributeRanges ?? {};
+  const labels = scan.data?.octree?.attributeLabels ?? {};
+  const flatKeys = new Set(Object.keys(scan.data?.scalarFields ?? {}));
+
+  const isDegenerate = (name: string): boolean => {
+    // A flat cloud's own scalarFields are always real data — only the octree's
+    // written schema can be padding.
+    if (flatKeys.has(name)) return false;
+    if (!OCTREE_BUILTIN_ATTRIBUTES.has(name.toLowerCase())) return false;
+    const r = ranges[name];
+    if (!r?.min?.length || !r?.max?.length) return false;  // no range ⇒ assume real
+    return r.min.every((v) => v === 0) && r.max.every((v) => v === 0);
+  };
+
+  const present = new Set<string>();
+  const padding = new Set<string>();
+  for (const name of importedColumnNames(scan)) {
+    (isDegenerate(name) ? padding : present).add(labels[name] ?? name);
+  }
+  // A label that appears in BOTH groups is data (the populated key wins) — e.g.
+  // a real `timestamp` alongside the all-zero `gps-time` that shares its label.
+  for (const label of present) padding.delete(label);
+  const byName = (a: string, b: string) => a.localeCompare(b);
+  return { present: [...present].sort(byName), padding: [...padding].sort(byName) };
+}
+
 // Every scalar column a cloud actually carries, for the "fields:" line in the
 // expanded scan row.
 //
@@ -1614,9 +1673,12 @@ export function resampleCloud(
 //
 // Works for both cloud shapes: octree-backed clouds hold their columns in
 // `octree.attributeRanges`, flat clouds in `scalarFields`.
-export function importedColumnsFor(scan: {
+// The RAW buffer keys of every scalar column a cloud carries, before display
+// labels are applied. Shared by `importedColumnsFor` (which labels them) and
+// `partitionImportedColumns` (which needs the keys to look up their ranges).
+function importedColumnNames(scan: {
   data?: {
-    octree?: { attributeRanges?: Record<string, unknown>; attributeLabels?: Record<string, string> };
+    octree?: { attributeRanges?: Record<string, unknown> };
     scalarFields?: Record<string, unknown>;
   };
 }): string[] {
@@ -1628,6 +1690,16 @@ export function importedColumnsFor(scan: {
   for (const geom of ['position', 'rgb', 'rgba', 'color', 'normal', 'indices', 'spacing']) {
     names.delete(geom);
   }
+  return [...names];
+}
+
+export function importedColumnsFor(scan: {
+  data?: {
+    octree?: { attributeRanges?: Record<string, unknown>; attributeLabels?: Record<string, string> };
+    scalarFields?: Record<string, unknown>;
+  };
+}): string[] {
+  const names = importedColumnNames(scan);
   // Show the DISPLAY label, not the raw octree buffer key.
   //
   // The keys are PotreeConverter's own attribute names, and for the time column
@@ -1639,8 +1711,13 @@ export function importedColumnsFor(scan: {
   //
   // The labels map is keyed by the same buffer name, so this is a pure display
   // substitution — nothing downstream keys off this list.
+  //
+  // Dedupe AFTER the substitution, not before. An ASCII import whose time column
+  // round-tripped through the LAS gps_time dimension carries BOTH keys — the
+  // PotreeConverter builtin `gps-time` and its own `timestamp` — and they label
+  // identically, so keying the set on the raw name listed "Timestamp, Timestamp"
+  // and read as two separate fields.
   const labels = scan.data?.octree?.attributeLabels ?? {};
-  return [...names]
-    .map((n) => labels[n] ?? n)
-    .sort((a, b) => a.localeCompare(b));
+  const labelled = new Set([...names].map((n) => labels[n] ?? n));
+  return [...labelled].sort((a, b) => a.localeCompare(b));
 }

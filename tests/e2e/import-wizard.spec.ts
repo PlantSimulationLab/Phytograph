@@ -376,3 +376,69 @@ test('mesh import does not open the wizard', async () => {
   // The mesh loads directly.
   await expect(page.locator('canvas').first()).toBeAttached();
 });
+
+test('a params-less import still expands to show its fields and extent', async () => {
+  // THE GAP: the expand chevron used to be gated on the scan carrying scan
+  // PARAMETERS, which only a .riproject/.PROJ/E57/XML import produces. A plain
+  // .xyz/.laz import therefore had no way to answer "which scalar columns
+  // actually came through?" — the one question the wizard's own choices make
+  // most pressing — because the Color-by dropdown hides constant and builtin
+  // columns and so cannot distinguish "dropped" from "kept but flat".
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+
+  const wizard = page.getByTestId('import-wizard');
+  await expect(wizard).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('import-wizard-import').click();
+  await expect(wizard).toBeHidden();
+
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  // Precondition: this really is a scan with NO parameters — the case that
+  // previously had no chevron at all.
+  await expect(row).toHaveAttribute('data-has-params', 'false');
+
+  const scanId = await row.getAttribute('data-scan-id');
+  expect(scanId).not.toBeNull();
+  await page.getByTestId(`scan-expand-${scanId}`).click();
+
+  // Cloud provenance: point count and the hits-only extent. scalars.xyz spans
+  // 0–2.0 m in X (11 columns at 0.2 m) — assert the real number, not merely
+  // that some text appeared.
+  const info = page.getByTestId(`scan-cloud-info-${scanId}`);
+  await expect(info).toBeVisible();
+  await expect(info).toContainText('points: 60');
+  await expect(info).toContainText('extent:');
+  await expect(info).toContainText('source: scalars.xyz');
+
+  // Fields: the file's three non-geometry columns, under the DISPLAY labels the
+  // wizard gave them (the same names the Color-by picker uses).
+  const cols = page.getByTestId(`scan-columns-${scanId}`);
+  await expect(cols).toBeVisible();
+  const listed = ((await cols.locator('[data-columns]').getAttribute('data-columns')) ?? '').split(',');
+  expect(listed).toContain('Timestamp');
+  expect(listed).toContain('Deviation');
+  expect(listed).toContain('Target Index');
+  // Each exactly once. `gps-time` and `timestamp` are two buffer keys for one
+  // quantity and both label "Timestamp"; deduping on the raw key printed it
+  // twice and read as two separate fields.
+  expect(listed.filter((c) => c === 'Timestamp')).toHaveLength(1);
+  // Geometry is not a scalar field.
+  expect(listed).not.toContain('position');
+
+  // The LAS schema dimensions PotreeConverter writes for EVERY source — none of
+  // which are in this 6-column ASCII file — are listed separately as empty
+  // rather than mixed in, which is what buried the three real columns.
+  const empty = ((await cols.locator('[data-empty-columns]').getAttribute('data-empty-columns')) ?? '').split(',');
+  expect(empty).toContain('user data');
+  expect(empty).toContain('point source id');
+  expect(empty).toContain('scan angle rank');
+  for (const real of ['Timestamp', 'Deviation', 'Target Index']) {
+    expect(empty).not.toContain(real);
+  }
+
+  // Collapsing hides both blocks again.
+  await page.getByTestId(`scan-expand-${scanId}`).click();
+  await expect(info).toBeHidden();
+  await expect(cols).toBeHidden();
+});
