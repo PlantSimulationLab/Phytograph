@@ -196,6 +196,94 @@ its ~1 M node target — the cube-law guess alone under-shoots at scale (a 13.5 
 plot landed on 4.3 M voxels), so most large clouds never trigger the advisory at
 all.
 
+## Sky/miss exclusion is a chokepoint, not a per-tool duty
+
+A sky/miss point (`is_miss != 0`) is a ray that hit nothing, projected **~1 km
+out** along the beam. On a real terrestrial scan they are routinely the
+*majority* of the file — a measured vineyard scan is 21.06 M points, 61 % misses,
+with the returns inside ±490 m and the miss shell reaching ±20 km.
+
+Every tool that grids, triangulates, builds a KD-tree, or runs CSF over a cloud
+scales off that cloud's extent, so leaving misses in inflates it ~1000× and the
+algorithm **hangs rather than errors**. Where the extent only feeds a threshold
+(cloud-to-mesh coverage, ICP pre-alignment) the failure is quieter and worse: a
+confident wrong answer. Measured on that scan, misses inflated the robust
+diagonal 2,192× (29 m → 64 km), so a 5 % correspondence distance became 3,210 m
+instead of 1.47 m and the centroid sat 5 km out in Z.
+
+Two payload shapes reach a compute endpoint, and only one was ever protected:
+
+- **`source`** (session/octree clouds) — filtered **server-side** by
+  `_read_points_from_source(include_misses=False)`, which honours the flag on
+  both the session branch and the file-path branch (`_file_miss_mask` probes the
+  file's own `is_miss` LAS extra-dim / ASCII column).
+- **inline `points`** — passed through **verbatim**. The renderer is the only
+  defense.
+
+Filtering inline payloads used to be each call site's own job, which made it
+something every new tool had to *remember* — and it was repeatedly forgotten. An
+audit found eight tools shipping raw positions, six of them the unfiltered twin
+of a correctly-filtered sibling in the same file (ground-seg vs tree-seg, QSM vs
+skeleton, c2m vs c2c ICP, wood-aggregate vs wood-per-scan).
+
+So the filter now lives at the chokepoint. `buildPointSource` calls
+`collectHitPoints` once and returns `{ kind: 'inline', hits, data }`; `hits` is
+the input for every compute path, and the payload type makes it **required**, so
+a new call site cannot omit it without a compile error. Two rules follow:
+
+- **Decimating? Use `collectHitPointsCapped`** — it filters *then* strides. The
+  reverse order spends the budget on the miss shell: a 60 k budget over that
+  61 %-miss scan kept ~37 k misses and thinned the actual tree to ~23 k.
+- **Writing per-point results back? Use `scatterToFullLength`** — the backend
+  labels the *hit subset*, so its result is shorter than `pointCount`. Writing it
+  directly mislabels every point after the first miss.
+
+`data` (misses included) stays available for the two paths that legitimately
+need them: **export**, where a miss is real recorded information and dropping it
+would break round-trip fidelity, and **LAD**, which needs misses as the
+Beer's-law transmission denominator and reads them on its own path. Reach for it
+only there, and say why at the site.
+
+As defense in depth the inline branches of `/api/c2m/distance`,
+`/api/c2m/icp`, `/api/triangulate/check-spacing` and the Helios triangulation
+points-mode fallback also run `_drop_far_outliers`, which detects the *gap*
+between the cloud and its shell rather than a multiple of the spread — a
+percentile-based rule fails once misses are the majority, because they define the
+percentile themselves.
+
+Three further paths were **latent**: reachable, but protected only by a
+coincidence of the current UI rather than by anything in the code. They are fixed
+at the source rather than left to the coincidence:
+
+- **`/api/triangulate/check-spacing`** — `_resolve_scan_positions` now excludes
+  misses on all three of its branches (session `extras`, inline, file flags). A
+  miss's nearest neighbour is another distant miss, so misses don't widen the
+  spacing distribution, they *define* it: measured median nearest-neighbour
+  distance was 35.65 m with misses versus 0.0143 m without, a ~2,500× error that
+  inverts the bridging verdict. The caller's grid crop removed them incidentally
+  and today's renderer always sends a grid — but the no-grid branch ("measure the
+  whole cloud") had no protection, and the endpoint takes any client's request.
+- **Helios triangulation, ASCII file-path branch** — the *binary* sub-branch
+  decoded through `_read_points_from_source` and dropped misses; the ASCII `else`
+  beside it did neither, streaming every row into the auto-grid bbox and handing
+  the raw file to Helios. `_ascii_hits_only_copy` now rewrites the file with miss
+  rows removed, **preserving every column** — a scan format may declare
+  multi-return columns (`target_index`/`target_count`/`timestamp`) that the
+  reconstruction consumes, so re-encoding to bare x-y-z would silently drop them.
+  A file that declares no `is_miss` column is passed through untouched.
+- **Flat-cloud parameter seeding** — CSF cloth resolution and DEM cell size are
+  absolute distances seeded from "how big is this scene", and were reading
+  `bounds.size`, which one ~1 km miss defines single-handedly. Use
+  `extentForParameterSeeding()`, which prefers the backend's `robustExtent`
+  (1st–99th percentile span) and otherwise computes a hits-only extent.
+  `robustExtent` is only populated on session/octree clouds, so **flat clouds
+  were the ones actually exposed** — the raw fallback gave defaults ~1000× too
+  coarse: not a crash, just silently useless numbers.
+
+The crop box is deliberately **not** filtered: it is an interactive box the user
+drags, and it must enclose everything visible — including misses, or you could
+never crop them away.
+
 ## Logging
 
 All three processes feed **one log file per app session** owned by the main

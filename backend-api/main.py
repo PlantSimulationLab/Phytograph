@@ -6250,6 +6250,68 @@ def _xyz_column_indices(ascii_format: Optional[str]) -> tuple:
     return 0, 1, 2
 
 
+def _ascii_hits_only_copy(file_path: str, ascii_format: Optional[str],
+                          tmpdir: str, idx: int):
+    """Copy an ASCII scan file with sky/miss rows REMOVED, returning
+    (path, ascii_format, n_points, min_xyz, max_xyz).
+
+    The format string is preserved verbatim and every column is carried through,
+    because a Helios scan file may legitimately declare multi-return columns
+    (target_index / target_count / timestamp) that the reconstruction consumes —
+    decoding to a bare x-y-z file would silently drop them.
+
+    When the format declares no `is_miss` column there is nothing to filter, so
+    the original path is returned untouched and this costs one bounds scan, the
+    same as before. Rows whose x/y/z don't parse are skipped exactly as
+    `_file_xyz_bounds` skips them, so the reported bounds and count stay
+    consistent with the file actually handed to Helios.
+    """
+    import math
+
+    _require_ascii_scan_file(file_path, "Scan bounds scanning")
+    tokens = _tokenize_ascii_format(ascii_format) if ascii_format else []
+    miss_idx = tokens.index(_MISS_SLUG) if _MISS_SLUG in tokens else None
+    if miss_idx is None:
+        # No miss column declared — nothing to drop; keep the original file.
+        n, lo, hi = _file_xyz_bounds(file_path, ascii_format)
+        return file_path, ascii_format, n, lo, hi
+
+    xi, yi, zi = _xyz_column_indices(ascii_format)
+    need = max(xi, yi, zi, miss_idx) + 1
+    out_path = os.path.join(tmpdir, f"scan_{idx}_hits.txt")
+    n = 0
+    lo = [math.inf, math.inf, math.inf]
+    hi = [-math.inf, -math.inf, -math.inf]
+    with open(file_path) as src, open(out_path, 'w') as dst:
+        for line in src:
+            stripped = line.strip()
+            if not stripped or stripped[0] in '#/':
+                continue
+            cols = stripped.split()
+            if len(cols) < need:
+                continue
+            try:
+                x, y, z = float(cols[xi]), float(cols[yi]), float(cols[zi])
+                is_miss = float(cols[miss_idx])
+            except ValueError:
+                continue
+            if is_miss != 0:
+                continue
+            dst.write(line if line.endswith('\n') else line + '\n')
+            if x < lo[0]: lo[0] = x
+            if y < lo[1]: lo[1] = y
+            if z < lo[2]: lo[2] = z
+            if x > hi[0]: hi[0] = x
+            if y > hi[1]: hi[1] = y
+            if z > hi[2]: hi[2] = z
+            n += 1
+    if n == 0:
+        raise ValueError(
+            f"'{os.path.basename(file_path)}' has no hit points to triangulate "
+            "(empty file, or only sky/miss returns).")
+    return out_path, ascii_format, n, lo, hi
+
+
 def _file_xyz_bounds(file_path: str, ascii_format: Optional[str] = None):
     """Stream an ASCII point file once and return (n_points, min_xyz, max_xyz).
 
@@ -6980,7 +7042,18 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                     fp = pts_path
                 else:
                     fmt = scan_entry.ascii_format or _detect_ascii_format(fp)
-                    n_points, lo, hi = _file_xyz_bounds(fp, fmt)
+                    # ASCII sibling of the binary branch above, and it needs the
+                    # SAME miss exclusion. This app exports `is_miss` as a
+                    # first-class ASCII column, so an exported-then-reimported
+                    # scan carries the ~1 km shell in a plain text file. Left in,
+                    # it both blows up the auto-grid bbox (~1000x) and reaches
+                    # Helios, which hangs the reconstruction rather than erroring.
+                    #
+                    # Rewrite to a temp file with the miss rows dropped rather
+                    # than decoding to bare x/y/z: the format string may carry
+                    # multi-return columns (target_index/target_count/timestamp)
+                    # that Helios needs, so the columns must survive the filter.
+                    fp, fmt, n_points, lo, hi = _ascii_hits_only_copy(fp, fmt, tmpdir, idx)
                     if lo is not None:
                         bb_lo = np.minimum(bb_lo, lo)
                         bb_hi = np.maximum(bb_hi, hi)
@@ -6992,13 +7065,20 @@ def _do_helios_computation(request: HeliosTriangulationRequest, edges_only: bool
                 if not points:
                     raise ValueError("Scan entry has no points, file_path, or session_id")
                 pts_arr_scan = np.asarray(points, dtype=float)
+                # An inline array carries no miss column, so use the geometric
+                # gap detector: a ~1 km shell left in here would inflate the
+                # auto-grid bbox and hang Helios exactly as on the file paths.
+                pts_arr_scan = _drop_far_outliers(pts_arr_scan[:, :3])
+                if pts_arr_scan.shape[0] == 0:
+                    raise ValueError("Scan entry has no hit points to triangulate.")
                 bb_lo = np.minimum(bb_lo, pts_arr_scan[:, :3].min(axis=0))
                 bb_hi = np.maximum(bb_hi, pts_arr_scan[:, :3].max(axis=0))
                 pts_path = os.path.join(tmpdir, f"scan_{idx}.txt")
                 # %.8g for the same precision reason as the session branch above.
                 np.savetxt(pts_path, pts_arr_scan[:, :3], fmt="%.8g", delimiter=" ")
                 n_theta, n_phi = _resolution(
-                    scan_entry, len(points), theta_max - theta_min, phi_max - phi_min)
+                    scan_entry, pts_arr_scan.shape[0],
+                    theta_max - theta_min, phi_max - phi_min)
                 fmt = "x y z"
                 fp = pts_path
 
@@ -7416,10 +7496,24 @@ _SPACING_BRIDGE_RATIO = 3.0
 
 
 def _resolve_scan_positions(scan_entry) -> "np.ndarray":
-    """Surviving (N,3) positions for one scan, by the same source priority as the
-    triangulation/LAD paths: live session (honoring unbaked deletions, never
+    """Surviving (N,3) HIT positions for one scan, by the same source priority as
+    the triangulation/LAD paths: live session (honoring unbaked deletions, never
     re-reading the source) -> inline points -> source file. Positions only — the
     spacing check needs no ray directions or multi-return columns.
+
+    Sky/miss points are EXCLUDED on every branch. A miss is a ray that hit
+    nothing, projected ~1 km out, so its nearest neighbour is another distant
+    miss: they do not merely widen the distribution, they define it. Measured on
+    a real vineyard scan (21.06 M points, 61% misses) the pooled median
+    nearest-neighbour distance was 35.65 m with misses in versus 0.0143 m without
+    — a 2,500x error, which inverts the bridging verdict this feeds.
+
+    The caller's grid crop (`_points_inside_grid`) already removes misses
+    incidentally when a grid is supplied, and today's renderer always supplies
+    one. That is a coincidence of the current UI, not a guarantee: the no-grid
+    branch ("measure the whole cloud") has no such protection, and this endpoint
+    is reachable by any client. Filter at the source instead of relying on a
+    downstream crop that a refactor could remove.
 
     A `file_path` source is only for scans that never had a session; a stale
     session raises (see _resolve_scan_session)."""
@@ -7429,15 +7523,27 @@ def _resolve_scan_positions(scan_entry) -> "np.ndarray":
 
     if sess is not None:
         with _cloud_session_lock:
-            return np.ascontiguousarray(sess.positions[~sess.deleted], dtype=np.float64)
+            keep = ~sess.deleted
+            miss = sess.extras.get(_MISS_SLUG) if sess.extras else None
+            if miss is not None and len(miss) == len(keep):
+                keep = keep & (np.asarray(miss) == 0)
+            return np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
     if scan_entry.points:
-        return np.asarray(scan_entry.points, dtype=np.float64).reshape(-1, 3)
+        xyz = np.asarray(scan_entry.points, dtype=np.float64).reshape(-1, 3)
+        # An inline array carries no miss column, so fall back to the geometric
+        # gap detector the c2m/register paths use.
+        return _drop_far_outliers(xyz)
     if scan_entry.file_path:
         if not os.path.isfile(scan_entry.file_path):
             raise ValueError(f"Scan file not found: {scan_entry.file_path}")
-        xyz, _dirs, _labels, _vals, _flags = _file_to_lad_arrays(
+        xyz, _dirs, _labels, _vals, flags = _file_to_lad_arrays(
             scan_entry.file_path, scan_entry.ascii_format, scan_entry.origin)
-        return np.asarray(xyz, dtype=np.float64)
+        xyz = np.asarray(xyz, dtype=np.float64)
+        # `_file_to_lad_arrays` surfaces the file's own miss column for LAD's
+        # sake; the spacing check wants the opposite half of it.
+        if flags is not None and len(flags) == len(xyz):
+            xyz = xyz[np.asarray(flags) == 0]
+        return xyz
     raise ValueError("Scan entry has no points, file_path, or session_id")
 
 
@@ -24184,6 +24290,60 @@ def _preview_ptx(file_path: str, max_rows: int = 20) -> PointCloudPreviewRespons
 # cleanly and a shift would only be a nuisance.
 _SHIFT_SUGGEST_THRESHOLD = 1.0e4
 
+# How many points the LAS/LAZ hits-only min probe will stream before giving up
+# and falling back to the header. Sized so a full-dome terrestrial scan's real
+# returns are comfortably covered without turning a wizard preview into a
+# multi-second read.
+_SHIFT_PROBE_MAX_POINTS = 4_000_000
+
+
+def _las_hit_mins(file_path: str) -> Optional[np.ndarray]:
+    """Per-axis min over the HIT points of a LAS/LAZ file, or None when the file
+    carries no `is_miss` dimension (the header mins are then already correct).
+
+    The header mins CANNOT be used when misses are present. A sky/miss point is a
+    ray that hit nothing, projected ~1 km out along the beam, so `header.mins` is
+    the miss shell's extent, not the data's. On a real RIEGL vineyard scan that
+    is the difference between a true min of (-491, -478, -32) and a header min of
+    (-20018, -19999, -12975): suggesting floor(header.mins) as the global shift
+    SUBTRACTS 20 km from a cloud that was already at the origin, teleporting it
+    to (+19997, +20001) — the exact opposite of what the shift is for.
+
+    Streams via laspy's chunk iterator so a 21 M-point LAZ costs a bounded scan
+    rather than a full in-RAM read. Returns None on any problem, and on a file
+    whose points are all misses (no hits to take a min over)."""
+    try:
+        import laspy
+        with laspy.open(file_path) as reader:
+            if _MISS_SLUG not in set(reader.header.point_format.dimension_names):
+                return None  # no misses recorded — header mins are the truth
+            scales = np.asarray(reader.header.scales, dtype=np.float64)
+            offsets = np.asarray(reader.header.offsets, dtype=np.float64)
+            mins: Optional[np.ndarray] = None
+            seen = 0
+            for chunk in reader.chunk_iterator(1_000_000):
+                miss = np.asarray(chunk[_MISS_SLUG]).astype(np.float64) != 0
+                if miss.all():
+                    seen += len(miss)
+                    if seen >= _SHIFT_PROBE_MAX_POINTS:
+                        break
+                    continue
+                # Scale the raw ints ourselves: chunk.x/.y/.z would materialise a
+                # float64 copy of every point including the misses we're dropping.
+                keep = ~miss
+                xyz = np.column_stack((
+                    np.asarray(chunk.X)[keep], np.asarray(chunk.Y)[keep],
+                    np.asarray(chunk.Z)[keep],
+                )).astype(np.float64) * scales + offsets
+                cmin = xyz.min(axis=0)
+                mins = cmin if mins is None else np.minimum(mins, cmin)
+                seen += len(miss)
+                if seen >= _SHIFT_PROBE_MAX_POINTS:
+                    break
+            return mins
+    except Exception:
+        return None
+
 
 def _suggest_global_shift(file_path: str,
                           response: PointCloudPreviewResponse) -> Optional[List[float]]:
@@ -24192,10 +24352,14 @@ def _suggest_global_shift(file_path: str,
     can't be probed cheaply). The suggestion is floor(min) per axis when any
     axis min exceeds `_SHIFT_SUGGEST_THRESHOLD`.
 
-    ASCII: a capped pandas read of just the x/y/z columns (roles come from the
-    already-computed preview `columns`). LAS/LAZ: the header mins (no body read).
-    Other formats: skipped (None) — the viewer's render-offset still keeps them
-    artifact-free; only the explicit import shift is unavailable there."""
+    The min is taken over HIT points only. Sky/miss points sit ~1 km out along
+    their beam, so including them measures the miss shell instead of the data and
+    suggests a shift that moves the cloud AWAY from the origin — see
+    `_las_hit_mins`. ASCII: a capped pandas read of the x/y/z columns plus
+    `is_miss` when the file has one. LAS/LAZ: a chunked hits-only scan when the
+    file records misses, else the header mins (no body read). Other formats:
+    skipped (None) — the viewer's render-offset still keeps them artifact-free;
+    only the explicit import shift is unavailable there."""
     try:
         ext = _Path(file_path).suffix.lower().lstrip('.')
         mins: Optional[np.ndarray] = None
@@ -24204,21 +24368,35 @@ def _suggest_global_shift(file_path: str,
                         if c.detected_role in ('x', 'y', 'z')}
             if not all(r in role_idx for r in ('x', 'y', 'z')):
                 return None
+            names = ['x', 'y', 'z']
             usecols = [role_idx['x'], role_idx['y'], role_idx['z']]
+            # Drop misses here too: this app exports is_miss as an ASCII column,
+            # so a re-imported scan hits exactly the same 1 km-shell problem.
+            miss_col = next((c.index for c in response.columns
+                             if _MISS_SLUG in (c.detected_role, c.suggested_slug)), None)
+            if miss_col is not None and miss_col not in usecols:
+                usecols.append(miss_col)
+                names.append(_MISS_SLUG)
+            order = np.argsort(usecols)  # pandas returns usecols in file order
             df = pd.read_csv(
                 file_path, sep=_ascii_pandas_sep(file_path), header=None,
-                comment='#', usecols=usecols, names=['x', 'y', 'z'],
+                comment='#', usecols=usecols,
+                names=[names[i] for i in order],
                 dtype=np.float64, engine='c', skip_blank_lines=True,
                 skiprows=_ascii_skiprows(file_path), on_bad_lines='skip',
                 nrows=200_000,  # cap: enough for a stable min without a full read
             ).dropna()
+            if _MISS_SLUG in df.columns:
+                df = df[df[_MISS_SLUG] == 0]
             if df.empty:
                 return None
-            mins = df.to_numpy().min(axis=0)
+            mins = df[['x', 'y', 'z']].to_numpy().min(axis=0)
         elif ext in ('las', 'laz'):
             import laspy
-            with laspy.open(file_path) as reader:
-                mins = np.asarray(reader.header.mins, dtype=np.float64)
+            mins = _las_hit_mins(file_path)
+            if mins is None:
+                with laspy.open(file_path) as reader:
+                    mins = np.asarray(reader.header.mins, dtype=np.float64)
         elif ext == 'ptx':
             # PTX point coordinates are SCANNER-LOCAL (small by construction), so
             # the body carries no shift signal at all — the registered world
@@ -28732,7 +28910,15 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
         if request.source is not None:
             points, _, _ = _read_points_from_source(request.source)
         else:
-            points = np.array(request.points or [], dtype=np.float64).reshape(-1, 3)
+            # Defense in depth: an INLINE array is passed through verbatim, so
+            # unlike the `source` branch (filtered by _read_points_from_source)
+            # nothing upstream guarantees misses are gone. The renderer now
+            # filters them, but a stale client or a direct API caller would
+            # otherwise silently get a ~2000x inflated correspondence threshold
+            # and a centroid kilometres off — a confident wrong answer, not an
+            # error. See _drop_far_outliers.
+            points = _drop_far_outliers(
+                np.array(request.points or [], dtype=np.float64).reshape(-1, 3))
         vertices = np.array(request.mesh_vertices, dtype=np.float64).reshape(-1, 3)
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
@@ -29109,7 +29295,15 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
         if request.source is not None:
             points, _, _ = _read_points_from_source(request.source)
         else:
-            points = np.array(request.points or [], dtype=np.float64).reshape(-1, 3)
+            # Defense in depth: an INLINE array is passed through verbatim, so
+            # unlike the `source` branch (filtered by _read_points_from_source)
+            # nothing upstream guarantees misses are gone. The renderer now
+            # filters them, but a stale client or a direct API caller would
+            # otherwise silently get a ~2000x inflated correspondence threshold
+            # and a centroid kilometres off — a confident wrong answer, not an
+            # error. See _drop_far_outliers.
+            points = _drop_far_outliers(
+                np.array(request.points or [], dtype=np.float64).reshape(-1, 3))
         vertices = np.array(request.mesh_vertices, dtype=np.float64).reshape(-1, 3)
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 

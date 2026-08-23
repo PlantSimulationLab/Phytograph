@@ -145,6 +145,8 @@ import {
   ladReuseGrid,
   extractReuseMeshPayload,
   collectHitPoints,
+  collectHitPointsCapped,
+  extentForParameterSeeding,
   scatterToFullLength,
   type Vec3Like,
   type ReuseMeshPayload,
@@ -189,6 +191,7 @@ import { SceneBackground } from './viewer/scene/SceneBackground';
 import { CameraCapture } from './viewer/scene/CameraCapture';
 import { TranslationGizmo } from './viewer/gizmos/TranslationGizmo';
 import { RotationGizmo } from './viewer/gizmos/RotationGizmo';
+import { GIZMO_ARROW_PIXELS, GIZMO_RING_PIXELS } from './viewer/gizmos/ConstantScreenScaler';
 import { OriginPicker } from './viewer/gizmos/OriginPicker';
 import { SceneOriginMarker } from './viewer/gizmos/SceneOriginMarker';
 import type { PointCloudOctree } from 'potree-core';
@@ -915,7 +918,10 @@ export default function PointCloudViewer({
   useEffect(() => {
     if (showGroundSegmentPanel && !groundPanelWasOpen.current) {
       const sel = clouds.find((c) => selectedIds.has(c.id));
-      const size = sel?.data.bounds?.size;
+      // Hits-only extent, NOT bounds.size: a miss sits ~1 km out and would set
+      // the raw extent single-handedly, seeding a cloth resolution ~1000x too
+      // coarse. See extentForParameterSeeding.
+      const size = sel ? extentForParameterSeeding(sel.data) : null;
       if (size) {
         const defaults = groundSegmentDefaultsForExtent(Math.max(size.x, size.y), size.z);
         setGroundClothResolution(defaults.clothResolution);
@@ -956,7 +962,8 @@ export default function PointCloudViewer({
   useEffect(() => {
     if (showDEMPanel && !demPanelWasOpen.current) {
       const sel = clouds.find((c) => selectedIds.has(c.id));
-      const size = sel?.data.bounds?.size;
+      // Hits-only extent — same reason as the CSF seed above.
+      const size = sel ? extentForParameterSeeding(sel.data) : null;
       if (size) setDemCellSize(demDefaultsForExtent(Math.max(size.x, size.y)).cellSize);
     }
     demPanelWasOpen.current = showDEMPanel;
@@ -7513,7 +7520,13 @@ export default function PointCloudViewer({
         },
       };
     }
-    return { kind: 'inline', data: getDisplayData(cloud) };
+    // Flat (in-RAM) cloud. Filter sky/miss points HERE, once, so every
+    // downstream consumer gets hits-only by construction rather than having to
+    // remember — see the PointSourcePayload docs for why this is a chokepoint
+    // and not a per-caller responsibility. `data` still carries the unfiltered
+    // cloud for the paths that legitimately need misses (export, LAD).
+    const data = getDisplayData(cloud);
+    return { kind: 'inline', hits: collectHitPoints(data), data };
   }, [getEditState, getDisplayData]);
 
   // Render-path companion to getDisplayData: returns ONLY a Uint32Array
@@ -7666,6 +7679,11 @@ export default function PointCloudViewer({
       return null;
     }
 
+    // `ps.data`, NOT `ps.hits`: export deliberately KEEPS sky/miss points. A
+    // miss is real recorded information (a ray that returned nothing), the
+    // exporter writes it as the `is_miss` column, and LAD needs it downstream as
+    // the Beer's-law transmission denominator. Round-tripping a scan must not
+    // silently drop 60% of the file. Every COMPUTE path uses `ps.hits`.
     const data = ps.data;
 
     // Handle LAZ export via backend (for compression)
@@ -9171,7 +9189,7 @@ export default function PointCloudViewer({
   }, [skeletons, clouds, downloadFile, skeletonShowAsCylinders, skeletonTubeRadius]);
 
 
-  // Serialize a FLAT cloud's display positions into the backend's `points`
+  // Serialize a FLAT cloud's HIT points into the backend's `points`
   // (`number[][]`), STRIDE-DOWNSAMPLED to the triangulate cap. Only reached for
   // clouds with neither a session nor a source file (genuinely flat, in-RAM) —
   // session/file clouds go through buildPointSource's `source` branch (capped
@@ -9179,16 +9197,18 @@ export default function PointCloudViewer({
   // an uncapped multi-million-point flat cloud (e.g. a large no-path import) would
   // build a huge `number[][]` + JSON body, the same OOM shape as the Helios fix.
   // Stride (not reservoir) preserves spatial uniformity, matching the backend's
-  // _read_points_from_source downsample. Returns {points, used, total}.
+  // _read_points_from_source downsample.
+  //
+  // Misses are excluded BEFORE the stride (see collectHitPointsCapped): a miss
+  // sits ~1 km out, so it both inflates the extent the mesher works over and
+  // steals budget from the real surface. `total` is therefore the HIT count, so
+  // any "used N of M" message the caller shows describes the actual data.
   const flatPointsCapped = useCallback((data: PointCloudData): { points: number[][]; used: number; total: number } => {
-    const total = data.pointCount;
-    const stride = total > triangulateMaxPoints ? Math.ceil(total / triangulateMaxPoints) : 1;
-    const points: number[][] = [];
-    for (let i = 0; i < total; i += stride) {
-      const idx = i * 3;
-      points.push([data.positions[idx], data.positions[idx + 1], data.positions[idx + 2]]);
+    const capped = collectHitPointsCapped(data, triangulateMaxPoints);
+    if (capped.droppedMisses > 0) {
+      console.log(`Triangulation: excluded ${capped.droppedMisses} sky/miss points`);
     }
-    return { points, used: points.length, total };
+    return { points: capped.points, used: capped.used, total: capped.total };
   }, [triangulateMaxPoints]);
 
   // Open3D triangulation (ball_pivoting / poisson / alpha_shape / delaunay),
@@ -9552,15 +9572,15 @@ export default function PointCloudViewer({
       }
 
       // --- Flat cloud: classify in memory, write scalarFields. ---
+      // Hit points only. CSF is the tool this matters most for: a miss sits
+      // ~1 km out, so including misses makes the cloth span the whole ~1000x
+      // inflated extent and the solver builds a multi-million-node grid over
+      // ~500 iterations -- it HANGS rather than erroring.
       const displayData = ps.data;
       const count = displayData.pointCount;
-      const points: number[][] = new Array(count);
-      for (let i = 0; i < count; i++) {
-        points[i] = [
-          displayData.positions[i * 3],
-          displayData.positions[i * 3 + 1],
-          displayData.positions[i * 3 + 2],
-        ];
+      const { points, hitIndices, droppedMisses } = ps.hits;
+      if (droppedMisses > 0) {
+        console.log(`Ground segmentation: excluded ${droppedMisses} sky/miss points`);
       }
 
       const response = await segmentGround({ points, ...csfParams }, abort.signal);
@@ -9568,7 +9588,13 @@ export default function PointCloudViewer({
         throw new Error(response.error || 'Ground segmentation failed');
       }
 
-      const labels = Float32Array.from(response.labels);
+      // The backend labelled the HIT subset, so its result is indexed against
+      // `points`, not the cloud. Scatter back to full length before it touches a
+      // scalar field or the split loop below -- writing it directly would
+      // mislabel every point after the first miss. Misses take the default fill
+      // of 0, which is outside the 1=Ground / 2=Non-ground range, so they are
+      // neither -- the same convention the tree/wood siblings use.
+      const labels = scatterToFullLength(response.labels, hitIndices, count);
       const newScalarFields = {
         ...(displayData.scalarFields ?? {}),
         [GROUND_CLASS_ATTRIBUTE]: { values: labels, min: 1, max: 2 },
@@ -9582,7 +9608,10 @@ export default function PointCloudViewer({
         const makeChild = (classValue: number, suffix: string, color: string) => {
           const idxs: number[] = [];
           for (let i = 0; i < count; i++) {
-            if (Math.round(response.labels[i]) === classValue) idxs.push(i);
+            // `labels`, NOT `response.labels`: the latter is indexed against the
+            // hit subset, so on a cloud with misses it would select the wrong
+            // points (and read past its end).
+            if (Math.round(labels[i]) === classValue) idxs.push(i);
           }
           if (idxs.length === 0) return;
           const pos = new Float32Array(idxs.length * 3);
@@ -9731,38 +9760,26 @@ export default function PointCloudViewer({
       // pathological). Filter here (the session path already gets hits-only). ---
       const displayData = ps.data;
       const rawCount = displayData.pointCount;
-      const missField = displayData.scalarFields?.[MISS_ATTRIBUTE];
-      const isHit = (i: number) =>
-        !missField || missField.values.length !== rawCount || missField.values[i] === 0;
-      const groundField = displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE];
-      const hasGround = !!groundField && groundField.values.length === rawCount;
+      // Use the SHARED helper rather than a local miss loop: a hand-rolled copy
+      // is exactly how the filtered and unfiltered twins drifted apart across
+      // this file. `aligned` keeps each per-point array in lockstep with the
+      // positions, which is the part that is easy to get wrong by hand.
+      //
       // First-return index (0 = first return) drives the DSM / CHM top-of-canopy
-      // surface AND the DTM's return-density layer, so collect it whenever the
-      // column exists (the DTM always attaches the layer bundle).
-      const targetIndexField = displayData.scalarFields?.['target_index'];
-      const hasFirstReturn = !!targetIndexField && targetIndexField.values.length === rawCount;
-      // Per-point intensity feeds the DTM's intensity layer. `displayData.intensities`
-      // is the renderer's intensity buffer (Float32Array), aligned to all points.
+      // surface AND the DTM's return-density layer; per-point intensity feeds the
+      // DTM's intensity layer. Both are collected whenever their column exists.
       const intensityBuf = displayData.intensities;
-      const hasIntensity = demSurfaces.has('dtm') && !!intensityBuf && intensityBuf.length === rawCount;
-
-      const points: number[][] = [];
-      const groundLabels: number[] | undefined = hasGround ? [] : undefined;
-      const firstReturnLabels: number[] | undefined = hasFirstReturn ? [] : undefined;
-      const intensity: number[] | undefined = hasIntensity ? [] : undefined;
-      const hitIndices: number[] = [];
-      for (let i = 0; i < rawCount; i++) {
-        if (!isHit(i)) continue;   // drop sky/miss points
-        hitIndices.push(i);
-        points.push([
-          displayData.positions[i * 3],
-          displayData.positions[i * 3 + 1],
-          displayData.positions[i * 3 + 2],
-        ]);
-        if (groundLabels) groundLabels.push(Math.round(groundField!.values[i]));
-        if (firstReturnLabels) firstReturnLabels.push(Math.round(targetIndexField!.values[i]));
-        if (intensity) intensity.push(intensityBuf![i]);
-      }
+      const wantIntensity = demSurfaces.has('dtm');
+      const hits = collectHitPoints(displayData, {
+        ground: displayData.scalarFields?.[GROUND_CLASS_ATTRIBUTE]?.values,
+        firstReturn: displayData.scalarFields?.['target_index']?.values,
+        intensity: wantIntensity ? intensityBuf : undefined,
+      });
+      const points = hits.points;
+      const hitIndices = hits.hitIndices;
+      const groundLabels = hits.aligned.ground?.map(v => Math.round(v));
+      const firstReturnLabels = hits.aligned.firstReturn?.map(v => Math.round(v));
+      const intensity = hits.aligned.intensity;
       flat = { displayData, rawCount, points, groundLabels, firstReturnLabels, intensity, hitIndices, count: points.length };
       if (flat.count < 3) {
         setDemInProgress(false);
@@ -10072,20 +10089,33 @@ export default function PointCloudViewer({
           // (otherwise the concatenated array can't align 1:1) — mirrors the
           // backend's all-or-nothing rule for multi-source requests.
           let allHaveRefl = reflWeight > 0;
-          const order: { id: string; count: number; displayData: PointCloudData }[] = [];
+          // `hitCount` is what each cloud CONTRIBUTED (misses excluded), which
+          // is what the label slices are indexed by; `fullCount` is the cloud's
+          // real length, needed to scatter those labels back. Conflating the two
+          // is the bug this shape prevents.
+          const order: {
+            id: string; hitCount: number; fullCount: number;
+            hitIndices: number[]; displayData: PointCloudData;
+          }[] = [];
           for (const { cloud, ps } of resolved) {
-            const d = (ps as { data: PointCloudData }).data;
+            const inline = ps as Extract<PointSourcePayload, { kind: 'inline' }>;
+            const d = inline.data;
             const t = getEditState(cloud.id).translation;
-            for (let i = 0; i < d.pointCount; i++) {
-              inlineParts.push([
-                d.positions[i * 3] + t.x,
-                d.positions[i * 3 + 1] + t.y,
-                d.positions[i * 3 + 2] + t.z,
-              ]);
+            // Hit points only, with reflectance filtered in LOCKSTEP -- the
+            // backend's all-or-nothing rule needs reflectance to align 1:1 with
+            // the points actually sent, not with the unfiltered cloud.
+            const refl = allHaveRefl ? inlineReflectance(d) : null;
+            const hits = collectHitPoints(d, { reflectance: refl ?? undefined });
+            for (const pt of hits.points) {
+              inlineParts.push([pt[0] + t.x, pt[1] + t.y, pt[2] + t.z]);
             }
-            const r = allHaveRefl ? inlineReflectance(d) : null;
-            if (r) reflParts.push(...r); else allHaveRefl = false;
-            order.push({ id: cloud.id, count: d.pointCount, displayData: d });
+            const r = hits.aligned.reflectance;
+            if (allHaveRefl && r && r.length === hits.points.length) reflParts.push(...r);
+            else allHaveRefl = false;
+            order.push({
+              id: cloud.id, hitCount: hits.points.length, fullCount: d.pointCount,
+              hitIndices: hits.hitIndices, displayData: d,
+            });
           }
 
           const response = await segmentWood({
@@ -10103,12 +10133,17 @@ export default function PointCloudViewer({
 
           let cursor = 0;
           for (const o of order) {
-            const slice = labels.slice(cursor, cursor + o.count);
-            cursor += o.count;
+            // Slice by hitCount (what this cloud contributed), then scatter back
+            // to fullCount so the scalar field lines up with the cloud's own
+            // points. Slicing by the full count would both mis-slice every cloud
+            // after the first and mislabel points after each cloud's first miss.
+            const slice = labels.slice(cursor, cursor + o.hitCount);
+            cursor += o.hitCount;
             const cd = o.displayData;
+            const values = scatterToFullLength(slice, o.hitIndices, o.fullCount);
             onUpdateCloud(o.id, {
               ...cd,
-              scalarFields: { ...(cd.scalarFields ?? {}), [WOOD_CLASS_ATTRIBUTE]: { values: Float32Array.from(slice), min: 1, max: 2 } },
+              scalarFields: { ...(cd.scalarFields ?? {}), [WOOD_CLASS_ATTRIBUTE]: { values, min: 1, max: 2 } },
             });
           }
 
@@ -10650,7 +10685,13 @@ export default function PointCloudViewer({
       const response = await computeAlignmentDistance(
         ps.kind === 'source'
           ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
-          : { points: Array.from(ps.data.positions), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+          // Hit points only: a miss sits ~1 km out, and BOTH the coverage
+          // threshold and the ICP centroid pre-alignment scale off the cloud's
+          // extent. Measured on a real scan, misses inflated the robust diagonal
+          // 2,192x (29 m -> 64 km), so the 5% correspondence distance became
+          // 3,210 m instead of 1.47 m and the centroid sat 5 km off in Z --
+          // silently confident, entirely wrong answers rather than an error.
+          : { points: ps.hits.points.flat(), mesh_vertices: meshVertices, mesh_indices: meshIndices },
         ctrl.signal,
         (p, msg) => setAlignDistProgress({ label: msg, value: p }),
         (runId) => { alignDistRunIdRef.current = runId; },
@@ -10715,7 +10756,13 @@ export default function PointCloudViewer({
       const response = await icpRegisterMeshToCloud(
         ps.kind === 'source'
           ? { source: ps.source, mesh_vertices: meshVertices, mesh_indices: meshIndices }
-          : { points: Array.from(ps.data.positions), mesh_vertices: meshVertices, mesh_indices: meshIndices },
+          // Hit points only: a miss sits ~1 km out, and BOTH the coverage
+          // threshold and the ICP centroid pre-alignment scale off the cloud's
+          // extent. Measured on a real scan, misses inflated the robust diagonal
+          // 2,192x (29 m -> 64 km), so the 5% correspondence distance became
+          // 3,210 m instead of 1.47 m and the centroid sat 5 km off in Z --
+          // silently confident, entirely wrong answers rather than an error.
+          : { points: ps.hits.points.flat(), mesh_vertices: meshVertices, mesh_indices: meshIndices },
         ctrl.signal,
         (p, msg) => setIcpProgress({ label: msg, value: p }),
         (runId) => { icpRunIdRef.current = runId; },
@@ -11727,16 +11774,13 @@ export default function PointCloudViewer({
       if (ps.kind === 'source') {
         source = { ...ps.source, max_points: MAX_QSM_POINTS };
       } else {
-        const displayData = ps.data;
-        const total = displayData.pointCount;
-        const skip = total > MAX_QSM_POINTS ? Math.ceil(total / MAX_QSM_POINTS) : 1;
-        points = [];
-        for (let i = 0; i < total; i += skip) {
-          points.push([
-            displayData.positions[i * 3],
-            displayData.positions[i * 3 + 1],
-            displayData.positions[i * 3 + 2],
-          ]);
+        // Hit points only, and filtered BEFORE the stride. Striding the raw
+        // array spends the budget on the ~1 km miss shell: on a 61%-miss scan a
+        // 60 k budget kept ~37 k misses and decimated the actual tree to ~23 k.
+        const capped = collectHitPointsCapped(ps.data, MAX_QSM_POINTS);
+        points = capped.points;
+        if (capped.droppedMisses > 0) {
+          console.log(`QSM: excluded ${capped.droppedMisses} sky/miss points`);
         }
       }
 
@@ -11766,17 +11810,14 @@ export default function PointCloudViewer({
           if (ps.kind === 'source') {
             sources.push({ ...ps.source, max_points: MAX_QSM_POINTS });
           } else {
-            // Flat cloud: concatenate its display points in WORLD space
+            // Flat cloud: concatenate its HIT points in WORLD space
             // (translation applied here — getDisplayData leaves it to the parent
             // group). Scans are assumed pre-registered (e.g. ICP-aligned).
-            const d = ps.data;
+            // Misses are dropped per-cloud, before the concat, so the shared
+            // budget below is spent entirely on real returns.
             const t = getEditState(cloud.id).translation;
-            for (let i = 0; i < d.pointCount; i++) {
-              inlineParts.push([
-                d.positions[i * 3] + t.x,
-                d.positions[i * 3 + 1] + t.y,
-                d.positions[i * 3 + 2] + t.z,
-              ]);
+            for (const pt of ps.hits.points) {
+              inlineParts.push([pt[0] + t.x, pt[1] + t.y, pt[2] + t.z]);
             }
           }
         }
@@ -16650,7 +16691,7 @@ export default function PointCloudViewer({
               sceneOrigin[2] - displayOffset.z,
             )}
             size={1}
-            constantScreenSize={90}
+            constantScreenSize={GIZMO_ARROW_PIXELS}
             onTranslate={(d) => {
               const b = sceneOriginRef.current;
               setSceneOriginOverride([b[0] + d.x, b[1] + d.y, b[2] + d.z]);
@@ -16660,18 +16701,34 @@ export default function PointCloudViewer({
           />
         )}
 
-        {/* Translation Gizmo for selected clouds */}
+        {/* Translation Gizmo for selected clouds — anchored on the SCENE ORIGIN,
+            the same point the rotation rings below use.
+
+            It used to sit on the cloud's bounds center (plus the live draft), the
+            usual CAD convention of putting move handles on the object. But
+            rotation genuinely has to be drawn at its pivot, so the two halves of
+            one tool ended up in two different places — arbitrarily far apart when
+            the origin isn't near the cloud — and neither glyph explained the
+            other. Translation has no pivot (the axes are identical wherever the
+            arrows are drawn), so it's the half that can move. Deliberately does
+            NOT follow the draft translation: the rings don't either, and handles
+            that slide away mid-drag are worse than handles that stay put. */}
         {editMode === 'translate' && firstSelectedCloud && (
           <TranslationGizmo
             // center in DISPLAY space (world − displayOffset): the gizmo's
             // DragHandler projects the center through the display-space camera, so
             // it must match. Emitted deltas are offset-invariant (handlers unchanged).
             center={new THREE.Vector3(
-              firstSelectedCloud.data.bounds.center.x + getEditState(firstSelectedCloud.id).translation.x - displayOffset.x,
-              firstSelectedCloud.data.bounds.center.y + getEditState(firstSelectedCloud.id).translation.y - displayOffset.y,
-              firstSelectedCloud.data.bounds.center.z + getEditState(firstSelectedCloud.id).translation.z - displayOffset.z
+              sceneOrigin[0] - displayOffset.x,
+              sceneOrigin[1] - displayOffset.y,
+              sceneOrigin[2] - displayOffset.z,
             )}
-            size={firstSelectedCloud.data.bounds.size.length() / 3}
+            // Fixed on-screen size, not bounds-derived: on a survey-scale cloud a
+            // bounds-sized gizmo is kilometres wide, so zooming into any detail
+            // pushed every handle off screen. `size` is now just the glyph's
+            // nominal unit — the pixel span is what the user sees.
+            size={1}
+            constantScreenSize={GIZMO_ARROW_PIXELS}
             onTranslate={handleGizmoTranslate}
             onDragStart={() => setGizmoDragging(true)}
             onDragEnd={() => {
@@ -16687,8 +16744,9 @@ export default function PointCloudViewer({
         )}
 
         {/* Rotation Gizmo for selected clouds — three rings centered on the scene
-            origin (the pivot the marker shows). Dragging updates the draft
-            rotation (render-only); OK bakes it. */}
+            origin (the pivot the marker shows), concentric with the translation
+            arrows above. Dragging updates the draft rotation (render-only); OK
+            bakes it. */}
         {editMode === 'translate' && firstSelectedCloud && (() => {
           const P = { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] };
           return (
@@ -16697,7 +16755,8 @@ export default function PointCloudViewer({
               // gizmo. Rings are drawn slightly larger than the translate arrows so
               // the two don't overlap and stay grabbable.
               center={new THREE.Vector3(P.x - displayOffset.x, P.y - displayOffset.y, P.z - displayOffset.z)}
-              size={firstSelectedCloud.data.bounds.size.length() / 2}
+              size={1}
+              constantScreenSize={GIZMO_RING_PIXELS}
               onRotate={handleGizmoRotate}
               onDragStart={() => setGizmoDragging(true)}
               onDragEnd={() => { setGizmoDragging(false); pendingHistoryRef.current = null; }}
@@ -16708,7 +16767,6 @@ export default function PointCloudViewer({
         {/* Translation Gizmo for selected mesh */}
         {editMode === 'translate' && selectedMesh && (() => {
           const meshPos = meshPositions.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-          const meshScale = meshScales.get(selectedMesh.id) || { x: 1, y: 1, z: 1 };
           return (
             <TranslationGizmo
               // center in DISPLAY space (world − displayOffset) — see cloud gizmo.
@@ -16717,7 +16775,8 @@ export default function PointCloudViewer({
                 meshPos.y - displayOffset.y,
                 meshPos.z - displayOffset.z,
               )}
-              size={Math.max(meshScale.x, meshScale.y, meshScale.z)}
+              size={1}
+              constantScreenSize={GIZMO_ARROW_PIXELS}
               onTranslate={handleMeshTranslate}
               onDragStart={() => { startHistoryEntry('mesh', selectedMesh.id); setGizmoDragging(true); }}
               onDragEnd={() => { commitHistoryEntry(); setGizmoDragging(false); }}
@@ -16728,7 +16787,8 @@ export default function PointCloudViewer({
         {/* Translation Gizmo for selected skeleton */}
         {editMode === 'translate' && selectedSkeleton && selectedSkeleton.data.pointCount > 0 && (() => {
           const skelPos = skeletonPositions.get(selectedSkeleton.id) || { x: 0, y: 0, z: 0 };
-          // Calculate skeleton bounds for gizmo size
+          // Calculate skeleton bounds for the gizmo's CENTER (its on-screen size
+          // is fixed in pixels, so the extent is no longer needed for scaling).
           const skelData = selectedSkeleton.data;
           let minX = skelData.points[0], maxX = skelData.points[0];
           let minY = skelData.points[1], maxY = skelData.points[1];
@@ -16741,7 +16801,6 @@ export default function PointCloudViewer({
             minY = Math.min(minY, y); maxY = Math.max(maxY, y);
             minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
           }
-          const size = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
           // center in DISPLAY space (world − displayOffset) — see cloud gizmo.
           const center = new THREE.Vector3(
             skelPos.x + (minX + maxX) / 2 - displayOffset.x,
@@ -16751,7 +16810,8 @@ export default function PointCloudViewer({
           return (
             <TranslationGizmo
               center={center}
-              size={size}
+              size={1}
+              constantScreenSize={GIZMO_ARROW_PIXELS}
               onTranslate={handleSkeletonTranslate}
               onDragStart={() => { startHistoryEntry('skeleton', selectedSkeleton.id); setGizmoDragging(true); }}
               onDragEnd={() => { commitHistoryEntry(); setGizmoDragging(false); }}

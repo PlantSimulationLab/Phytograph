@@ -199,6 +199,14 @@ dropdowns in; you correct anything that's wrong before importing:
   cleanly either way (see the note below). Z defaults to 0/off, matching the
   common case where only the horizontal coordinates are large.
 
+    The suggestion is measured over **returns only**. Sky/miss points are rays
+    that hit nothing, drawn about a kilometre out along the beam, so a scan's
+    recorded extent can span tens of kilometres while the actual returns sit
+    within a few hundred metres of the origin. Measuring those would suggest a
+    shift that pushes the cloud *away* from the origin rather than onto it, so
+    they are excluded — a scan that is already near the origin is correctly
+    offered no shift at all, however far its misses reach.
+
 !!! note "Large coordinates render cleanly with or without a shift"
     The 3D viewport stores positions in 32-bit floats, which lose precision at
     UTM magnitudes (~5 cm at 500,000 m) — historically this made the ground grid

@@ -1,7 +1,7 @@
 // Pure, stateless helpers extracted from PointCloudViewer.tsx. No React, no
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
-import type { MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
+import type { AlignedArrays, HitPoints, MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
 import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire, shiftPoseStream } from './poseStream';
@@ -170,13 +170,8 @@ export function computeBoundsFromPositions(positions: Float32Array, count: numbe
 // lockstep via `aligned`; each is filtered with the same mask.
 export function collectHitPoints(
   data: PointCloudData,
-  aligned?: Record<string, ArrayLike<number> | undefined>,
-): {
-  points: number[][];
-  hitIndices: number[];
-  aligned: Record<string, number[]>;
-  droppedMisses: number;
-} {
+  aligned?: AlignedArrays,
+): HitPoints {
   const count = data.pointCount;
   const missField = data.scalarFields?.[MISS_ATTRIBUTE];
   // Only trust the miss column when it is aligned to the cloud; a stale or
@@ -203,6 +198,93 @@ export function collectHitPoints(
   }
 
   return { points, hitIndices, aligned: out, droppedMisses: count - points.length };
+}
+
+// The per-axis extent to seed an absolute-distance PARAMETER from (CSF cloth
+// resolution, DEM cell size, and anything else calibrated to "how big is this
+// scene").
+//
+// `bounds.size` is the wrong number for that. It is defined by the most extreme
+// point on each axis, so a sky/miss point -- a ray that hit nothing, drawn ~1 km
+// out -- sets it single-handedly. On a measured vineyard scan the raw extent is
+// ~40 km across where the data is ~1 km, which seeds a CSF cloth resolution
+// ~1000x too coarse (one cell covering the whole plot) or a DEM cell size to
+// match: not a crash, just silently useless defaults the user has to discover
+// and correct by hand.
+//
+// Preference order:
+//   1. `robustExtent` -- the backend's 1st-99th percentile span, computed at
+//      import. Present on session/octree clouds only.
+//   2. a hits-only min/max, computed here. Flat (in-RAM) clouds carry no
+//      robustExtent, so they were the ones actually exposed.
+//   3. `bounds.size` -- only when the cloud records no miss column at all, in
+//      which case it is already the honest extent.
+export function extentForParameterSeeding(data: PointCloudData): Vec3Like | null {
+  const robust = data.robustExtent;
+  if (robust) return { x: robust[0], y: robust[1], z: robust[2] };
+
+  const count = data.pointCount;
+  const missField = data.scalarFields?.[MISS_ATTRIBUTE];
+  const hasMiss = !!missField && missField.values.length === count;
+  const size = data.bounds?.size;
+  // No miss column (or no points to measure): the raw size is all there is, and
+  // is correct when nothing was projected out to the miss shell.
+  if (!hasMiss || count === 0 || !data.positions?.length) {
+    return size ? { x: size.x, y: size.y, z: size.z } : null;
+  }
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < count; i++) {
+    if (missField!.values[i] !== 0) continue;
+    const x = data.positions[i * 3], y = data.positions[i * 3 + 1], z = data.positions[i * 3 + 2];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  // Every point was a miss -- nothing to measure; fall back rather than return
+  // an infinite extent.
+  if (!isFinite(minX)) return size ? { x: size.x, y: size.y, z: size.z } : null;
+  return { x: maxX - minX, y: maxY - minY, z: maxZ - minZ };
+}
+
+// `collectHitPoints` + a point budget: filter misses FIRST, then stride the
+// survivors down to `maxPoints`.
+//
+// The ORDER is the whole point, and getting it backwards is a real bug this
+// codebase shipped. Striding first spends the budget on the ~1 km miss shell:
+// on a measured vineyard scan (21.06 M points, 61% misses) a 60 k budget strode
+// by 351 across the WHOLE array, so ~37 k of the 60 k kept points were misses
+// and the actual tree was decimated to ~23 k — a badly-thinned trunk fed to QSM
+// even in the cases where the miss extent didn't hang the algorithm outright.
+// Filtering first spends the entire budget on real returns.
+//
+// `used`/`total` report the stride outcome over HITS (total = hit count, not
+// cloud size) so a caller's "used N of M points" message describes the data.
+export function collectHitPointsCapped(
+  data: PointCloudData,
+  maxPoints: number,
+  aligned?: AlignedArrays,
+): HitPoints & { used: number; total: number } {
+  const hits = collectHitPoints(data, aligned);
+  const total = hits.points.length;
+  const stride = maxPoints > 0 && total > maxPoints ? Math.ceil(total / maxPoints) : 1;
+  if (stride === 1) return { ...hits, used: total, total };
+
+  const points: number[][] = [];
+  const hitIndices: number[] = [];
+  const out: Record<string, number[]> = {};
+  for (const key of Object.keys(hits.aligned)) out[key] = [];
+  for (let i = 0; i < total; i += stride) {
+    points.push(hits.points[i]);
+    hitIndices.push(hits.hitIndices[i]);
+    for (const key of Object.keys(hits.aligned)) out[key].push(hits.aligned[key][i]);
+  }
+  return {
+    points, hitIndices, aligned: out,
+    droppedMisses: hits.droppedMisses,
+    used: points.length, total,
+  };
 }
 
 // Scatter a per-hit-point result back to full cloud length, filling non-hit

@@ -35,6 +35,10 @@ import {
   ladReuseGrid,
   buildHeliosTriangulationRequest,
   resolveHeliosScanSource,
+  collectHitPoints,
+  collectHitPointsCapped,
+  extentForParameterSeeding,
+  scatterToFullLength,
 } from './pointCloudHelpers';
 import { projectWorldToCanvasPixel } from './cropGeometry';
 import type { MeshData, PointCloudData } from './pointCloudTypes';
@@ -1575,5 +1579,221 @@ describe('buildHeliosTriangulationRequest / resolveHeliosScanSource', () => {
     expect(resolveHeliosScanSource(scan, entry)).toBe(false);
     expect(entry.points).toBeUndefined();
     expect(entry.session_id).toBeUndefined();
+  });
+});
+
+// ── Miss exclusion: the chokepoint that replaced per-tool remembering ────────
+//
+// Sky/miss points are rays that hit nothing, projected ~1 km out along the beam.
+// Feeding them to any gridding / KD-tree / CSF / triangulation tool inflates the
+// extent ~1000x, which HANGS the algorithm rather than erroring. An audit found
+// eight tools shipping raw positions, six of them the unfiltered twin of a
+// correctly-filtered sibling in the same file -- so filtering moved into
+// `buildPointSource`, and these helpers are what it funnels through.
+describe('collectHitPointsCapped', () => {
+  // A cloud whose misses sit ~1 km out, like the real thing. `missEvery` marks
+  // every Nth point a miss so the hit/miss interleaving is non-trivial.
+  function cloudWithMisses(n: number, missEvery: number): PointCloudData {
+    const positions = new Float32Array(n * 3);
+    const miss = new Float32Array(n);
+    const refl = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const isMiss = missEvery > 0 && i % missEvery === 0;
+      const base = isMiss ? 1000 : 0;
+      positions[i * 3] = base + i * 0.001;
+      positions[i * 3 + 1] = base;
+      positions[i * 3 + 2] = base;
+      miss[i] = isMiss ? 1 : 0;
+      refl[i] = i;
+    }
+    return {
+      positions,
+      scalarFields: {
+        is_miss: { values: miss, min: 0, max: 1 },
+        reflectance: { values: refl, min: 0, max: n - 1 },
+      },
+      pointCount: n,
+      bounds: {
+        min: new THREE.Vector3(0, 0, 0), max: new THREE.Vector3(1000, 1000, 1000),
+        center: new THREE.Vector3(500, 500, 500), size: new THREE.Vector3(1000, 1000, 1000),
+      },
+    };
+  }
+
+  it('spends the whole budget on hits, not on the miss shell', () => {
+    // 1000 points, 60% misses, budget 100. Striding the RAW array (the bug)
+    // would keep ~60 misses and only ~40 real points; filtering first keeps 100
+    // real points and zero misses.
+    const n = 1000;
+    const data = cloudWithMisses(n, 0);
+    const miss = data.scalarFields!.is_miss.values as Float32Array;
+    for (let i = 0; i < n; i++) {
+      const isMiss = i % 10 < 6;             // 60% misses
+      miss[i] = isMiss ? 1 : 0;
+      data.positions[i * 3] = isMiss ? 1000 : i * 0.001;
+      data.positions[i * 3 + 1] = isMiss ? 1000 : 0;
+      data.positions[i * 3 + 2] = isMiss ? 1000 : 0;
+    }
+
+    const capped = collectHitPointsCapped(data, 100);
+
+    expect(capped.points.length).toBe(100);
+    expect(capped.droppedMisses).toBe(600);
+    // Not one survivor may be a miss.
+    for (const p of capped.points) expect(p[0]).toBeLessThan(500);
+    // `total` reports HITS, so a "used N of M" message describes the data.
+    expect(capped.total).toBe(400);
+    expect(capped.used).toBe(100);
+  });
+
+  it('keeps aligned arrays in lockstep through BOTH the filter and the stride', () => {
+    // The stride is the half that is easy to forget: filtering aligns the arrays,
+    // then striding must subsample them by the same indices.
+    const data = cloudWithMisses(100, 5);   // 20 misses
+    const capped = collectHitPointsCapped(data, 10, {
+      reflectance: data.scalarFields!.reflectance.values,
+    });
+
+    expect(capped.points.length).toBe(10);
+    expect(capped.aligned.reflectance).toHaveLength(10);
+    // reflectance[i] === original index i, so it must equal hitIndices exactly.
+    expect(capped.aligned.reflectance).toEqual(capped.hitIndices);
+  });
+
+  it('hitIndices still address the ORIGINAL cloud after striding', () => {
+    // scatterToFullLength depends on this: a strided index that pointed into the
+    // filtered array instead of the cloud would scatter results to wrong points.
+    const data = cloudWithMisses(100, 5);
+    const capped = collectHitPointsCapped(data, 10);
+    for (let k = 0; k < capped.points.length; k++) {
+      const orig = capped.hitIndices[k];
+      expect(data.scalarFields!.is_miss.values[orig]).toBe(0);
+      expect(capped.points[k][0]).toBeCloseTo(data.positions[orig * 3], 5);
+    }
+  });
+
+  it('is a no-op pass-through when the cloud fits the budget', () => {
+    const data = cloudWithMisses(50, 5);
+    const capped = collectHitPointsCapped(data, 1000);
+    expect(capped.used).toBe(40);
+    expect(capped.total).toBe(40);
+    expect(capped.points.length).toBe(40);
+  });
+
+  it('handles a cloud with no miss column at all', () => {
+    const data = cloudWithMisses(100, 0);
+    delete data.scalarFields!.is_miss;
+    const capped = collectHitPointsCapped(data, 25);
+    expect(capped.droppedMisses).toBe(0);
+    expect(capped.points.length).toBe(25);
+  });
+});
+
+describe('collectHitPoints + scatterToFullLength round-trip', () => {
+  // Every segmentation tool depends on this pairing: the backend labels the HIT
+  // subset, so a result written back without scattering mislabels every point
+  // after the first miss.
+  it('puts per-hit results back at their original cloud indices', () => {
+    const n = 10;
+    const positions = new Float32Array(n * 3);
+    const miss = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      miss[i] = i % 3 === 0 ? 1 : 0;         // misses at 0,3,6,9
+      positions[i * 3] = i;
+    }
+    const data: PointCloudData = {
+      positions,
+      scalarFields: { is_miss: { values: miss, min: 0, max: 1 } },
+      pointCount: n,
+      bounds: {
+        min: new THREE.Vector3(), max: new THREE.Vector3(),
+        center: new THREE.Vector3(), size: new THREE.Vector3(),
+      },
+    };
+
+    const hits = collectHitPoints(data);
+    expect(hits.hitIndices).toEqual([1, 2, 4, 5, 7, 8]);
+
+    // Backend labels the 6 hits 1..6; scatter must land them at those indices.
+    const labels = Float32Array.from([1, 2, 3, 4, 5, 6]);
+    const full = scatterToFullLength(labels, hits.hitIndices, n);
+
+    expect(Array.from(full)).toEqual([0, 1, 2, 0, 3, 4, 0, 5, 6, 0]);
+    // Misses keep the fill value, so they are neither class.
+    for (const i of [0, 3, 6, 9]) expect(full[i]).toBe(0);
+  });
+});
+
+describe('extentForParameterSeeding', () => {
+  // Absolute-distance parameters (CSF cloth resolution, DEM cell size) are
+  // seeded from "how big is this scene". `bounds.size` answers that with the
+  // most extreme point on each axis, so a single ~1km miss sets it alone --
+  // seeding defaults ~1000x too coarse. Not a crash: silently useless numbers.
+  function cloud(opts: {
+    hits: number[][]; misses?: number[][];
+    robustExtent?: [number, number, number]; withMissColumn?: boolean;
+  }): PointCloudData {
+    const all = [...opts.hits, ...(opts.misses ?? [])];
+    const positions = new Float32Array(all.length * 3);
+    const missVals = new Float32Array(all.length);
+    all.forEach((p, i) => {
+      positions[i * 3] = p[0]; positions[i * 3 + 1] = p[1]; positions[i * 3 + 2] = p[2];
+      missVals[i] = i >= opts.hits.length ? 1 : 0;
+    });
+    const xs = all.map(p => p[0]), ys = all.map(p => p[1]), zs = all.map(p => p[2]);
+    const min = new THREE.Vector3(Math.min(...xs), Math.min(...ys), Math.min(...zs));
+    const max = new THREE.Vector3(Math.max(...xs), Math.max(...ys), Math.max(...zs));
+    return {
+      positions,
+      scalarFields: (opts.withMissColumn ?? true)
+        ? { is_miss: { values: missVals, min: 0, max: 1 } } : {},
+      pointCount: all.length,
+      robustExtent: opts.robustExtent,
+      bounds: {
+        min, max,
+        center: new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5),
+        size: new THREE.Vector3().subVectors(max, min),
+      },
+    };
+  }
+
+  it('ignores the miss shell that would set the raw extent', () => {
+    const data = cloud({
+      hits: [[0, 0, 0], [10, 8, 3]],
+      misses: [[1000, 1000, 1000], [-1000, -1000, -1000]],
+    });
+    // The raw bounds are ~2km across...
+    expect(data.bounds.size.x).toBeGreaterThan(1900);
+    // ...but the scene is 10m.
+    const e = extentForParameterSeeding(data)!;
+    expect(e.x).toBeCloseTo(10, 5);
+    expect(e.y).toBeCloseTo(8, 5);
+    expect(e.z).toBeCloseTo(3, 5);
+  });
+
+  it('prefers the backend robustExtent when the cloud has one', () => {
+    // Session/octree clouds carry a 1st-99th percentile span already; it is the
+    // better number and costs no scan.
+    const data = cloud({
+      hits: [[0, 0, 0], [10, 8, 3]],
+      misses: [[1000, 1000, 1000]],
+      robustExtent: [7, 5, 2],
+    });
+    expect(extentForParameterSeeding(data)).toEqual({ x: 7, y: 5, z: 2 });
+  });
+
+  it('falls back to bounds.size when no miss column exists', () => {
+    // Nothing was projected to a shell, so the raw extent is already honest.
+    const data = cloud({ hits: [[0, 0, 0], [4, 6, 9]], withMissColumn: false });
+    const e = extentForParameterSeeding(data)!;
+    expect(e.x).toBeCloseTo(4, 5);
+    expect(e.z).toBeCloseTo(9, 5);
+  });
+
+  it('falls back rather than returning an infinite extent when all points are misses', () => {
+    const data = cloud({ hits: [], misses: [[1000, 1000, 1000], [-1000, 0, 0]] });
+    const e = extentForParameterSeeding(data)!;
+    expect(Number.isFinite(e.x)).toBe(true);
+    expect(e.x).toBeCloseTo(data.bounds.size.x, 5);
   });
 });

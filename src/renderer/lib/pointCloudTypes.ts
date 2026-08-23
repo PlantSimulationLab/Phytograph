@@ -120,12 +120,60 @@ export interface OctreeRef {
   scanParams?: ScanParamsFromFile | null;
 }
 
+// Per-point arrays a caller needs kept in lockstep with a hit-filtered position
+// list. Keyed by a caller-chosen name; each is filtered by the SAME mask as the
+// positions, so index i of every output refers to the same point.
+export type AlignedArrays = Record<string, ArrayLike<number> | undefined>;
+
+// A flat cloud's HIT points, pre-filtered — the output of `collectHitPoints`.
+//
+// `points` excludes sky/miss points (`is_miss != 0`) and is therefore SHORTER
+// than the cloud's `pointCount`. Any per-point result computed from it is
+// indexed against this subset, so writing it back to a scalar field REQUIRES
+// `scatterToFullLength(values, hitIndices, pointCount)` — writing directly
+// mislabels every point after the first miss.
+export interface HitPoints {
+  /** Hit positions as the `number[][]` the compute endpoints take. */
+  points: number[][];
+  /** Original cloud index of each entry in `points`; feeds scatterToFullLength. */
+  hitIndices: number[];
+  /** Caller-requested per-point arrays, filtered by the same mask. */
+  aligned: Record<string, number[]>;
+  /** How many sky/miss points were dropped (0 when the cloud records none). */
+  droppedMisses: number;
+}
+
 // Result of buildPointSource: either an in-memory cloud (flat path) or a
 // backend source descriptor (octree path). Downstream-op handlers branch on
 // `kind`. The `source` shape is the BackendPointSource fields the renderer
 // fills in (the per-op `max_points`/`want_colors` are added at the call site).
+//
+// ── Why the inline branch carries `hits` ──────────────────────────────────
+// The `source` branch is filtered SERVER-side (`_read_points_from_source` with
+// `include_misses=False`). The inline branch has no such chokepoint: the
+// backend passes an inline `points` array through verbatim, so the renderer is
+// the ONLY defense. Leaving each call site to filter `data.positions` itself
+// made miss-exclusion something every new tool had to REMEMBER, and it was
+// repeatedly forgotten — an audit found eight tools shipping raw positions,
+// six of them the un-filtered twin of a correctly-filtered sibling in the same
+// file.
+//
+// So the filtering happens ONCE, here, and every consumer gets `hits` already
+// clean. Reach for `data` only when you genuinely need misses (export
+// round-trip fidelity, LAD's Beer's-law denominator) — and say why at the site.
 export type PointSourcePayload =
-  | { kind: 'inline'; data: PointCloudData }
+  | {
+      kind: 'inline';
+      /** Hit points only. The default input for every compute path. */
+      hits: HitPoints;
+      /**
+       * The unfiltered cloud, misses INCLUDED. Needed for per-point metadata
+       * (colors, scalar fields, pointCount) and for the two paths that must
+       * keep misses. Do NOT read `data.positions` to build a compute payload —
+       * use `hits.points`.
+       */
+      data: PointCloudData;
+    }
   | { kind: 'source'; source: Pick<BackendPointSource, 'source_path' | 'ascii_format' | 'translation' | 'session_id'> };
 
 // Point cloud data interface
