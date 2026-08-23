@@ -10847,8 +10847,14 @@ export default function PointCloudViewer({
       sId = cloudIds[1];
     }
 
-    const targetCloud = clouds.find(c => c.id === tId);
-    const sourceCloud = clouds.find(c => c.id === sId);
+    // Read through `cloudsRef`, not the closed-over `clouds`. A caller that
+    // applies several transforms in a row -- multi-scan registration does --
+    // stays inside ONE render, so the captured array never updates and every
+    // iteration after the first would transform a cloud that has already moved.
+    // The error compounds: measured ~10 m on a 3-scan grapex set whose backend
+    // poses were correct to 0.13 m.
+    const targetCloud = cloudsRef.current.find(c => c.id === tId);
+    const sourceCloud = cloudsRef.current.find(c => c.id === sId);
 
     if (!targetCloud || !sourceCloud) {
       showToast({ type: 'error', title: 'Not Found', message: 'Could not find selected point clouds' });
@@ -11224,6 +11230,34 @@ export default function PointCloudViewer({
     try {
       // Index 0 is the reference; the backend keys its results by these indices.
       const ordered = [targetCloud, ...sourceClouds];
+
+      // Every scan must render in the SAME frame, or a correct registration
+      // still looks wrong. Clouds draw at `world - displayOffset - worldShift`,
+      // and the import wizard suggests that shift per FILE as floor(min), so
+      // scans of one site can disagree: measured 25 m and 28 m apart on a
+      // three-scan vineyard whose poses were right to 0.13 m. The result then
+      // registers correctly in world coordinates and the viewport re-separates
+      // it by the difference. Refuse rather than hand back a confident mess.
+      const shiftOf = (c: typeof targetCloud) =>
+        (c.data.octree?.worldShift ?? [0, 0, 0]) as number[];
+      const refShift = shiftOf(targetCloud);
+      const mismatched = ordered.filter(c =>
+        shiftOf(c).some((v, k) => Math.abs(v - refShift[k]) > 1e-6));
+      if (mismatched.length > 0) {
+        const worst = Math.max(...mismatched.map(c =>
+          Math.hypot(...shiftOf(c).map((v, k) => v - refShift[k]))));
+        showToast({
+          type: 'error',
+          title: 'Auto-Register',
+          message: `These scans were imported with different global shifts (up to `
+            + `${worst.toFixed(0)} m apart), so they are drawn in different `
+            + `coordinate frames. Re-import them together with one shift — tick `
+            + `"apply to all" on the shift — then register.`,
+          duration: 0,
+        });
+        return;
+      }
+
       const payloads = ordered.map(c => buildPointSource(c));
 
       // The backend takes EITHER a list of sources or a list of inline arrays,

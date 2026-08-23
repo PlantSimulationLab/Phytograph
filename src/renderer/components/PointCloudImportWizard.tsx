@@ -276,6 +276,9 @@ interface ScanConfig {
   // 0/keep by default since elevation is rarely huge. The user can edit/toggle.
   shiftEnabled: boolean;
   shift: { x: number; y: number; z: number };
+  // Set once the user edits the shift by hand, so a later preview arriving in
+  // the same batch cannot overwrite their choice with the shared suggestion.
+  shiftTouched?: boolean;
   // Mobile-platform trajectory attached to this scan (null = static capture).
   trajectory: PoseStream | null;
   // True once the user explicitly imported a trajectory FOR THIS SCAN. A
@@ -525,16 +528,39 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
           // large/UTM coords). Default Z to keep (0) — elevation is rarely huge —
           // even when a Z suggestion is offered, matching CloudCompare's default.
           const sug = preview.suggested_shift ?? null;
-          setConfigs((prev) => prev.map((c, idx) => idx === i ? {
-            ...c,
-            preview,
-            loading: false,
-            warning: preview.warning ?? null,
-            columns,
-            autoOnly: columns.length === 0,
-            shiftEnabled: sug != null,
-            shift: sug ? { x: sug[0], y: sug[1], z: 0 } : { x: 0, y: 0, z: 0 },
-          } : c));
+          setConfigs((prev) => {
+            // Scans imported together belong in ONE frame. The backend suggests
+            // floor(min) per axis, which is per FILE, so scans of a single site
+            // get different shifts -- measured 25 m and 28 m apart on a
+            // three-scan vineyard, purely because the scanners stood that far
+            // apart. Clouds render at `world - displayOffset - worldShift`, so
+            // mismatched shifts draw them in different frames and any alignment
+            // between them looks wrong however well it registered.
+            //
+            // Take the smallest suggestion seen so far across the batch: it is
+            // stable regardless of preview completion order, and staying at or
+            // below every scan's own floor(min) keeps coordinates positive,
+            // which is what the shift is for.
+            const shared = prev.reduce<[number, number] | null>((acc, c, idx) => {
+              const s = idx === i ? sug : (c.preview?.suggested_shift ?? null);
+              if (!s) return acc;
+              return acc ? [Math.min(acc[0], s[0]), Math.min(acc[1], s[1])]
+                         : [s[0], s[1]];
+            }, null);
+            return prev.map((c, idx) => {
+              const base = idx === i
+                ? { ...c, preview, loading: false, warning: preview.warning ?? null,
+                    columns, autoOnly: columns.length === 0 }
+                : c;
+              // Only re-seed scans the user has not edited by hand.
+              if (!shared || base.shiftTouched) return base;
+              return {
+                ...base,
+                shiftEnabled: true,
+                shift: { x: shared[0], y: shared[1], z: 0 },
+              };
+            });
+          });
         } catch (e) {
           if (cancelled) return;
           const msg = e instanceof Error ? e.message : 'Preview failed';
@@ -608,12 +634,15 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   }, [stepIdx]);
 
   const setShiftEnabled = useCallback((v: boolean) => {
-    setConfigs((prev) => prev.map((c, i) => i === stepIdx ? { ...c, shiftEnabled: v } : c));
+    setConfigs((prev) => prev.map((c, i) => i === stepIdx
+      ? { ...c, shiftEnabled: v, shiftTouched: true } : c));
   }, [stepIdx]);
 
   const setShiftAxis = useCallback((axis: 'x' | 'y' | 'z', v: number) => {
+    // Mark it edited so a preview still loading elsewhere in the batch cannot
+    // overwrite the value with the shared suggestion.
     setConfigs((prev) => prev.map((c, i) => i === stepIdx
-      ? { ...c, shift: { ...c.shift, [axis]: v } } : c));
+      ? { ...c, shift: { ...c.shift, [axis]: v }, shiftTouched: true } : c));
   }, [stepIdx]);
 
   // Import a mobile-platform trajectory file for the current scan. The picked
@@ -670,6 +699,17 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
       return {
         ...c,
         rgbIs255: src.rgbIs255,
+        // Carry the global shift too. It is auto-suggested per file as
+        // floor(min) per axis, so scans of ONE site get DIFFERENT shifts --
+        // measured 25 m and 28 m apart on a three-scan vineyard, because the
+        // scanners stood that far apart. Clouds render at
+        // `world - displayOffset - worldShift`, so scans that disagree about
+        // the shift are drawn in different frames: registration aligns them
+        // correctly in world coordinates and the viewport then re-separates
+        // them by the difference. "Apply to all" has to mean one frame.
+        shiftEnabled: src.shiftEnabled,
+        shift: { ...src.shift },
+        shiftTouched: true,
         columns: c.columns.map((col, idx) => ({
           ...col,
           role: src.columns[idx]?.role ?? col.role,

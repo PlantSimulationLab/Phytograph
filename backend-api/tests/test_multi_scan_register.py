@@ -174,3 +174,39 @@ def test_an_inline_payload_within_the_limit_is_accepted():
 
     result = main._do_multi_scan_register(_request(views), progress=None)
     assert result["success"], result.get("error")
+
+
+def test_the_reported_pair_count_is_exact_not_an_estimate():
+    """The progress label promises a total, so it must be the real one.
+
+    It was genuinely approximate under the old probe-then-fill scheme: a
+    bounded subgraph picked the variant and the winner filled the rest, so the
+    total depended on how those overlapped, and the label said "of ~N". Per-pair
+    selection tries every graph edge against every variant, which is their
+    product -- exact. Counting the actual searches pins that, so the tilde
+    cannot quietly become wrong again.
+    """
+    from unittest.mock import patch
+
+    import raster_correlation
+
+    poses = [np.eye(4), _rigid(9.0, [2.0, -1.0, 0.0]), _rigid(-6.0, [-2.0, 2.0, 0.0]),
+             _rigid(4.0, [1.0, 3.0, 0.0])]
+    views = _views(_scene(), poses, seed=21)
+
+    real = raster_correlation.register_by_correlation
+    calls = {"n": 0}
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    with patch.object(raster_correlation, "register_by_correlation", counting):
+        result = main._do_multi_scan_register(
+            _request(views, refine_icp=False), progress=None)
+    assert result["success"], result.get("error")
+
+    predicted = main._expected_coarse_runs(
+        len(views), True, False, 0)
+    assert calls["n"] == predicted, (
+        f"progress promises {predicted} searches but {calls['n']} ran")

@@ -123,9 +123,20 @@ def check_loops(pairs: Dict[Tuple[int, int], np.ndarray], n_scans: int,
         edges = {tuple(sorted(p)) for p in ((a, b), (b, c), (a, c))}
         (in_passing if lp["closed"] else in_failing).update(edges)
 
-    # Only blame an edge that no passing loop vouches for. With enough scans
-    # this localises precisely -- on a 5-scan olive set it named exactly the two
-    # wrong pairs out of ten, because the good pairs closed their own triangles.
+    # Only blame an edge that no passing loop vouches for.
+    #
+    # KNOWN LIMITATION, and it inverts rather than merely weakening. A loop
+    # containing TWO bad edges can still close, because their errors cancel
+    # around the cycle -- and that closure then vouches for both, clearing them
+    # from suspicion. Verified on a controlled 5-scan graph with 5 known-bad
+    # edges: this named only (0,3), which was GOOD, and cleared every genuinely
+    # bad edge.
+    #
+    # It localises correctly while wrong edges are a minority, which is the
+    # regime it was measured in. Beyond that a caller gets a false accusation --
+    # withholding a scan that registered fine -- so `localised` should be read
+    # as "this is a hypothesis", not a verdict. A proper fix needs per-edge
+    # residuals from a joint adjustment rather than set arithmetic over loops.
     suspect = sorted(in_failing - in_passing)
 
     # A single triangle cannot localise: one bad pose breaks the only loop, so
@@ -213,6 +224,43 @@ _COARSE_VARIANTS = (
 )
 
 
+def scan_graph_edges(n_scans: int, reference: int = 0,
+                     complete: bool = False) -> List[Tuple[int, int]]:
+    """Which pairs to register: a star to the reference plus a closing ring.
+
+    Registering every pair is quadratic and mostly wasted. What the result
+    actually needs is (a) a path from every scan to the reference, and (b) at
+    least one CYCLE through every scan, because loop closure is the only signal
+    that reliably catches a wrong-but-well-fitting pose. A star gives (a) and a
+    ring adds (b), at linear cost:
+
+        6 scans -> 10 pairs against 15 for the full graph
+       10 scans -> 19 pairs against 45
+
+    Measured on the peach set: 10 pairs in 104 s against 15 pairs in 201 s, both
+    placing 5 of 5, with 5 loops still available to check. A pure star would be
+    cheaper again but has NO cycles, so nothing could be validated -- which is
+    the one mechanism that has reliably worked on repetitive plantings.
+
+    `complete=True` restores the full graph for a caller that wants every
+    pairwise constraint (a small set, or a deliberate diagnostic run).
+    """
+    if n_scans < 2:
+        return []
+    if complete or n_scans <= 3:
+        # At 3 scans the full graph IS the star plus its ring.
+        return list(itertools.combinations(range(n_scans), 2))
+
+    others = [i for i in range(n_scans) if i != reference]
+    edges = {tuple(sorted((reference, i))) for i in others}
+    # Chain the non-reference scans, then close it, so every scan lies on a
+    # cycle with the reference rather than dangling off it.
+    for a, b in zip(others, others[1:]):
+        edges.add(tuple(sorted((a, b))))
+    edges.add(tuple(sorted((others[0], others[-1]))))
+    return sorted(edges)
+
+
 def _probe_edges(n_scans: int, max_edges: int = 9) -> List[Tuple[int, int]]:
     """A small edge set that still contains cycles, for scoring variants.
 
@@ -238,7 +286,8 @@ def _probe_edges(n_scans: int, max_edges: int = 9) -> List[Tuple[int, int]]:
 
 def select_per_pair_by_loops(n_scans: int,
                              candidates: Callable[[int, int], List[np.ndarray]],
-                             max_passes: int = 5) -> dict:
+                             max_passes: int = 5,
+                             edges: Optional[Sequence[Tuple[int, int]]] = None) -> dict:
     """Choose a coarse-stage variant PER PAIR, judged by whole-graph consistency.
 
     `candidates(a, b)` returns that pair's candidate transforms, one per variant,
@@ -260,7 +309,8 @@ def select_per_pair_by_loops(n_scans: int,
 
     Returns {'assignment', 'pairs', 'report', 'closed', 'total'}.
     """
-    keys = list(itertools.combinations(range(n_scans), 2))
+    keys = list(edges) if edges is not None else list(
+        itertools.combinations(range(n_scans), 2))
     table = {k: candidates(*k) for k in keys}
     table = {k: v for k, v in table.items() if v}
     if not table:

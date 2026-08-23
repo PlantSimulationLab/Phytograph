@@ -397,52 +397,14 @@ def test_second_orchard_is_not_regressed_by_peach_tuning():
     )
 
 
-@pytest.mark.skipif(
-    not (_OLIVE_TARGET.is_file() and _OLIVE_SOURCE.is_file()
-         and _OLIVE_TRUTH_1.is_file() and _OLIVE_TRUTH_4.is_file()),
-    reason="OliveRegistration fixtures not available (local-only example dataset)",
-)
-def test_a_wrong_pose_is_reported_ambiguous_not_confident():
-    """Being wrong is acceptable. Being wrong and CONFIDENT is not.
-
-    On a uniform planting a row-shifted pose is not a poor fit -- it lands plant
-    on plant. Measured on this olive pair when the shortlist was too small to
-    reach the true peak: the answer was 3.8 m out while reporting ICP fitness
-    0.989 and rmse_ratio 0.008, inside every quality gate, and came back
-    confident. Residual-based checks cannot catch that, because the wrong pose's
-    residual is genuinely low -- lower here (0.215) than a CORRECT peach pair's
-    (0.315).
-
-    What separates them is how far the winner leads a genuinely DIFFERENT pose.
-    Correct results led by >= 0.063 across both orchards; wrong ones by <= 0.014.
-
-    `refine_top_k=8` reproduces the too-small shortlist deliberately (the
-    shipped default is far larger). The
-    assertion is on the FLAG, not the error: the shipped default gets this pair
-    right, and this test guards the honesty of the signal when it does not.
-    """
-    target = _load_peach(_OLIVE_TARGET)
-    source = _load_peach(_OLIVE_SOURCE)
-
-    truth = (np.linalg.inv(np.load(str(_OLIVE_TRUTH_1)))
-             @ np.load(str(_OLIVE_TRUTH_4)))
-    prior = float(round(math.degrees(math.atan2(truth[1, 0], truth[0, 0]))))
-
-    result = register_by_correlation(target, source, yaw_prior_deg=prior,
-                                     refine_top_k=8)
-    M = np.asarray(result["transformation"], dtype=np.float64)
-    err = float(np.mean(np.linalg.norm(
-        (source @ M[:3, :3].T + M[:3, 3])
-        - (source @ truth[:3, :3].T + truth[:3, 3]), axis=1)))
-
-    # Guard the premise: if a future change makes K=4 succeed here, this test
-    # stops testing anything and should be re-pointed rather than left green.
-    assert err > 1.0, (
-        f"fixture no longer produces a wrong pose at K=8 (err {err:.2f} m) -- "
-        "re-point this test at a case that still fails"
-    )
-    assert result["ambiguous"], (
-        f"a pose {err:.1f} m from RiSCAN's answer was reported unambiguous "
-        f"(pose_margin={result['pose_margin']}) -- a wrong answer must not be "
-        "returned as a confident one"
-    )
+# `test_a_wrong_pose_is_reported_ambiguous_not_confident` lived here and has
+# been REMOVED rather than re-pointed. It reproduced a wrong pose by starving the
+# shortlist on the olive (001, 011) pair, and that pair now registers correctly
+# at every shortlist size down to K=2 (0.14 m) because the coarse stage
+# improved -- so there is no wrong pose left for it to assert on. Its own
+# premise-guard caught this, which is the guard working as designed.
+#
+# The property it protected -- a wrong pose must report ambiguous rather than
+# confident -- is NOT currently covered on real data. Re-adding it needs a pair
+# that still fails, not a fixture bent until it does; a manufactured failure
+# would test the bending, not the guard.
