@@ -24,7 +24,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyDropboxIgnores } from './dropbox-ignore.mjs';
-import { BACKEND_STAMP_FILE, readBackendVersionFromSource } from './backend-version.mjs';
+import {
+  BACKEND_SOURCE_HASH_FILE,
+  BACKEND_STAMP_FILE,
+  hashBackendSources,
+  readBackendVersionFromSource,
+} from './backend-version.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -243,7 +248,16 @@ proc.on('exit', (code) => {
   // `npm run check:backend`) can catch it instantly, before spawning anything.
   const builtVersion = readBackendVersionFromSource();
   writeFileSync(join(distPath, 'phytograph_backend', BACKEND_STAMP_FILE), `${builtVersion}\n`);
-  console.log(`[build-backend] stamped bundle as version ${builtVersion}`);
+  // Second stamp: the digest of the Python that went in. BACKEND_VERSION only
+  // moves when a change breaks the renderer contract, so most backend edits
+  // leave it alone — and a version-only stamp then reports a days-old bundle as
+  // current, letting E2E run old code and pass. The hash closes that.
+  const builtHash = hashBackendSources();
+  writeFileSync(
+    join(distPath, 'phytograph_backend', BACKEND_SOURCE_HASH_FILE), `${builtHash}\n`);
+  console.log(
+    `[build-backend] stamped bundle as version ${builtVersion} ` +
+    `(sources ${builtHash.slice(0, 16)}…)`);
   // The bundle directory was just recreated from scratch, which drops the
   // com.dropbox.ignored xattr — re-mark it, or ~1 GB of regenerable output
   // starts syncing (and gets scanned by every backup/AV agent) all over again.

@@ -41,6 +41,48 @@ answers. Without this, the UI could go live against a backend the supervisor
 is in the middle of replacing, and `/api/*` calls would fail silently after
 the splash had already dismissed.
 
+## The fourth copy: the PyInstaller bundle
+
+`resources/phytograph_backend/` is a **build-time** copy of the backend, and it
+is the one that bites. It only changes when someone runs `npm run build:backend`,
+so editing `main.py` leaves a stale binary on disk while all three source
+declarations still agree with each other.
+
+The build therefore writes **two** stamps into the bundle directory, and
+`npm run check:backend` compares both without launching anything (it is a file
+read plus a hash of ~2 MB of Python — single-digit milliseconds):
+
+| Stamp | Catches |
+|---|---|
+| `phytograph_backend_version.txt` | The bundle was built from a **different `BACKEND_VERSION`** |
+| `phytograph_backend_sources.sha256` | The bundle was built from **different Python**, at the same version |
+
+The second one exists because the first has a blind spot that is the *common*
+case, not an exotic one. `BACKEND_VERSION` only moves when a change breaks the
+renderer contract, so most backend edits — bug fixes, new filtering, anything
+additive — leave it untouched. The version stamp then still matches, the check
+prints a tick, and E2E launches a bundle compiled from **older Python** while
+reporting green.
+
+That is worse than the stale-version failure the stamp was written to catch. A
+version mismatch hangs every spec at the splash: loud, and impossible to miss.
+Source drift is silent — the suite passes, having exercised code that is not the
+code under review. (Observed exactly that way: a bundle built one day sailed
+through `check:backend` against sources edited the next.)
+
+The hash covers the `.py` files PyInstaller actually compiles in
+(`backend-api/`, `qsm/`, `qsm/validation/`, `vendor/treeiso/`) and includes each
+file's **path** as well as its bytes, so an added, deleted, or renamed module is
+caught even when no existing file changed. `research/`, `tools/`, `scripts/` and
+`tests/` are deliberately excluded — they never enter the bundle, and hashing
+them would demand pointless 10-minute rebuilds.
+
+Both `npm run test:e2e` and `launchApp()` run this check first, so a drifted
+bundle fails in milliseconds with an exact diagnosis rather than 30 s per spec at
+an unrelated locator. A bundle built before source hashing existed reports a
+**warning** rather than a tick — the version alone can no longer be read as
+proof — and one rebuild clears it.
+
 ## Tagging a release
 
 ```bash

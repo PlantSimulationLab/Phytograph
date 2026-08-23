@@ -24,6 +24,21 @@ if (result.reason === 'unstamped') {
     '[check-backend] bundle has no version stamp (built before stamping was added); ' +
       'run `npm run build:backend` to enable the fast check.',
   );
+} else if (result.reason === 'unhashed') {
+  // The version matches, but this bundle predates source hashing, so an edit
+  // that didn't move BACKEND_VERSION is still invisible. Warn loudly rather
+  // than printing a ✓ — a bare tick here is exactly what let a day-old bundle
+  // through before, and the whole point of this check is to stop trusting the
+  // version alone.
+  console.warn(
+    `[check-backend] ⚠ backend bundle ${result.bundleVersion} matches by VERSION only.\n` +
+      '  It carries no source hash, so backend edits that leave BACKEND_VERSION\n' +
+      '  unchanged cannot be detected — E2E may run older Python and still pass.\n' +
+      '  Run `npm run build:backend` once to enable the content check.',
+  );
 } else {
-  console.log(`[check-backend] ✓ backend bundle ${result.bundleVersion} matches source`);
+  console.log(
+    `[check-backend] ✓ backend bundle ${result.bundleVersion} matches source ` +
+      `(sources ${result.sourceHash.slice(0, 16)}…)`,
+  );
 }

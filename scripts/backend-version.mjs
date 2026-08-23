@@ -16,8 +16,9 @@
 // callers compare that stamp against the source of truth BEFORE launching
 // anything. Reading a file costs nothing and the diagnosis is exact.
 
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,28 @@ const root = resolve(__dirname, '..');
 
 // Written by scripts/build-backend.mjs into the bundle dir at build time.
 export const BACKEND_STAMP_FILE = 'phytograph_backend_version.txt';
+
+// Second stamp: a hash of the Python sources the bundle was built FROM.
+//
+// The version stamp alone has a blind spot, and it is the common case rather
+// than an exotic one. `BACKEND_VERSION` only moves when a change requires a new
+// packaged build, so the overwhelming majority of backend edits — bug fixes,
+// new filtering, anything that doesn't break the renderer contract — leave it
+// untouched. The stamp then still matches, `check:backend` reports OK, and E2E
+// launches a bundle compiled from *older Python* while reporting green. That is
+// worse than the stale-version hang it was written to catch: a hang is loud,
+// this silently tests code that is not the code under review.
+//
+// Observed exactly that way: a bundle built 2026-08-22 sailed through
+// `check:backend` against sources edited 2026-08-23, and would have run the
+// whole E2E suite without exercising a single one of the day's backend changes.
+export const BACKEND_SOURCE_HASH_FILE = 'phytograph_backend_sources.sha256';
+
+// Directories whose .py files are compiled INTO the bundle. `research/`,
+// `tools/`, `scripts/` and `tests/` are dev-only and deliberately excluded — a
+// change there cannot affect the shipped binary, and hashing them would demand
+// pointless 10-minute rebuilds.
+const BUNDLED_SOURCE_DIRS = ['', 'qsm', 'qsm/validation', 'vendor/treeiso'];
 
 export function backendBundleDir() {
   return join(root, 'resources', 'phytograph_backend');
@@ -48,6 +71,55 @@ export function readExpectedBackendVersion() {
 }
 
 /**
+ * SHA-256 over every bundled Python source, plus the paths themselves.
+ *
+ * Path-sensitive on purpose: hashing contents alone would miss a file being
+ * added, deleted, or renamed, which changes the bundle just as surely as an
+ * edit. Sorted with a fixed separator so the digest is stable across platforms
+ * and filesystem enumeration order.
+ *
+ * Reads ~2 MB of text and takes single-digit milliseconds — the whole point of
+ * this check is that it costs nothing next to a 10-minute rebuild.
+ */
+export function hashBackendSources() {
+  const backendDir = join(root, 'backend-api');
+  const files = [];
+  for (const rel of BUNDLED_SOURCE_DIRS) {
+    const dir = rel ? join(backendDir, ...rel.split('/')) : backendDir;
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.py')) continue;
+      const full = join(dir, name);
+      if (!statSync(full).isFile()) continue;
+      files.push(full);
+    }
+  }
+  // Normalise separators so a Windows build and a macOS build of identical
+  // sources produce identical digests.
+  files.sort();
+  const h = createHash('sha256');
+  for (const full of files) {
+    h.update(relative(backendDir, full).split(pathSep).join('/'));
+    h.update('\0');
+    h.update(readFileSync(full));
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
+
+/**
+ * The source digest recorded at build time, or null when the bundle predates
+ * source hashing. Null is "unknown", not "mismatch" — same treatment as an
+ * unstamped version.
+ */
+export function readBundleSourceHash() {
+  const f = join(backendBundleDir(), BACKEND_SOURCE_HASH_FILE);
+  if (!existsSync(f)) return null;
+  const v = readFileSync(f, 'utf8').trim();
+  return v.length > 0 ? v : null;
+}
+
+/**
  * The version the bundle on disk was built from, or null when it carries no
  * stamp. A missing stamp means the bundle predates stamping (or was built by
  * another tool) — treat it as unknown, not as a mismatch, and let the caller
@@ -66,8 +138,8 @@ export function readBundleStamp() {
  *
  * Returns `{ ok, reason, message }`. `ok: false` always carries a `message`
  * naming the exact mismatch and the one command that fixes it. `reason` is
- * machine-readable: 'missing-bundle' | 'stale-bundle' | 'version-lock' |
- * 'unstamped'.
+ * machine-readable: 'missing-bundle' | 'stale-bundle' | 'stale-sources' |
+ * 'version-lock' | 'unstamped' | 'unhashed'.
  */
 export function checkBackendBundle({ allowUnstamped = true } = {}) {
   const bundleDir = backendBundleDir();
@@ -132,5 +204,42 @@ export function checkBackendBundle({ allowUnstamped = true } = {}) {
     };
   }
 
-  return { ok: true, bundleVersion: stamp };
+  // Versions agree — now the harder question: was this bundle built from the
+  // Python that is on disk RIGHT NOW? Most backend edits don't move
+  // BACKEND_VERSION, so the check above passes on a bundle that is days old.
+  // Without this, E2E runs old code and reports green.
+  const builtHash = readBundleSourceHash();
+  if (builtHash === null) {
+    if (allowUnstamped) {
+      return { ok: true, reason: 'unhashed', bundleVersion: stamp, sourceHash: null };
+    }
+    return {
+      ok: false,
+      reason: 'unhashed',
+      bundleVersion: stamp,
+      message:
+        `The backend bundle carries no source hash, so edits that don't move ` +
+        `BACKEND_VERSION can't be detected.\n` +
+        `Run \`npm run build:backend\` to rebuild and stamp it.`,
+    };
+  }
+
+  const currentHash = hashBackendSources();
+  if (builtHash !== currentHash) {
+    return {
+      ok: false,
+      reason: 'stale-sources',
+      bundleVersion: stamp,
+      message:
+        `Stale backend bundle — it was built from DIFFERENT Python sources than ` +
+        `the ones on disk.\n` +
+        `The version matches (${stamp}), so the app will start and E2E will look ` +
+        `green — while testing the OLD backend code.\n` +
+        `  bundle built from sources sha256 = ${builtHash.slice(0, 16)}…\n` +
+        `  backend-api/*.py currently       = ${currentHash.slice(0, 16)}…\n` +
+        `Fix: npm run build:backend`,
+    };
+  }
+
+  return { ok: true, bundleVersion: stamp, sourceHash: currentHash };
 }
