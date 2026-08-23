@@ -245,6 +245,22 @@ BACKEND_VERSION = "0.72.0"
 import logging
 logger = logging.getLogger("phytograph")
 
+# Per-operation diagnostics (ICP iteration counts, fitness/RMSE, centre offsets)
+# go to `logger.debug`, NOT `print`.
+#
+# The supervisor tees the sidecar's stdout/stderr straight to the terminal in
+# dev, so a `print` here is console noise for the user rather than a log entry --
+# and registration is the worst offender because auto-registration runs ICP once
+# per scan PAIR, so a routine multi-scan run scrolls the terminal with numbers
+# nobody asked for.
+#
+# Nothing is lost by demoting them: the same fitness/RMSE/iteration values are
+# streamed to the UI via the `progress` callback DURING the run and returned in
+# the endpoint's response when it finishes, so the user already sees them in the
+# place they'd look. The root logger is set to INFO in backend_wrapper.py, so
+# these stay silent by default and come back by lowering that level when you
+# actually need to debug a registration.
+
 
 app = FastAPI(title="Phytograph API", version="0.1.0")
 
@@ -29270,7 +29286,8 @@ def run_icp_until_convergence(source_pcd, target_pcd, max_corr_dist, init_transf
         # Check for convergence (RMSE plateau)
         rmse_improvement = prev_rmse - current_rmse
         if rmse_improvement < rmse_threshold and rmse_improvement >= 0:
-            print(f"ICP converged after {total_iterations} iterations. RMSE: {current_rmse:.6f}")
+            logger.debug("ICP converged after %d iterations. RMSE: %.6f",
+                         total_iterations, current_rmse)
             break
 
         prev_rmse = current_rmse
@@ -29347,7 +29364,8 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
         # Apply center alignment to source
         source_pcd.translate(center_offset)
 
-        print(f"Center alignment: moved source by [{center_offset[0]:.4f}, {center_offset[1]:.4f}, {center_offset[2]:.4f}]")
+        logger.debug("Center alignment: moved source by [%.4f, %.4f, %.4f]",
+                     center_offset[0], center_offset[1], center_offset[2])
 
         _cancel_checkpoint(progress)
         if progress is not None:
@@ -29397,7 +29415,8 @@ def _do_c2m_icp(request: "ICPRegistrationRequest", progress=None) -> dict:
         translation = [float(combined_transform[0, 3]), float(combined_transform[1, 3]), float(combined_transform[2, 3])]
         transform_flat = combined_transform.flatten().tolist()
 
-        print(f"ICP complete - fitness: {reg_result.fitness:.4f}, RMSE: {reg_result.inlier_rmse:.6f}, iterations: {iterations}")
+        logger.debug("ICP complete - fitness: %.4f, RMSE: %.6f, iterations: %d",
+                     reg_result.fitness, reg_result.inlier_rmse, iterations)
 
         if progress is not None:
             progress(1.0, "Done")
@@ -29519,7 +29538,8 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
         # Apply center alignment to source
         source_pcd.translate(center_offset)
 
-        print(f"Center alignment: moved source by [{center_offset[0]:.4f}, {center_offset[1]:.4f}, {center_offset[2]:.4f}]")
+        logger.debug("Center alignment: moved source by [%.4f, %.4f, %.4f]",
+                     center_offset[0], center_offset[1], center_offset[2])
 
         _cancel_checkpoint(progress)
         if progress is not None:
@@ -29588,7 +29608,8 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
         translation = [float(combined_transform[0, 3]), float(combined_transform[1, 3]), float(combined_transform[2, 3])]
         transform_flat = combined_transform.flatten().tolist()
 
-        print(f"Cloud-to-cloud ICP complete - fitness: {reg_result.fitness:.4f}, RMSE: {reg_result.inlier_rmse:.6f}, iterations: {iterations}")
+        logger.debug("Cloud-to-cloud ICP complete - fitness: %.4f, RMSE: %.6f, iterations: %d",
+                     reg_result.fitness, reg_result.inlier_rmse, iterations)
 
         if progress is not None:
             progress(1.0, "Done")
@@ -30323,9 +30344,10 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             progress(1.0, "Done")
 
         translation = [float(transform[0, 3]), float(transform[1, 3]), float(transform[2, 3])]
-        print(f"Global registration complete - method: {request.anchor_method}, "
-              f"anchors: {n_tgt}/{n_src}, coarse fitness: {coarse_fitness:.4f}, "
-              f"final fitness: {fitness:.4f}, confident: {confident}")
+        logger.debug(
+            "Global registration complete - method: %s, anchors: %s/%s, "
+            "coarse fitness: %.4f, final fitness: %.4f, confident: %s",
+            request.anchor_method, n_tgt, n_src, coarse_fitness, fitness, confident)
 
         return dict(
             success=True,
@@ -30918,7 +30940,8 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         # Apply center alignment to source
         source_pcd.translate(center_offset)
 
-        print(f"Mesh-to-mesh center alignment: moved source by [{center_offset[0]:.4f}, {center_offset[1]:.4f}, {center_offset[2]:.4f}]")
+        logger.debug("Mesh-to-mesh center alignment: moved source by [%.4f, %.4f, %.4f]",
+                     center_offset[0], center_offset[1], center_offset[2])
 
         _cancel_checkpoint(progress)
         if progress is not None:
@@ -30984,7 +31007,8 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         translation = [float(combined_transform[0, 3]), float(combined_transform[1, 3]), float(combined_transform[2, 3])]
         transform_flat = combined_transform.flatten().tolist()
 
-        print(f"Mesh-to-mesh ICP complete - fitness: {reg_result.fitness:.4f}, RMSE: {reg_result.inlier_rmse:.6f}, iterations: {iterations}")
+        logger.debug("Mesh-to-mesh ICP complete - fitness: %.4f, RMSE: %.6f, iterations: %d",
+                     reg_result.fitness, reg_result.inlier_rmse, iterations)
 
         if progress is not None:
             progress(1.0, "Done")
