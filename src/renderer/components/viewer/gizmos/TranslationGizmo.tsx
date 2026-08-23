@@ -1,8 +1,8 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
-import { useThree, useFrame, ThreeEvent } from '@react-three/fiber';
+import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
-import { worldPerPixel } from '../../../lib/screenScale';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
+import { ConstantScreenScaler } from './ConstantScreenScaler';
 
 // Translation gizmo arrow. Drawn around the LOCAL origin — the parent group
 // carries the world position, so the whole glyph can be rescaled as a unit.
@@ -150,28 +150,6 @@ function DragHandler({ activeAxis, gizmoCenter, onDrag, onDragEnd }: DragHandler
   return null;
 }
 
-// Rescales the visual group so the gizmo subtends a fixed number of screen
-// pixels regardless of zoom. Only mounted when `constantScreenSize` is set; the
-// DragHandler is deliberately left alone (it works off the UNSCALED center, so
-// its screen-space projection math is unaffected).
-function ConstantScreenScaler({
-  target, pixels, size,
-}: { target: React.RefObject<THREE.Group | null>; pixels: number; size: number }) {
-  const { camera, size: viewport } = useThree();
-  const worldPos = useRef(new THREE.Vector3()).current;
-  useFrame(() => {
-    const grp = target.current;
-    if (!grp) return;
-    // World position, not local — a parent group may be cancelling displayOffset.
-    grp.getWorldPosition(worldPos);
-    // `size` is the gizmo's nominal world extent, so dividing it out makes the
-    // scaled arrow length exactly `pixels` px.
-    const world = pixels * worldPerPixel(camera, camera.position, viewport.height, worldPos);
-    if (world > 0 && size > 0) grp.scale.setScalar(world / size);
-  });
-  return null;
-}
-
 // Translation gizmo
 export interface TranslationGizmoProps {
   center: THREE.Vector3;
@@ -181,10 +159,10 @@ export interface TranslationGizmoProps {
   onDragEnd: () => void;
   /**
    * When set, the arrows are rescaled every frame to span this many screen
-   * pixels instead of `size` world units. Used by the scene-origin gizmo, whose
-   * marker is itself constant-size and which must stay usable on an empty scene
-   * (where a bounds-derived size would be degenerate). Omit for the normal
-   * bounds-sized behavior.
+   * pixels instead of `size` world units — so the gizmo stays grabbable whether
+   * you're zoomed into a corner of a kilometre-wide survey cloud or looking at a
+   * centimetre-scale mesh. Every gizmo in the app sets it; `size` then only fixes
+   * the glyph's internal proportions. Omit for raw world-unit sizing.
    */
   constantScreenSize?: number;
 }

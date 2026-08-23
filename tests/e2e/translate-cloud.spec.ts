@@ -13,6 +13,9 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // A Helios scan XML that carries a defined scanner origin (0.5, -1.0, 0.25) and
 // references tiny.xyz alongside it, so the import attaches both params and data.
 const SCAN_XML = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-scan.xml');
+// A 30 m cube spanning (10,10,10)..(40,40,40) — a cloud whose extent dwarfs the
+// detail you'd zoom into. Used by the constant-screen-size gizmo test.
+const LARGE_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'large-extent.xyz');
 
 // Translate tool on an octree-backed cloud. The tool is a DRAFT editor with an
 // explicit OK/Cancel flow (the pop-up the user drives):
@@ -98,9 +101,9 @@ test.describe('translate cloud', () => {
   // remount the outgoing entry can still be in the registry alongside the new
   // one. Reading an arbitrary key then returns the stale pre-bake entry — which
   // reports net.x === 5 and makes it look like nothing was baked.
-  const readEntry = async () => {
+  const readEntry = async (scanName = 'tiny.xyz') => {
     const cacheId = await session.page
-      .locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]')
+      .locator(`[data-testid="scan-row"][data-scan-name="${scanName}"]`)
       .getAttribute('data-octree-cache-id');
     if (!cacheId) throw new Error('cloud row has no octree cache id');
     return session.page.evaluate((id) => {
@@ -114,14 +117,14 @@ test.describe('translate cloud', () => {
 
   // readEntry, but fails the poll instead of throwing while the octree for a
   // freshly-rebuilt cacheId is still streaming in.
-  const readEntryWhenReady = async () => {
+  const readEntryWhenReady = async (scanName = 'tiny.xyz') => {
     // Poll: right after import (and right after a bake rebuild) the row's
     // data-octree-cache-id and the registry entry for it can settle a frame
     // apart, so a one-shot read can miss. Retry until the current cacheId's
     // entry is present.
     let last: Awaited<ReturnType<typeof readEntry>> = null;
     await expect.poll(async () => {
-      last = await readEntry();
+      last = await readEntry(scanName);
       return last !== null;
     }, { timeout: 20_000, intervals: [100, 250, 500] }).toBe(true);
     if (!last) throw new Error('octree entry not registered yet');
@@ -329,6 +332,161 @@ test.describe('translate cloud', () => {
         worldDx: Math.round((e.world.x - before.world.x) * 1000) / 1000,
       };
     }, { timeout: 60_000, intervals: [250, 500, 1000] }).toEqual({ netX: 0, worldDx: 5 });
+  });
+
+  // Two properties of the Transform gizmo, both driven through the real UI.
+  //
+  // 1. It is sized in SCREEN PIXELS, not off the cloud's bounds. `size` used to
+  //    be `bounds.size.length() / 3`, so on a survey-scale cloud the arrows were
+  //    tens of metres long. Framed on the whole cloud that looks fine, but the
+  //    moment you zoom in to work on a detail — the normal reason to open
+  //    Transform — every handle is far outside the viewport and the tool is
+  //    unusable until you zoom back out.
+  //
+  // 2. It is anchored on the SCENE ORIGIN, concentric with the rotation rings.
+  //    The arrows used to sit on the cloud's bounds center while the rings sat on
+  //    the origin, so the two halves of one tool were drawn arbitrarily far apart.
+  //
+  // The test sets the origin well away from the cloud's bounds center, zooms in,
+  // then grabs the arrow at the fixed pixel offset where a constant-size gizmo
+  // draws its head. Either regression puts nothing at that pixel — the head is
+  // metres off screen (1), or it's over by the bounds center (2) — the
+  // pointerdown hits empty space and the draft stays at zero.
+  test('the Transform gizmo is a fixed on-screen size, anchored on the scene origin', async () => {
+    const { app, page } = session;
+
+    await importFiles(app, page, 'import-auto', LARGE_FIXTURE);
+    await completeImportWizard(page);
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="large-extent.xyz"]');
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row).toHaveAttribute('data-selected', 'true');
+    await page.waitForFunction(() => {
+      const reg = (window as any).__octreePositions;
+      return reg && Object.keys(reg).length === 1;
+    }, { timeout: 20_000 });
+
+    // The fixture spans (10,10,10)..(40,40,40), so its bounds center is ~(25,25,25).
+    // Put the origin at a corner instead: if the arrows regressed to the bounds
+    // center they are ~26 m away from where this test clicks — at the zoom below,
+    // thousands of pixels.
+    const ORIGIN: [number, number, number] = [10, 10, 10];
+    await page.getByTestId('tool-set-scene-origin').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeVisible();
+    for (const [axis, v] of [['x', '10'], ['y', '10'], ['z', '10']] as const) {
+      const input = page.getByTestId(`scene-origin-input-${axis}`);
+      await input.fill(v);
+      await input.press('Enter');
+    }
+    await expect(page.getByTestId('scene-origin-panel')).toHaveAttribute('data-has-origin', 'true');
+    // Look at the origin ("Frame origin" in the panel) — a corner of the cloud is
+    // outside the default framing, and the gizmo has to be on screen to grab.
+    await page.getByTestId('scene-origin-frame').click();
+    // Close the origin panel so the Transform tool can open (panels are exclusive).
+    await page.getByTestId('scene-origin-close').click();
+    await expect(page.getByTestId('scene-origin-panel')).toBeHidden();
+
+    const cam = await page.evaluate(() => (window as any).__getCameraState?.());
+    const bmin = cam.bounds.min as number[];
+    const bmax = cam.bounds.max as number[];
+    const extent = Math.hypot(bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]);
+    // Load-bearing: the whole point is a cloud far larger than the gizmo's ~90 px.
+    // If the fixture ever shrank, a bounds-sized gizmo would pass too.
+    expect(extent).toBeGreaterThan(20);
+    // ...and that the origin is genuinely off the bounds center, or property 2
+    // is untested.
+    const boundsCenter = [(bmin[0] + bmax[0]) / 2, (bmin[1] + bmax[1]) / 2, (bmin[2] + bmax[2]) / 2];
+    expect(Math.hypot(
+      boundsCenter[0] - ORIGIN[0], boundsCenter[1] - ORIGIN[1], boundsCenter[2] - ORIGIN[2],
+    )).toBeGreaterThan(10);
+
+    await openTranslateTool();
+
+    // Zoom in to a realistic "working on a detail" distance: roughly a 1 m field
+    // of view on a 30 m cloud. Stepped with a re-check rather than a fixed notch
+    // count — the wheel is zoom-to-cursor with a latched depth anchor, so how far
+    // one notch travels depends on what it picked, and a fixed count either
+    // undershoots or slams into the minDistance clamp (~3 mm), where even a
+    // centimetre projects off screen and the probes below can't be taken.
+    const camDist = async () => {
+      const st = await page.evaluate(() => (window as any).__getCameraState?.());
+      return Math.hypot(
+        st.position[0] - st.target[0], st.position[1] - st.target[1], st.position[2] - st.target[2],
+      ) as number;
+    };
+    const TARGET_DIST = 1.0;
+    for (let i = 0; i < 40 && (await camDist()) > TARGET_DIST; i++) {
+      // Re-aim each step: the origin drifts on screen as the camera flies in, and
+      // zoom-to-cursor follows the pointer.
+      const at = await worldToScreen(ORIGIN);
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.wheel(0, -120);
+    }
+    const finalDist = await camDist();
+    expect(finalDist).toBeLessThan(extent / 10);
+    // Guard the other side too — at the clamp the probes below cannot be taken.
+    expect(finalDist).toBeGreaterThan(0.05);
+
+    // Where the gizmo center now projects, and the on-screen direction of each
+    // axis. Pick the axis with the longest screen projection: the default
+    // three-quarter view leaves one axis nearly edge-on, and dragging a
+    // few-pixel-long arrow proves nothing.
+    const screenCenter = await worldToScreen(ORIGIN);
+    // Step a SMALL distance along each axis: at this zoom a full metre projects
+    // off screen (which is the whole point), and worldToScreen refuses to return
+    // a point outside the frustum. Only the direction and the px-per-metre ratio
+    // are used, and both are linear in the step.
+    const PROBE_M = finalDist / 50;
+    const dirs = await Promise.all([0, 1, 2].map(async (i) => {
+      const tip: [number, number, number] = [ORIGIN[0], ORIGIN[1], ORIGIN[2]];
+      tip[i] += PROBE_M;
+      const q = await worldToScreen(tip);
+      return { dx: (q.x - screenCenter.x) / PROBE_M, dy: (q.y - screenCenter.y) / PROBE_M };
+    }));
+    let best = 0;
+    dirs.forEach((d, i) => {
+      if (Math.hypot(d.dx, d.dy) > Math.hypot(dirs[best].dx, dirs[best].dy)) best = i;
+    });
+    // Pixels per world METRE along that axis (PROBE_M already divided out).
+    const len = Math.hypot(dirs[best].dx, dirs[best].dy);
+    const unit = { x: dirs[best].dx / len, y: dirs[best].dy / len };
+
+    // The test is only meaningful if this viewpoint is one where the OLD sizing
+    // actually failed. Old arrow length was `bounds.size.length() / 3` world
+    // units; at `len` px per metre it has to overshoot the viewport for the grab
+    // below to distinguish the two behaviors.
+    const oldArrowPx = (extent / 3) * len;
+    const canvasBox = (await page.locator('canvas').first().boundingBox())!;
+    expect(oldArrowPx).toBeGreaterThan(Math.max(canvasBox.width, canvasBox.height));
+
+    // Grab the ARROWHEAD of a constant-size gizmo: the shaft runs to 0.8 of the
+    // nominal size and the cone to ~1.05, so ~0.92 × 90 px lands on the head.
+    const grab = { x: screenCenter.x + unit.x * 83, y: screenCenter.y + unit.y * 83 };
+    // The handle must be what is actually under that pixel — if a toast or panel
+    // covers it, the drag would silently test nothing.
+    expect(await page.evaluate(
+      ([px, py]) => document.elementFromPoint(px as number, py as number)?.tagName,
+      [grab.x, grab.y],
+    )).toBe('CANVAS');
+
+    await page.mouse.move(grab.x, grab.y);
+    await page.mouse.move(grab.x, grab.y);   // settle: zero the travel r3f reports as delta
+    await page.mouse.down();
+    // Several moves — the drag handler treats the first as its baseline sample.
+    await page.mouse.move(grab.x + unit.x * 20, grab.y + unit.y * 20, { steps: 4 });
+    await page.mouse.move(grab.x + unit.x * 60, grab.y + unit.y * 60, { steps: 6 });
+    await page.mouse.up();
+
+    // The drag reached the gizmo and moved the DRAFT along that axis only.
+    const axis = (['x', 'y', 'z'] as const)[best];
+    const draft = await readEntryWhenReady('large-extent.xyz');
+    expect(Math.abs(draft.net[axis])).toBeGreaterThan(1e-3);
+    for (const other of ['x', 'y', 'z'] as const) {
+      if (other !== axis) expect(Math.abs(draft.net[other])).toBeLessThan(1e-6);
+    }
+    // Nothing baked yet — this is still the draft the panel owns.
+    await expect(page.getByTestId('translate-panel')).toHaveAttribute('data-dirty', 'true');
+    await page.getByTestId('translate-cancel').click();
+    await expect(page.getByTestId('translate-panel')).toBeHidden();
   });
 
   // The bug that motivated baking: a translated cloud fed to a COMPUTE tool.

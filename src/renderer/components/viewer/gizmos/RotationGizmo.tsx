@@ -2,6 +2,7 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
+import { ConstantScreenScaler } from './ConstantScreenScaler';
 
 // Rotation gizmo: three colored rings (X red, Y green, Z blue) drawn around the
 // pivot. Dragging a ring rotates the cloud about that world axis. The emitted
@@ -24,12 +25,13 @@ const AXIS_VEC: Record<Axis, THREE.Vector3> = {
   z: new THREE.Vector3(0, 0, 1),
 };
 
-// A flat ring (torus) lying in the plane perpendicular to `axis`.
+// A flat ring (torus) lying in the plane perpendicular to `axis`. Drawn around
+// the LOCAL origin — the parent group carries the pivot position, so the whole
+// glyph can be rescaled as a unit (see ConstantScreenScaler).
 function RotationRing({
-  axis, center, radius, onDragStart,
+  axis, radius, onDragStart,
 }: {
   axis: Axis;
-  center: THREE.Vector3;
   radius: number;
   onDragStart: (axis: Axis) => void;
 }) {
@@ -51,7 +53,6 @@ function RotationRing({
     // UI overlay, not content — see lib/sceneOverlay.ts.
     <mesh
       {...SCENE_OVERLAY}
-      position={center}
       rotation={rotation}
       onPointerOver={(e: ThreeEvent<PointerEvent>) => { e.stopPropagation(); setHovered(true); gl.domElement.style.cursor = 'grab'; }}
       onPointerOut={(e: ThreeEvent<PointerEvent>) => { e.stopPropagation(); setHovered(false); gl.domElement.style.cursor = 'auto'; }}
@@ -126,10 +127,17 @@ export interface RotationGizmoProps {
   onRotate: (axis: Axis, deltaDeg: number) => void;
   onDragStart: () => void;
   onDragEnd: () => void;
+  /**
+   * When set, the rings are rescaled every frame to span this many screen pixels
+   * instead of `size` world units, so they stay grabbable at any zoom on a cloud
+   * of any extent. `size` then only fixes the glyph's internal proportions.
+   */
+  constantScreenSize?: number;
 }
 
-export function RotationGizmo({ center, size, onRotate, onDragStart, onDragEnd }: RotationGizmoProps) {
+export function RotationGizmo({ center, size, onRotate, onDragStart, onDragEnd, constantScreenSize }: RotationGizmoProps) {
   const [activeAxis, setActiveAxis] = useState<Axis | null>(null);
+  const visualRef = useRef<THREE.Group>(null);
 
   const handleAxisDragStart = useCallback((axis: Axis) => {
     setActiveAxis(axis);
@@ -146,14 +154,23 @@ export function RotationGizmo({ center, size, onRotate, onDragStart, onDragEnd }
     // UI overlay, not content — see lib/sceneOverlay.ts. On the root group so
     // every ring, handle and the pivot marker below inherit it.
     <group {...SCENE_OVERLAY}>
-      <RotationRing axis="x" center={center} radius={radius} onDragStart={handleAxisDragStart} />
-      <RotationRing axis="y" center={center} radius={radius} onDragStart={handleAxisDragStart} />
-      <RotationRing axis="z" center={center} radius={radius} onDragStart={handleAxisDragStart} />
-      {/* Small pivot marker so the rotation center is visible. */}
-      <mesh position={center}>
-        <sphereGeometry args={[radius * 0.04, 12, 12]} />
-        <meshBasicMaterial color="#a3a3a3" />
-      </mesh>
+      {/* Everything visual hangs off one group positioned at the pivot, so the
+          constant-size scaler can scale the whole glyph about that point. */}
+      <group ref={visualRef} position={center}>
+        <RotationRing axis="x" radius={radius} onDragStart={handleAxisDragStart} />
+        <RotationRing axis="y" radius={radius} onDragStart={handleAxisDragStart} />
+        <RotationRing axis="z" radius={radius} onDragStart={handleAxisDragStart} />
+        {/* Small pivot marker so the rotation center is visible. */}
+        <mesh>
+          <sphereGeometry args={[radius * 0.04, 12, 12]} />
+          <meshBasicMaterial color="#a3a3a3" />
+        </mesh>
+      </group>
+      {constantScreenSize !== undefined && (
+        <ConstantScreenScaler target={visualRef} pixels={constantScreenSize} size={radius} />
+      )}
+      {/* Not scaled: the drag handler works off the UNSCALED pivot and measures
+          the cursor's screen angle around it, so it's independent of glyph size. */}
       <RotationDragHandler activeAxis={activeAxis} pivot={center} onRotate={onRotate} onDragEnd={handleDragEnd} />
     </group>
   );
