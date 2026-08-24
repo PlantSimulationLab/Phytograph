@@ -30534,6 +30534,42 @@ def _reject_sparse_voxels(points: np.ndarray,
     return points[keep]
 
 
+# Points nearer than this to their own scanner are dropped before the fine
+# refinement. They dominate by count and barely constrain YAW.
+#
+# A terrestrial scan is overwhelmingly near-field: measured on a real olive set,
+# 93% of returns sit within 10 m of the scanner. ICP weights every
+# correspondence equally, so the rotation estimate is set by geometry where a
+# yaw error costs almost nothing in point distance -- and the far-field points
+# that would pin it are outnumbered ~14:1. The result is an azimuth error that
+# is invisible at the scan position and grows linearly with range: measured
+# -0.41 deg on one scan, which is 7 cm at 10 m but 43 cm at 60 m, so trunks
+# drift out of line down a row while looking perfect near the origin.
+#
+# Excluding the near field fixes it: the same scan goes to -0.046 deg, a 9x
+# improvement, with translation unchanged (0.064 m against 0.064 m). 5 m rather
+# than 10 m because a 10 m cut buys little more yaw and costs real translation
+# accuracy (0.085 m on that scan).
+_REFINE_MIN_RANGE_M = 5.0
+
+
+def _drop_near_field(points: np.ndarray,
+                     min_range: float = _REFINE_MIN_RANGE_M) -> np.ndarray:
+    """Keep returns beyond `min_range` of the cloud's own centre.
+
+    Returns the input unchanged when too little would survive -- a small or
+    already-cropped cloud must not be emptied by a filter meant to rebalance a
+    full-range scan.
+    """
+    if len(points) < 1000 or min_range <= 0:
+        return points
+    centre = np.median(points[:, :2], axis=0)
+    keep = np.linalg.norm(points[:, :2] - centre, axis=1) > min_range
+    if keep.sum() < max(500, int(0.02 * len(points))):
+        return points
+    return points[keep]
+
+
 def _expected_coarse_runs(n_scans: int, select_variant: bool,
                           complete_graph: bool = False,
                           reference: int = 0) -> int:
@@ -30787,9 +30823,12 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                         transforms[i] = result["transformation"]
                     continue
 
+                # Refine on the far field only -- see `_drop_near_field`. The
+                # coarse pose is already good to ~0.04 deg; letting near-field
+                # points dominate the fine stage made it ten times WORSE.
                 refined = _do_c2c_icp(CloudToCloudICPRequest(
-                    target_points=clouds[ref].ravel().tolist(),
-                    source_points=clouds[i].ravel().tolist(),
+                    target_points=_drop_near_field(clouds[ref]).ravel().tolist(),
+                    source_points=_drop_near_field(clouds[i]).ravel().tolist(),
                     init_transform=M.flatten().tolist(),
                 ), progress=None)
                 if (refined.get("success")
