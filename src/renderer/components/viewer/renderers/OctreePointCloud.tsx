@@ -268,7 +268,25 @@ function cropClipsEverything(
   clipBox: { min: THREE.Vector3; max: THREE.Vector3; invert?: boolean },
   bounds: { min: THREE.Vector3; max: THREE.Vector3 },
   translation: { x: number; y: number; z: number },
+  rotation?: { x: number; y: number; z: number } | null,
 ): boolean {
+  // Bail whenever ANY pose is active — rotation or translation.
+  //
+  // `bounds` is world and already carries every committed move, while the
+  // `translation`/`rotation` passed in are the COMPOSED pose (draft + the stored
+  // pose standing in for an un-re-tiled octree). Adding them to `bounds` counts
+  // a committed move twice, so the test answers about a place the cloud is not:
+  // a box sitting plainly over the cloud reads as disjoint and the cloud is
+  // HIDDEN the moment the user opens Crop. Under rotation there is the separate
+  // problem that the true extent is an oriented box.
+  //
+  // The whole value of this function is that its conservativeness is obvious at
+  // a glance ("returns true only when emptiness is CERTAIN"), and it is a
+  // LOD-lag optimisation, not a correctness feature — so give up the rare win
+  // rather than try to reconstruct which part of the pose `bounds` already has.
+  const posed = (rotation && (rotation.x !== 0 || rotation.y !== 0 || rotation.z !== 0))
+    || translation.x !== 0 || translation.y !== 0 || translation.z !== 0;
+  if (posed) return false;
   const { x: tx, y: ty, z: tz } = translation;
   const bminx = bounds.min.x + tx, bminy = bounds.min.y + ty, bminz = bounds.min.z + tz;
   const bmaxx = bounds.max.x + tx, bmaxy = bounds.max.y + ty, bmaxz = bounds.max.z + tz;
@@ -454,6 +472,13 @@ export function OctreePointCloud({
           z: octree.position.z + off.z,
         },
         displayOffset: { x: off.x, y: off.y, z: off.z },
+        // The full object matrix. `net`/`world` above are derived from
+        // `octree.position` alone, which describes the pose completely only while
+        // it is a pure translation — with a rotation active the position also
+        // carries the rotation's translation term. Rotation assertions read this
+        // instead; the two older fields stay as they are so the existing
+        // translation specs keep passing.
+        matrix: octree.matrix.toArray(),
       };
     }
   }, [octree, translation?.x, translation?.y, translation?.z, rotation?.x, rotation?.y, rotation?.z, pivot?.x, pivot?.y, pivot?.z, displayOffset?.x, displayOffset?.y, displayOffset?.z, data.octree?.cacheId]);
@@ -587,8 +612,13 @@ export function OctreePointCloud({
       (m as any).heightMin = rangeMin;
       (m as any).heightMax = rangeMax;
     } else {
-      const zMin = data.bounds.min.z;
-      const zMax = data.bounds.max.z;
+      // potree's height shader reads `modelMatrix * position`, i.e. the DISPLAY
+      // frame (world − displayOffset) with the pose already applied. `data.bounds`
+      // is world, so the offset has to come off or the whole gradient shifts by
+      // it — invisible at the origin, metres out on a UTM scene.
+      const dz = displayOffset?.z ?? 0;
+      const zMin = data.bounds.min.z - dz;
+      const zMax = data.bounds.max.z - dz;
       const zPad = 0.2 * Math.max(zMax - zMin, 1e-6);
       (m as any).heightMin = zMin - zPad;
       (m as any).heightMax = zMax + zPad;
@@ -795,7 +825,11 @@ export function OctreePointCloud({
     }
 
     setMaterialVersion(v => v + 1);
-  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme]);
+  // `data.bounds` and `displayOffset` are deps because the height-colour range
+  // is derived from them: a committed transform moves the bounds, and without
+  // these the gradient keeps describing the cloud's previous extent.
+  }, [octree, pointSize, colorMode, selectedScalarField, singleColor, colormap, rangeMin, rangeMax, labelIndexScheme,
+      data.bounds.min.z, data.bounds.max.z, displayOffset?.z]);
 
   // ── Clip arbitration ──────────────────────────────────────────────────────
   //
@@ -1014,11 +1048,13 @@ export function OctreePointCloud({
   // exactly once when the tool closes rather than every frame after.
   const labelOverlayWasActiveRef = useRef(false);
   const frameStateRef = useRef({
-    clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
   });
   frameStateRef.current = {
-    clipBox, translation, data, colorMode, selectedScalarField, onFirstTilesReady,
+    // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
+    // emptiness for a rotated cloud (see cropClipsEverything).
+    clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
   };
 
@@ -1033,7 +1069,7 @@ export function OctreePointCloud({
       // the box overlaps again.
       shouldSkip: () => {
         const { clipBox: cb, data: d, translation: t } = frameStateRef.current;
-        const cropEmpty = !!cb && cropClipsEverything(cb, d.bounds, t ?? { x: 0, y: 0, z: 0 });
+        const cropEmpty = !!cb && cropClipsEverything(cb, d.bounds, t ?? { x: 0, y: 0, z: 0 }, frameStateRef.current.rotation);
         if (cropEmpty !== cropHiddenRef.current) {
           cropHiddenRef.current = cropEmpty;
           const cacheId = d.octree?.cacheId;

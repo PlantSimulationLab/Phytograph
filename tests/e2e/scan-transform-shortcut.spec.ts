@@ -74,11 +74,24 @@ test.describe('scan transform shortcuts', () => {
   const rowFor = (id: string) =>
     scansPanel().locator(`[data-testid="scan-row"][data-scan-id="${id}"]`);
 
-  // Select a scan through its Scans-panel row (the same handler the viewport
-  // marker click calls), then drop focus so the shortcut reaches the window.
+  // ENSURE a scan is selected, through its Scans-panel row (the same handler the
+  // viewport marker click calls), then drop focus so the shortcut reaches the
+  // window.
+  //
+  // Checks first rather than clicking unconditionally, because a plain click on
+  // the row that is ALREADY the sole selection deselects it (that toggle is real
+  // product behaviour — see handleToggleScanSelection in App.tsx). Scans created
+  // via `addScanPosition` start unselected, but a scan imported through the
+  // wizard is auto-selected, so an unconditional click turns it OFF and every
+  // shortcut afterwards has no target. translate-cloud.spec.ts documents the
+  // same trap ("No re-click — a plain click on the sole selection toggles it
+  // off"); this helper just makes the check reusable across both starting
+  // states instead of assuming one.
   async function selectScanRow(id: string) {
     const row = rowFor(id);
-    await row.click();
+    if (await row.getAttribute('data-selected') !== 'true') {
+      await row.click();
+    }
     await expect(row).toHaveAttribute('data-selected', 'true');
     await focusBody();
   }

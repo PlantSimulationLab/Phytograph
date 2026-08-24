@@ -109,6 +109,19 @@ hidden behind others.
 4. For vegetated scenes, choose what to **match on**.
 5. Click **Register**.
 
+!!! note "Registering is fast, even for many scans"
+    Registered clouds move as soon as the match is found, and the move is stored
+    straight away — so every tool afterwards works on the aligned data with no
+    waiting, however many scans were registered.
+
+    The display index a streamed cloud is drawn from is *not* rebuilt (after a
+    rotation that would take far longer than the alignment itself); the viewer
+    draws the existing index in its new position instead. The only operations
+    that need it rebuilt are a **freeform or rectangle crop, the erase brush, or
+    the label brush**, because those select points using the view you drew them
+    in — the first of those shows an **Updating display…** indicator, then
+    applies normally.
+
 ### Scene type
 
 This picks the *method*, not a preset, so it is worth getting right:

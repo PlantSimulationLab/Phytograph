@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.72.0"
+BACKEND_VERSION = "0.73.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -21201,6 +21201,12 @@ import subprocess as _subprocess
 import sys as _sys
 from pathlib import Path as _Path
 
+# In-place rigid transform of a built octree (the pure-translation fast path in
+# `_translate_octree_in_place`). A separate module because it is self-contained
+# binary-format work that must be unit-testable without importing this 5000-line
+# file or standing up a server.
+import octree_transform
+
 
 _OCTREE_CACHE_VERSION = 1  # bump if cache layout changes (forces re-conversion)
 
@@ -21228,6 +21234,20 @@ def _octree_build_lock(cache_key: str) -> threading.Lock:
 # Default cache cap. Overridable via PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES.
 # A typical 28 M-point cloud is ~340 MB on disk; 20 GB holds ~60 such clouds.
 _DEFAULT_OCTREE_CACHE_MAX_BYTES = 20 * 1024 * 1024 * 1024
+
+
+def _octree_cache_max_bytes() -> int:
+    """The octree cache size cap, honouring PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES.
+
+    A malformed override falls back to the default rather than raising — an
+    unparseable env var must not break an import, a bake or a transform.
+    """
+    try:
+        return int(_os.environ.get(
+            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", _DEFAULT_OCTREE_CACHE_MAX_BYTES,
+        ))
+    except ValueError:
+        return _DEFAULT_OCTREE_CACHE_MAX_BYTES
 
 
 def _octree_cache_root() -> _Path:
@@ -25430,6 +25450,24 @@ class CloudSession:
     # reads the in-RAM arrays, so split/filter/extract/export already see fresh
     # labels with no commit.
     label_dirty: Dict[str, bool] = field(default_factory=dict)
+    # The DERIVED OCTREE is in an older frame than `positions`.
+    #
+    # Set by `session_transform` with octree_mode="pose":
+    # the geometry moves immediately — so every compute path, which reads
+    # `positions` via `_read_points_from_source`, is correct at once — but the
+    # octree is left alone because a rotation re-buckets its nodes and forcing
+    # PotreeConverter to reindex costs ~83 s on a 10 M-point scan. The renderer
+    # closes the gap by composing the matrix onto the octree object.
+    #
+    # This is the same "octree is BEHIND, not WRONG" arrangement `label_dirty`
+    # describes for labels, and it is deliberately NOT `octree_cache_id = None`
+    # (which means "stale, must rebuild before use"): the cached octree is still
+    # servable and still renders correctly once posed.
+    #
+    # Holds the accumulated SESSION-frame 4x4 (row-major, flat 16) so a later
+    # refresh can be reasoned about; None when the octree matches the geometry.
+    # Cleared by `rebuild_octree` and by every path that rebuilds the octree.
+    octree_pose: Optional[List[float]] = None
 
 
 def _epsg_from_wkt_vlr(header) -> Optional[int]:
@@ -27051,6 +27089,11 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
         if len(sess.deleted_history) > _MAX_DELETED_HISTORY:
             sess.deleted_history = sess.deleted_history[-_MAX_DELETED_HISTORY:]
         sess.octree_cache_id = None  # derived octree is now stale until bake
+        # INVARIANT: `octree_pose` set means "the cached octree is valid,
+        # just in an older frame". With no cached octree at all that is false, so
+        # the two must never be set together — a later reader that trusts the flag
+        # to decide whether the cache is servable would otherwise be wrong.
+        sess.octree_pose = None
         # A crop that actually removed hits invalidates any SEPARATELY backfilled
         # misses: they were gap-filled against the pre-crop hits, so their
         # hit/miss ratio no longer matches and would skew LAD. Per the product
@@ -27237,6 +27280,7 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
             else np.zeros(len(sess.positions), dtype=bool)
         )
         sess.octree_cache_id = None
+        sess.octree_pose = None   # see the invariant note in delete_cloud_region
         deleted_count = int(sess.deleted.sum())
         total = int(len(sess.positions))
     return {
@@ -27396,7 +27440,16 @@ def bake_cloud_session(session_id: str):
     if survivors == 0:
         return {"session_id": session_id, "point_count": 0, "baked": False}
 
-    if not has_deletions:
+    # `octree_pose` disqualifies the no-rebuild fast path below.
+    #
+    # That path returns the CURRENT cache_id and calls it baked. With a deferred
+    # transform outstanding the cached octree is in an older frame than
+    # `positions`, so returning it here would hand the renderer an octree it
+    # believes current — and the renderer, seeing an unchanged cache_id, would
+    # keep posing it and double-apply the transform. A silent wrong-frame answer,
+    # which is the failure mode this whole area exists to prevent. Rebuild.
+    is_posed = sess.octree_pose is not None
+    if not has_deletions and not is_posed:
         cache_dir = _octree_cache_root() / (sess.octree_cache_id or "")
         if sess.octree_cache_id and (cache_dir / "metadata.json").is_file():
             meta = _read_octree_metadata(cache_dir)
@@ -27444,6 +27497,12 @@ def bake_cloud_session(session_id: str):
         sess.label_history = {}
         sess.label_dirty = {}
         sess.octree_cache_id = cache_key
+        # The octree just built from these arrays carries any posed transform,
+        # so the renderer must stop posing it. Cleared HERE rather than relying on
+        # `_session_rebuild` because bake deliberately calls
+        # `_build_octree_from_las` directly (it needs the compaction to happen in
+        # the same critical section).
+        sess.octree_pose = None
         remaining = int(len(sess.positions))
 
     # Rebuild the miss octree from the surviving misses so the displayed shell
@@ -27455,12 +27514,7 @@ def bake_cloud_session(session_id: str):
     with _cloud_session_lock:
         sess.miss_octree_cache_id = miss_cache_id
 
-    try:
-        max_bytes = int(_os.environ.get(
-            "PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES", _DEFAULT_OCTREE_CACHE_MAX_BYTES,
-        ))
-    except ValueError:
-        max_bytes = _DEFAULT_OCTREE_CACHE_MAX_BYTES
+    max_bytes = _octree_cache_max_bytes()
     keep_dirs = [cache_dir]
     if miss_cache_id:
         keep_dirs.append(_octree_cache_root() / miss_cache_id)
@@ -27587,6 +27641,14 @@ def _session_rebuild(sess: "CloudSession") -> tuple[str, _Path, dict]:
         cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
     with _cloud_session_lock:
         sess.octree_cache_id = cache_key
+        # The octree was just built FROM the current arrays, so any posed
+        # transform is now folded into it. Cleared here rather than at each of
+        # the ~10 callers (filter, split, segment, crop-apply, extract, DEM,
+        # commit_labels, bake, refresh, transform) because this is the one
+        # function all of them go through — a per-caller clear is a rule someone
+        # eventually forgets, and forgetting leaves the renderer posing an octree
+        # that already has the transform baked in.
+        sess.octree_pose = None
     return cache_key, cache_dir, meta
 
 
@@ -27715,6 +27777,7 @@ def session_split(session_id: str, request: SessionSplitRequest):
         sess.deleted_history = []
         sess.label_history = {}   # label undo must not reach across this commit either
         sess.octree_cache_id = None
+        sess.octree_pose = None    # see the invariant note in delete_cloud_region
 
     leftover_meta = None
     if leftover is not None:
@@ -28574,6 +28637,70 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, **meta}
 
 
+def _translate_octree_in_place(cache_id: Optional[str],
+                               delta: np.ndarray) -> Optional[Tuple[str, _Path, dict]]:
+    """Fast path for a PURE-TRANSLATION transform: rewrite an already-built
+    octree's coordinates instead of reconverting the cloud.
+
+    A rigid transform does not invalidate an octree — rotation and translation
+    preserve neighbourhood, subdivision and LOD selection — and for a
+    translation the node structure is provably unchanged (see
+    `octree_transform`'s module docstring for the measurements). Reconverting
+    5 M points costs ~39 s; rewriting the coordinates costs ~0.8 s.
+
+    Returns (cache_key, cache_dir, meta) on success, or None to mean "caller
+    must fall back to a full rebuild". None is returned for every unsupported
+    case — no cached octree, a cache miss, a compressed encoding, an unexpected
+    attribute layout — so a failure here is always a slow path, never an error.
+
+    Installs into the octree cache under a key derived from the source key plus
+    the translation, using the same staging-dir + atomic-rename discipline as
+    `_build_octree_from_las`, and preserving its cancel-safety invariant: no
+    checkpoint sits between the rename and the metadata read, so a cache entry
+    is either ABSENT or FULLY BUILT, never half.
+    """
+    if not cache_id:
+        return None
+    src_dir = _octree_cache_root() / cache_id
+    if not (src_dir / "metadata.json").is_file():
+        return None
+
+    import octree_transform
+
+    # Key on the source octree plus the exact translation, so the same move on
+    # the same cloud reuses the result. Rounded to 1e-9 m before hashing: the
+    # matrix arrives as a float64 product of several transforms, and hashing raw
+    # bits would miss cache on noise far below the octree's own 1 mm quantum.
+    dstr = ",".join(f"{float(v):.9f}" for v in np.asarray(delta, dtype=np.float64).reshape(3))
+    cache_key = _hashlib.sha1(f"{cache_id}|translate|{dstr}".encode("utf-8")).hexdigest()
+    cache_dir = _octree_cache_root() / cache_key
+
+    with _octree_build_lock(cache_key):
+        if not (cache_dir / "metadata.json").is_file():
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            staging_dir = cache_dir.parent / (cache_key + ".staging")
+            if staging_dir.exists():
+                _shutil.rmtree(staging_dir)
+            try:
+                octree_transform.translate_octree_dir(src_dir, staging_dir, delta)
+                if cache_dir.exists():
+                    _shutil.rmtree(cache_dir)
+                staging_dir.rename(cache_dir)
+            except Exception:
+                # Includes OctreeTransformError (unsupported layout/encoding).
+                # Clean up and tell the caller to take the converter path — an
+                # in-place rewrite is an optimisation, never a hard requirement.
+                try:
+                    _shutil.rmtree(staging_dir)
+                except (FileNotFoundError, OSError):
+                    pass
+                logger.info("In-place octree translate unavailable for %s; rebuilding.",
+                            cache_id, exc_info=True)
+                return None
+
+    return cache_key, cache_dir, _read_octree_metadata(cache_dir)
+
+
 class SessionTransformRequest(BaseModel):
     """Apply a rigid 4x4 transform (rotation + translation) to a session's
     geometry in place, then rebuild the octree. Used by cloud-to-cloud ICP to
@@ -28582,6 +28709,24 @@ class SessionTransformRequest(BaseModel):
     octree follows. `matrix` is 16 floats, ROW-MAJOR world-frame (the same
     layout `ICPRegistrationResponse.transformation_matrix` returns)."""
     matrix: List[float]
+    # What to do with the DERIVED OCTREE. The geometry moves either way.
+    #
+    #   "rebuild" — return a CURRENT octree. A pure translation takes the
+    #               in-place rewrite (`octree_transform`, O(file): every point
+    #               record decoded and re-encoded); a rotation reconverts via
+    #               PotreeConverter (~83 s on 10 M points, node re-bucketing).
+    #               For callers that genuinely need the octree re-tiled.
+    #   "pose"    — leave the octree ALONE and report `octree_posed: true`. The
+    #               renderer draws it through a stored matrix, which potree
+    #               composes through rendering, LOD, picking and clipping. No
+    #               rebuild happens then OR later — the pose is the answer until
+    #               something explicitly needs re-tiling (see rebuild_octree).
+    #
+    # "pose" applies to translations as well as rotations. The in-place rewrite
+    # is far cheaper than a reconvert but still O(file) (~2.8 s on a 13 M-point
+    # scan, plus re-streaming the whole octree), which made a TRANSLATION
+    # visibly slower than a ROTATION — the opposite of what users expect.
+    octree_mode: Literal["rebuild", "pose"] = "rebuild"
 
 
 @app.post("/api/cloud/session/{session_id}/transform")
@@ -28637,25 +28782,151 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             sess.miss_octree_origin = moved.reshape(3).tolist()
 
         had_miss_octree = sess.miss_octree_cache_id is not None
+        # Snapshot the pre-transform octree ids for the in-place fast path below.
+        # Must be read HERE, before they're cleared, and under the same lock that
+        # moved the points — so the octree we rewrite is provably the one built
+        # from the geometry we just transformed.
+        prev_octree_id = sess.octree_cache_id
+        prev_miss_octree_id = sess.miss_octree_cache_id
         # Permanent geometry change: drop the derived octree and the erase-undo
         # history so a later erase-undo can't reach across the transform.
+        # (Re-set below when the pose path keeps the existing octree.)
         sess.octree_cache_id = None
         sess.deleted_history = []
         remaining = int((~sess.deleted).sum())
         sess.label_history = {}   # label undo must not reach across this commit either
         total = int(len(sess.positions))
 
-    # Rebuild derived octrees OUTSIDE the lock (PotreeConverter is slow).
+    # A PURE TRANSLATION leaves the octree's node structure untouched, so the
+    # built octree can be re-coordinated in place (~0.8 s on 5 M points) instead
+    # of reconverted (~39 s). Rotation cannot: node membership is octant
+    # containment in an axis-aligned root cube, and spinning the cloud inside it
+    # re-buckets most points (88 % at 30 degrees) — so anything with a rotation
+    # falls through to the converter. See `octree_transform`.
+    #
+    # `delta` is in the SESSION frame, which is the frame the octree's own
+    # coordinates are in. For a pure translation the world_shift conjugation
+    # (R·(p+shift)+t−shift with R=I) collapses to exactly `t`, so no shift
+    # bookkeeping is needed here.
+    is_pure_translation, delta = octree_transform.classify_matrix(request.matrix)
+
+    # "pose" skips the in-place rewrite too — it is NOT a translation fast path.
+    #
+    # The rewrite is far cheaper than a reconvert but still O(file): it decodes,
+    # re-encodes and rewrites every point record (~2.8 s on a 13 M-point scan),
+    # and the renderer then re-streams the whole octree under a new cache id.
+    # Posing costs nothing and looks identical, so running the rewrite here made
+    # a TRANSLATION visibly slower than a ROTATION — the opposite of what the
+    # cost model predicts and what users expect.
+    #
+    # The rewrite still earns its place under "rebuild", where a current octree
+    # is required and the alternative is a full reconvert.
+    fast = None
+    if request.octree_mode != "pose" and is_pure_translation:
+        fast = _translate_octree_in_place(prev_octree_id, delta)
+
+    if fast is None and request.octree_mode == "pose" and prev_octree_id:
+        # POSE, DO NOT REBUILD — now or later. The geometry has already moved (the
+        # locked block above), so every
+        # compute path — all of which read `positions` through
+        # `_read_points_from_source`, never the octree — is correct as of now.
+        # What remains is the DISPLAY cache, and reindexing it costs ~83 s on a
+        # 10 M-point scan for a rotation, essentially all of it inside
+        # PotreeConverter's node-building stage.
+        #
+        # So keep the existing octree and tell the renderer it is behind. The
+        # renderer composes this matrix onto the octree object, which potree
+        # already threads through rendering, LOD, picking and clipping (tile
+        # scene nodes are children of the octree, so `sceneNode.matrixWorld`
+        # carries it). See `CloudSession.octree_pose`.
+        with _cloud_session_lock:
+            sess.octree_cache_id = prev_octree_id
+            sess.octree_pose = [float(v) for v in request.matrix]
+        cache_dir = _octree_cache_root() / prev_octree_id
+        meta = _read_octree_metadata(cache_dir)
+        # Deferring removes this session's only eviction trigger (today the sole
+        # caller is `bake_cloud_session`), so a register-heavy workflow that never
+        # bakes would grow the cache without bound. Trimming here costs a
+        # directory walk, not a rebuild, and never touches the dirs still in use.
+        keep = [cache_dir]
+        if prev_miss_octree_id:
+            keep.append(_octree_cache_root() / prev_miss_octree_id)
+        try:
+            _evict_octree_cache(_octree_cache_max_bytes(), keep=keep)
+        except Exception:
+            logger.exception("Octree cache eviction failed after a deferred transform.")
+        return {"session_id": session_id, "point_count": remaining, "total_count": total,
+                "cache_id": prev_octree_id, "cache_dir": str(cache_dir),
+                "miss_octree_cache_id": prev_miss_octree_id,
+                "octree_posed": True, **meta}
+
+    if fast is not None:
+        cache_key, cache_dir, meta = fast
+        with _cloud_session_lock:
+            sess.octree_cache_id = cache_key
+            sess.octree_pose = None
+    else:
+        # Rebuild derived octrees OUTSIDE the lock (PotreeConverter is slow).
+        cache_key, cache_dir, meta = _session_rebuild(sess)
+        with _cloud_session_lock:
+            sess.octree_pose = None
+
+    miss_id = None
+    if had_miss_octree:
+        # The miss shell is a derived octree of the same geometry, so it gets the
+        # same treatment — otherwise a translated cloud would pay a full miss
+        # reconvert and undo the saving on any scan carrying sky/miss points.
+        miss_fast = (_translate_octree_in_place(prev_miss_octree_id, delta)
+                     if is_pure_translation else None)
+        miss_id = miss_fast[0] if miss_fast is not None else _build_miss_octree(
+            sess, sess.miss_octree_origin)
+        with _cloud_session_lock:
+            sess.miss_octree_cache_id = miss_id
+
+    return {"session_id": session_id, "point_count": remaining, "total_count": total,
+            "cache_id": cache_key, "cache_dir": str(cache_dir),
+            "miss_octree_cache_id": miss_id, "octree_posed": False, **meta}
+
+
+@app.post("/api/cloud/session/{session_id}/rebuild_octree")
+def session_rebuild_octree(session_id: str):
+    """Rebuild a session's derived octree(s) from its CURRENT in-RAM arrays.
+
+    The repayment step for a deferred transform: it brings the display cache back
+    into the same frame as the geometry and clears `octree_pose`, so the
+    renderer can drop its stored pose.
+
+    Needed because a few operations cannot tolerate the octree being behind. The
+    screen-space regions (lasso crop, erase, label brush) freeze a camera looking
+    at the POSED octree and the backend replays it against session positions, so
+    the two frames must agree first. Compute and export never need this — they
+    read `positions` directly.
+
+    Idempotent and safe to call when nothing is stale: it simply rebuilds. No
+    source file is read, and no deletions are applied (that is `bake`'s job)."""
+    sess = _get_cloud_session(session_id)
+    had_miss_octree = sess.miss_octree_cache_id is not None
+
+    # Clears octree_pose (see _session_rebuild).
     cache_key, cache_dir, meta = _session_rebuild(sess)
+
     miss_id = None
     if had_miss_octree:
         miss_id = _build_miss_octree(sess, sess.miss_octree_origin)
         with _cloud_session_lock:
             sess.miss_octree_cache_id = miss_id
 
+    keep_dirs = [cache_dir]
+    if miss_id:
+        keep_dirs.append(_octree_cache_root() / miss_id)
+    _evict_octree_cache(_octree_cache_max_bytes(), keep=keep_dirs)
+
+    with _cloud_session_lock:
+        remaining = int((~sess.deleted).sum())
+        total = int(len(sess.positions))
     return {"session_id": session_id, "point_count": remaining, "total_count": total,
             "cache_id": cache_key, "cache_dir": str(cache_dir),
-            "miss_octree_cache_id": miss_id, **meta}
+            "miss_octree_cache_id": miss_id, "octree_posed": False, **meta}
 
 
 class SessionFilterRequest(BaseModel):
@@ -28731,6 +29002,7 @@ def session_filter(session_id: str, request: SessionFilterRequest):
         sess.deleted_history = []
         sess.label_history = {}   # label undo must not reach across this commit either
         sess.octree_cache_id = None
+        sess.octree_pose = None    # see the invariant note in delete_cloud_region
         remaining = int((~sess.deleted).sum())
 
     if not request.rebuild:

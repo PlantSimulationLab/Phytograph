@@ -164,6 +164,17 @@ export function cloneCloudEditState(state: CloudEditState): CloudEditState {
     ...state,
     erasedIndices: new Set(state.erasedIndices),
     pendingDeletes: state.pendingDeletes ? state.pendingDeletes.map((r) => ({ ...r })) : undefined,
+    // Six floats plus an id — cheap to copy, and copying removes a whole class of
+    // aliasing bug that would only surface days later through undo. The spread
+    // above would otherwise share the nested vectors with the live state.
+    storedPose: state.storedPose
+      ? {
+          translation: { ...state.storedPose.translation },
+          rotation: { ...state.storedPose.rotation },
+          pivot: { ...state.storedPose.pivot },
+          cacheId: state.storedPose.cacheId,
+        }
+      : undefined,
   };
 }
 

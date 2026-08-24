@@ -4354,15 +4354,25 @@ export async function sessionFilter(
 
 /**
  * Apply a rigid 4x4 transform (ROW-MAJOR, world-frame — the layout an ICP
- * registration returns) to a session's geometry in place and rebuild its octree
- * (+ miss octree). Moves an octree-backed cloud whose points live in the backend
- * session, not in the renderer's (empty) in-RAM array — used by cloud-to-cloud
- * ICP to move a streamed SOURCE cloud onto the target.
+ * registration returns) to a session's geometry in place. Moves an octree-backed
+ * cloud whose points live in the backend session, not in the renderer's (empty)
+ * in-RAM array — used by the Transformation tool and by cloud-to-cloud ICP.
+ *
+ * `octreeMode`:
+ *   'rebuild' — return a CURRENT octree. A rotation reconverts (~83 s on a
+ *            10 M-point scan); a translation takes the in-place rewrite.
+ *   'pose'    — leave the octree ALONE: the geometry still moves
+ *            (so every compute path is correct at once) and the existing octree is
+ *            returned with `octree_posed: true`, for the renderer to pose.
+ *
+ * The backend decides which happened — it already classifies the matrix, and a
+ * second epsilon on this side is how the two drift apart.
  */
 export async function sessionTransform(
   sessionId: string,
   matrix: number[],
-): Promise<CloudSessionBakeResult> {
+  octreeMode: 'rebuild' | 'pose' = 'rebuild',
+): Promise<CloudSessionBakeResult & { octree_posed?: boolean }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/transform');
@@ -4370,7 +4380,7 @@ export async function sessionTransform(
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/transform`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ matrix }),
+      body: JSON.stringify({ matrix, octree_mode: octreeMode }),
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -4378,10 +4388,45 @@ export async function sessionTransform(
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
-    return (await response.json()) as CloudSessionBakeResult;
+    return (await response.json()) as CloudSessionBakeResult & { octree_posed?: boolean };
   } catch (error) {
     clearTimeout(timeoutId);
     console.error('session_transform failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Rebuild a session's octree(s) from its CURRENT geometry, discharging a deferred
+ * transform so the renderer can drop its stored pose.
+ *
+ * Called before any operation that ships a SCREEN-SPACE region (lasso crop, erase,
+ * label brush): those freeze a camera looking at the posed octree and the backend
+ * replays it against session positions, so the two frames have to agree first.
+ * Compute and export never need this — they read the session arrays directly.
+ *
+ * Slow by nature (a full PotreeConverter run), hence the long timeout.
+ */
+export async function rebuildSessionOctree(
+  sessionId: string,
+): Promise<CloudSessionBakeResult & { octree_posed?: boolean }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 600000, '/api/cloud/session/:id/rebuild_octree');
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/rebuild_octree`, {
+      method: 'POST',
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return (await response.json()) as CloudSessionBakeResult & { octree_posed?: boolean };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('rebuild_octree failed:', error);
     throw error;
   }
 }

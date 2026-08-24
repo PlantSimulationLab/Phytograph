@@ -2,10 +2,13 @@ import { useRef, useMemo, useState, useCallback, useEffect } from 'react';
 import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
+import { BakeQueue } from '../lib/pendingBakes';
+import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
+import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -2575,6 +2578,22 @@ export default function PointCloudViewer({
     return getEditState(id).rotation ?? { x: 0, y: 0, z: 0 };
   }, [getEditState]);
 
+  // The pose an octree-backed cloud is DRAWN at: the live draft composed over any
+  // committed-but-unrefreshed transform (`CloudEditState.storedPose`).
+  //
+  // A rotation cannot reuse the octree's nodes, so refreshing the display cache
+  // after one costs a full PotreeConverter reindex. Instead the geometry moves in
+  // the session immediately (every compute path reads that) and the octree is
+  // posed here — which potree threads through rendering, LOD, picking and
+  // clipping for free, because tile scene nodes are children of the octree object.
+  //
+  // `sceneOriginRef` rather than `sceneOrigin`: the memo is defined further down,
+  // and the ref is how the other early callbacks reach it without a TDZ.
+  const getCloudPose = useCallback((cloud: PointCloudEntry) => {
+    const pivot = renderPivot(sceneOriginRef.current, cloud.data.bounds.center);
+    return composeCloudPose(editStates.get(cloud.id), cloud.data.octree?.cacheId, pivot);
+  }, [editStates]);
+
   // Toggle the crop tool. Called from both the single-cloud toolbar and
   // the multi-cloud toolbar so the same Crop button is available to N≥1
   // selected scans. On entry the world-space cropBox is initialized to
@@ -2972,6 +2991,25 @@ export default function PointCloudViewer({
   scansRef.current = scans;
   const editStatesRef = useRef(editStates);
   editStatesRef.current = editStates;
+
+  // ── Deferred transform bakes ───────────────────────────────────────────────
+  // A registration/transform is shown IMMEDIATELY as a render pose and written
+  // into the backend session afterwards, one cloud at a time. Auto-Register on N
+  // scans therefore returns as soon as the maths is done instead of blocking for
+  // N octree rebuilds (a rotation can't reuse the node structure, so it costs a
+  // full PotreeConverter run — tens of seconds on a large scan).
+  //
+  // The safety rule that makes this sound: NO COMPUTE MAY READ A CLOUD WITH A
+  // PENDING BAKE, because its rendered pose and its session geometry disagree
+  // until the bake lands. `buildPointSource` is async precisely so it can await
+  // the barrier at the one chokepoint every tool goes through.
+  //
+  // Held in a ref, not state: the registration loop enqueues several clouds
+  // inside one async pass, and correctness must not depend on a re-render
+  const [, setPendingBakeIds] = useState<string[]>([]);
+  // Assigned just below the runner it needs; the ref breaks the definition
+  // cycle (the runner reads cloudsRef/onUpdateCloud, which are defined later).
+  const bakeQueueRef = useRef<BakeQueue | null>(null);
   // Live handle for `bakeSelectedTranslations`, declared here (early) so callers
   // defined ABOVE its useCallback (handleMoveToOrigin) and effects that must not
   // re-subscribe on every render (the T-modal keyboard listener) can reach the
@@ -3111,6 +3149,77 @@ export default function PointCloudViewer({
       });
     }
   }, [clouds, onUpdateCloud, buildSessionOctreeData]);
+
+  // The queue survives as a NO-OP SAFETY NET.
+  //
+  // Transforms are now written eagerly, so nothing is ever enqueued and
+  // `settle()` resolves instantly. What it preserves is the structural
+  // guarantee in `buildPointSource`: no compute path can read a cloud whose
+  // rendered pose and session geometry disagree. Keeping the seam (and its
+  // chokepoint tests) means any future deferred work is covered by default
+  // rather than needing the barrier rebuilt from scratch.
+  if (bakeQueueRef.current === null) {
+    bakeQueueRef.current = new BakeQueue(
+      async () => { /* nothing defers geometry any more */ },
+      { onChange: (ids) => setPendingBakeIds(ids) },
+    );
+  }
+
+  // Bring a cloud's octree back into the same frame as its geometry, if a
+  // committed transform is still being rendered as a pose.
+  //
+  // WHY THIS EXISTS — screen-space regions are the one thing a posed octree
+  // breaks. The lasso crop, the erase brush and the label brush freeze the
+  // camera that was looking at the POSED octree and send it to the backend,
+  // which replays that projection against SESSION positions. Those two frames
+  // agree only once the octree has been refreshed, so these paths must wait.
+  //
+  // Everything else is fine posed: compute and export read the session arrays
+  // (already moved), and rendering, LOD, picking and GPU clipping all go through
+  // the octree object's matrix.
+  //
+  // No-op — and free — when the cloud has no stored pose, which is the common
+  // case. Returns false if the refresh failed, so the caller can abort rather
+  // than ship a region into a mismatched frame.
+  const [refreshingOctreeIds, setRefreshingOctreeIds] = useState<string[]>([]);
+  const ensureOctreeFrameCurrent = useCallback(async (cloudId: string): Promise<boolean> => {
+    const cloud = cloudsRef.current.find(c => c.id === cloudId);
+    const octreeInfo = cloud?.data.octree;
+    if (!cloud || !octreeInfo?.sessionId) return true;
+    if (!hasStoredPose(editStatesRef.current.get(cloudId), octreeInfo.cacheId)) return true;
+
+    setRefreshingOctreeIds(prev => (prev.includes(cloudId) ? prev : [...prev, cloudId]));
+    try {
+      const result = await rebuildSessionOctree(octreeInfo.sessionId);
+      if (!cloudsRef.current.some(c => c.id === cloudId)) return false;
+      // The rebuilt octree carries the transform, so `data.bounds` (already
+      // moved at commit) stays as it is and the pose is dropped.
+      onUpdateCloud(cloudId, buildSessionOctreeData(
+        result, octreeInfo, cloud.data.fileName ?? cloudId, undefined, { diverged: true },
+      ));
+      setEditStates(prev => {
+        const next = new Map(prev);
+        const st = next.get(cloudId);
+        if (st) next.set(cloudId, { ...st, storedPose: undefined });
+        return next;
+      });
+      return true;
+    } catch (err) {
+      showToast({
+        type: 'error',
+        title: 'Could not update display',
+        message: `${cloud.data.fileName ?? cloudId}: `
+          + `${err instanceof Error ? err.message : String(err)}. `
+          + 'The edit was not applied.',
+        duration: 0,
+      });
+      return false;
+    } finally {
+      setRefreshingOctreeIds(prev => prev.filter(id => id !== cloudId));
+    }
+  }, [onUpdateCloud, buildSessionOctreeData, setEditStates]);
+  const ensureOctreeFrameCurrentRef = useRef(ensureOctreeFrameCurrent);
+  ensureOctreeFrameCurrentRef.current = ensureOctreeFrameCurrent;
 
   // Duplicate a scan — its point data AND any scan-parameter metadata — into a
   // fully independent copy. Three flavors:
@@ -3359,6 +3468,11 @@ export default function PointCloudViewer({
       if (cloud.data.octree && cloud.data.octree.sessionId) {
         const octreeInfo = cloud.data.octree;
         const sessionId = octreeInfo.sessionId!;
+        // Crop can ship a screen-space region (freeform polygon, or a rect drawn
+        // from an arbitrary camera), which the backend replays against session
+        // positions — so the octree has to be in that same frame first. Done once
+        // here rather than per sub-path, since extract/split/delete all follow.
+        if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) return;
         let deleteRegion: CropOctreeRegion | null = null;
         if (cropMode === 'box' && cropBox) {
           deleteRegion = {
@@ -3749,6 +3863,10 @@ export default function PointCloudViewer({
         canvas: frame.canvas,
         invert: false, // delete points INSIDE the painted squares
       };
+      // The frozen camera below was looking at the POSED octree; the backend
+      // replays it against session positions. Bring the two frames together
+      // first — see ensureOctreeFrameCurrent.
+      if (!(await ensureOctreeFrameCurrentRef.current(cloudId))) return;
       let deletedCount = 0;
       try {
         const result = await deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion);
@@ -4433,6 +4551,8 @@ export default function PointCloudViewer({
     setLabelStrokes(nextStrokes);
     setLabelDirty(true);
     setLabelBusy(true);
+    // Screen-space stroke: the octree must be in the session's frame first.
+    if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) { setLabelBusy(false); return; }
     try {
       const res = await labelCloudRegion(sessionId, [{
         region: region as CropOctreeRegion,
@@ -4893,6 +5013,19 @@ export default function PointCloudViewer({
         // single static apex. Omitted (undefined → dropped from the JSON body) for
         // static scans, which keep the single-origin path unchanged.
         const trajectory = p?.trajectory ? poseStreamToWire(shiftPoseStream(p.trajectory, ws)) : undefined;
+        // Bring the octree into the geometry's frame FIRST.
+        //
+        // Backfill rebuilds the MISS octree from `sess.positions` (already moved)
+        // but leaves the hits `cacheId` untouched — and the stored pose is gated
+        // on that hits id. So a posed cloud would keep posing a miss shell that
+        // already has the transform baked in, drawing it at DOUBLE the rotation.
+        // On a real scan, with misses projected ~1 km out, that puts the sky
+        // shell hundreds of metres off the tree it belongs to, silently.
+        //
+        // This is the one rebuild path the cacheId gate cannot cover, because it
+        // is the only one that refreshes a derived octree without changing the id
+        // the gate reads.
+        if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) return;
         try {
           const res = await backfillMisses(oct.sessionId!, origin, raster, trajectory, abort.signal, report);
           stopSynth();  // the request resolved — no more synthetic creep for this scan
@@ -4908,11 +5041,20 @@ export default function PointCloudViewer({
           // though the hits cacheId is unchanged). Don't fabricate a scanOrigin
           // from a placeholder.
           report(1.0, 'Loading miss points…');
-          const rebuiltMissCacheId = res.miss_octree_cache_id ?? oct.missOctreeCacheId ?? null;
+          // Re-read the cloud: `ensureOctreeFrameCurrent` above may have re-tiled
+          // the octree, which installs a new cacheId AND new bounds via
+          // onUpdateCloud. `cloud`/`oct` are the pre-refresh snapshot, and
+          // handleUpdateScanData replaces `data` WHOLESALE — so writing them back
+          // would revert the refresh, remount the un-posed original octree, and
+          // leave the viewport showing the cloud in its pre-transform position
+          // while the session geometry stays moved.
+          const liveCloud = cloudsRef.current.find(c => c.id === cloud.id) ?? cloud;
+          const liveOct = liveCloud.data.octree ?? oct;
+          const rebuiltMissCacheId = res.miss_octree_cache_id ?? liveOct.missOctreeCacheId ?? null;
           onUpdateCloud(cloud.id, {
-            ...cloud.data,
+            ...liveCloud.data,
             octree: {
-              ...oct,
+              ...liveOct,
               hasMisses: true,
               missOctreeCacheId: rebuiltMissCacheId,
             },
@@ -6330,12 +6472,19 @@ export default function PointCloudViewer({
       const es = getEditState(c.id);
       const t = es.translation;
       const r = getEditRotation(c.id);
+      // `storedPose` is part of WHERE THE CLOUD IS, so a picked label anchored
+      // before a committed transform must be dropped by it. Without this the
+      // signature would be unchanged across a commit (the draft returns to zero
+      // and the cacheId no longer moves), and stale labels would survive.
+      const sp = es.storedPose;
       sig.set(c.id, [
         t.x, t.y, t.z, r.x, r.y, r.z,
         c.data.pointCount,
         c.data.octree?.cacheId ?? '',
         es.pendingDeletedCount ?? 0,
         es.erasedIndices.size,
+        sp ? `${sp.translation.x},${sp.translation.y},${sp.translation.z},`
+           + `${sp.rotation.x},${sp.rotation.y},${sp.rotation.z},${sp.cacheId}` : '',
       ].join('|'));
     }
     return sig;
@@ -7246,11 +7395,28 @@ export default function PointCloudViewer({
     if (bakingTranslationRef.current.has(cloudId)) return { ok: 'noop' };
     bakingTranslationRef.current.add(cloudId);
     try {
+      // Let any DEFERRED bake for this cloud land first.
+      //
+      // This path bakes the current draft pose. A queued bake will subtract its
+      // own share of that draft when it completes, so committing on top of one
+      // still in flight would double-count the overlap and move the cloud twice.
+      // Settling first makes the draft read below unambiguous: whatever remains
+      // is the user's, and nothing else is about to touch it.
+      await bakeQueueRef.current?.settle(cloudId);
       const clearDraft = () => {
         setEditStates(prev => {
           const next = new Map(prev);
           const state = next.get(cloudId);
-          if (state) next.set(cloudId, { ...state, translation: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 } });
+          // `storedPose` is dropped alongside the draft: this runs when the
+          // octree came back CURRENT, so the transform is in the octree's own
+          // coordinates and any pose standing in for an older one would now
+          // double-apply. Matches the ICP path's non-posed branch.
+          if (state) next.set(cloudId, {
+            ...state,
+            translation: { x: 0, y: 0, z: 0 },
+            rotation: { x: 0, y: 0, z: 0 },
+            storedPose: undefined,
+          });
           return next;
         });
       };
@@ -7321,34 +7487,132 @@ export default function PointCloudViewer({
 
       const octreeInfo = cloud.data.octree;
       if (octreeInfo?.sessionId) {
+        // EAGER GEOMETRY, DEFERRED DISPLAY.
+        //
+        // The session write is awaited — it is fast (~0.5 s on 10 M points, one
+        // numpy pass) and it is what every compute path reads. What is NOT
+        // awaited is the octree: a rotation re-buckets its nodes, so refreshing
+        // it costs a full PotreeConverter reindex (~83 s on that same scan).
+        //
+        // So the backend moves the geometry and hands back the OLD octree with
+        // `octree_posed`, and the cloud is drawn through a stored pose instead.
+        // potree threads the object matrix through rendering, LOD, picking and
+        // clipping already (tile scene nodes are its children), so the posed
+        // octree is correct everywhere the user can interact with it.
         let result: Awaited<ReturnType<typeof sessionTransform>>;
         try {
-          result = await sessionTransform(octreeInfo.sessionId, rowMajor);
+          result = await sessionTransform(octreeInfo.sessionId, rowMajor, 'pose');
         } catch (err) {
-          // Leave the draft in edit-state so the user still sees the cloud where
-          // they put it and can retry — silently dropping it would move the cloud
-          // back under them. The caller aggregates failures into ONE toast (a
-          // per-cloud toast would stack N-high on a multi-cloud bake).
+          // Leave the draft up so the cloud stays where the user put it and they
+          // can retry — silently dropping it would move the cloud back under
+          // them. The caller aggregates failures into ONE toast.
           return { ok: false, reason: err instanceof Error ? err.message : String(err) };
         }
-        // The rebuild took seconds; the cloud may have been deleted meanwhile.
-        // Skip the state write for a vanished cloud (onUpdateCloud on a missing
-        // id could otherwise resurrect a ghost row / orphan its octree).
-        if (!clouds.some(c => c.id === cloudId)) return { ok: false, gone: true };
-        // Forward a scanOrigin already moved so the rebuilt OctreeRef carries the
-        // transformed origin (buildSessionOctreeData copies it as-is).
-        const movedOctreeInfo = { ...octreeInfo, scanOrigin: transformedScanOrigin(octreeInfo.scanOrigin) };
-        onUpdateCloud(cloudId, buildSessionOctreeData(
-          result, movedOctreeInfo, cloud.data.fileName ?? cloudId,
-          // Geometry moved permanently; the source file still holds the
-          // ORIGINAL position, so it can no longer be rebuilt from.
-          undefined, { diverged: true },
-        ));
+        // The call may have taken a moment; skip a cloud deleted meanwhile rather
+        // than resurrecting a ghost row via onUpdateCloud.
+        if (!cloudsRef.current.some(c => c.id === cloudId)) return { ok: false, gone: true };
+
+        // The scanner origin and trajectory are world-frame renderer state and
+        // must stay consistent with the geometry, so they move regardless of
+        // which path the octree took.
+        const movedOctreeInfo = {
+          ...octreeInfo,
+          scanOrigin: transformedScanOrigin(octreeInfo.scanOrigin),
+        };
+
+        if (result.octree_posed) {
+          // Octree deferred: keep it, and record the pose it must be drawn at.
+          // `data.bounds` moves NOW because the geometry has — framing, zoom,
+          // displayOffset and the scene origin all read it and would otherwise
+          // describe where the cloud used to be.
+          const moved = transformBoundsAabb(cloud.data.bounds, t, rot, P);
+          const size = new THREE.Vector3().subVectors(moved.max, moved.min);
+          const center = new THREE.Vector3()
+            .addVectors(moved.min, moved.max).multiplyScalar(0.5);
+          // robustBounds is the percentile box the zoom limits and CSF/DEM
+          // parameter seeding read; it is tuples, not Vector3s.
+          const rb = cloud.data.robustBounds;
+          const movedRobust = rb
+            ? transformBoundsAabb(
+                {
+                  min: new THREE.Vector3(rb.min[0], rb.min[1], rb.min[2]),
+                  max: new THREE.Vector3(rb.max[0], rb.max[1], rb.max[2]),
+                },
+                t, rot, P,
+              )
+            : undefined;
+          onUpdateCloud(cloudId, {
+            ...cloud.data,
+            bounds: { min: moved.min, max: moved.max, center, size },
+            ...(movedRobust
+              ? {
+                  robustBounds: {
+                    min: [movedRobust.min.x, movedRobust.min.y, movedRobust.min.z] as [number, number, number],
+                    max: [movedRobust.max.x, movedRobust.max.y, movedRobust.max.z] as [number, number, number],
+                  },
+                  // Rigid transforms preserve lengths, so a pure translation
+                  // leaves the extent untouched; a rotation only re-orients the
+                  // box, and the AABB of it is looser. Recompute from the moved
+                  // box so the two never disagree.
+                  robustExtent: [
+                    movedRobust.max.x - movedRobust.min.x,
+                    movedRobust.max.y - movedRobust.min.y,
+                    movedRobust.max.z - movedRobust.min.z,
+                  ] as [number, number, number],
+                }
+              : {}),
+            // A rotation turns an outlier-resistant percentile into a raw box
+            // minimum; a pure translation keeps it exact. Restored on refresh.
+            ...(cloud.data.groundZ !== undefined
+              ? { groundZ: transformGroundZ(cloud.data.groundZ, cloud.data.bounds.center, t, rot, P) }
+              : {}),
+            octree: {
+              ...movedOctreeInfo,
+              // The source file still holds the ORIGINAL pose, so it can no
+              // longer be rebuilt from.
+              divergedFromSource: true,
+            },
+          });
+          setEditStates(prev => {
+            const next = new Map(prev);
+            const st = next.get(cloudId) ?? getEditState(cloudId);
+            next.set(cloudId, {
+              ...st,
+              // The draft is CONSUMED into the stored pose, not dropped: the
+              // cloud keeps rendering in exactly the same place, with the pose
+              // now standing in for an octree that is behind.
+              translation: { x: 0, y: 0, z: 0 },
+              rotation: { x: 0, y: 0, z: 0 },
+              // COMPOSE onto any pose already standing in for this octree.
+              // Each commit moves the session geometry again, so the pose has to
+              // describe the TOTAL displacement from the octree's frame — writing
+              // just this commit's draft would silently discard every earlier
+              // one and snap the cloud back.
+              storedPose: {
+                ...composeCloudPose(
+                  { translation: t, rotation: rot, storedPose: st.storedPose },
+                  result.cache_id,
+                  { x: P.x, y: P.y, z: P.z },
+                ),
+                pivot: { x: P.x, y: P.y, z: P.z },
+                cacheId: result.cache_id,
+              },
+            });
+            return next;
+          });
+        } else {
+          // Octree is current (a pure translation took the in-place rewrite, or
+          // the backend reconverted): adopt it and clear the draft outright.
+          onUpdateCloud(cloudId, buildSessionOctreeData(
+            result, movedOctreeInfo, cloud.data.fileName ?? cloudId,
+            undefined, { diverged: true },
+          ));
+          clearDraft();
+        }
         transformScanParams();
-        clearDraft();
         // Destructive boundary: the session geometry moved permanently, so an
-        // erase-undo must not reach back across it (the backend cleared its
-        // own deleted_history for the same reason).
+        // erase-undo must not reach back across it (the backend cleared its own
+        // deleted_history for the same reason).
         scene.boundary([cloudId]);
         return { ok: true };
       }
@@ -7543,7 +7807,21 @@ export default function PointCloudViewer({
   // once on `kind` instead of each re-deriving the octree case. For octree
   // clouds the only pending edit is translation (erase is disabled on them),
   // read from the same edit state the crop-apply path uses.
-  const buildPointSource = useCallback((cloud: PointCloudEntry): PointSourcePayload => {
+  // ASYNC on purpose — this is the compute barrier for deferred transform bakes.
+  //
+  // A cloud whose transform is still queued is DRAWN at its new pose while its
+  // backend session still holds the old geometry. Computing against it would
+  // silently use un-transformed points: the worst failure mode this codebase
+  // has, and one it has hit repeatedly with geometry frames. Awaiting here — at
+  // the single chokepoint all 14 compute call sites already funnel through —
+  // makes that unrepresentable rather than something each new tool must
+  // remember. Being async is the enforcement: a call site that forgets to await
+  // gets a Promise where it wanted a payload, and fails to compile.
+  //
+  // Costs nothing in the common case: `settle()` resolves immediately when the
+  // cloud has no pending bake.
+  const buildPointSource = useCallback(async (cloud: PointCloudEntry): Promise<PointSourcePayload> => {
+    await bakeQueueRef.current?.settle(cloud.id);
     const octree = cloud.data.octree;
     // Route through the backend `source` branch whenever the cloud is
     // session-backed (sessionId) OR file-backed (sourceXyzPath). Gating on
@@ -7730,7 +8008,7 @@ export default function PointCloudViewer({
     // (applying any pending translation) and writes it straight to destPath.
     // Sending dest_path (rather than taking base64 back) is what makes a
     // 25 M-point export possible at all — see PointCloudExportRequest.
-    const ps = buildPointSource(cloud);
+    const ps = await buildPointSource(cloud);
     if (ps.kind === 'source') {
       try {
         const response = await exportPointCloudLasLaz({
@@ -9351,7 +9629,7 @@ export default function PointCloudViewer({
         const sources: NonNullable<Parameters<typeof triangulatePointCloud>[0]['sources']> = [];
         const points: number[][] = [];
         for (const cloud of targets) {
-          const ps = buildPointSource(cloud);
+          const ps = await buildPointSource(cloud);
           if (ps.kind === 'source') {
             sources.push({ ...ps.source, max_points: triangulateMaxPoints });
           } else {
@@ -9438,7 +9716,7 @@ export default function PointCloudViewer({
       let downsampledNote: string | null = null;
       for (let cloudIdx = 0; cloudIdx < targets.length; cloudIdx++) {
         const cloud = targets[cloudIdx];
-        const ps = buildPointSource(cloud);
+        const ps = await buildPointSource(cloud);
         const request: Parameters<typeof triangulatePointCloud>[0] = {
           method,
           estimate_normals: true,
@@ -9595,7 +9873,7 @@ export default function PointCloudViewer({
     };
 
     try {
-      const ps = buildPointSource(cloud);
+      const ps = await buildPointSource(cloud);
 
       // --- Session-backed octree cloud: CSF on the in-RAM array, append
       // ground_class, rebuild from arrays (no file re-read). ---
@@ -9817,7 +10095,7 @@ export default function PointCloudViewer({
 
     // Precompute the flat-cloud point arrays ONCE (shared across every surface in
     // the batch) — the miss/ground/first-return extraction is identical per run.
-    const ps = buildPointSource(cloud);
+    const ps = await buildPointSource(cloud);
     let flat: {
       displayData: typeof cloud.data;
       rawCount: number;
@@ -10147,7 +10425,8 @@ export default function PointCloudViewer({
       // (no apply-labels endpoint), so a selection containing any octree cloud
       // falls back to per-scan. ===
       if (aggregate) {
-        const resolved = targets.map(c => ({ cloud: c, ps: buildPointSource(c) }));
+        const resolved = await Promise.all(
+          targets.map(async c => ({ cloud: c, ps: await buildPointSource(c) })));
         const anyOctree = resolved.some(r => r.ps.kind === 'source');
         if (anyOctree) {
           showToast({
@@ -10270,7 +10549,7 @@ export default function PointCloudViewer({
   ) => {
     const id = cloud.id;
     {
-      const ps = buildPointSource(cloud);
+      const ps = await buildPointSource(cloud);
 
       // --- Session-backed octree cloud: classify the in-RAM array, append
       // wood_class, rebuild from arrays (no file re-read). ---
@@ -10482,7 +10761,7 @@ export default function PointCloudViewer({
     const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
 
     try {
-      const ps = buildPointSource(cloud);
+      const ps = await buildPointSource(cloud);
 
       // --- Session-backed octree cloud: TreeIso on the in-RAM array, append
       // tree_instance, rebuild from arrays (no file re-read). ---
@@ -10747,7 +11026,7 @@ export default function PointCloudViewer({
       // mesh's current display transform so the distance reflects where the mesh
       // actually sits in the viewport (a user may have moved it), not its
       // untransformed base vertices. Mirrors handleICPSnapToFit.
-      const ps = buildPointSource(cloud);
+      const ps = await buildPointSource(cloud);
       const meshPos = meshPositions.get(meshId) || { x: 0, y: 0, z: 0 };
       const meshVertices: number[] = [];
       for (let i = 0; i < mesh.data.vertexCount; i++) {
@@ -10814,7 +11093,7 @@ export default function PointCloudViewer({
     try {
       // Resolve the TARGET cloud to inline points (flat) or a source descriptor
       // (octree). The cloud stays fixed; the mesh (SOURCE) is always inline.
-      const ps = buildPointSource(cloud);
+      const ps = await buildPointSource(cloud);
 
       // Get current mesh position
       const currentPos = meshPositions.get(meshId) || { x: 0, y: 0, z: 0 };
@@ -11002,8 +11281,8 @@ export default function PointCloudViewer({
       // both in WORLD frame and returns a world-frame matrix; how the SOURCE is
       // MOVED then depends on whether it's flat (bake into in-RAM positions) or
       // octree (apply on the backend session, below).
-      const targetPs = buildPointSource(targetCloud);
-      const sourcePs = buildPointSource(sourceCloud);
+      const targetPs = await buildPointSource(targetCloud);
+      const sourcePs = await buildPointSource(sourceCloud);
 
       // Each side keys differently depending on whether it came back as an
       // octree/session descriptor or inline points.
@@ -11117,40 +11396,127 @@ export default function PointCloudViewer({
         const sourceOctree = sourceCloud.data.octree;
         if (sourceOctree?.sessionId) {
           // Octree-backed source: geometry lives in the backend session (in-RAM
-          // `positions` is empty), so bake the world-frame matrix into the session
-          // and adopt the rebuilt octree. ICP saw the source at (world +
-          // edit-translation) — buildPointSource sent that translation — so the
-          // matrix M satisfies M·(world + tr) ≈ target. The backend session
-          // transform operates on the world points alone, so fold the same
-          // pre-translation into the matrix before sending: M' = M · T(tr). Then
-          // reset the local translation to 0 (it's now baked into the session).
+          // `positions` is empty), so the world-frame matrix has to be written
+          // into the session. ICP saw the source at (world + edit-translation) —
+          // buildPointSource sent that translation — so the matrix M satisfies
+          // M·(world + tr) ≈ target. The backend session transform operates on
+          // the world points alone, so fold the same pre-translation into the
+          // matrix before sending: M' = M · T(tr).
           const tr = getEditState(sourceCloud.id).translation;
           const sessionMatrix = matrix.clone().multiply(
             new THREE.Matrix4().makeTranslation(tr.x, tr.y, tr.z),
           );
           appliedMatrix = sessionMatrix;
-          // The backend reads a ROW-MAJOR flat 4x4. THREE.Matrix4.elements /
-          // toArray() are COLUMN-major, so transpose before flattening (matches
-          // the row-major layout the ICP response used).
+          // EAGER GEOMETRY, DEFERRED DISPLAY — see bakeCloudTransform for the
+          // full reasoning. The session write is awaited (fast, and it is what
+          // every compute path reads); the octree reindex is not (a rotation
+          // re-buckets its nodes, ~83 s on a 10 M-point scan), so the cloud is
+          // drawn through a stored pose until something refreshes it.
+          // The backend reads a ROW-MAJOR flat 4x4; THREE stores column-major.
           const rowMajor = sessionMatrix.clone().transpose().toArray();
-          const result = await sessionTransform(sourceOctree.sessionId, rowMajor);
-          // The scan origin lives in world coordinates and the session points
-          // were moved by `sessionMatrix` (= M · T(tr)) in world frame, so push
-          // the origin through the SAME matrix (rotation part is `quaternion`;
-          // the T(tr) prefix is a pure translation and doesn't change it).
+          let result: Awaited<ReturnType<typeof sessionTransform>>;
+          try {
+            result = await sessionTransform(sourceOctree.sessionId, rowMajor, 'pose');
+          } catch (err) {
+            showToast({
+              type: 'error', title: options?.label ?? 'Cloud Alignment',
+              message: `Could not move ${sourceCloud.data.fileName ?? sourceCloud.id}: `
+                + `${err instanceof Error ? err.message : String(err)}`,
+            });
+            return;
+          }
+          if (!cloudsRef.current.some(c => c.id === sourceCloud.id)) return;
+
+          // The scan origin is world-frame renderer state and moves with the
+          // geometry, on both paths.
           const moveScanOrigin = transformSourceOrigin(sessionMatrix, quaternion);
           const movedOctree = { ...sourceOctree, scanOrigin: moveScanOrigin(sourceOctree.scanOrigin) };
-          onUpdateCloud(sourceCloud.id, buildSessionOctreeData(
-            result, movedOctree, sourceCloud.data.fileName ?? sourceCloud.id,
-            // ICP moved the cloud permanently — the source file is stale.
-            undefined, { diverged: true },
-          ));
-          setEditStates(prev => {
-            const next = new Map(prev);
-            const state = next.get(sourceCloud.id) || getEditState(sourceCloud.id);
-            next.set(sourceCloud.id, { ...state, translation: { x: 0, y: 0, z: 0 } });
-            return next;
-          });
+          const pivot = renderPivot(sceneOrigin, sourceCloud.data.bounds.center);
+          const posed = poseFromMatrix(sessionMatrix, pivot);
+
+          if (result.octree_posed) {
+            const moved = transformBoundsAabb(
+              sourceCloud.data.bounds, posed.translation, posed.rotation, pivot);
+            const size = new THREE.Vector3().subVectors(moved.max, moved.min);
+            const center = new THREE.Vector3()
+              .addVectors(moved.min, moved.max).multiplyScalar(0.5);
+            const rb = sourceCloud.data.robustBounds;
+            const movedRobust = rb
+              ? transformBoundsAabb(
+                  {
+                    min: new THREE.Vector3(rb.min[0], rb.min[1], rb.min[2]),
+                    max: new THREE.Vector3(rb.max[0], rb.max[1], rb.max[2]),
+                  },
+                  posed.translation, posed.rotation, pivot,
+                )
+              : undefined;
+            onUpdateCloud(sourceCloud.id, {
+              ...sourceCloud.data,
+              bounds: { min: moved.min, max: moved.max, center, size },
+              ...(movedRobust
+                ? {
+                    robustBounds: {
+                      min: [movedRobust.min.x, movedRobust.min.y, movedRobust.min.z] as [number, number, number],
+                      max: [movedRobust.max.x, movedRobust.max.y, movedRobust.max.z] as [number, number, number],
+                    },
+                    robustExtent: [
+                      movedRobust.max.x - movedRobust.min.x,
+                      movedRobust.max.y - movedRobust.min.y,
+                      movedRobust.max.z - movedRobust.min.z,
+                    ] as [number, number, number],
+                  }
+                : {}),
+              ...(sourceCloud.data.groundZ !== undefined
+                ? { groundZ: transformGroundZ(
+                    sourceCloud.data.groundZ, sourceCloud.data.bounds.center,
+                    posed.translation, posed.rotation, pivot) }
+                : {}),
+              octree: { ...movedOctree, divergedFromSource: true },
+            });
+            setEditStates(prev => {
+              const next = new Map(prev);
+              const state = next.get(sourceCloud.id) || getEditState(sourceCloud.id);
+              next.set(sourceCloud.id, {
+                ...state,
+                // The ICP draft translation is folded into `sessionMatrix`, so it
+                // must not remain as a draft too or it applies twice.
+                translation: { x: 0, y: 0, z: 0 },
+                rotation: { x: 0, y: 0, z: 0 },
+                // COMPOSE onto any pose already standing in for this octree —
+                // registering a scan twice must accumulate, not replace.
+                storedPose: {
+                  ...composeCloudPose(
+                    {
+                      translation: posed.translation,
+                      rotation: posed.rotation,
+                      storedPose: state.storedPose,
+                    },
+                    result.cache_id,
+                    pivot,
+                  ),
+                  pivot,
+                  cacheId: result.cache_id,
+                },
+              });
+              return next;
+            });
+          } else {
+            onUpdateCloud(sourceCloud.id, buildSessionOctreeData(
+              result, movedOctree, sourceCloud.data.fileName ?? sourceCloud.id,
+              undefined, { diverged: true },
+            ));
+            setEditStates(prev => {
+              const next = new Map(prev);
+              const state = next.get(sourceCloud.id) || getEditState(sourceCloud.id);
+              next.set(sourceCloud.id, {
+                ...state,
+                translation: { x: 0, y: 0, z: 0 },
+                rotation: { x: 0, y: 0, z: 0 },
+                storedPose: undefined,
+              });
+              return next;
+            });
+          }
         } else {
           // Flat source: bake the transform into the in-RAM positions.
           // The source cloud's positions were sent with current translation
@@ -11414,7 +11780,7 @@ export default function PointCloudViewer({
         return;
       }
 
-      const payloads = ordered.map(c => buildPointSource(c));
+      const payloads = await Promise.all(ordered.map(c => buildPointSource(c)));
 
       // The backend takes EITHER a list of sources or a list of inline arrays,
       // not a mix, so a single inline cloud forces every scan inline. Session
@@ -11546,6 +11912,7 @@ export default function PointCloudViewer({
     const targets = registeredScans(scansRef.current);
     if (targets.length === 0) return;
 
+
     setIsResettingRegistration(true);
     const failures: string[] = [];
     let reset = 0;
@@ -11599,11 +11966,107 @@ export default function PointCloudViewer({
         const octreeInfo = live.data.octree;
         try {
           if (octreeInfo?.sessionId) {
-            const result = await sessionTransform(octreeInfo.sessionId, inverse);
-            // The rebuild took seconds; skip a scan deleted meanwhile rather
-            // than resurrecting a ghost row via onUpdateCloud.
+            // Deferred, exactly like the forward registration. This loop runs
+            // once per registered scan, so paying a full octree reindex here is
+            // N times the cost the deferral exists to avoid — it was the whole
+            // reason "unregister" took minutes on a six-scan set.
+            const result = await sessionTransform(octreeInfo.sessionId, inverse, 'pose');
+            // The call may have taken a moment; skip a scan deleted meanwhile
+            // rather than resurrecting a ghost row via onUpdateCloud.
             if (!scansRef.current.some(s => s.id === live.id)) continue;
             const movedOctree = { ...octreeInfo, scanOrigin: moveOrigin(octreeInfo.scanOrigin) };
+            if (result.octree_posed) {
+              // The octree stayed put, so record the pose it must now be drawn
+              // at. `handleResetRegistration` already cleared any prior pose
+              // before this loop, so there is nothing to compose onto.
+              const pivot = renderPivot(sceneOriginRef.current, live.data.bounds.center);
+              const posed = poseFromMatrix(inv, pivot);
+              const moved = transformBoundsAabb(
+                live.data.bounds, posed.translation, posed.rotation, pivot);
+              const size = new THREE.Vector3().subVectors(moved.max, moved.min);
+              const center = new THREE.Vector3()
+                .addVectors(moved.min, moved.max).multiplyScalar(0.5);
+              // Move the percentile box and ground level too, matching the other
+              // two commit sites. `robustExtent` seeds CSF/DEM parameters and
+              // `contentCenter` (from robustBounds) is what the camera actually
+              // frames on — leaving them behind would aim Home at the cloud's
+              // pre-reset position and seed compute from a stale extent, and no
+              // rebuild follows on this path to reconcile them later.
+              const rbR = live.data.robustBounds;
+              const movedRobustR = rbR
+                ? transformBoundsAabb(
+                    {
+                      min: new THREE.Vector3(rbR.min[0], rbR.min[1], rbR.min[2]),
+                      max: new THREE.Vector3(rbR.max[0], rbR.max[1], rbR.max[2]),
+                    },
+                    posed.translation, posed.rotation, pivot,
+                  )
+                : undefined;
+              onUpdateCloud(live.id, {
+                ...live.data,
+                bounds: { min: moved.min, max: moved.max, center, size },
+                ...(movedRobustR
+                  ? {
+                      robustBounds: {
+                        min: [movedRobustR.min.x, movedRobustR.min.y, movedRobustR.min.z] as [number, number, number],
+                        max: [movedRobustR.max.x, movedRobustR.max.y, movedRobustR.max.z] as [number, number, number],
+                      },
+                      robustExtent: [
+                        movedRobustR.max.x - movedRobustR.min.x,
+                        movedRobustR.max.y - movedRobustR.min.y,
+                        movedRobustR.max.z - movedRobustR.min.z,
+                      ] as [number, number, number],
+                    }
+                  : {}),
+                ...(live.data.groundZ !== undefined
+                  ? { groundZ: transformGroundZ(
+                      live.data.groundZ, live.data.bounds.center,
+                      posed.translation, posed.rotation, pivot) }
+                  : {}),
+                octree: { ...movedOctree, divergedFromSource: true },
+              });
+              setEditStates(prev => {
+                const next = new Map(prev);
+                const st = next.get(live.id) ?? getEditState(live.id);
+                next.set(live.id, {
+                  ...st,
+                  translation: { x: 0, y: 0, z: 0 },
+                  rotation: { x: 0, y: 0, z: 0 },
+                  // COMPOSE onto whatever pose this scan already carries.
+                  //
+                  // Deliberately NOT cleared up front: a scan whose inverse
+                  // transform FAILS must keep both its registration record and
+                  // its pose, or its geometry stays registered while the octree
+                  // renders un-posed — and `ensureOctreeFrameCurrent` would never
+                  // fire again for it, letting a later screen-space edit ship a
+                  // frozen camera into a mismatched frame with no guard.
+                  storedPose: {
+                    ...composeCloudPose(
+                      {
+                        translation: posed.translation,
+                        rotation: posed.rotation,
+                        storedPose: st.storedPose,
+                      },
+                      result.cache_id,
+                      pivot,
+                    ),
+                    pivot,
+                    cacheId: result.cache_id,
+                  },
+                });
+                return next;
+              });
+              restoreScanParams();
+              // Clear the registration record — the scan is no longer
+              // registered, which is what drives the panel badge and what
+              // re-enables Reset. Skipping this was the bug the E2E caught: the
+              // early `continue` below bypasses the shared tail that used to do
+              // it, so it has to happen here too.
+              onUpdateScanRegistration?.(live.id, undefined);
+              scene.boundary([live.id]);
+              reset += 1;
+              continue;
+            }
             onUpdateCloud(live.id, buildSessionOctreeData(
               result, movedOctree, live.data.fileName ?? live.id,
               // Still diverged: the cloud is back at its pre-registration pose,
@@ -11848,7 +12311,7 @@ export default function PointCloudViewer({
 
     try {
       const MAX_SKELETON_POINTS = 20000;
-      const ps = buildPointSource(cloud);
+      const ps = await buildPointSource(cloud);
 
       // Resolve the points source and the effective search radius. Octree
       // clouds send a backend source descriptor (with the 20k cap) and let the
@@ -12025,7 +12488,7 @@ export default function PointCloudViewer({
     // throwing on failure. The caller turns it into a QSMEntry. `report` folds the
     // streamed per-stage fraction into the overall bar (see the loop below).
     const buildOne = async (cloud: PointCloudEntry, report: BinaryFrameProgress) => {
-      const ps = buildPointSource(cloud);
+      const ps = await buildPointSource(cloud);
       let points: number[][] | undefined;
       let source: BackendPointSource | undefined;
 
@@ -12061,7 +12524,8 @@ export default function PointCloudViewer({
         // backend source (their in-RAM display buffer is empty, so they MUST be
         // read server-side); flat clouds carry inline display points. The two
         // resolve through the same buildPointSource the per-scan path uses.
-        const resolved = targets.map(c => ({ cloud: c, ps: buildPointSource(c) }));
+        const resolved = await Promise.all(
+          targets.map(async c => ({ cloud: c, ps: await buildPointSource(c) })));
         const sources: BackendPointSource[] = [];
         const inlineParts: number[][] = [];
         for (const { cloud, ps } of resolved) {
@@ -12380,6 +12844,11 @@ export default function PointCloudViewer({
         return next;
       });
     } else if (type === 'cloud') {
+      // Drop any queued transform FIRST: the session is about to be freed, so
+      // the bake has nowhere to land, and an orphaned entry would keep
+      // `settleAll` (used on close) waiting forever. `cancel` also releases
+      // anything already blocked on this cloud's barrier.
+      ids.forEach(id => bakeQueueRef.current?.cancel(id));
       // onRemoveCloud === App's handleRemoveScan: it frees each scan's backend
       // session and prunes selectedScanIds, so looping here frees every session.
       ids.forEach(id => onRemoveCloud(id));
@@ -14550,7 +15019,7 @@ export default function PointCloudViewer({
         const scanName = scans.find(s => s.id === scanId)?.label
           ?? cloud.data.fileName ?? 'scan';
 
-        const payload = buildPointSource(cloud);
+        const payload = await buildPointSource(cloud);
         if (payload.kind !== 'source') {
           allWarnings.push(`${scanName}: no backing data source; skipped.`);
           continue;
@@ -16071,6 +16540,9 @@ export default function PointCloudViewer({
         {clouds.map(cloud => {
           if (!cloud.visible) return null;
           const editState = getEditState(cloud.id);
+          // Draft composed over any committed-but-unrefreshed transform. Used by
+          // the octree and its miss shell so the two stay locked to each other.
+          const cloudPose = getCloudPose(cloud);
           const isSelected = selectedIds.has(cloud.id);
           // This cloud's OWN color mode (its override, else the scene default).
           // Every colour decision below reads these, not the global state, so
@@ -16160,16 +16632,15 @@ export default function PointCloudViewer({
                   // (gizmo + T-modal) actually moves an octree cloud. The resample
                   // preview renders at the origin (group position [0,0,0]), so it
                   // gets no offset either.
-                  translation={hasResamplePreview ? undefined : editState.translation}
-                  // Draft rotation (Transformation tool). Applied about the pivot:
-                  // the scene origin if one is set, else this cloud's bbox center
-                  // (spin-in-place). Zero rotation costs nothing (position fast path).
-                  rotation={hasResamplePreview ? undefined : editState.rotation}
-                  pivot={hasResamplePreview ? undefined : (
-                    sceneOrigin
-                      ? { x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }
-                      : { x: cloud.data.bounds.center.x, y: cloud.data.bounds.center.y, z: cloud.data.bounds.center.z }
-                  )}
+                  // The DRAWN pose: the live draft composed over any committed
+                  // transform whose octree has not been refreshed yet
+                  // (`storedPose`). `getCloudPose` resolves both against the same
+                  // pivot the renderer uses, so a stale octree lands exactly where
+                  // the moved session geometry is. Zero rotation still costs
+                  // nothing (applyOctreePose's position fast path).
+                  translation={hasResamplePreview ? undefined : cloudPose.translation}
+                  rotation={hasResamplePreview ? undefined : cloudPose.rotation}
+                  pivot={hasResamplePreview ? undefined : cloudPose.pivot}
                   // Render-only precision safety net: the resample preview lives
                   // at the origin already (group [0,0,0]), so it gets no offset;
                   // the live cloud renders at world − displayOffset.
@@ -16337,15 +16808,19 @@ export default function PointCloudViewer({
           // otherwise be a silent no-op; the toast fired at toggle time explains
           // why (see onToggleMisses). Render nothing here.
           if (!oct.missOctreeCacheId) return null;
-          const editState = getEditState(cloud.id);
+          // The SAME composed pose the hits octree gets. Sharing one resolver is
+          // what keeps the shell locked to the tree when a committed transform is
+          // being rendered rather than baked — two independent computations here
+          // is how the two would drift.
+          const cloudPose = getCloudPose(cloud);
           return (
             <MissOctree
               key={`miss-${cloud.id}-${oct.missOctreeCacheId}`}
               missCacheId={oct.missOctreeCacheId}
               pointSize={pointSize}
-              translation={editState.translation}
-              rotation={editState.rotation}
-              pivot={{ x: sceneOrigin[0], y: sceneOrigin[1], z: sceneOrigin[2] }}
+              translation={cloudPose.translation}
+              rotation={cloudPose.rotation}
+              pivot={cloudPose.pivot}
               displayOffset={displayOffset}
             />
           );
@@ -17824,6 +18299,20 @@ export default function PointCloudViewer({
         />
       )}
 
+      {/* Rebuilding a posed octree so a screen-space edit can be applied in the
+          same frame as the geometry. The geometry itself is already saved — this
+          is the display cache catching up — so there is no cancel: abandoning it
+          would leave the edit unapplied anyway. */}
+      {refreshingOctreeIds.length > 0 && (
+        <StatusPill
+          testId="octree-refresh-running"
+          label={refreshingOctreeIds.length === 1
+            ? 'Updating display…'
+            : `Updating display… (${refreshingOctreeIds.length} clouds)`}
+          progress={null}
+        />
+      )}
+
       {qsmInProgress && (
         <StatusPill
           testId="qsm-running"
@@ -18299,16 +18788,37 @@ export default function PointCloudViewer({
                     // for E2E. Registration is judged by WHERE the cloud ends up,
                     // and a wrong-plant match on a regular planting lands one
                     // spacing off while still reporting success — so the extent
-                    // is the assertion that separates the two. Includes the
-                    // pending edit translation so it reflects what's on screen.
+                    // is the assertion that separates the two.
+                    //
+                    // Reflects the RENDERED pose, which means the draft ROTATION
+                    // as well as the translation. Since a registration's bake is
+                    // deferred, a rotated-but-unbaked cloud is the normal state
+                    // for a while — reporting translation only would describe an
+                    // extent the cloud does not occupy, and an E2E assertion on
+                    // it would be checking a pose no user ever sees.
                     data-scan-bounds={(() => {
                       const b = scan.data?.bounds;
                       if (!b) return '';
-                      const t = editStates.get(scan.id)?.translation ?? { x: 0, y: 0, z: 0 };
-                      return [
-                        b.min.x + t.x, b.min.y + t.y, b.min.z + t.z,
-                        b.max.x + t.x, b.max.y + t.y, b.max.z + t.z,
-                      ].map(v => v.toFixed(3)).join(',');
+                      // The RENDERED extent: `data.bounds` plus the live DRAFT.
+                      //
+                      // Deliberately NOT the composed pose. `storedPose` maps the
+                      // OCTREE's frame to the world, and `data.bounds` is already
+                      // in the world — it is moved at every commit. Composing the
+                      // pose here would apply a committed transform a second time
+                      // (measured as a 5.8 m error against the registration
+                      // fixtures). The draft is the only part not yet in bounds.
+                      //
+                      // Shares `transformBoundsAabb` with the committed-bounds
+                      // update so the two cannot disagree about a rotated extent.
+                      const st = editStates.get(scan.id);
+                      const out = transformBoundsAabb(
+                        b,
+                        st?.translation ?? { x: 0, y: 0, z: 0 },
+                        st?.rotation ?? { x: 0, y: 0, z: 0 },
+                        renderPivot(sceneOrigin, b.center),
+                      );
+                      return [out.min.x, out.min.y, out.min.z, out.max.x, out.max.y, out.max.z]
+                        .map(v => v.toFixed(3)).join(',');
                     })()}
                     // Effective world-frame scanner origin (params.origin primary,
                     // octree.scanOrigin fallback) as "x,y,z" for E2E — must move

@@ -269,6 +269,38 @@ export interface CloudEditState {
   // deletes, so the scan row's point count reflects the deletion immediately
   // (the octree metadata's pointCount only drops on bake). 0 when none pending.
   pendingDeletedCount?: number;
+  /**
+   * A COMMITTED transform whose octree has not caught up yet.
+   *
+   * Distinct from `translation`/`rotation` above, which are a live DRAFT the user
+   * is still adjusting. `storedPose` means the opposite: the session geometry has
+   * already moved (so every compute path, which reads the session arrays, is
+   * correct), and only the octree — the display cache — is behind. A rotation
+   * cannot reuse the octree's nodes, so refreshing it costs a full PotreeConverter
+   * reindex (~83 s on a 10 M-point scan); posing the octree instead costs nothing.
+   *
+   * Rendered ON TOP of the draft, composed by `composeCloudPose`.
+   *
+   * `pivot` is frozen at commit because the matrix was built about it; the scene
+   * origin may move afterwards, and `composeCloudPose` handles that by composing
+   * in world space and re-decomposing against the live pivot.
+   *
+   * `cacheId` is the safety mechanism, and it is what makes this cheap: the pose
+   * applies ONLY while it matches the cloud's current octree. Every rebuild path
+   * (filter, split, segment, crop-apply, extract, DEM, commit-labels, bake,
+   * refresh) produces a new id from already-moved arrays — so the pose is already
+   * baked into that octree, the ids stop matching, and the pose is ignored. No
+   * rebuild path needs to know this field exists.
+   *
+   * REPLACE, never mutate in place: `cloneCloudEditState` copies it shallowly per
+   * field, and an in-place edit would leak across an undo snapshot.
+   */
+  storedPose?: {
+    translation: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number };  // Euler XYZ, DEGREES
+    pivot: { x: number; y: number; z: number };     // WORLD, frozen at commit
+    cacheId: string;
+  };
 }
 
 // Mirror of backendApi's CropOctreeRegion, duplicated here to keep this

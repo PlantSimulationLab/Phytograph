@@ -68,6 +68,19 @@ can never leak into a later step.
     - Like applying a crop or a filter, an applied transform is a
       permanent edit to the working copy — it is not on the undo stack.
       Your source file on disk is never modified.
+    - **Applying is fast, including a rotation.** The points themselves move
+      straight away, so every tool — triangulation, LAD, skeletons, QSM,
+      export — sees the cloud where you put it immediately. What is *not*
+      redone straight away is the display index a streamed cloud is drawn
+      from: rebuilding that after a rotation would take far longer than the
+      move itself, so the viewer simply draws the existing index in its new
+      position. You will not see a difference.
+
+      The one thing that needs the index rebuilt is a **freeform or
+      rectangle crop, the erase brush, or the label brush** on a rotated
+      cloud, because those select points using the view you drew them in.
+      The first of those after a rotation shows an **Updating display…**
+      indicator while it catches up, then applies normally.
 
 The toolbar also has a one-click **Move to Origin** that centers the
 cloud's bounding box at (0, 0, 0) without rotating it.

@@ -259,7 +259,14 @@ test.describe('translate cloud', () => {
         netX: Math.round(e.net.x * 1000) / 1000,
         worldDx: Math.round((e.world.x - before.world.x) * 1000) / 1000,
       };
-    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toEqual({ netX: 0, worldDx: 5 });
+    // `worldDx` is the assertion that matters: the cloud is drawn +5 in world.
+    //
+    // `netX` is deliberately NOT checked. It used to be 0 because a translate
+    // re-tiled the octree and cleared the draft; a translate now poses the
+    // existing octree instead (re-tiling is O(file) and the pose is free), so
+    // netX legitimately stays at the offset. Asserting it would pin the
+    // mechanism rather than the result.
+    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toMatchObject({ worldDx: 5 });
 
     // Y/Z untouched.
     const after = await readEntryWhenReady();
@@ -331,7 +338,14 @@ test.describe('translate cloud', () => {
         netX: Math.round(e.net.x * 1000) / 1000,
         worldDx: Math.round((e.world.x - before.world.x) * 1000) / 1000,
       };
-    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toEqual({ netX: 0, worldDx: 5 });
+    // `worldDx` is the assertion that matters: the cloud is drawn +5 in world.
+    //
+    // `netX` is deliberately NOT checked. It used to be 0 because a translate
+    // re-tiled the octree and cleared the draft; a translate now poses the
+    // existing octree instead (re-tiling is O(file) and the pose is free), so
+    // netX legitimately stays at the offset. Asserting it would pin the
+    // mechanism rather than the result.
+    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toMatchObject({ worldDx: 5 });
   });
 
   // Two properties of the Transform gizmo, both driven through the real UI.
@@ -512,7 +526,14 @@ test.describe('translate cloud', () => {
         netX: Math.round(e.net.x * 1000) / 1000,
         worldDx: Math.round((e.world.x - before.world.x) * 1000) / 1000,
       };
-    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toEqual({ netX: 0, worldDx: 5 });
+    // `worldDx` is the assertion that matters: the cloud is drawn +5 in world.
+    //
+    // `netX` is deliberately NOT checked. It used to be 0 because a translate
+    // re-tiled the octree and cleared the draft; a translate now poses the
+    // existing octree instead (re-tiling is O(file) and the pose is free), so
+    // netX legitimately stays at the offset. Asserting it would pin the
+    // mechanism rather than the result.
+    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toMatchObject({ worldDx: 5 });
 
     // Triangulate through the real UI (Poisson at non-default depth 7, matching
     // the other triangulation specs on this fixture).
@@ -577,8 +598,10 @@ test.describe('translate cloud', () => {
     // position is STILL +5 and the net offset is STILL 0.
     await session.page.waitForTimeout(500);
     const after = await readEntryWhenReady();
+    // Still +5 in world — the point of the test. `net.x` is not checked: a
+    // translate now poses the octree rather than re-tiling it, so the offset
+    // lives in the pose instead of in the octree's own coordinates.
     expect(Math.round((after.world.x - before.world.x) * 1000) / 1000).toBe(5);
-    expect(Math.abs(after.net.x)).toBeLessThan(1e-3);
   });
 
   // Move to Origin is a canned cloud translation — it must bake too, or it
@@ -689,11 +712,15 @@ test.describe('translate cloud', () => {
     await openTranslateTool();
     await typeRotate('z', '90');
     await clickOK();
-    // Wait for the bake: the rotated octree rebuild lands (net back to ~0).
-    await expect.poll(async () => {
-      const e = await readEntry();
-      return e ? Math.round(e.net.x * 1000) / 1000 : null;
-    }, { timeout: 60_000, intervals: [250, 500, 1000] }).toBe(0);
+    // The GEOMETRY is written on OK; the octree is not rebuilt for a rotation
+    // (that would cost a full PotreeConverter reindex), so the cloud keeps being
+    // drawn through a stored pose and `net` stays non-zero. Waiting for net→0
+    // here would wait for a rebuild that deliberately never happens.
+    //
+    // What this test is actually about is the geometry, and the export below is
+    // the assertion that proves it: a render-only rotation would export the
+    // ORIGINAL coordinates.
+    await expect(page.getByTestId('translate-panel')).toBeHidden({ timeout: 60_000 });
 
     // Triangulate (Poisson depth 7, matching the other specs on this fixture).
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
@@ -1218,6 +1245,7 @@ test.describe('translate cloud', () => {
     // Capture the octree's pre-bake cacheId so we can prove the geometry bake
     // actually ran (a fresh cacheId) — not just that the origin metadata changed.
     const cacheBefore = await row.getAttribute('data-octree-cache-id');
+    const boundsBefore = (await row.getAttribute('data-scan-bounds'))!.split(',').map(Number);
 
     await openTranslateTool();
     await typeTranslate('x', '5');
@@ -1226,12 +1254,19 @@ test.describe('translate cloud', () => {
     // The origin must shift by +5 in X: 0.5 → 5.5, Y/Z unchanged.
     await expect(row).toHaveAttribute('data-scan-origin', '5.500,-1.000,0.250', { timeout: 60_000 });
 
-    // Sanity: the geometry bake actually happened (octree rebuilt → new cacheId),
-    // so the origin moved WITH a real geometry change, not on its own.
+    // Sanity: the geometry really moved, so the origin moved WITH it rather than
+    // drifting on its own.
+    //
+    // Asserted on the BOUNDS, not on a changed cacheId. A translate no longer
+    // re-tiles the octree (that is O(file); the existing octree is posed
+    // instead), so the cacheId legitimately stays put — using it as the proxy
+    // for "the geometry moved" would now pin the mechanism, not the result.
     await expect(async () => {
-      const cacheAfter = await row.getAttribute('data-octree-cache-id');
-      expect(cacheAfter).toBeTruthy();
-      expect(cacheAfter).not.toBe(cacheBefore);
+      const raw = await row.getAttribute('data-scan-bounds');
+      expect(raw).toBeTruthy();
+      const n = raw!.split(',').map(Number);
+      expect(Math.round((n[0] - boundsBefore[0]) * 1000) / 1000).toBe(5);
+      expect(Math.round((n[3] - boundsBefore[3]) * 1000) / 1000).toBe(5);
     }).toPass({ timeout: 60_000 });
   });
 
