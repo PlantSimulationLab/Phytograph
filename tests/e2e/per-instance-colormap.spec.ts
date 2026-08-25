@@ -58,6 +58,36 @@ function colorDistance(
 }
 
 // Import the fixture and triangulate it twice, yielding two independent meshes.
+//
+// Ball Pivoting, NOT Poisson. This was the source of a ~50%-per-run flake that
+// surfaced as `expect(mesh-row).toHaveCount(N)` timing out one mesh short, at a
+// different test on each run. It reads like a selection or timing problem and is
+// neither: Open3D 0.19.0's Poisson reconstruction fails nondeterministically on
+// ~6% of calls (documented at `_run_poisson_isolated` in backend-api/main.py,
+// which subprocess-isolates it so a SIGSEGV can't take the backend down). Here
+// it surfaced as the child erroring out rather than crashing —
+//
+//   Failed to close loop [4: 9 24 17] | (45701): (296,352,326)
+//     — PoissonRecon/Src/FEMTree.IsoSurface.specialized.inl:1463
+//
+// — which the backend correctly reports as a failed triangulation and the UI
+// correctly shows as an error toast. The product is behaving properly; the test
+// was just built on a coin flip. Six Poisson calls per run (two per test, three
+// tests) at ~6% each is a ~30% chance that some assertion in the file comes up
+// short — matching both the observed rate and the way the failure wandered
+// between tests. triangulate-merge.spec.ts was moved off Poisson for this same
+// reason.
+//
+// Ball Pivoting is deterministic on this fixture, and measurably so: 40/40
+// triangulations across 20 fresh scenes produced 109 triangles and a
+// byte-identical colour signature every time (and the whole loop ran in 43 s,
+// against minutes for the Poisson version). That also strengthens the file —
+// the two meshes are now identical, so "both follow the default, so their
+// colours converge" is an exact equality rather than a tolerance around two
+// different reconstructions.
+//
+// Nothing here depends on Poisson: these tests need two meshes carrying
+// per-triangle scalar colour, which any triangulated mesh provides.
 async function makeTwoMeshes(page: Page, app: LaunchedApp['app']) {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
@@ -70,12 +100,17 @@ async function makeTwoMeshes(page: Page, app: LaunchedApp['app']) {
     await page.getByTestId('tool-triangulate').click();
     const triModal = page.getByTestId('triangulation-popup');
     await expect(triModal).toBeVisible();
-    await triModal.getByTestId('triangulation-method').selectOption('poisson');
-    await triModal.getByTestId('triangulation-poisson-depth').fill('6');
+    await triModal.getByTestId('triangulation-method').selectOption('ball_pivoting');
+    // The popup seeds its own scan checkboxes from the panel selection on open,
+    // falling back to ALL eligible scans when that selection is empty
+    // (TriangulationPopup's seed effect). With one cloud in the scene both
+    // routes pick that cloud, so no re-click is needed between iterations —
+    // and a plain click here would be actively wrong: triangulating does not
+    // touch selectedScanIds, so the row is still the sole selection and a
+    // click would toggle it OFF (see handleToggleScanSelection in App.tsx,
+    // and the same trap documented in scan-transform-shortcut.spec.ts).
     await triModal.getByTestId('triangulation-run-button').click();
     await expect(page.getByTestId('mesh-row')).toHaveCount(i + 1, { timeout: 90_000 });
-    // Re-select the cloud so the second triangulation has a source.
-    if (i === 0) await cloudRow.click();
   }
 }
 
@@ -171,11 +206,11 @@ test('the scene default repaints only the meshes still inheriting it', async () 
   // Both meshes now share the default, so their colours must converge: mesh 0
   // repaints away from jet and lands on whatever mesh 1 is using.
   //
-  // The two meshes are separate Poisson reconstructions of the same cloud, so
-  // their triangles — and hence the sampled means — are close but not
-  // identical. The tolerance below is an order of magnitude under the
-  // jet↔default separation this same test measures (>0.05), so it still fails
-  // if mesh 0 stays on its override.
+  // The two meshes are Ball Pivoting reconstructions of the same cloud, which is
+  // deterministic here (measured identical across 40 runs — see makeTwoMeshes),
+  // so the two means are equal to floating-point noise rather than merely close.
+  // The tolerance stays well under the jet↔default separation this same test
+  // measures (>0.05), so it still fails if mesh 0 stays on its override.
   await page.waitForTimeout(500);
   const afterReset = await meshColorSignatures(page);
   expect(
