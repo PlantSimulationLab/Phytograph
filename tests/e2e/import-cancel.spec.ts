@@ -76,7 +76,33 @@ async function barWidthPct(page: import('@playwright/test').Page): Promise<numbe
   });
 }
 
+// The cache entries currently installed under the launch's private octree cache
+// root — a directory is "installed" once it holds a metadata.json (the atomic
+// rename that promotes `<key>.staging` into `<key>` is the last step of a build,
+// so this never sees a half-built entry).
+function listInstalledOctrees(root: string): string[] {
+  return existsSync(root)
+    ? readdirSync(root).filter((d) => existsSync(join(root, d, 'metadata.json')))
+    : [];
+}
+
+// Octree builds still in progress. `_build_octree_from_las` runs PotreeConverter
+// into `<key>.staging/` and promotes it with one atomic rename, removing the
+// staging dir on any failure — so a staging DIRECTORY existing means a build is
+// live right now. (The sibling `<key>.staging.converter.log` is a file, not a
+// directory, and is excluded.)
+function listStagingOctrees(root: string): string[] {
+  return existsSync(root)
+    ? readdirSync(root).filter((d) =>
+        d.endsWith('.staging') && statSync(join(root, d)).isDirectory())
+    : [];
+}
+
 let session: LaunchedApp;
+// Snapshot of the octree cache at the start of each test. The cache is on-disk
+// state that File → New does NOT clear, so tests must diff against this rather
+// than assume the root is empty.
+let octreesBefore: string[] = [];
 
 test.beforeAll(async () => {
   test.setTimeout(300_000);   // fixture generation on a cold run
@@ -90,11 +116,13 @@ test.afterAll(async () => {
 
 test.beforeEach(async () => {
   await resetToFreshScene(session.app, session.page);
+  octreesBefore = listInstalledOctrees(session.octreeCacheRoot);
 });
 
-// Playwright runs tests in declaration order within a file, and this one must go
-// FIRST: it asserts the octree cache is empty after the cancel, which the second
-// test (a full successful import of the same fixture) would populate.
+// Declaration order no longer matters to correctness: the cache assertion below
+// diffs against the per-test snapshot instead of demanding a globally empty
+// root, so the second test (a full successful import, which installs an entry)
+// can no longer break this one by running first.
 test('cancelling an import stops the backend work and adds no scan', async () => {
   test.setTimeout(240_000);
   const { app, page } = session;
@@ -125,6 +153,29 @@ test('cancelling an import stops the backend work and adds no scan', async () =>
   });
   expect(health.ok, 'backend was unresponsive mid-import (event loop blocked)').toBe(true);
 
+  // Cancel while the OCTREE BUILD IS ACTUALLY RUNNING, not merely while the
+  // modal happens to be up.
+  //
+  // This is what makes the test mean anything, and it took a sabotage run to
+  // find. Clicking as soon as the modal appears cancels ~200 ms in, during the
+  // ASCII read — a moment when there is no converter to kill and nothing that
+  // could be left behind, so every assertion below is satisfied by an import
+  // that had barely started. With the backend's cancel delivery deliberately
+  // broken, the spec still went green in under a second.
+  //
+  // Waiting for a `<key>.staging` directory pins the click to the one window
+  // where a leak is possible: PotreeConverter has been spawned and is writing,
+  // and only a cancel that genuinely reaches the worker can stop it before the
+  // atomic rename installs the entry. Load-independent — it waits for a state,
+  // not a duration.
+  await expect.poll(
+    () => listStagingOctrees(session.octreeCacheRoot).length,
+    {
+      timeout: 120_000,
+      message: 'the octree build never started, so there was nothing to cancel',
+    },
+  ).toBeGreaterThan(0);
+
   // Cancel for real.
   const cancel = page.getByTestId('bulk-import-cancel');
   await expect(cancel).toBeVisible();
@@ -134,22 +185,51 @@ test('cancelling an import stops the backend work and adds no scan', async () =>
   // often lands fast enough that the whole modal unmounts first, which races.
   await expect(modal).toBeHidden({ timeout: 60_000 });
 
-  // Give a NOT-actually-cancelled import ample time to finish and install its
-  // octree. The uncancelled import of this fixture takes ~10 s end to end (see
-  // the second test), so 45 s of quiet is decisive: work still running in the
-  // background would have completed several times over by now.
-  await page.waitForTimeout(45_000);
+  // Wait for the OCTREE BUILD to settle, rather than sleeping.
+  //
+  // This used to be `waitForTimeout(45_000)`, reasoning that an uncancelled
+  // import takes ~10 s so 45 s of quiet proves nothing is still running. That
+  // premise is load-dependent by construction — it measures the machine, not the
+  // cancel — and it broke under `--workers=2`, where the `heavy` project runs
+  // alongside a `main` spec (the two projects are deliberately NOT serialised;
+  // see playwright.config.ts). It also cost 45 s on every green run.
+  //
+  // The load-independent signal is the cache directory itself. A build writes
+  // into `<key>.staging/` and promotes it with a single atomic rename, so while
+  // a staging dir exists the converter is still working; when none exists the
+  // build has either been torn down or has finished (and installed). Polling for
+  // "no staging dir" therefore waits exactly as long as the machine needs and
+  // not a second more — and, critically, it keeps watching the work itself.
+  //
+  // Deliberately NOT the backend's cancel registry: a run is cleared from it in
+  // the stream's `finally`, which fires when the CLIENT disconnects — while the
+  // worker thread carries on in the executor. Measured during sabotage: the
+  // registry emptied at t+3 s and the octree was installed at t+12 s. Polling
+  // that would have declared the import over nine seconds before it leaked,
+  // which is precisely the bug this test exists to catch.
+  await expect.poll(
+    () => listStagingOctrees(session.octreeCacheRoot).length,
+    {
+      timeout: 180_000,
+      message: 'an octree build was still staging — the import never stopped',
+    },
+  ).toBe(0);
 
-  // The octree cache is empty — the PotreeConverter run was really killed, not
-  // merely detached. This is what separates a REAL cancel from one that just
-  // hides the dialog: a background import would have installed a cache entry
-  // (`<key>/metadata.json`) by now. It also pins the poisoned-cache invariant —
+  // The octree cache holds nothing new — the PotreeConverter run was really
+  // killed, not merely detached. This is what separates a REAL cancel from one
+  // that just hides the dialog: a background import would have installed a cache
+  // entry (`<key>/metadata.json`). It also pins the poisoned-cache invariant —
   // a killed build must leave the entry ABSENT, never half-written.
-  const installed = existsSync(session.octreeCacheRoot)
-    ? readdirSync(session.octreeCacheRoot).filter((d) =>
-        existsSync(join(session.octreeCacheRoot, d, 'metadata.json')))
-    : [];
-  expect(installed,
+  //
+  // Compared against a beforeEach snapshot rather than asserted empty: the
+  // octree cache is on-disk state that `resetToFreshScene` (File → New) does not
+  // clear, so "the root is empty" silently depends on this test running first
+  // and on every earlier test having left nothing behind. Diffing against the
+  // snapshot asserts what this test actually cares about — that THIS cancel
+  // installed nothing — and keeps holding if the file is ever reordered.
+  const installed = listInstalledOctrees(session.octreeCacheRoot);
+  const added = installed.filter((d) => !octreesBefore.includes(d));
+  expect(added,
     'an octree was installed after cancel — the import kept running').toEqual([]);
 
   // Nothing was imported into the scene...

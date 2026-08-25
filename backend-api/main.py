@@ -20579,6 +20579,55 @@ class _ProgressReporter:
             self._cancel_int.value = 1
 
 
+class _WindowedProgress:
+    """A progress reporter that maps a sub-worker's own 0..1 sweep into a SLICE
+    of an outer reporter's bar, and forwards the cancel protocol unchanged.
+
+    Exists because the cancel protocol is duck-typed: `_cancel_checkpoint` only
+    raises when its argument exposes a truthy `should_cancel`. Windowing the
+    fraction with a bare closure therefore SILENTLY strips cancellation from
+    every checkpoint the sub-worker runs — the failure is invisible (no error,
+    no log; the work simply runs to completion after the user cancelled), which
+    is exactly how it survived in `_do_create_multi_cloud_session`. Wrapping in
+    a class that delegates `should_cancel`/`cancelled`/`raise_if_cancelled`/
+    `bind_cancel_int` keeps the two concerns from being separable by accident.
+
+    Use this anywhere a sub-range of a streaming op's progress is delegated;
+    never re-introduce a plain `def sub_progress(...)` wrapper.
+    """
+
+    def __init__(self, outer, lo: float, hi: float, prefix: str = ""):
+        self._outer = outer
+        self._lo = lo
+        self._hi = hi
+        self._prefix = prefix
+
+    def __call__(self, fraction, message: str = "") -> None:
+        if self._outer is None:
+            return
+        f = (None if fraction is None
+             else self._lo + (self._hi - self._lo) * max(0.0, min(1.0, fraction)))
+        self._outer(f, f"{self._prefix}{message}" if message else self._prefix.strip())
+
+    # --- cancel protocol: delegate straight through to the wrapped reporter ---
+    def should_cancel(self) -> bool:
+        fn = getattr(self._outer, "should_cancel", None)
+        return bool(fn()) if fn else False
+
+    @property
+    def cancelled(self) -> bool:
+        return self.should_cancel()
+
+    def raise_if_cancelled(self) -> None:
+        if self.should_cancel():
+            raise ScanCancelled()
+
+    def bind_cancel_int(self, cancel_int) -> None:
+        fn = getattr(self._outer, "bind_cancel_int", None)
+        if fn:
+            fn(cancel_int)
+
+
 def _bin_frame_streaming_response(
     build_frame,
     *,
@@ -26754,11 +26803,18 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
         # jumps forward then back.
         sess_lo = lo + (hi - lo) * (0.35 if is_ptx else 0.0)
 
-        def _sub_progress(fraction, message="", _lo=sess_lo, _hi=hi, _p=prefix):
-            if progress is None:
-                return
-            f = None if fraction is None else _lo + (_hi - _lo) * max(0.0, min(1.0, fraction))
-            progress(f, f"{_p}{message}" if message else _p.strip())
+        # MUST be a _WindowedProgress, not a bare closure. `_cancel_checkpoint`
+        # probes its argument for `should_cancel`, so a plain function silently
+        # disables EVERY checkpoint inside `_do_create_cloud_session` — and since
+        # this multi path is what all path-backed imports go through, that made
+        # import cancellation a no-op at every stage boundary. The only thing
+        # that still stopped was the PotreeConverter poll loop (which watches the
+        # `cancel_event` directly), so a cancel took effect only if it happened
+        # to land while the converter was running; land it a moment earlier — the
+        # common case, during the ASCII→LAS normalise and the point read — and
+        # the import ran to completion and installed an octree into the cache
+        # after the dialog had already been dismissed.
+        _sub_progress = _WindowedProgress(progress, sess_lo, hi, prefix)
 
         if progress is not None:
             progress(lo, f"{prefix}Importing scan position {i + 1} of {n}…" if n > 1
