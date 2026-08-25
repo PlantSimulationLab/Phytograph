@@ -1,0 +1,278 @@
+name: Platform
+
+# Builds an UNSIGNED installer on the platforms CI never touches and proves the
+# packaged app actually opens. This is the "package builds are never tested"
+# gap: ci.yml runs the full suite on Linux against the supervised backend, but
+# nothing outside a release tag ever exercised electron-builder, and nothing at
+# all ever exercised Windows or macOS.
+#
+# ---------------------------------------------------------------------------
+# Why unsigned, and why that is the point
+# ---------------------------------------------------------------------------
+# Signing and notarization are the slow, credential-bound, queue-bound part of
+# release.yml — a first notarization submission has sat "In Progress" for over
+# an hour. None of it is needed to answer the question this workflow asks,
+# which is "does the assembled installer produce an app that runs?".
+#
+# So the secrets are deliberately absent and SKIP_NOTARIZATION is pinned:
+#   - scripts/notarize.cjs returns early on SKIP_NOTARIZATION=1 (and again on
+#     missing APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID), so Apple is never called.
+#   - CSC_IDENTITY_AUTO_DISCOVERY=false stops electron-builder hunting the
+#     keychain for a macOS identity that isn't there.
+#   - azureSigningArgs() in scripts/run-electron-builder.mjs no-ops without
+#     AZURE_TENANT_ID/AZURE_CLIENT_ID, so Windows packaging skips Authenticode.
+#
+# The result: iterating on a packaging or first-launch bug costs a build, not a
+# build plus a notarization queue. release.yml remains the only place that
+# signs, notarizes, or publishes anything.
+#
+# ---------------------------------------------------------------------------
+# Scope of v1: macOS arm64 + Windows
+# ---------------------------------------------------------------------------
+# These are the two platforms with ZERO automated coverage today, and neither
+# needs exotic build setup — the macos-14 runner gets prebuilt wheels for
+# pye57/cloth-simulation-filter/cut_pursuit_py, and Windows needs only MSVC.
+#
+# Deliberately NOT here yet, with reasons that are about cost, not oversight:
+#
+#   macOS Intel (macos-15-intel) — it is the only platform that builds those
+#   three packages from sdist, and release.yml carries ~110 lines of hard-won
+#   workarounds for it (xerces-c SONAME drift, cut_pursuit_py's sdist declaring
+#   0.1.2 while named 1.0.12). Copying that here would fork it and guarantee
+#   drift. The right move is to extract those steps into a composite action
+#   under .github/actions/ that BOTH workflows call, then add the platform.
+#
+#   Linux — ci.yml already drives the real supervised backend through the whole
+#   E2E suite on every push, so the only untested delta is the AppImage wrapper
+#   itself. Adding it here would also mint a fourth ~2.9 GB Linux backend cache
+#   against a 10 GB repo budget. When it is added, it should SHARE ci.yml's
+#   cache key rather than define its own, since both build the same CPU-only
+#   Linux bundle from the same sources.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Which platforms to build'
+        type: choice
+        default: all
+        options: [all, macos-arm64, windows]
+  # Weekly rather than nightly: this catches upstream drift (a runner image
+  # bump, a wheel that stopped publishing) without burning two runners a day on
+  # commits that changed nothing. Run it by hand before cutting a release tag —
+  # that is the check that actually matters, and it is what stops a packaging
+  # regression from being discovered mid-release.
+  schedule:
+    - cron: '0 9 * * 1'
+
+concurrency:
+  group: platform-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # A dispatch can target ONE platform, so a first look at just Windows does not
+  # also spend a macOS runner. (Re-testing a platform that already failed does
+  # not need this — GitHub's "Re-run failed jobs" re-runs only the failed matrix
+  # leg. This is for the targeted first dispatch.)
+  #
+  # It has to be a separate job because the matrix cannot filter itself: a
+  # job-level `if:` is evaluated BEFORE the matrix expands, so `matrix.key` is
+  # not in scope there. Emitting the matrix as JSON and consuming it through
+  # fromJSON() is the supported way to make the leg list depend on an input.
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.pick.outputs.include }}
+    env:
+      # Passed through the environment rather than interpolated straight into
+      # the script. The value is a constrained `choice`, so this is not
+      # exploitable today, but `${{ }}` inside a shell body is the shape of an
+      # expression-injection bug and is worth never writing.
+      EVENT_NAME: ${{ github.event_name }}
+      PLATFORMS: ${{ inputs.platforms }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          # pip caching is kept on macOS/Windows: those caches are ~370-440 MB
+          # and macOS Intel (when it joins) genuinely compiles from sdist. Only
+          # the 3.2 GB Linux pip cache was a bad trade — see ci.yml.
+          all=$(cat <<'JSON'
+          [
+            {"key":"macos-arm64","platform":"macos-14","arch":"arm64","pip_cache":"pip",
+             "package_cmd":"npm run package:mac -- --arm64 --publish never"},
+            {"key":"windows","platform":"windows-2022","arch":"x64","pip_cache":"pip",
+             "package_cmd":"npm run package:win -- --publish never"}
+          ]
+          JSON
+          )
+          sel="$all"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${PLATFORMS:-}" ] && [ "$PLATFORMS" != "all" ]; then
+            sel=$(jq -c --arg k "$PLATFORMS" '[.[] | select(.key == $k)]' <<<"$all")
+            if [ "$(jq -r 'length' <<<"$sel")" -eq 0 ]; then
+              echo "::error::no platform matches '$PLATFORMS'"; exit 1
+            fi
+          fi
+          echo "include=$(jq -c . <<<"$sel")" >> "$GITHUB_OUTPUT"
+          jq -r '.[] | "selected: \(.key) (\(.platform))"' <<<"$sel"
+
+  package:
+    needs: select
+    strategy:
+      # Never cancel a sibling platform on the first failure: the whole point is
+      # to learn about Windows AND macOS in one round rather than discovering
+      # them one dispatch at a time.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.select.outputs.include) }}
+
+    runs-on: ${{ matrix.platform }}
+    # Cold: PyHelios + PyInstaller + electron-builder. Warm: ~15 min. No
+    # notarization wait is possible here, so this needs nowhere near
+    # release.yml's 150.
+    timeout-minutes: 90
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: ${{ matrix.pip_cache }}
+          cache-dependency-path: backend-api/requirements.txt
+
+      # PyHelios's and PotreeConverter's CMake builds use the "Visual Studio 17
+      # 2022" generator, which fails with "could not find any instance of Visual
+      # Studio" unless the VS Developer environment is on PATH. The hosted runner
+      # has VS installed but does not activate it for plain `run:` steps.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # The `-cpu` suffix is load-bearing. release.yml appends `-cuda` and, on
+      # Windows, installs the CUDA toolkit so libhelios compiles its CUDA
+      # ray-tracing path. This workflow installs no CUDA, so its Windows bundle
+      # is CPU-only. If the two shared a key, a CPU-only backend built here
+      # could be restored into a release build and shipped as a GPU installer —
+      # exactly the outcome `--require-gpu` exists to prevent. Distinct keys
+      # make that impossible rather than merely unlikely.
+      #
+      # Consequence worth stating plainly: on Windows the artifact smoke-tested
+      # here is NOT byte-identical to the one released. It validates packaging,
+      # resource paths, sidecar spawn and first launch; it does not validate the
+      # GPU path. That is the GPU parity job's business.
+      #
+      # Keep the hashFiles globs identical to ci.yml and release.yml — they must
+      # hash the same inputs even though the suffixes differ.
+      - name: Compute cache keys
+        id: keys
+        shell: bash
+        run: |
+          sha="$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)"
+          echo "backend=backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${sha}-cpu" >> "$GITHUB_OUTPUT"
+          if command -v sha256sum >/dev/null; then h=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1); else h=$(shasum -a 256 scripts/build-potree-converter.mjs | cut -d' ' -f1); fi
+          echo "potree=potree-${{ runner.os }}-${{ matrix.arch }}-pr686-${h}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache PyInstaller backend
+        id: backend-cache
+        uses: actions/cache@v4
+        with:
+          path: resources/phytograph_backend
+          key: ${{ steps.keys.outputs.backend }}
+
+      - name: Cache PotreeConverter binary
+        id: potree-cache
+        uses: actions/cache@v4
+        with:
+          path: resources/potree_converter
+          key: ${{ steps.keys.outputs.potree }}
+
+      # No torch CPU-index dance here: that exists in release.yml only because
+      # Linux defaults to the CUDA torch wheel. macOS and Windows already
+      # resolve CPU torch for phytorch-lib.
+      - name: Install Python dependencies
+        if: steps.backend-cache.outputs.cache-hit != 'true'
+        working-directory: backend-api
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # No --require-gpu: macOS has no CUDA at all, and this workflow
+      # deliberately does not install the Windows toolkit (see the key comment).
+      - name: Build PyHelios from source
+        if: steps.backend-cache.outputs.cache-hit != 'true'
+        run: node scripts/build-pyhelios.mjs
+
+      - name: Build Python backend (PyInstaller bundle)
+        if: steps.backend-cache.outputs.cache-hit != 'true'
+        run: node scripts/build-backend.mjs
+
+      - name: Build PotreeConverter
+        if: steps.potree-cache.outputs.cache-hit != 'true'
+        run: node scripts/build-potree-converter.mjs
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Fail before electron-builder rather than after: a bundle that does not
+      # match the tree produces an installer whose app hangs at the splash
+      # forever (see CLAUDE.md "Version-lock contract"), and the smoke test
+      # would then report a 2-minute timeout instead of the real cause.
+      - name: Verify backend bundle matches the tree
+        run: node scripts/check-backend-bundle.mjs
+
+      # `npm run package:*` runs `npm run build` first, so the renderer, main
+      # and preload are built here. --publish never is explicit rather than
+      # relying on electron-builder's default, which publishes on a tag.
+      - name: Package installer (unsigned)
+        env:
+          SKIP_NOTARIZATION: '1'
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # macOS electron-builder 25.1.8 hard-links build/icon.icns into the
+          # packaged .app twice within one build and the second link fails
+          # EEXIST. Copying instead sidesteps it; harmless elsewhere.
+          USE_HARD_LINKS: 'false'
+        run: ${{ matrix.package_cmd }}
+
+      # The artifact-level check: launch the packaged binary, assert the window
+      # opens, the supervised backend answers /version with the expected
+      # version, and the renderer mounts. This is what catches a first-launch
+      # crash or a backend that cannot start from inside the bundle — the class
+      # of failure a green build hides.
+      - name: Smoke-test packaged app
+        run: npm run test:smoke-packaged
+
+      # electron-builder writes its own logs next to the output; grab enough to
+      # diagnose a packaging failure without shipping the ~1 GB unpacked app.
+      - name: Upload packaging diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-diagnostics-${{ matrix.key }}
+          path: |
+            release/*.yml
+            release/*.blockmap
+            release/builder-*.yml
+            release/builder-debug.yml
+          retention-days: 7
+          if-no-files-found: ignore
