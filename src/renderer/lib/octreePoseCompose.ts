@@ -74,6 +74,30 @@ function isZeroRotation(r: { x: number; y: number; z: number } | null | undefine
 }
 
 /**
+ * Apply one draft pose (rotation about `pivot`, then translation) to a single
+ * WORLD point.
+ *
+ * Same matrix as `transformBoundsAabb` uses on a cloud's corners, so a point
+ * that rides along with a cloud (its scanner origin, say) lands exactly where
+ * the rendered cloud puts it. Shares `poseToMatrix` rather than re-deriving the
+ * rotation-about-a-pivot composition, which is the part that is easy to get
+ * subtly wrong.
+ */
+export function transformPoint(
+  point: readonly [number, number, number],
+  translation: { x: number; y: number; z: number },
+  rotationDeg: { x: number; y: number; z: number },
+  pivot: { x: number; y: number; z: number },
+): [number, number, number] {
+  if (isZeroRotation(rotationDeg)) {
+    return [point[0] + translation.x, point[1] + translation.y, point[2] + translation.z];
+  }
+  const v = new THREE.Vector3(point[0], point[1], point[2])
+    .applyMatrix4(poseToMatrix(translation, rotationDeg, pivot));
+  return [v.x, v.y, v.z];
+}
+
+/**
  * Resolve the pose the octree (and its miss shell) should render at.
  *
  * `cacheId` is the cloud's CURRENT octree id; `livePivot` is the pivot the

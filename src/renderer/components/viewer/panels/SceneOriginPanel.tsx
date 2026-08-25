@@ -1,13 +1,23 @@
-import { Crosshair, X, Target, MousePointerClick, Focus } from 'lucide-react';
+import { useState } from 'react';
+import { Crosshair, X, Target, MousePointerClick, Focus, Radio } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 
 type Axis = 'x' | 'y' | 'z';
 
+// One scan the origin can be snapped onto: a scanner position in WORLD coords,
+// already carrying any uncommitted transform draft (the parent resolves that).
+export interface ScannerPositionOption {
+  id: string;
+  label: string;
+  position: [number, number, number];
+}
+
 // Scene-origin panel (CloudCompare-style pivot). The origin is a point in WORLD
 // coordinates that serves as the rotation pivot for the Transformation tool. It
-// ALWAYS exists — with no user override it sits at the scene bounds center — so
-// `origin` is never null; `isCustom` distinguishes "the user placed this" from
-// "the default", which is all the Reset button needs. The parent
+// ALWAYS exists — with no override it sits at the scene bounds center (or, on a
+// scan project that carries scanner positions, at their centroid) — so `origin`
+// is never null; `isCustom` distinguishes "something other than the plain
+// scene-center default", which is all the Reset button needs. The parent
 // (PointCloudViewer) owns the origin state, the pick-mode arming, and the
 // world-frame math; this component only renders the current value and reports
 // intent. Whether the marker is DRAWN is a viewport display setting, not an
@@ -15,15 +25,28 @@ type Axis = 'x' | 'y' | 'z';
 interface SceneOriginPanelProps {
   /** Effective origin in WORLD coords (user override, else the ground-anchored scene center). */
   origin: [number, number, number];
-  /** True when the user has overridden the default scene-center origin. */
+  /**
+   * True when the origin is NOT the plain scene-center default — i.e. Reset has
+   * something to undo. Covers both an explicit user placement and the scanner
+   * centroid seeded on import; `originSource` says which.
+   */
   isCustom: boolean;
+  /** Where the current origin came from, for the caption and for E2E. */
+  originSource: 'user' | 'scanners' | 'default';
   /** True while click-to-place is armed (next viewport click sets the origin). */
   placeMode: boolean;
   /** Whether a "move to selection center" target is available. */
   canMoveToSelection: boolean;
+  /**
+   * Scans carrying a known scanner position, in scene order. Empty when nothing
+   * in the scene records one (a plain XYZ/LAS import), which disables the snap.
+   */
+  scannerPositions: ScannerPositionOption[];
   onCoordChange: (axis: Axis, value: number) => void;
   onTogglePlaceMode: () => void;
   onMoveToSelection: () => void;
+  /** Move the origin onto the given scan's scanner position. */
+  onSnapToScanner: (scanId: string) => void;
   /** Re-centre the camera on the origin, keeping the current viewing angle. */
   onFrameOrigin: () => void;
   onReset: () => void;
@@ -33,15 +56,25 @@ interface SceneOriginPanelProps {
 const AXES: Axis[] = ['x', 'y', 'z'];
 
 export function SceneOriginPanel({
-  origin, isCustom, placeMode, canMoveToSelection,
-  onCoordChange, onTogglePlaceMode, onMoveToSelection, onFrameOrigin,
+  origin, isCustom, originSource, placeMode, canMoveToSelection, scannerPositions,
+  onCoordChange, onTogglePlaceMode, onMoveToSelection, onSnapToScanner, onFrameOrigin,
   onReset, onClose,
 }: SceneOriginPanelProps) {
+  // Which scanner the snap targets. Held as an id rather than an index so the
+  // choice survives a scan being added or removed, and resolved against the
+  // CURRENT list every render — a scan that disappears (deleted, or its draft
+  // baked away) silently falls back to the first available one instead of
+  // leaving the button pointed at nothing.
+  const [pickedScanId, setPickedScanId] = useState<string | null>(null);
+  const chosenScanner =
+    scannerPositions.find((s) => s.id === pickedScanId) ?? scannerPositions[0] ?? null;
+
   return (
     <div
       className="absolute top-4 right-[280px] z-20 bg-neutral-800/95 backdrop-blur-sm rounded-lg p-3 shadow-lg w-56"
       data-testid="scene-origin-panel"
       data-has-origin={isCustom ? 'true' : 'false'}
+      data-origin-source={originSource}
       data-place-mode={placeMode ? 'true' : 'false'}
     >
       <div className="text-xs font-medium text-neutral-300 mb-3 flex items-center justify-between">
@@ -66,6 +99,15 @@ export function SceneOriginPanel({
         scene center at ground level — drag its marker, click a point in the
         viewport, or type world coordinates.
       </p>
+
+      {originSource === 'scanners' && (
+        <p
+          className="text-[10px] text-neutral-400 mb-2 leading-relaxed"
+          data-testid="scene-origin-source-note"
+        >
+          Placed at the average of the imported scanner positions.
+        </p>
+      )}
 
       <button
         onClick={onTogglePlaceMode}
@@ -111,6 +153,49 @@ export function SceneOriginPanel({
         <Target className="w-3 h-3" />
         Center on selection
       </button>
+
+      {/* Snap to a scanner position. The scene-origin panel is where a
+          multi-scan user reasons about the plot's geometry, and the scanner
+          positions are the only other absolute points in it — so offer them
+          directly rather than making the user copy coordinates out of the Scans
+          panel. Disabled outright when nothing in the scene carries an origin
+          (a plain XYZ/LAS import records none). */}
+      <div className="mt-3">
+        <label
+          htmlFor="scene-origin-scanner-select"
+          className="text-[10px] text-neutral-400 block mb-1"
+        >
+          Scanner position
+        </label>
+        <select
+          id="scene-origin-scanner-select"
+          data-testid="scene-origin-scanner-select"
+          value={chosenScanner?.id ?? ''}
+          disabled={scannerPositions.length === 0}
+          onChange={(e) => setPickedScanId(e.target.value)}
+          className="w-full bg-neutral-700 text-neutral-200 text-[11px] px-2 py-1 rounded border border-neutral-600 focus:border-blue-500 focus:outline-none disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {scannerPositions.length === 0 ? (
+            <option value="">No scanner positions</option>
+          ) : (
+            scannerPositions.map((s) => (
+              <option key={s.id} value={s.id}>{s.label}</option>
+            ))
+          )}
+        </select>
+        <button
+          onClick={() => { if (chosenScanner) onSnapToScanner(chosenScanner.id); }}
+          disabled={!chosenScanner}
+          data-testid="scene-origin-to-scanner"
+          title={chosenScanner
+            ? `Set the origin to ${chosenScanner.label} at (${chosenScanner.position.map((v) => v.toFixed(3)).join(', ')})`
+            : 'No scan in the scene records a scanner position — import a scan project, a Helios XML, or a file with a pose'}
+          className="w-full mt-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 rounded text-[11px] flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Radio className="w-3 h-3" />
+          Snap to scanner
+        </button>
+      </div>
 
       <button
         onClick={onFrameOrigin}

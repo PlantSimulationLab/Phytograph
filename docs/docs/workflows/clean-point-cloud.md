@@ -103,6 +103,17 @@ With no placement of your own, the origin sits laterally at the center of the
 loaded scene but vertically at its **base** — on the ground rather than
 halfway up — which is usually the point you want to circle.
 
+**Scan projects start at the scanner instead.** If the first thing you load
+into an empty scene records where the instrument stood — a RIEGL project, a
+Helios XML with `<origin>` tags, an E57 with poses — the origin starts at the
+**average of those scanner positions** rather than at the middle of the
+bounding box. For a multi-station plot that is the better pivot: the bounding
+box is defined by whatever the beams happened to reach (sky returns, a distant
+treeline, one stray outlier), while the stations bracket the thing you came to
+look at. The panel says so while that placement is in force, and **Reset to
+scene center** drops it. Scans imported *later*, into a scene that already has
+content, never move the origin — only the first load seeds it.
+
 That ground level is measured robustly, so a handful of erroneous returns
 below the terrain (multipath, birds, scanner artefacts) will not drag it
 down: it ignores the lowest 0.5% of points rather than taking the single
@@ -127,8 +138,14 @@ In the **Scene Origin** panel you can:
 - Type exact **X / Y / Z** world coordinates.
 - **Center on selection** — snap the origin to the middle of the selected
   cloud(s).
+- **Snap to scanner** — put the origin exactly on a scanner position. Choose
+  the scan from the **Scanner position** dropdown above the button. Only scans
+  that record where the instrument stood are listed; when nothing in the scene
+  does (a plain XYZ / LAS / PLY import records no pose), the dropdown and the
+  button are grayed out.
 - **Reset to scene center** — drop your placement and return the origin to
   its default: laterally the middle of the loaded scene, vertically its base.
+  This also clears a scanner-average placement seeded at import.
 
 The origin returns to that default when you start a new scene
 (**File → New**).

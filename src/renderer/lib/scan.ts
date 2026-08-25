@@ -243,6 +243,40 @@ export function scanHasKnownOrigin(scan: { data?: PointCloudData; params?: ScanP
   return scan.data?.octree?.scanOrigin != null || scan.params != null;
 }
 
+// The scan's scanner position (beam apex) in WORLD coordinates, or null when the
+// source never recorded one. `params.origin` is the PRIMARY copy — it is what
+// every scan-geometry consumer reads and what a scan-position gesture writes —
+// and `octree.scanOrigin` is the fallback for data-only imports (E57 pose, a
+// RIEGL position without a .pat/.scn) that carried a pose but no parameters.
+// The same precedence as the Scans panel's `data-scan-origin` attribute; keep
+// the two in step. Baked coordinates only: an uncommitted Translate/Rotate
+// draft lives in the viewer's edit state, so callers that care apply it.
+export function scanOriginOf(
+  scan: { data?: PointCloudData; params?: ScanParameters },
+): [number, number, number] | null {
+  const p = scan.params?.origin;
+  if (p) return [p.x, p.y, p.z];
+  const o = scan.data?.octree?.scanOrigin;
+  return o ? [o[0], o[1], o[2]] : null;
+}
+
+// Centroid of every KNOWN scanner position in `scans`, or null when none of them
+// carries one. Used to seed the scene origin on the first import: a multi-scan
+// project's natural pivot is the middle of the scanner ring, not the middle of
+// the point cloud's bounding box (which a single far outlier can drag away).
+// Scans without an origin are skipped, not counted as (0,0,0).
+export function meanScanOrigin(
+  scans: readonly { data?: PointCloudData; params?: ScanParameters }[],
+): [number, number, number] | null {
+  const origins = scans.map(scanOriginOf).filter((o): o is [number, number, number] => o != null);
+  if (origins.length === 0) return null;
+  const sum = origins.reduce<[number, number, number]>(
+    (acc, o) => [acc[0] + o[0], acc[1] + o[1], acc[2] + o[2]],
+    [0, 0, 0],
+  );
+  return [sum[0] / origins.length, sum[1] / origins.length, sum[2] / origins.length];
+}
+
 export function scanDisplayName(scan: Scan): string {
   if (scan.label) return scan.label;
   if (scan.data?.fileName) return scan.data.fileName;

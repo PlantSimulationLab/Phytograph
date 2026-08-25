@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+
+<!--
+  Two scan stations bracketing a small cylinder, for the scene-origin tests.
+
+  The <origin> values are deliberately NOWHERE NEAR the point data's bounding
+  box (the two cylinders span x ∈ [-0.3, 1.3], y ∈ [-0.3, 0.3], z ∈ [0, 1.5]),
+  so "origin at the scanner centroid" (4, 2.5, 1.5) and "origin at the scene
+  centre" are metres apart and no assertion about which one is in force can pass
+  by coincidence.
+
+  Both <filename>s resolve alongside this XML in the fixtures directory.
+-->
+
+<helios>
+
+<scan>
+  <filename> tiny.xyz </filename>
+  <origin> 3.0 1.0 1.5 </origin>
+  <size> 30 60 </size>
+</scan>
+
+<scan>
+  <filename> tiny-offset.xyz </filename>
+  <origin> 5.0 4.0 1.5 </origin>
+  <size> 30 60 </size>
+</scan>
+
+</helios>

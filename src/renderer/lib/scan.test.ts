@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
   duplicateScanName, derivedScanName, hasData, hasParams, scanDisplayName,
-  columnSlugs, missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, missReconSources, type Scan,
+  columnSlugs, missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, scanOriginOf,
+  meanScanOrigin, missReconSources, type Scan,
   composeRegistration, invertRigid4x4, multiply4x4, registeredScans, referenceScanIds,
 } from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
@@ -238,6 +239,54 @@ describe('scanHasKnownOrigin', () => {
   it('is false when the scan has no data', () => {
     const scan: Scan = { id: '1', label: 'a', visible: true, color: '#000' };
     expect(scanHasKnownOrigin(scan)).toBe(false);
+  });
+});
+
+describe('scanOriginOf', () => {
+  it('prefers params.origin over the octree fallback copy', () => {
+    // The two can legitimately disagree: params.origin is what a scan-position
+    // gesture writes, while octree.scanOrigin is the copy stamped at import.
+    const scan = makeScanWithColumns(['timestamp']);
+    scan.data!.octree!.scanOrigin = [9, 9, 9];
+    scan.params = { ...DEFAULT_SCAN_PARAMETERS, origin: { x: 1, y: 2, z: 3 } };
+    expect(scanOriginOf(scan)).toEqual([1, 2, 3]);
+  });
+
+  it('falls back to the octree copy when there are no params (E57 pose)', () => {
+    const scan = makeScanWithColumns(['timestamp']);
+    scan.data!.octree!.scanOrigin = [4, 5, 6];
+    expect(scanOriginOf(scan)).toEqual([4, 5, 6]);
+  });
+
+  it('is null for a plain XYZ import, and for a scan with no data at all', () => {
+    expect(scanOriginOf(makeScanWithColumns(['intensity']))).toBeNull();
+    const bare: Scan = { id: '1', label: 'a', visible: true, color: '#000' };
+    expect(scanOriginOf(bare)).toBeNull();
+  });
+});
+
+describe('meanScanOrigin', () => {
+  function scanAt(x: number, y: number, z: number): Scan {
+    const scan = makeScanWithColumns(['timestamp']);
+    scan.params = { ...DEFAULT_SCAN_PARAMETERS, origin: { x, y, z } };
+    return scan;
+  }
+
+  it('averages the stations of a multi-position project', () => {
+    expect(meanScanOrigin([scanAt(0, 0, 2), scanAt(4, 0, 2), scanAt(2, 6, 8)]))
+      .toEqual([2, 2, 4]);
+  });
+
+  it('skips originless scans rather than counting them as (0,0,0)', () => {
+    // The failure this guards: a plain XYZ dropped alongside a scan project
+    // would otherwise halve the centroid toward the world origin.
+    const plain = makeScanWithColumns(['intensity']);
+    expect(meanScanOrigin([scanAt(10, 10, 10), plain])).toEqual([10, 10, 10]);
+  });
+
+  it('is null when nothing in the scene records a position', () => {
+    expect(meanScanOrigin([makeScanWithColumns(['intensity'])])).toBeNull();
+    expect(meanScanOrigin([])).toBeNull();
   });
 });
 

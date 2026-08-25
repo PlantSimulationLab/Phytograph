@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 
-import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ } from './octreePoseCompose';
+import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint } from './octreePoseCompose';
 import { applyOctreePose } from '../components/viewer/renderers/octreePose';
 import type { CloudEditState } from './pointCloudTypes';
 
@@ -281,5 +281,45 @@ describe('transformGroundZ', () => {
 
     expect(movedGround).toBeGreaterThan(movedBox.min.z + 1);
     expect(Math.abs(movedGround - ground)).toBeLessThan(3);
+  });
+});
+
+describe('transformPoint', () => {
+  // A point that rides with a cloud (its scanner origin) must land exactly where
+  // the cloud's own corners land — otherwise "snap the scene origin to this
+  // scanner" puts the pivot somewhere the user can see the scanner is not.
+  // Checked AGAINST transformBoundsAabb rather than against re-derived algebra:
+  // a degenerate box's corners are all the same point, so the AABB of the
+  // transformed box is that point transformed.
+  const cases: { t: { x: number; y: number; z: number }; r: { x: number; y: number; z: number } }[] = [
+    { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 } },
+    { t: { x: 3, y: -2, z: 0.5 }, r: { x: 0, y: 0, z: 0 } },
+    { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 90 } },
+    { t: { x: 1.5, y: 4, z: -3 }, r: { x: 15, y: -40, z: 110 } },
+  ];
+  const point: [number, number, number] = [7, -1.25, 2];
+  const pivot = { x: 2, y: 2, z: 0 };
+
+  for (const { t, r } of cases) {
+    it(`agrees with the AABB transform for t=${JSON.stringify(t)} r=${JSON.stringify(r)}`, () => {
+      const box = {
+        min: new THREE.Vector3(...point),
+        max: new THREE.Vector3(...point),
+      };
+      const moved = transformBoundsAabb(box, t, r, pivot);
+      const p = transformPoint(point, t, r, pivot);
+      expect(p[0]).toBeCloseTo(moved.min.x, 6);
+      expect(p[1]).toBeCloseTo(moved.min.y, 6);
+      expect(p[2]).toBeCloseTo(moved.min.z, 6);
+    });
+  }
+
+  it('rotates ABOUT the pivot, not about the world origin', () => {
+    // The bug this catches: dropping the pivot term turns a 180° yaw of a scan
+    // parked away from (0,0,0) into a reflection through the world origin.
+    const p = transformPoint([3, 2, 1], { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 180 }, { x: 2, y: 2, z: 0 });
+    expect(p[0]).toBeCloseTo(1, 6);
+    expect(p[1]).toBeCloseTo(2, 6);
+    expect(p[2]).toBeCloseTo(1, 6);
   });
 });

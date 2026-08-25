@@ -238,6 +238,14 @@ That same toast says how the scans were placed — how many were registered, how
 many came from a prior and still want ICP, or that they are unregistered
 altogether.
 
+Because the project records where the instrument stood at each position, an
+import into an **empty** scene also places the [scene
+origin](clean-point-cloud.md#setting-the-scene-origin) — the pivot the view
+orbits about — at the **average of those scanner positions**, rather than at
+the middle of the point cloud's bounding box. **Snap to scanner** in the Scene
+Origin panel moves it onto any single position, and **Reset to scene center**
+puts it back on the bounding box.
+
 ## Troubleshooting
 
 **"RIEGL .rxp import is macOS-only in this release."**

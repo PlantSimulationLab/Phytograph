@@ -4,7 +4,7 @@ import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
-import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ } from '../lib/octreePoseCompose';
+import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
@@ -82,7 +82,7 @@ import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
 import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
-import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
+import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -233,7 +233,7 @@ import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
 import { TransformationPanel } from './viewer/panels/TransformationPanel';
-import { SceneOriginPanel } from './viewer/panels/SceneOriginPanel';
+import { SceneOriginPanel, type ScannerPositionOption } from './viewer/panels/SceneOriginPanel';
 import { ResamplePanel } from './viewer/panels/ResamplePanel';
 import { FilterPanel } from './viewer/panels/FilterPanel';
 import { ErasePanel } from './viewer/panels/ErasePanel';
@@ -1918,6 +1918,11 @@ export default function PointCloudViewer({
   // restarts (an origin is tied to a specific dataset's world coordinates and
   // rarely meaningful across scenes).
   const [sceneOriginOverride, setSceneOriginOverride] = useState<[number, number, number] | null>(null);
+  // Default origin SEEDED from the scanner positions of the first import (see the
+  // effect below the `sceneOrigin` memo). Sits between the user's override and
+  // the bounds-center fallback: an explicit placement still wins, and Reset
+  // clears both so "scene center" always remains reachable.
+  const [scannerSceneOrigin, setScannerSceneOrigin] = useState<[number, number, number] | null>(null);
   // When true, the next left-click in the viewport places the scene origin (via
   // octree surface-snap, else a ground-plane raycast). Armed from the Scene Origin
   // panel; auto-disarms after a successful pick.
@@ -6370,6 +6375,7 @@ export default function PointCloudViewer({
   );
 
   // Effective scene origin (WORLD): the user's explicit placement, else the
+  // scanner centroid seeded by the first import (see the effect below), else the
   // GROUND-anchored scene center — laterally the bounds center (X/Y), but
   // vertically at the scene's ground level (`staticBounds.groundZ`, an
   // outlier-resistant floor) rather than the mid-height.
@@ -6394,10 +6400,42 @@ export default function PointCloudViewer({
   // centered at (0,0,0) (so groundZ = −5); `sceneHasContent` gates the marker
   // off there anyway. The ref mirrors it for the async bake path.
   const sceneOrigin = useMemo<[number, number, number]>(
-    () => sceneOriginOverride ?? [staticBounds.center.x, staticBounds.center.y, staticBounds.groundZ],
-    [sceneOriginOverride, staticBounds],
+    () => sceneOriginOverride
+      ?? scannerSceneOrigin
+      ?? [staticBounds.center.x, staticBounds.center.y, staticBounds.groundZ],
+    [sceneOriginOverride, scannerSceneOrigin, staticBounds],
   );
   sceneOriginRef.current = sceneOrigin;
+
+  // ── Seed the origin from the scanner positions on the first import ───────
+  //
+  // A scan project (.riproject/.PROJ, a Helios XML, an E57 with poses) knows
+  // where its instrument stood, and the centroid of those stations is a far
+  // better pivot for it than the point cloud's bounding-box center: the box is
+  // defined by whatever the beams happened to reach — sky returns, a distant
+  // treeline, one far outlier — while the stations bracket the plot the user
+  // actually came to look at.
+  //
+  // Latched on the empty→populated transition ONLY, hence the ref rather than a
+  // plain derivation of `scans`: adding a fourth scan an hour into a session
+  // must not yank the pivot (and the camera target) out from under the user.
+  // Every import path batches its scans into a single add (`addScansTx`), so one
+  // transition sees the whole first import. Emptying the scene re-arms it, so a
+  // delete-all-then-import behaves like a fresh start; File → New remounts the
+  // subtree and resets everything for free.
+  const sceneWasEmptyRef = useRef(true);
+  useEffect(() => {
+    if (scans.length === 0) {
+      sceneWasEmptyRef.current = true;
+      setScannerSceneOrigin(null);
+      return;
+    }
+    if (!sceneWasEmptyRef.current) return;
+    sceneWasEmptyRef.current = false;
+    // null when nothing in the batch carries an origin (a plain XYZ/LAS import),
+    // which leaves the ground-anchored bounds center in force.
+    setScannerSceneOrigin(meanScanOrigin(scans));
+  }, [scans]);
 
   // ── Point picker: turn a raw hit into a placed label ─────────────────────
   //
@@ -20791,12 +20829,37 @@ export default function PointCloudViewer({
             (union.min.z + union.max.z) / 2,
           ];
         };
+        // Scanner positions the origin can snap to, in scene order. Params-only
+        // scans count — a Helios XML station with no points is still a real
+        // position. Each rides its live transform DRAFT (the same pose and the
+        // same pivot the octree renders at), so the snap lands on the scanner
+        // where the user currently SEES it, not where it was last baked.
+        const scannerPositions: ScannerPositionOption[] = scans.flatMap((s) => {
+          const origin = scanOriginOf(s);
+          if (!origin) return [];
+          const st = s.data ? editStates.get(s.id) : undefined;
+          const position = st
+            ? transformPoint(
+                origin,
+                st.translation,
+                st.rotation ?? { x: 0, y: 0, z: 0 },
+                renderPivot(sceneOrigin, s.data!.bounds.center),
+              )
+            : origin;
+          return [{ id: s.id, label: scanDisplayName(s), position }];
+        });
         return (
           <SceneOriginPanel
             origin={sceneOrigin}
-            isCustom={sceneOriginOverride !== null}
+            isCustom={sceneOriginOverride !== null || scannerSceneOrigin !== null}
+            originSource={
+              sceneOriginOverride !== null ? 'user'
+                : scannerSceneOrigin !== null ? 'scanners'
+                : 'default'
+            }
             placeMode={originPlaceMode}
             canMoveToSelection={canMoveToSelection}
+            scannerPositions={scannerPositions}
             onCoordChange={(axis, value) => {
               // Base on the EFFECTIVE origin, so editing one axis of the default
               // scene-center origin keeps the other two where they're shown.
@@ -20810,11 +20873,23 @@ export default function PointCloudViewer({
               const c = selectionCenter();
               if (c) setSceneOriginOverride(c);
             }}
+            onSnapToScanner={(scanId) => {
+              const target = scannerPositions.find(sp => sp.id === scanId);
+              if (target) setSceneOriginOverride(target.position);
+            }}
             // Explicit "take me to the pivot". Framing no longer bends toward the
             // origin implicitly (zoom-to-cursor makes the whole scene reachable),
             // so getting there is a command the user invokes.
             onFrameOrigin={() => (window as any).__frameSceneOrigin?.()}
-            onReset={() => { setSceneOriginOverride(null); setOriginPlaceMode(false); }}
+            onReset={() => {
+              // Clears the import-seeded scanner centroid too, so Reset always
+              // means "the plain scene center" no matter what put the origin
+              // where it is. The seed only ever comes back on a fresh import
+              // into an empty scene.
+              setSceneOriginOverride(null);
+              setScannerSceneOrigin(null);
+              setOriginPlaceMode(false);
+            }}
             onClose={() => { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }}
           />
         );
