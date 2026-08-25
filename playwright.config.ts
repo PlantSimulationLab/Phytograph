@@ -58,10 +58,20 @@ export default defineConfig({
   //
   // Cost: the `heavy` project measured 2.4 min on its own, and those specs used
   // to overlap other work, so the split adds roughly two minutes of serial
-  // wall-clock. CI's `heavy` JOB ran 83-86 min of its 100 min cap before this,
-  // so the headroom absorbs it — but that is the number to re-check if the cap
-  // is ever hit again (see .github/workflows/ci.yml, which argues for sharding
-  // rather than raising it further).
+  // wall-clock locally.
+  //
+  // In CI that cost is now zero. The single 86-minute `heavy` JOB this comment
+  // used to reference is gone: .github/workflows/ci.yml took the sharding advice
+  // and splits E2E into `e2e` (the `main` project, --shard'ed N ways) plus a
+  // dedicated `e2e-heavy` job. So the heavy specs run on their own runner,
+  // concurrently with the main shards rather than serially after them.
+  //
+  // That dedicated job is also the only placement that actually honours the
+  // memory ceilings above. `workers: 1` keeps these specs off EACH OTHER but
+  // cannot keep a `main` spec off the same machine — and sharding would have
+  // scattered them among the main shards, putting exactly that neighbour back.
+  // If you ever fold them into the sharded matrix, the ceilings become
+  // measurements of a machine the spec does not control again.
   projects: [
     {
       name: 'heavy',

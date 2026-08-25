@@ -39,6 +39,7 @@ jobs:
           - platform: macos-14
             arch: arm64
             backend_name: phytograph_backend
+            pip_cache: 'pip'
           # Intel macOS. This job exists because the PyInstaller backend (and
           # libhelios) must be compiled NATIVELY per architecture: v0.50.0
           # packaged both mac dmgs from the single arm64 runner, which put an
@@ -52,6 +53,7 @@ jobs:
           - platform: macos-15-intel
             arch: x64
             backend_name: phytograph_backend
+            pip_cache: 'pip'
           # Pinned to windows-2022 (not windows-latest): PyHelios's CMake build
           # detects the "Visual Studio 17 2022" generator, but windows-latest
           # now ships VS 18, so the generator can't find a matching install and
@@ -62,6 +64,7 @@ jobs:
           - platform: windows-2022
             arch: x64
             backend_name: phytograph_backend
+            pip_cache: 'pip'
           # Pinned to ubuntu-24.04 (not ubuntu-latest) to match the image
           # PyHelios's own CI builds on (pyhelios/.github/workflows/
           # pytest-linux.yml) and to avoid a surprise image bump (cf. the VS 18
@@ -69,6 +72,8 @@ jobs:
           - platform: ubuntu-24.04
             arch: x64
             backend_name: phytograph_backend
+            # No pip cache on Linux, deliberately — see the Setup Python step.
+            pip_cache: ''
 
     runs-on: ${{ matrix.platform }}
     # 150 min (not 75): macOS notarization waits on Apple's notary service,
@@ -92,11 +97,24 @@ jobs:
           cache: 'npm'
           cache-dependency-path: package-lock.json
 
+      # pip caching is per-platform (matrix.pip_cache), not unconditional.
+      #
+      # Kept on macOS/Windows: macOS Intel compiles cut_pursuit_py, pye57 and
+      # cloth-simulation-filter from sdist, so its cache saves real BUILD time,
+      # and those caches are only ~370-440 MB each.
+      #
+      # Disabled on Linux: manylinux wheels exist for everything in
+      # requirements.txt, so there it cached downloads only — and it had grown
+      # to 3.2 GB, a third of the repo's 10 GB Actions cache budget. The repo
+      # was 35% over that budget, and GitHub evicts by least-recent-access, so
+      # this cache was competing with the 2.9 GB PyInstaller bundle that saves
+      # ~9 min of native build. Dropping it on Linux costs ~1-2 min of wheel
+      # downloads and buys back the headroom.
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          cache: ${{ matrix.pip_cache }}
           cache-dependency-path: backend-api/requirements.txt
 
       # Activate the MSVC toolchain on Windows. The PyHelios and PotreeConverter

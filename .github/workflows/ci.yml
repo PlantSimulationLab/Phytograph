@@ -3,11 +3,40 @@ name: CI
 # Runs the test suites on every push and PR. Build/sign/notarize/publish lives
 # in release.yml (tag-triggered) — this workflow is purely tests. Linux-only on
 # purpose: it's the cheap runner and the logic under test (renderer, backend,
-# Electron main) is platform-agnostic. Two jobs:
-#   quick — typecheck + frontend unit tests; needs only `npm ci`, fails fast.
-#   heavy — backend pytest + Playwright E2E; these share the expensive native
-#           prerequisites (libhelios, the PyInstaller backend, PotreeConverter),
-#           so they're co-located and build those once, cached between runs.
+# Electron main) is platform-agnostic.
+#
+# ---------------------------------------------------------------------------
+# Job graph (was: one 86-minute `heavy` job; see the sharding note below)
+# ---------------------------------------------------------------------------
+#
+#   quick ─────────────────────────────────────────────  ~1 min   (independent)
+#   pytest ────────────────────────────────────────────  ~15 min  (independent)
+#   prepare ──┬── e2e (shard 1/N) ──┐
+#             ├── e2e (shard 2/N) ──┤
+#             ├── e2e (shard …/N) ──┼── e2e-summary
+#             ├── e2e (shard N/N) ──┤
+#             └── e2e-heavy ────────┘
+#
+# Measured on the 2026-08-21 cold-cache run (86m total, run 32508126955):
+#   checkout+setup 58s · python deps 1m22s · PyHelios 3m21s · disk/swap 1m23s
+#   · PyInstaller 4m04s · pytest 12m53s · npm ci+build 29s · E2E 60m49s
+#
+# E2E was 71% of the wall clock, so that is the term that got split. Sharding
+# the Playwright suite N ways takes the critical path to roughly
+# `prepare + (E2E/N + per-shard setup)` — about 28 min cold / 20 min warm at
+# N=4. Runner minutes are free here (public repo, standard runners), so the
+# extra jobs cost nothing but wall clock, which they reduce.
+#
+# The other reason to shard: GitHub's "Re-run failed jobs" now re-runs ONE
+# shard (~17 min) instead of the whole 86-minute suite. Given that a first
+# attempt commonly fails, the re-run path matters more than the happy path.
+#
+# `prepare` exists so the expensive native build happens exactly once and its
+# cache is SAVED AT ~11 MIN INSTEAD OF ~86. Previously actions/cache's post-job
+# save ran at the very end of `heavy`, so a job that hit its timeout was
+# CANCELLED before saving — throwing away a good 10-minute native build and
+# forcing the next run to redo it. Now a red or timed-out E2E shard can never
+# cost you the build again.
 
 on:
   push:
@@ -24,10 +53,24 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # GL/X11/GLU headers for the PyHelios visualizer/lidar plugin; TBB for the
+  # PotreeConverter build AND its runtime linkage; xvfb as a virtual display for
+  # the headless Electron app and libhelios's GL symbols at runtime. Shared by
+  # every Linux job so a new dependency can't be added to one and forgotten in
+  # another.
+  LINUX_DEPS: libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+
 jobs:
   # --------------------------------------------------------------------------
   # Fast lane: typecheck + frontend unit tests. No native build, so this gives
   # quick feedback and catches the bulk of regressions cheaply.
+  #
+  # This is also where platform-specific LOGIC should be caught. Anything that
+  # can be expressed as a pure function over a platform string (see
+  # src/main/octreeCacheRoot.ts and its shared contract JSON) is testable here,
+  # on the free Linux runner, in one minute — instead of needing a real Windows
+  # runner. Prefer extending that pattern over adding cross-OS E2E.
   # --------------------------------------------------------------------------
   quick:
     runs-on: ubuntu-24.04
@@ -56,32 +99,35 @@ jobs:
         run: npm run test:unit
 
   # --------------------------------------------------------------------------
-  # Heavy lane: backend pytest + Playwright E2E. Both need the real native
-  # stack — E2E drives the PACKAGED supervised backend (not a dev uvicorn), so
-  # the full PyInstaller bundle + libhelios + PotreeConverter must be built.
-  # The backend/potree caches (same keys as release.yml) make repeat runs cheap.
+  # Backend unit tests. Deliberately has NO `needs:` — it shares nothing with
+  # the PyInstaller bundle (pytest imports backend-api/main.py directly), so it
+  # starts at t=0 and reports in ~15 min regardless of cache state.
+  #
+  # It builds PyHelios unconditionally, which is a behaviour change worth
+  # understanding: the old job built it only on a backend-cache MISS, reasoning
+  # that a cache hit made it unnecessary. That was backwards. On a cache HIT the
+  # lib was never built, so `import main` found no libhelios, hit the
+  # `if not _lib_path.exists()` branch in main.py, and shelled out to
+  # build-pyhelios.mjs MID-COLLECTION — paying the same ~3m21s, but buried
+  # inside the pytest step where it read as slow tests rather than a build.
+  # Building it up front is the same cost, deterministic, and legible.
+  #
+  # Do NOT "optimise" this by caching pyhelios_build/: main.py decides staleness
+  # by comparing the lib's mtime against the newest .cpp/.hpp/.h under
+  # helios-core/ and native/. A cache restore gives the lib its original (older)
+  # mtime while git checkout stamps the sources with a fresh one, so a restored
+  # lib always looks stale and gets rebuilt anyway — after you've paid to
+  # download it.
   # --------------------------------------------------------------------------
-  heavy:
+  pytest:
     runs-on: ubuntu-24.04
-    # Budget, measured: ~6 min of native build on a cold cache (libhelios +
-    # PyInstaller) + ~11 min pytest + ~50 min E2E. The E2E step is the term that
-    # grows — it was 47 min for ~275 tests on 2026-08-03 and 51+ min for 310 on
-    # 2026-08-21, when the whole job hit the old 75 min cap 13 tests from the
-    # end and was CANCELLED. A cancelled job skips the `if: failure()` report
-    # upload, so it also destroys the traces you need to debug it.
-    #
-    # 100 leaves ~30 min of headroom. When E2E growth eats that, prefer sharding
-    # the suite across runners over raising this again — a 100-minute serial job
-    # is already a slow feedback loop.
-    timeout-minutes: 100
+    timeout-minutes: 45
     env:
       # build-potree-converter.mjs fetches upstream PR #686 via the GH API.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # PyHelios source submodule (+ nested helios-core); libhelios builds
-          # from it, and importing backend-api/main.py loads pyhelios.
           submodules: recursive
 
       - name: Setup Node
@@ -91,40 +137,32 @@ jobs:
           cache: 'npm'
           cache-dependency-path: package-lock.json
 
+      # No `cache: 'pip'`, deliberately. That cache grew to 3.2 GB — a third of
+      # the repo's entire 10 GB Actions cache budget — to save roughly 1-2 min
+      # of wheel downloads. The repo was 35% over that budget (13.5 GB), and
+      # GitHub evicts caches by least-recent-access, so the pip cache was
+      # competing with (and evicting) the 2.9 GB PyInstaller bundle that saves
+      # ~9 min. That is a bad trade in both directions: dropping it here buys
+      # back the headroom that keeps `prepare`'s warm path warm.
+      #
+      # Linux is the right place to drop it and release.yml's macOS/Windows
+      # entries are the right place to keep it: manylinux wheels exist for
+      # everything in requirements.txt, so on Linux this only ever cached
+      # DOWNLOADS. macOS Intel actually compiles cut_pursuit_py, pye57 and
+      # cloth-simulation-filter from sdist, so its (10x smaller) cache saves
+      # real build time.
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: backend-api/requirements.txt
 
-      # GL/X11/GLU headers for the PyHelios visualizer/lidar plugin; TBB for the
-      # PotreeConverter build; xvfb as a virtual display for the headless
-      # Electron app and libhelios's GL symbols at runtime.
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
-
-      - name: Record submodule SHAs
-        id: submodules
-        shell: bash
-        run: |
-          echo "sha=$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      # Same cache key as release.yml so CI and release share the bundle — keep
-      # the hashFiles globs IDENTICAL in both files or they stop sharing.
-      #
-      # Globs cover exactly what PyInstaller bundles: main.py + the qsm/ package
-      # it imports + vendor/treeiso (--add-data). Deliberately NOT
-      # `backend-api/**/*.py`, which also matched 87 test files, so touching a
-      # pytest file evicted a bundle that would have rebuilt byte-identical.
-      - name: Cache PyInstaller backend
-        id: backend-cache
-        uses: actions/cache@v4
-        with:
-          path: resources/phytograph_backend
-          key: backend-${{ runner.os }}-x64-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}
+          # Intentional word splitting: LINUX_DEPS is a package LIST and must
+          # reach apt as separate args, so it must stay unquoted.
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $LINUX_DEPS
 
       - name: Install Python dependencies
         working-directory: backend-api
@@ -140,9 +178,146 @@ jobs:
           #   natively supported".
           pip install pytest pytest-cov pytest-asyncio httpx
 
-      # Build libhelios from the submodule (needed by the backend bundle AND so
-      # `import main` in the pytest conftest loads pyhelios rather than trying to
-      # compile it mid-collection). Skipped when the backend bundle is cached.
+      - name: Build PyHelios from source
+        run: node scripts/build-pyhelios.mjs
+
+      - name: Compute PotreeConverter cache key
+        id: potree-key
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null; then h=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1); else h=$(shasum -a 256 scripts/build-potree-converter.mjs | cut -d' ' -f1); fi
+          echo "key=$h" >> "$GITHUB_OUTPUT"
+
+      # Several backend tests exercise the octree/Potree path, so the binary has
+      # to be here. Read/write cache (not restore-only): on a cold key this job
+      # may race `prepare` to save the same key, which actions/cache handles by
+      # logging "Cache already exists" rather than failing.
+      - name: Cache PotreeConverter binary
+        id: potree-cache
+        uses: actions/cache@v4
+        with:
+          path: resources/potree_converter
+          key: potree-${{ runner.os }}-x64-pr686-${{ steps.potree-key.outputs.key }}
+
+      - name: Build PotreeConverter
+        if: steps.potree-cache.outputs.cache-hit != 'true'
+        run: node scripts/build-potree-converter.mjs
+
+      # pytest imports backend-api/main.py, which loads the libhelios built
+      # above; run under xvfb in case that load touches a display. Invoke pytest
+      # via the CI Python (the `test:backend` npm script hardcodes a local venv
+      # that doesn't exist on the runner).
+      - name: Backend unit tests (pytest)
+        working-directory: backend-api
+        run: xvfb-run -a python -m pytest -v
+
+  # --------------------------------------------------------------------------
+  # Build the native prerequisites ONCE and publish them to the Actions cache
+  # for the E2E jobs to restore. Nothing is tested here.
+  #
+  # Cold: ~11 min. Warm: ~2 min (both caches hit, every build step skipped).
+  # --------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      backend-key: ${{ steps.keys.outputs.backend }}
+      potree-key: ${{ steps.keys.outputs.potree }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # PyHelios source submodule (+ nested helios-core); libhelios builds
+          # from it, and importing backend-api/main.py loads pyhelios.
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      # No `cache: 'pip'`, deliberately. That cache grew to 3.2 GB — a third of
+      # the repo's entire 10 GB Actions cache budget — to save roughly 1-2 min
+      # of wheel downloads. The repo was 35% over that budget (13.5 GB), and
+      # GitHub evicts caches by least-recent-access, so the pip cache was
+      # competing with (and evicting) the 2.9 GB PyInstaller bundle that saves
+      # ~9 min. That is a bad trade in both directions: dropping it here buys
+      # back the headroom that keeps `prepare`'s warm path warm.
+      #
+      # Linux is the right place to drop it and release.yml's macOS/Windows
+      # entries are the right place to keep it: manylinux wheels exist for
+      # everything in requirements.txt, so on Linux this only ever cached
+      # DOWNLOADS. macOS Intel actually compiles cut_pursuit_py, pye57 and
+      # cloth-simulation-filter from sdist, so its (10x smaller) cache saves
+      # real build time.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          # Intentional word splitting: LINUX_DEPS is a package LIST and must
+          # reach apt as separate args, so it must stay unquoted.
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $LINUX_DEPS
+
+      # Both cache keys are computed HERE and exported as job outputs, so the
+      # downstream jobs restore by the exact string this job saved rather than
+      # recomputing it. Recomputing was the old failure mode waiting to happen:
+      # release.yml and ci.yml had to keep their hashFiles() globs
+      # character-identical or they silently stopped sharing a cache.
+      #
+      # The backend globs cover exactly what PyInstaller bundles: main.py + the
+      # qsm/ package it imports + vendor/treeiso (--add-data). Deliberately NOT
+      # `backend-api/**/*.py`, which also matched 87 test files, so touching a
+      # pytest file evicted a bundle that would have rebuilt byte-identical.
+      #
+      # This key is deliberately NOT interchangeable with release.yml's, which
+      # appends `-cuda`. The old comment here claimed the two "share the bundle";
+      # they never have, and they must not. On Linux the release runner installs
+      # the CUDA toolkit and compiles a GPU-enabled libhelios, while CI compiles
+      # CPU-only — a shared key would let CI's CPU-only bundle be restored by a
+      # release build and shipped as a GPU installer, the exact outcome
+      # `--require-gpu` exists to prevent. Keep the GLOBS identical to
+      # release.yml (that part does matter, so both hash the same inputs); keep
+      # the suffixes distinct.
+      - name: Compute cache keys
+        id: keys
+        shell: bash
+        run: |
+          sha="$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)"
+          echo "backend=backend-${{ runner.os }}-x64-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${sha}" >> "$GITHUB_OUTPUT"
+          if command -v sha256sum >/dev/null; then h=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1); else h=$(shasum -a 256 scripts/build-potree-converter.mjs | cut -d' ' -f1); fi
+          echo "potree=potree-${{ runner.os }}-x64-pr686-${h}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache PyInstaller backend
+        id: backend-cache
+        uses: actions/cache@v4
+        with:
+          path: resources/phytograph_backend
+          key: ${{ steps.keys.outputs.backend }}
+
+      - name: Cache PotreeConverter binary
+        id: potree-cache
+        uses: actions/cache@v4
+        with:
+          path: resources/potree_converter
+          key: ${{ steps.keys.outputs.potree }}
+
+      - name: Install Python dependencies
+        if: steps.backend-cache.outputs.cache-hit != 'true'
+        working-directory: backend-api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # Build libhelios from the submodule — the PyInstaller bundle collects it.
       - name: Build PyHelios from source
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-pyhelios.mjs
@@ -169,31 +344,92 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-backend.mjs
 
-      - name: Compute PotreeConverter cache key
-        id: potree-key
-        shell: bash
-        run: |
-          if command -v sha256sum >/dev/null; then h=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1); else h=$(shasum -a 256 scripts/build-potree-converter.mjs | cut -d' ' -f1); fi
-          echo "key=$h" >> "$GITHUB_OUTPUT"
-
-      - name: Cache PotreeConverter binary
-        id: potree-cache
-        uses: actions/cache@v4
-        with:
-          path: resources/potree_converter
-          key: potree-${{ runner.os }}-x64-pr686-${{ steps.potree-key.outputs.key }}
-
       - name: Build PotreeConverter
         if: steps.potree-cache.outputs.cache-hit != 'true'
         run: node scripts/build-potree-converter.mjs
 
-      # pytest imports backend-api/main.py, which loads the libhelios just built;
-      # run under xvfb in case that load touches a display. Invoke pytest via the
-      # CI Python (the `test:backend` npm script hardcodes a local venv that
-      # doesn't exist on the runner).
-      - name: Backend unit tests (pytest)
-        working-directory: backend-api
-        run: xvfb-run -a python -m pytest -v
+      # Fail here, in a 2-minute job, rather than four shards down. The bundle
+      # the E2E jobs are about to restore must match the tree it will be tested
+      # against — see CLAUDE.md "Version-lock contract" for why a stale bundle
+      # HANGS every spec at the splash instead of erroring.
+      #
+      # Invoked with plain `node`, not `npm run`: check-backend-bundle.mjs and
+      # backend-version.mjs import only node: builtins, so this needs no
+      # node_modules and this job stays free of an `npm ci` it has no other use
+      # for.
+      - name: Verify backend bundle matches the tree
+        run: node scripts/check-backend-bundle.mjs
+
+  # --------------------------------------------------------------------------
+  # E2E, `main` project, sharded N ways. Each shard restores the cached bundle
+  # (read-only — only `prepare` writes it) and drives the real supervised
+  # backend on its own free port.
+  #
+  # To change the shard count, edit the matrix list ONLY: `strategy.job-total`
+  # resolves to the number of matrix jobs, so --shard's denominator follows
+  # automatically and can't drift out of sync with the list.
+  #
+  # fail-fast is OFF, deliberately. Cancelling the sibling shards on the first
+  # red one would save a few free runner-minutes and cost you the thing that
+  # actually matters: a cancelled job skips its `if: failure()` artifact upload,
+  # destroying the traces needed to debug it (the same lesson the old 75-minute
+  # timeout taught). It also means each CI round surfaces every failure at once,
+  # so one local debugging session covers them all instead of discovering them
+  # one push at a time.
+  # --------------------------------------------------------------------------
+  e2e:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needed even though this job builds no native code: `npm run build`
+          # runs gen:version, which reads the submodules' `git describe`, and
+          # about.spec.ts asserts those versions are neither 'unknown' nor
+          # Electron's. A submodule-less checkout fails that spec.
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install Linux runtime dependencies
+        run: |
+          sudo apt-get update
+          # Intentional word splitting: LINUX_DEPS is a package LIST and must
+          # reach apt as separate args, so it must stay unquoted.
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $LINUX_DEPS
+
+      # restore-only: a shard must never save these keys. Four shards racing to
+      # upload the same ~1 GB bundle is pure waste, and `prepare` has already
+      # written it by the time this job starts (its post-job save completes
+      # before the job is marked done, which is what `needs:` waits on).
+      #
+      # fail-on-cache-miss: if `prepare` succeeded the key exists, so a miss
+      # means something is wrong with the key plumbing — say so in 30 seconds
+      # instead of running the suite against a missing backend.
+      - name: Restore PyInstaller backend
+        uses: actions/cache/restore@v4
+        with:
+          path: resources/phytograph_backend
+          key: ${{ needs.prepare.outputs.backend-key }}
+          fail-on-cache-miss: true
+
+      - name: Restore PotreeConverter binary
+        uses: actions/cache/restore@v4
+        with:
+          path: resources/potree_converter
+          key: ${{ needs.prepare.outputs.potree-key }}
+          fail-on-cache-miss: true
 
       - name: Install frontend dependencies
         run: npm ci
@@ -210,16 +446,122 @@ jobs:
       # 1280x1024, but window-resize.spec.ts grows the window to 1600x1000 to
       # exercise the canvas-ratchet regression. Give the virtual display room for
       # that so the window manager isn't clamping the very geometry under test.
+      #
+      # Args after `--` are appended to the `test:e2e` script, whose last command
+      # is `playwright test` — so they reach Playwright, and `check:backend`
+      # still runs first.
       - name: E2E tests (Playwright + Electron)
-        run: xvfb-run -a -s "-screen 0 1920x1080x24" npm run test:e2e
+        run: >
+          xvfb-run -a -s "-screen 0 1920x1080x24"
+          npm run test:e2e -- --project=main
+          --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Upload Playwright report on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-main-${{ matrix.shard }}
           path: |
             playwright-report/
             test-results/
           retention-days: 7
           if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # E2E, `heavy` project — its own job rather than a shard.
+  #
+  # These specs build million-point fixtures and assert ABSOLUTE memory ceilings
+  # (crop-octree-100m holds a 500 MB usedJSHeapSize ceiling through its apply
+  # window), so what they measure is only meaningful if nothing else is running
+  # on the box. playwright.config.ts gives the project `workers: 1`, which keeps
+  # its specs off EACH OTHER but cannot keep a `main` spec off the same runner.
+  # Sharding would have scattered them randomly among the main shards and put
+  # exactly that neighbour back. A dedicated job is the only placement that
+  # actually delivers the isolation the ceilings assume — and it's ~2.4 min, so
+  # it never sets the critical path.
+  # --------------------------------------------------------------------------
+  e2e-heavy:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install Linux runtime dependencies
+        run: |
+          sudo apt-get update
+          # Intentional word splitting: LINUX_DEPS is a package LIST and must
+          # reach apt as separate args, so it must stay unquoted.
+          # shellcheck disable=SC2086
+          sudo apt-get install -y $LINUX_DEPS
+
+      - name: Restore PyInstaller backend
+        uses: actions/cache/restore@v4
+        with:
+          path: resources/phytograph_backend
+          key: ${{ needs.prepare.outputs.backend-key }}
+          fail-on-cache-miss: true
+
+      - name: Restore PotreeConverter binary
+        uses: actions/cache/restore@v4
+        with:
+          path: resources/potree_converter
+          key: ${{ needs.prepare.outputs.potree-key }}
+          fail-on-cache-miss: true
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build app (renderer + main + preload)
+        run: npm run build
+
+      - name: E2E tests (heavy project)
+        run: >
+          xvfb-run -a -s "-screen 0 1920x1080x24"
+          npm run test:e2e -- --project=heavy
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-heavy
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------------
+  # Single green/red check covering every E2E job. A matrix can't be named as a
+  # required status check (the shard count is part of the check name, so it
+  # would need re-configuring every time the matrix changes) — point branch
+  # protection at this instead.
+  #
+  # `if: always()` so it runs even when a shard failed; the explicit result test
+  # is required because a skipped or cancelled `needs` does NOT fail a job by
+  # default.
+  # --------------------------------------------------------------------------
+  e2e-summary:
+    needs: [e2e, e2e-heavy]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check E2E results
+        run: |
+          echo "e2e (sharded): ${{ needs.e2e.result }}"
+          echo "e2e-heavy:     ${{ needs.e2e-heavy.result }}"
+          if [ "${{ needs.e2e.result }}" != "success" ] || [ "${{ needs.e2e-heavy.result }}" != "success" ]; then
+            echo "::error::One or more E2E jobs did not succeed."
+            exit 1
+          fi
+          echo "All E2E jobs passed."
