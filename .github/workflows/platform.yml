@@ -227,6 +227,14 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-backend.mjs
 
+      # PotreeConverter links Intel TBB. The Windows build vendors it and Linux
+      # gets it from apt (see ci.yml's LINUX_DEPS), but the macOS runner ships
+      # neither — without this the CMake configure fails on a cold potree cache.
+      # Mirrors release.yml's "Install TBB (macOS)".
+      - name: Install TBB (macOS)
+        if: steps.potree-cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: brew install tbb
+
       - name: Build PotreeConverter
         if: steps.potree-cache.outputs.cache-hit != 'true'
         run: node scripts/build-potree-converter.mjs
