@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "CROSS-PROCESS CONTRACT: where cached Potree octrees live on disk.",
+    "The Python backend WRITES them (_octree_cache_root in backend-api/main.py);",
+    "the Electron main process READS them back through the app:// protocol",
+    "handler (resolveOctreeCacheRoot in src/main/octreeCacheRoot.ts). The two",
+    "silently disagreed on Windows and Linux, so every import produced an octree",
+    "the renderer could never fetch and nothing rendered (GitHub issue #4).",
+    "",
+    "This file is the single written-down truth both sides are tested against:",
+    "  - src/main/octreeCacheRoot.test.ts   (vitest)",
+    "  - backend-api/tests/test_octree_cache_root.py  (pytest)",
+    "Change one implementation without changing this file and its own test",
+    "fails; change this file without changing both implementations and BOTH",
+    "tests fail. It is test-only data - neither implementation reads it at",
+    "runtime, so a packaged build cannot break on a missing/renamed asset.",
+    "",
+    "Resolution rule, applied identically by both tests:",
+    "  base = env[baseEnv] if baseEnv is set and non-empty, else join(home, *baseHomeSegments)",
+    "  root = join(base, *segments)",
+    "PHYTOGRAPH_OCTREE_CACHE_ROOT overrides the whole thing on both sides."
+  ],
+  "overrideEnv": "PHYTOGRAPH_OCTREE_CACHE_ROOT",
+  "platforms": {
+    "darwin": {
+      "baseEnv": null,
+      "baseHomeSegments": ["Library", "Application Support"],
+      "segments": ["Phytograph", "cache", "octrees"]
+    },
+    "win32": {
+      "baseEnv": "LOCALAPPDATA",
+      "baseHomeSegments": ["AppData", "Local"],
+      "segments": ["Phytograph", "cache", "octrees"]
+    },
+    "linux": {
+      "baseEnv": "XDG_CACHE_HOME",
+      "baseHomeSegments": [".cache"],
+      "segments": ["Phytograph", "octrees"]
+    }
+  }
+}

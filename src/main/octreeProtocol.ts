@@ -3,18 +3,20 @@
 //
 // The renderer issues `fetch('app://octree/<sha1>/<filename>')` via
 // potree-core's RequestManager. This module translates that into a file read
-// under the user-data dir's `cache/octrees/<sha1>/` and returns a Response
-// containing the bytes.
+// under the octree cache root's `<sha1>/` and returns a Response containing
+// the bytes. The root comes from ./octreeCacheRoot.ts — the SAME resolver the
+// supervisor pins into the backend's env, so reader and writer cannot diverge.
 //
 // Path safety: only sha1 hex cache ids are accepted, and only specific
 // filenames (the three files PotreeConverter produces). Anything else gets
 // a 400 or 404 — no path traversal possible.
 
-import { app, protocol } from 'electron';
+import { protocol } from 'electron';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { join, basename } from 'node:path';
+import { resolveOctreeCacheRoot } from './octreeCacheRoot.js';
 
 const SCHEME = 'app';
 
@@ -35,14 +37,12 @@ function contentTypeFor(name: string): string {
 }
 
 /**
- * The on-disk cache root the backend writes octrees to. Mirrors the Python
- * helper `_octree_cache_root()` in backend-api/main.py for macOS / Windows /
- * Linux. Honors PHYTOGRAPH_OCTREE_CACHE_ROOT so dev/test overrides line up.
+ * The on-disk cache root the backend writes octrees to. See
+ * ./octreeCacheRoot.ts — deriving this from `app.getPath('userData')` is what
+ * broke Windows and Linux (issue #4); it must stay the single shared resolver.
  */
 function octreeCacheRoot(): string {
-  const env = process.env.PHYTOGRAPH_OCTREE_CACHE_ROOT;
-  if (env) return env;
-  return join(app.getPath('userData'), 'cache', 'octrees');
+  return resolveOctreeCacheRoot();
 }
 
 /**

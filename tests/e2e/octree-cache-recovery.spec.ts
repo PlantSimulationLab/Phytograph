@@ -84,3 +84,81 @@ test('rebuilds an octree-backed cloud after its disk cache is deleted', async ()
     await close();
   }
 });
+
+// A recovery must not poison the NEXT recovery.
+//
+// The rebuild used to be written back through `onUpdateScanData`, which drops
+// `sourcePath` and force-sets `divergedFromSource: true` — correct when the
+// caller is swapping in genuinely different points, wrong for a deterministic
+// rebuild of the cloud's own source file. So the first recovery succeeded but
+// left the cloud flagged as edited-since-import, and the SECOND cache loss hit
+// the refusal branch: "Edited point cloud unavailable … this cloud has been
+// edited since import", about a cloud the user had only imported and never
+// touched. Reported from the field as a permanently blank viewer (issue #4,
+// where a cache-root mismatch made every load fail and every import land on
+// this message immediately).
+//
+// One cycle can't catch it — the flag is only set by the first recovery — so
+// this drives two.
+test('recovers repeatedly, and never claims an untouched cloud was edited', async () => {
+  const { app, page, octreeCacheRoot, close } = await launchApp();
+
+  try {
+    await importFiles(app, page, 'import-point-cloud', FIXTURE);
+    await completeImportWizard(page);
+
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+    const pointCount = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
+    expect(pointCount).toBeGreaterThan(0);
+
+    const cacheId = await page.waitForFunction(() => {
+      const reg = (window as any).__octreePositions as Record<string, unknown> | undefined;
+      const keys = reg ? Object.keys(reg) : [];
+      return keys.length === 1 ? keys[0] : null;
+    }, undefined, { timeout: 30_000 }).then((h) => h.jsonValue() as Promise<string>);
+
+    const cacheDir = join(octreeCacheRoot, cacheId);
+    const colorModes = ['height', 'intensity'];
+
+    for (const mode of colorModes) {
+      expect(existsSync(cacheDir)).toBe(true);
+      await rm(cacheDir, { recursive: true, force: true });
+      expect(existsSync(cacheDir)).toBe(false);
+
+      // Remount the loader through the real UI (the React key includes colorMode).
+      // "Display" TOGGLES the panel, so only click it when the panel is closed —
+      // on the second pass it is still open from the first.
+      const colorMode = page.getByTestId('display-color-mode');
+      if (!(await colorMode.isVisible())) {
+        await page.getByRole('button', { name: 'Display' }).click();
+      }
+      await expect(colorMode).toBeVisible();
+      await page.evaluate((id) => {
+        const reg = (window as any).__octreePositions;
+        if (reg) delete reg[id];
+      }, cacheId);
+      await colorMode.selectOption(mode);
+      await expect(colorMode).toHaveValue(mode);
+
+      // The cloud comes back, both times.
+      await page.waitForFunction((id) => {
+        const reg = (window as any).__octreePositions as Record<string, unknown> | undefined;
+        return !!(reg && reg[id]);
+      }, cacheId, { timeout: 60_000 });
+      expect(existsSync(cacheDir)).toBe(true);
+      expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(pointCount);
+    }
+
+    // The specific lie this test exists for: an imported-and-untouched cloud
+    // must never be described as edited.
+    await expect(
+      page.locator('[data-testid="toast-error"]', { hasText: 'Edited point cloud unavailable' }),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="toast-error"]', { hasText: 'Point cloud unavailable' }),
+    ).toHaveCount(0);
+  } finally {
+    await close();
+  }
+});

@@ -86,6 +86,53 @@ tested as a normal HTTP server.
   SIGKILL after 3 s if the process is still alive, so a sidecar stuck in a
   long native call can't orphan and hold its port/RAM.
 
+## Octree cache location (cross-process contract)
+
+Cached Potree octrees are written by one process and read by another, so the
+two must resolve the same directory:
+
+- The **backend writes** them — `_octree_cache_root()` in
+  `backend-api/main.py`.
+- The **main process reads** them back out through the `app://octree/...`
+  protocol handler — `resolveOctreeCacheRoot()` in
+  `src/main/octreeCacheRoot.ts`.
+
+| Platform | Cache root |
+| --- | --- |
+| macOS | `~/Library/Application Support/Phytograph/cache/octrees` |
+| Windows | `%LOCALAPPDATA%\Phytograph\cache\octrees` |
+| Linux | `$XDG_CACHE_HOME/Phytograph/octrees` (or `~/.cache/...`) |
+
+`PHYTOGRAPH_OCTREE_CACHE_ROOT` overrides all of it, and the supervisor **pins
+its own resolved value into the sidecar's spawn environment**
+(`spawnChild` in `src/main/backend.ts`). That pin is what actually guarantees
+agreement at runtime; the Python fallback above only applies to a standalone
+`backend_wrapper.py` launch. `scripts/dev.mjs` and the E2E launcher set the
+same variable to per-session temp dirs.
+
+!!! warning "Never derive this from `app.getPath('userData')`"
+
+    That's what shipped, and it broke every import on Windows (issue #4).
+    `userData` is `%APPDATA%` — the **Roaming** profile — while the backend
+    writes to `%LOCALAPPDATA%`. The renderer fetched an octree that was never
+    at that path, the handler returned a plain-text 404, and potree-core's
+    `JSON.parse` failed on the body, so the cloud silently never rendered.
+    Linux diverged the same way (`~/.config` vs `~/.cache`). macOS agreed
+    only by accident — `app.getName()` returns `phytograph` while the backend
+    hardcodes `Phytograph`, and the default APFS volume is case-insensitive
+    — which is precisely why the dev loop and E2E never caught it.
+
+    A multi-gigabyte regenerable cache also does not belong in a roaming
+    profile, which is why the fix moved the reader to the backend's location
+    rather than the reverse.
+
+The layout is pinned from both sides against a single written contract,
+`src/shared/octreeCacheRoot.contract.json` — `src/main/octreeCacheRoot.test.ts`
+(Vitest) and `backend-api/tests/test_octree_cache_root.py` (pytest) each assert
+their own implementation against it, and a source-level chokepoint test asserts
+the supervisor still passes the environment pin. Change one implementation
+without the other and its test fails.
+
 ## In-RAM session eviction
 
 A cloud session (`CloudSession`) or plant session (`PlantSession`) is the

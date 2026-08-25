@@ -395,6 +395,12 @@ interface PointCloudViewerProps {
   // Replace the scan selection outright (see handleSetScanSelection in App).
   onSetScanSelection?: (ids: Set<string>) => void;
   onUpdateScanData: (id: string, data: PointCloudData) => void;
+  // Write back a deterministic octree-cache rebuild (handleOctreeMissing).
+  // REQUIRED, not optional, and must not be collapsed into onUpdateScanData:
+  // that one drops `sourcePath` and force-sets `divergedFromSource`, which for
+  // a faithful rebuild is a lie that poisons the NEXT recovery attempt. See
+  // handleRebuildScanOctree in App.
+  onRebuildScanOctree: (id: string, data: PointCloudData) => void;
   onUpdateScanParams: (id: string, params: ScanParameters | undefined) => void;
   // Record (or, with `undefined`, clear) a scan's Auto-Register provenance.
   // Separate from onUpdateScanData because the two must not travel together:
@@ -535,6 +541,7 @@ export default function PointCloudViewer({
   onDeselectAll,
   onSetScanSelection,
   onUpdateScanData,
+  onRebuildScanOctree,
   onUpdateScanParams,
   onUpdateScanRegistration,
   onUpdateScanLabel,
@@ -3137,7 +3144,10 @@ export default function PointCloudViewer({
       );
       // Refresh the sessionId — the old session is gone if the backend restarted.
       const newData = buildSessionOctreeData(rebuilt, octreeInfo, fileName, rebuilt.session_id);
-      onUpdateCloud(cloud.id, newData);
+      // NOT onUpdateCloud: that path would mark this faithful rebuild as
+      // edited-since-import and drop its sourcePath, so a second failure would
+      // report "Edited point cloud unavailable" about an untouched cloud.
+      onRebuildScanOctree(cloud.id, newData);
       // Force the loader to re-run even if the cacheId is unchanged (deterministic
       // rebuild → same hash). Bumping the paint generation remounts the component
       // with the now-present octree files.
@@ -3153,7 +3163,7 @@ export default function PointCloudViewer({
         duration: 0,
       });
     }
-  }, [clouds, onUpdateCloud, buildSessionOctreeData]);
+  }, [clouds, onRebuildScanOctree, buildSessionOctreeData]);
 
   // The queue survives as a NO-OP SAFETY NET.
   //

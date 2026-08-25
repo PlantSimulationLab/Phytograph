@@ -1325,6 +1325,26 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     ));
   }, []);
 
+  // Write back an octree-cache REBUILD (PointCloudViewer's handleOctreeMissing).
+  //
+  // Deliberately NOT handleUpdateScanData. That helper assumes the caller is
+  // replacing the cloud with different points, so it drops `sourcePath` and
+  // force-sets `divergedFromSource: true`. Recovery is the opposite case: it
+  // re-created the session from the scan's OWN `sourceXyzPath`, and
+  // createCloudSession is deterministic, so the result still matches that file
+  // exactly. Routing recovery through handleUpdateScanData made it slander its
+  // own output — the rebuilt cloud came back flagged as edited, so if the load
+  // failed again (e.g. the cache root was unreadable, issue #4) the next
+  // recovery attempt refused with "this cloud has been edited since import"
+  // about a cloud the user had only just imported and never touched.
+  //
+  // `divergedFromSource` is preserved rather than forced false: handleOctreeMissing
+  // already refuses to rebuild a genuinely diverged cloud, so it is falsy here,
+  // and preserving keeps that the caller's invariant instead of this writer's.
+  const handleRebuildScanOctree = useCallback((id: string, data: PointCloudData) => {
+    setScans(prev => prev.map(s => (s.id === id ? { ...s, data } : s)));
+  }, []);
+
   const handleUpdateScanParams = useCallback((id: string, params: ScanParameters | undefined) => {
     setScans(prev => prev.map(s =>
       s.id === id ? { ...s, params } : s
@@ -2123,6 +2143,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onDeselectAll={handleDeselectAll}
           onSetScanSelection={handleSetScanSelection}
           onUpdateScanData={handleUpdateScanData}
+          onRebuildScanOctree={handleRebuildScanOctree}
           onUpdateScanParams={handleUpdateScanParams}
           onUpdateScanRegistration={handleUpdateScanRegistration}
           onUpdateScanLabel={handleUpdateScanLabel}

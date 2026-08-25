@@ -9,6 +9,7 @@ import { app, BrowserWindow } from 'electron';
 import { EXPECTED_BACKEND_VERSION, BACKEND_PORT_PROD } from '../shared/constants.js';
 import { IPC, type BackendStatusPayload } from '../shared/ipc.js';
 import { backendLog } from './logger.js';
+import { resolveOctreeCacheRoot } from './octreeCacheRoot.js';
 
 // Split a possibly-multi-line stdout/stderr chunk into clean lines for the log
 // file. Carries a trailing partial line across chunks so a traceback split mid-
@@ -293,6 +294,12 @@ function spawnChild(binPath: string, port: number): void {
   // packaged app, so it can locate the bundled PotreeConverter binary at
   // <resourcesRoot>/potree_converter/<platform>/PotreeConverter.
   // PHYTOGRAPH_BACKEND_PORT tells backend_wrapper.py which port to bind.
+  // PHYTOGRAPH_OCTREE_CACHE_ROOT pins the octree cache to the SAME directory
+  // the app:// protocol handler reads from. Without this pin the two processes
+  // each guessed a per-OS path and disagreed on Windows (%APPDATA% vs
+  // %LOCALAPPDATA%) and Linux — the backend wrote octrees the renderer could
+  // never fetch, so every import rendered nothing (issue #4). Never drop this:
+  // the Python fallback is for standalone backend_wrapper.py launches only.
   try {
     child = spawn(binPath, [], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -304,7 +311,12 @@ function spawnChild(binPath: string, port: number): void {
       // group we can `process.kill(-pid)` the whole tree in stopBackend(). Windows
       // has no process groups here — we fall back to taskkill /T in stopBackend().
       detached: process.platform !== 'win32',
-      env: { ...process.env, PHYTOGRAPH_RESOURCES: resourcesRoot(), PHYTOGRAPH_BACKEND_PORT: String(port) },
+      env: {
+        ...process.env,
+        PHYTOGRAPH_RESOURCES: resourcesRoot(),
+        PHYTOGRAPH_BACKEND_PORT: String(port),
+        PHYTOGRAPH_OCTREE_CACHE_ROOT: resolveOctreeCacheRoot(),
+      },
     });
   } catch (err) {
     // spawn() can THROW synchronously instead of emitting an async 'error' —
