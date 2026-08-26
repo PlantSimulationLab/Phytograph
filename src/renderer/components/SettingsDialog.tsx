@@ -138,7 +138,11 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     rieglStatus.platformSupported &&
     rieglStatus.dockerPresent &&
     rieglStatus.rivlibValid &&
-    !rieglStatus.imageBuilt;
+    // Missing OR out of date. Before the staleness probe existed this read
+    // `!imageBuilt` alone, which hid the button in exactly the state whose
+    // error message told the user to press it: an image built by an older
+    // Phytograph still counts as "built".
+    (!rieglStatus.imageBuilt || rieglStatus.imageStale);
 
   if (!isOpen) return null;
 
@@ -339,10 +343,14 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                          settings?.rivlibPath
                            ? 'No lib/libscanifc.so here — pick the extracted folder'
                            : 'Not set — choose the extracted RiVLib folder'],
-                        ['image', rieglStatus.imageBuilt, 'Reader image built',
-                         rieglStatus.dockerPresent && rieglStatus.rivlibValid
-                           ? 'Use the button below'
-                           : 'Needs the steps above first'],
+                        ['image',
+                         rieglStatus.imageBuilt && !rieglStatus.imageStale,
+                         'Reader image up to date',
+                         rieglStatus.imageStale
+                           ? 'Built by an older version — your next import updates it automatically'
+                           : rieglStatus.dockerPresent && rieglStatus.rivlibValid
+                             ? 'Use the button below'
+                             : 'Needs the steps above first'],
                       ] as const
                     ).map(([key, ok, label, hint]) => (
                       <li
@@ -370,8 +378,12 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                     className="mt-2 px-3 py-1.5 text-xs rounded bg-blue-600/80 text-white border border-blue-500/50 hover:bg-blue-600 disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     {buildingImage
-                      ? 'Building image… (first run pulls a base image)'
-                      : 'Build reader image'}
+                      ? rieglStatus?.imageStale
+                        ? 'Updating image…'
+                        : 'Building image… (first run pulls a base image)'
+                      : rieglStatus?.imageStale
+                        ? 'Rebuild reader image'
+                        : 'Build reader image'}
                   </button>
                 )}
                 {buildError && (

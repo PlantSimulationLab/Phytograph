@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { CheckCircle2, AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import { getRieglStatus, type RieglStatus } from '../utils/backendApi';
 
 // DELIBERATELY NOT CACHED FOR THE SESSION, unlike ComputePathBadge.
@@ -114,23 +114,43 @@ export function RieglStatusBadge({
 
   if (!status) return null;
 
+  // THREE states, not two. An out-of-date image is not "unavailable" the way a
+  // stopped Docker daemon is: the next import rebuilds it in about a second
+  // with no action from the user, so reporting it in the same red-flag terms
+  // would overstate the problem and send them hunting for a fix that isn't
+  // needed. It still isn't "ready" either — something will happen first — so it
+  // gets its own informational state rather than being folded into either.
+  const state: 'ready' | 'stale' | 'unavailable' = status.available
+    ? 'ready'
+    : status.imageStale
+      ? 'stale'
+      : 'unavailable';
+
+  const TONE = {
+    ready: 'bg-green-500/15 text-green-300 border-green-500/30',
+    stale: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+    unavailable: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  } as const;
+
+  const LABEL = {
+    ready: 'RIEGL ready',
+    stale: 'RIEGL update pending',
+    unavailable: 'RIEGL unavailable',
+  } as const;
+
+  const Icon = { ready: CheckCircle2, stale: RefreshCw, unavailable: AlertCircle }[
+    state
+  ];
+
   return (
     <span
       data-testid="riegl-status-badge"
-      data-state={status.available ? 'ready' : 'unavailable'}
+      data-state={state}
       title={status.reason}
-      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
-        status.available
-          ? 'bg-green-500/15 text-green-300 border-green-500/30'
-          : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-      }`}
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${TONE[state]}`}
     >
-      {status.available ? (
-        <CheckCircle2 className="w-3 h-3" />
-      ) : (
-        <AlertCircle className="w-3 h-3" />
-      )}
-      {status.available ? 'RIEGL ready' : 'RIEGL unavailable'}
+      <Icon className="w-3 h-3" />
+      {LABEL[state]}
     </span>
   );
 }

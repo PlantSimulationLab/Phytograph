@@ -14,6 +14,7 @@ machine running them happens to have Docker up or a RiVLib download present.
 import json
 import math
 import os
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -1146,3 +1147,407 @@ def test_a_riegl_project_file_is_rejected_with_a_useful_message(client, tmp_path
         main._validate_riegl_project(str(stray))
     assert exc.value.status_code == 400
     assert ".PROJ" in str(exc.value.detail)
+
+
+# ---------------------------------------------------------------------------
+# Image staleness: existence is not identity
+# ---------------------------------------------------------------------------
+#
+# The reader lives inside a container image the user builds, and its output
+# contract has already moved twice (2 -> 3 -> 4). Nothing rebuilds that image on
+# its own — not the installer, not electron-updater. Before these tests, a probe
+# that only asked "does an image exist?" reported an image built by any past
+# version as ready, and the mismatch surfaced as a failure partway through an
+# import, pointing at a Settings button that was hidden precisely BECAUSE the
+# image existed. So identity is a hash of the build context, stamped into the
+# image at build time and compared on every probe.
+
+
+def _built_with(monkeypatch, tmp_path, stamp):
+    """Fake a macOS machine with Docker up, RiVLib present, image built.
+
+    `stamp` is what the built image reports as its identity — None models every
+    image built before stamping existed.
+    """
+    _mac(monkeypatch)
+    monkeypatch.setattr(main, "_docker_present", lambda: True)
+    monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
+    monkeypatch.setattr(main, "_riegl_image_stamp", lambda: stamp)
+    rivlib = tmp_path / "rivlib"
+    (rivlib / "lib").mkdir(parents=True)
+    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    return str(rivlib)
+
+
+def test_image_built_from_older_sources_reads_as_stale(client, monkeypatch, tmp_path):
+    rivlib = _built_with(monkeypatch, tmp_path, "0" * 64)
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": rivlib}).json()
+
+    assert b["image_built"] is True, "the image does exist"
+    assert b["image_stale"] is True, "but it is not the one these sources build"
+    assert b["available"] is False
+    # The wording has to carry the fix, and the fix here is "nothing, it heals".
+    assert "out of date" in b["reason"].lower()
+    assert "automatic" in b["reason"].lower()
+
+
+def test_unstamped_image_reads_as_stale(client, monkeypatch, tmp_path):
+    """Every image built before stamping existed carries no label at all.
+
+    That is the population this feature ships into, so it must be the caught
+    case rather than the missed one.
+    """
+    rivlib = _built_with(monkeypatch, tmp_path, None)
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": rivlib}).json()
+    assert b["image_stale"] is True
+    assert b["available"] is False
+
+
+def test_matching_stamp_is_available(client, monkeypatch, tmp_path):
+    rivlib = _built_with(monkeypatch, tmp_path, main._riegl_expected_stamp())
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": rivlib}).json()
+    assert b["image_stale"] is False
+    assert b["available"] is True
+    assert b["image_stamp"] == b["expected_stamp"]
+
+
+def test_unhashable_context_never_claims_stale(client, monkeypatch, tmp_path):
+    """No context to hash means no verdict — not a rebuild prompt.
+
+    A build that shipped without docker/riegl cannot be compared against
+    anything, and nagging the user to rebuild against nothing would be a dead
+    end. "Cannot judge" degrades to "fine", the same way every other probe here
+    degrades to a usable state rather than an error.
+    """
+    rivlib = _built_with(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(main, "_riegl_expected_stamp", lambda *a, **k: None)
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": rivlib}).json()
+    assert b["image_stale"] is False
+    assert b["available"] is True
+
+
+def test_stamp_covers_bytes_paths_and_ignores_pycache(tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n")
+    (ctx / "rxp_reader.py").write_text("_STREAM_VERSION = 4\n")
+    base = main._riegl_expected_stamp(ctx)
+    assert base and len(base) == 64
+
+    # Stable across calls — a hash that moved on its own would rebuild forever.
+    assert main._riegl_expected_stamp(ctx) == base
+
+    # Bytes: the common case, an edit that bumps no version at all.
+    (ctx / "rxp_reader.py").write_text("_STREAM_VERSION = 5\n")
+    bumped = main._riegl_expected_stamp(ctx)
+    assert bumped != base
+
+    # Paths: a renamed module changes what the image contains even when the
+    # bytes in the context are collectively identical.
+    (ctx / "rxp_reader.py").rename(ctx / "reader.py")
+    assert main._riegl_expected_stamp(ctx) != bumped
+
+    # __pycache__ is a side effect of running the reader locally, not an input.
+    cache = ctx / "__pycache__"
+    cache.mkdir()
+    (cache / "reader.cpython-311.pyc").write_bytes(b"\x00\x01")
+    assert main._riegl_expected_stamp(ctx) == main._riegl_expected_stamp(ctx)
+    (ctx / "reader.py").rename(ctx / "rxp_reader.py")
+    (ctx / "rxp_reader.py").write_text("_STREAM_VERSION = 4\n")
+    assert main._riegl_expected_stamp(ctx) == base, "pycache must not stamp"
+
+
+def test_build_passes_the_stamp_as_a_build_arg(monkeypatch, tmp_path):
+    """The stamp only works if the build actually writes it."""
+    import subprocess
+
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n")
+    seen = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    def _fake_popen(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    main._run_docker_build(ctx)
+
+    cmd = seen["cmd"]
+    expected = main._riegl_expected_stamp(ctx)
+    assert "--build-arg" in cmd
+    assert f"PHYTOGRAPH_READER_STAMP={expected}" in cmd
+    # And the image still gets its tag, or nothing would find it afterwards.
+    assert main.RIEGL_IMAGE in cmd
+
+
+def test_dockerfile_declares_the_stamp_below_every_run(tmp_path):
+    """Pin the two properties the stamp depends on, in the file itself.
+
+    The label key is a contract between the Dockerfile and _riegl_image_stamp:
+    change one spelling and every image reads as unstamped, i.e. permanently
+    stale, i.e. a rebuild before every single import.
+
+    The ORDERING matters just as much and is far easier to break by accident: an
+    ARG invalidates the build cache from its own line down, so an ARG placed
+    above the pip/apt layers turns every reader edit into a full cold rebuild
+    (minutes) instead of one COPY (~2 s) — which would quietly destroy the
+    entire reason the self-heal is safe to run unattended.
+    """
+    dockerfile = (
+        Path(main.__file__).resolve().parent.parent
+        / "docker" / "riegl" / "Dockerfile"
+    )
+    lines = dockerfile.read_text().splitlines()
+
+    arg_idx = [
+        i for i, ln in enumerate(lines)
+        if ln.strip().startswith("ARG PHYTOGRAPH_READER_STAMP")
+    ]
+    label_idx = [
+        i for i, ln in enumerate(lines)
+        if ln.strip().startswith("LABEL org.phytograph.reader-stamp")
+    ]
+    assert len(arg_idx) == 1, "exactly one stamp ARG"
+    assert len(label_idx) == 1, "exactly one stamp LABEL"
+    assert lines[label_idx[0]].strip().endswith("$PHYTOGRAPH_READER_STAMP")
+
+    last_run = max(
+        (i for i, ln in enumerate(lines) if ln.strip().startswith("RUN ")),
+        default=-1,
+    )
+    assert last_run >= 0, "the Dockerfile should still have RUN layers to protect"
+    assert arg_idx[0] > last_run, (
+        "ARG PHYTOGRAPH_READER_STAMP must sit below every RUN, or passing it "
+        "busts the pip/apt cache and a reader edit costs minutes, not seconds"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Self-heal: a stale image updates itself on the next import
+# ---------------------------------------------------------------------------
+
+
+def _healable(monkeypatch, tmp_path):
+    """A stale image, plus a fake build that makes the stamp match."""
+    reported = {"stamp": "0" * 64}
+    builds = []
+
+    _mac(monkeypatch)
+    monkeypatch.setattr(main, "_docker_present", lambda: True)
+    monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
+    monkeypatch.setattr(main, "_riegl_image_stamp", lambda: reported["stamp"])
+
+    def _fake_build(context, **kwargs):
+        builds.append(context)
+        reported["stamp"] = main._riegl_expected_stamp()
+
+    monkeypatch.setattr(main, "_run_docker_build", _fake_build)
+
+    rivlib = tmp_path / "rivlib"
+    (rivlib / "lib").mkdir(parents=True)
+    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    return str(rivlib), builds
+
+
+def test_resolve_rebuilds_a_stale_image_and_proceeds(monkeypatch, tmp_path):
+    """The whole point: the import does not fail, it waits ~2 s and continues."""
+    rivlib, builds = _healable(monkeypatch, tmp_path)
+
+    status = main._resolve_riegl_runtime(rivlib)
+
+    assert len(builds) == 1, "rebuilt exactly once"
+    assert status["available"] is True
+    assert status["image_stale"] is False
+
+
+def test_resolve_does_not_rebuild_a_missing_image(monkeypatch, tmp_path):
+    """A MISSING image is first-run setup on a cold cache — minutes, not seconds.
+
+    Healing that unattended would hang an import behind a ~150 MB base-image
+    pull and an apt/pip install with no explanation, so it stays an explicit
+    button in Settings. Only the warm case (an image exists, therefore its
+    layers are cached) heals itself.
+    """
+    rivlib, builds = _healable(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "_riegl_image_built", lambda: False)
+
+    with pytest.raises(HTTPException) as exc:
+        main._resolve_riegl_runtime(rivlib)
+
+    assert exc.value.status_code == 503
+    assert builds == [], "must not build a missing image behind the user's back"
+    assert "not been built" in exc.value.detail
+
+
+def test_resolve_does_not_rebuild_when_docker_is_down(monkeypatch, tmp_path):
+    rivlib, builds = _healable(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "_docker_present", lambda: False)
+
+    with pytest.raises(HTTPException):
+        main._resolve_riegl_runtime(rivlib)
+    assert builds == []
+
+
+def test_concurrent_imports_rebuild_the_image_once(monkeypatch, tmp_path):
+    """Two imports can genuinely be in flight — every endpoint is a threadpool
+    `def` — and they share one image tag. Without the lock plus the re-probe
+    inside it, both would start their own `docker build`."""
+    import threading
+
+    rivlib, builds = _healable(monkeypatch, tmp_path)
+
+    # Hold the first builder inside the build so the second is guaranteed to
+    # arrive while it is still running, rather than relying on timing.
+    inside = threading.Event()
+    release = threading.Event()
+    real_stamp = main._riegl_expected_stamp()
+    reported = {}
+
+    def _slow_build(context, **kwargs):
+        builds.append(context)
+        inside.set()
+        release.wait(timeout=5)
+        reported["done"] = True
+        return None
+
+    monkeypatch.setattr(main, "_run_docker_build", _slow_build)
+    monkeypatch.setattr(
+        main, "_riegl_image_stamp",
+        lambda: real_stamp if reported.get("done") else "0" * 64,
+    )
+
+    results = []
+    t1 = threading.Thread(
+        target=lambda: results.append(main._resolve_riegl_runtime(rivlib))
+    )
+    t1.start()
+    assert inside.wait(timeout=5), "first thread should reach the build"
+
+    t2 = threading.Thread(
+        target=lambda: results.append(main._resolve_riegl_runtime(rivlib))
+    )
+    t2.start()
+    release.set()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert len(builds) == 1, "the second import must reuse the first's rebuild"
+    assert len(results) == 2
+    assert all(r["available"] for r in results)
+
+
+def test_failed_rebuild_reports_the_manual_path(monkeypatch, tmp_path):
+    """When the automatic update fails the user needs somewhere to go."""
+    rivlib, _ = _healable(monkeypatch, tmp_path)
+
+    def _boom(context, **kwargs):
+        raise RuntimeError("daemon went away")
+
+    monkeypatch.setattr(main, "_run_docker_build", _boom)
+
+    with pytest.raises(HTTPException) as exc:
+        main._resolve_riegl_runtime(rivlib)
+
+    assert exc.value.status_code == 503
+    assert "daemon went away" in exc.value.detail
+    assert "Settings" in exc.value.detail
+
+
+def test_heal_uses_a_tighter_timeout_than_the_manual_build(monkeypatch, tmp_path):
+    """A warm rebuild is seconds; the 30-minute cold-cache ceiling would leave
+    an import looking hung with no explanation."""
+    rivlib, _ = _healable(monkeypatch, tmp_path)
+    seen = {}
+
+    def _capture(context, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(main, "_run_docker_build", _capture)
+    with pytest.raises(HTTPException):
+        main._resolve_riegl_runtime(rivlib)
+
+    assert seen["timeout_s"] <= 600.0
+
+
+# ---------------------------------------------------------------------------
+# Where the build context lives in a PACKAGED app
+# ---------------------------------------------------------------------------
+#
+# The same shape as the octree cache root: a path computed on BOTH sides of a
+# process boundary, and validated only on the side where they happen to agree.
+# electron-builder places extraResources relative to <app>/Contents/Resources,
+# while the env var the main process exports (resourcesRoot()) points one level
+# INSIDE that at .../Resources/resources. So {from: "docker", to: "docker"}
+# ships the context at .../Resources/docker/riegl while the backend looked for
+# .../Resources/resources/docker/riegl — it agreed in dev (repo root) and only
+# in dev, which is exactly where every test ran.
+
+
+def _extraresources_docker_dest():
+    """Where electron-builder actually puts docker/riegl, per package.json."""
+    repo_root = Path(main.__file__).resolve().parent.parent
+    pkg = json.loads((repo_root / "package.json").read_text())
+    for entry in pkg["build"]["extraResources"]:
+        if entry.get("from") == "docker":
+            return entry.get("to", "docker")
+    raise AssertionError(
+        "package.json no longer ships docker/ as extraResources — the RIEGL "
+        "reader cannot be built in a packaged app without it"
+    )
+
+
+def test_packaged_layout_matches_package_json_extraresources(monkeypatch, tmp_path):
+    """Build the real packaged tree and prove the resolver finds the context.
+
+    Reconstructed from package.json rather than hardcoded, so changing where the
+    context ships fails HERE instead of shipping an app whose only symptom is a
+    503 the moment a user clicks Build reader image.
+    """
+    dest = _extraresources_docker_dest()
+
+    # <app>/Contents/Resources — what an extraResources `to:` is relative to.
+    contents_resources = tmp_path / "Contents" / "Resources"
+    context = contents_resources / dest / "riegl"
+    context.mkdir(parents=True)
+    (context / "Dockerfile").write_text("FROM scratch\n")
+
+    # What src/main/backend.ts exports: resourcesRoot() = <...>/Resources/resources
+    monkeypatch.setenv(
+        "PHYTOGRAPH_RESOURCES", str(contents_resources / "resources")
+    )
+    monkeypatch.delenv("PHYTOGRAPH_RIEGL_DOCKER_CONTEXT", raising=False)
+
+    assert main._riegl_docker_context() == context
+
+    # And the consequence that made this worth pinning: with no context there is
+    # nothing to hash, so a packaged app could never tell a stale reader image
+    # from a current one.
+    assert main._riegl_expected_stamp() is not None
+
+
+def test_context_still_resolves_from_the_repo_checkout(monkeypatch):
+    """Dev has no PHYTOGRAPH_RESOURCES at all and must still find docker/riegl."""
+    monkeypatch.delenv("PHYTOGRAPH_RESOURCES", raising=False)
+    monkeypatch.delenv("PHYTOGRAPH_RIEGL_DOCKER_CONTEXT", raising=False)
+
+    ctx = main._riegl_docker_context()
+    assert (ctx / "Dockerfile").is_file()
+    assert (ctx / "rxp_reader.py").is_file()

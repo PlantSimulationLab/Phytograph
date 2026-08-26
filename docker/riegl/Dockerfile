@@ -77,3 +77,24 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /opt/riegl
 ENTRYPOINT ["python", "/opt/riegl/rxp_reader.py"]
+
+# IDENTITY STAMP — how the app knows this image is current.
+#
+# The reader's output contract changes with the app (it has moved 2 -> 3 -> 4),
+# and nothing rebuilds this image on its own. Existence alone is NOT identity:
+# `docker images -q phytograph-riegl:latest` answers "yes" for an image built
+# against any past version, which is how a stale reader used to read as ready
+# and fail only mid-import.
+#
+# So the backend hashes this build context (see _riegl_expected_stamp) and
+# passes it in; a mismatch between the label and the freshly computed hash means
+# the image predates the app, and _resolve_riegl_runtime rebuilds it before the
+# import proceeds. The hash covers file PATHS as well as bytes, so an added or
+# renamed file counts as a change too.
+#
+# DECLARED LAST ON PURPOSE. An ARG invalidates the build cache from its own line
+# downwards, so putting it above the pip/apt layers would turn every reader edit
+# into a full rebuild (minutes) instead of one COPY (~2 s). Keep this at the
+# bottom, below every RUN.
+ARG PHYTOGRAPH_READER_STAMP=unstamped
+LABEL org.phytograph.reader-stamp=$PHYTOGRAPH_READER_STAMP

@@ -1580,11 +1580,28 @@ describe('getRieglStatus', () => {
       platformSupported: true,
       dockerPresent: true,
       imageBuilt: true,
+      imageStale: false,
       rivlibPath: '/opt/rivlib',
       rivlibValid: true,
       image: 'phytograph-riegl:latest',
       reason: 'RIEGL .rxp import is ready.',
     });
+  });
+
+  it('carries image staleness separately from image existence', async () => {
+    // An image built by an older Phytograph is `image_built` AND `image_stale`.
+    // Collapsing the two would hide the state whose whole point is that it
+    // looks built: that is how a stale reader used to read as ready.
+    mockFetchOk({
+      ...ready,
+      available: false,
+      image_stale: true,
+      reason: 'The RIEGL reader image is out of date …',
+    });
+    const s = await getRieglStatus('/opt/rivlib');
+    expect(s.imageBuilt).toBe(true);
+    expect(s.imageStale).toBe(true);
+    expect(s.available).toBe(false);
   });
 
   it('sends the configured rivlib path as a query parameter', async () => {
@@ -1615,6 +1632,9 @@ describe('getRieglStatus', () => {
     expect(s.platformSupported).toBe(false);
     expect(s.dockerPresent).toBe(false);
     expect(s.imageBuilt).toBe(false);
+    // Absent means "no reason to think it is stale" — a backend that omits the
+    // field must not put the UI into a permanent rebuild prompt.
+    expect(s.imageStale).toBe(false);
     expect(s.rivlibValid).toBe(false);
     expect(s.rivlibPath).toBeNull();
     expect(s.image).toBe('');

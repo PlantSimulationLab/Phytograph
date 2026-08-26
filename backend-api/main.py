@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.73.0"
+BACKEND_VERSION = "0.74.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -577,6 +577,8 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
 # now; a native (non-container) RiVLib path can be dropped in behind this same
 # probe later without the UI or the endpoints changing.
 
+import threading as _threading
+
 RIEGL_IMAGE = "phytograph-riegl:latest"
 _RIEGL_DOCKER_TIMEOUT_S = 10
 
@@ -655,6 +657,99 @@ def _riegl_image_built() -> bool:
         return False
 
 
+# Everything in the build context defines the image EXCEPT this: running the
+# reader locally (scripts/riegl-probe.mjs, a pytest import) leaves __pycache__
+# behind, and byte-identical sources must not stamp differently because of it.
+_RIEGL_CONTEXT_IGNORE = {"__pycache__"}
+
+# Serialises the self-heal below. Every endpoint here is a threadpool `def`, so
+# two imports genuinely can be in flight at once and would otherwise each start
+# their own `docker build` against the same tag.
+_RIEGL_BUILD_LOCK = _threading.Lock()
+
+
+def _riegl_expected_stamp(context: "Optional[Path]" = None) -> "str | None":
+    """SHA-256 of the build context — the identity the built image should carry.
+
+    Deliberately a SOURCE HASH rather than a version counter, mirroring
+    phytograph_backend_sources.sha256 and for the same reason: a counter only
+    moves when someone remembers to move it, so it misses the common case of an
+    edit that changes the reader's behaviour without bumping anything. That is
+    the silent failure — a stamp that still matches while the image runs older
+    code — and it is worse than the loud one, so hash the sources instead.
+
+    Each file contributes its PATH as well as its bytes, so adding, deleting or
+    renaming a file changes the stamp too.
+
+    Returns None when the context cannot be located or read. None means "cannot
+    judge", and every caller treats that as NOT stale: a build that shipped
+    without docker/riegl must not nag the user to rebuild against nothing.
+    """
+    import hashlib
+
+    try:
+        ctx = context if context is not None else _riegl_docker_context()
+    except Exception:
+        return None
+    try:
+        h = hashlib.sha256()
+        for path in sorted(ctx.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(ctx)
+            if any(part in _RIEGL_CONTEXT_IGNORE for part in rel.parts):
+                continue
+            h.update(rel.as_posix().encode("utf-8"))
+            h.update(b"\0")
+            h.update(path.read_bytes())
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _riegl_image_stamp() -> "str | None":
+    """Read the identity stamp off the built image, or None if it carries none.
+
+    Resolved by image ID, not by name:tag, for the containerd reason documented
+    on _riegl_image_built: `docker image inspect phytograph-riegl:latest` can
+    answer "No such image" for an image `docker images -q` resolves fine.
+
+    None covers three situations that are all handled identically — no image, an
+    image built before stamping existed (every image built before this change),
+    and a probe that failed. All three mean "not known to match the app", and
+    the remedy for each is the same cheap rebuild.
+    """
+    image_id = RIEGL_IMAGE
+    try:
+        r = _spawn_run(
+            ["docker", "images", "-q", RIEGL_IMAGE],
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            image_id = r.stdout.strip().splitlines()[0].strip()
+    except Exception:
+        pass
+
+    try:
+        r = _spawn_run(
+            [
+                "docker", "image", "inspect", image_id, "--format",
+                '{{index .Config.Labels "org.phytograph.reader-stamp"}}',
+            ],
+            timeout=_RIEGL_DOCKER_TIMEOUT_S,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    stamp = r.stdout.strip()
+    # A Go template renders a missing label as "<no value>"; an image built
+    # without --build-arg carries the Dockerfile's own default.
+    if not stamp or stamp in ("<no value>", "unstamped"):
+        return None
+    return stamp
+
+
 def _riegl_status(rivlib_override: "str | None" = None) -> dict:
     """Resolve whether RIEGL .rxp reading is available, and why not when it isn't.
 
@@ -677,6 +772,9 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
             "platform_supported": False,
             "docker_present": False,
             "image_built": False,
+            "image_stale": False,
+            "image_stamp": None,
+            "expected_stamp": None,
             "rivlib_path": rivlib_path,
             "rivlib_valid": rivlib_ok,
             "image": RIEGL_IMAGE,
@@ -699,6 +797,26 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
         image_ok = _riegl_image_built() if docker_ok else False
     except Exception:
         image_ok = False
+
+    # EXISTENCE IS NOT IDENTITY. `docker images -q` answers "yes" for an image
+    # built against any past version of the reader, and the reader's output
+    # contract has already moved twice (2 -> 3 -> 4). Before stamping, that read
+    # as "ready" right up until an import failed halfway through with a message
+    # pointing at a Settings button that was hidden precisely because the image
+    # existed. So compare what the image was built from against what is on disk
+    # now, and treat a difference as its own state.
+    expected_stamp = _riegl_expected_stamp()
+    image_stamp = None
+    if image_ok:
+        try:
+            image_stamp = _riegl_image_stamp()
+        except Exception:
+            image_stamp = None
+    # `expected_stamp is None` means the context could not be hashed, i.e. we do
+    # not know what to compare against — never claim staleness on a guess.
+    image_stale = bool(
+        image_ok and expected_stamp is not None and image_stamp != expected_stamp
+    )
 
     if not docker_ok:
         reason = (
@@ -723,14 +841,30 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
             "The RIEGL reader image has not been built yet. Build it from your "
             "RiVLib copy to enable .rxp import."
         )
+    elif image_stale:
+        # Worded to inform rather than alarm: this state fixes ITSELF on the
+        # next import (see _resolve_riegl_runtime), so the manual rebuild is
+        # offered as the impatient option, not as a chore the user must do.
+        reason = (
+            "The RIEGL reader image is out of date — it was built by an earlier "
+            "version of Phytograph. The next .rxp import updates it "
+            "automatically (a second or two on a warm Docker cache); the button "
+            "in Settings does it now."
+        )
     else:
         reason = "RIEGL .rxp import is ready."
 
     return {
-        "available": bool(docker_ok and image_ok and rivlib_ok),
+        "available": bool(docker_ok and image_ok and rivlib_ok and not image_stale),
         "platform_supported": True,
         "docker_present": docker_ok,
         "image_built": image_ok,
+        "image_stale": image_stale,
+        # Both stamps travel so a support question ("why does it think this is
+        # old?") is answerable from the status alone rather than by rerunning
+        # docker by hand.
+        "image_stamp": image_stamp,
+        "expected_stamp": expected_stamp,
         "rivlib_path": rivlib_path,
         "rivlib_valid": rivlib_ok,
         "image": RIEGL_IMAGE,
@@ -761,6 +895,21 @@ def _riegl_docker_context() -> Path:
     candidates = []
     resources_env = os.environ.get("PHYTOGRAPH_RESOURCES")
     if resources_env:
+        # TWO packaged candidates, because PHYTOGRAPH_RESOURCES does NOT point
+        # at the root of extraResources — it points one level inside it.
+        # resourcesRoot() in src/main/backend.ts is
+        # <app>/Contents/Resources/RESOURCES, while an electron-builder
+        # extraResources `to:` is relative to <app>/Contents/Resources itself.
+        # package.json maps {from: "docker", to: "docker"}, so the context ships
+        # at <app>/Contents/Resources/docker/riegl — the PARENT of the env var.
+        # Looking only under the env var (as this did) found nothing in a
+        # packaged build: "Build reader image" answered 503 "build context not
+        # found", and the staleness stamp had no sources to hash, so a shipped
+        # app could neither build the reader nor notice its own was out of date.
+        # Both spellings are tried so the packaging can move either way without
+        # this silently breaking again; pinned by
+        # test_packaged_layout_matches_package_json_extraresources.
+        candidates.append(Path(resources_env).parent / "docker" / "riegl")
         candidates.append(Path(resources_env) / "docker" / "riegl")
     repo_root = Path(__file__).resolve().parent.parent
     candidates.append(repo_root / "docker" / "riegl")
@@ -845,10 +994,16 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
     for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
         env.pop(var, None)
 
-    cmd = [
-        "docker", "build", "--platform", "linux/amd64",
-        "-t", RIEGL_IMAGE, str(context),
-    ]
+    # Stamp the image with a hash of what it was built from, so a later launch
+    # can tell a current image from one that merely exists (see
+    # _riegl_expected_stamp). The ARG is declared at the BOTTOM of the
+    # Dockerfile, below every RUN, so passing it cannot invalidate the pip/apt
+    # layers — a reader-only change stays a ~2 s COPY rebuild.
+    cmd = ["docker", "build", "--platform", "linux/amd64"]
+    stamp = _riegl_expected_stamp(context)
+    if stamp:
+        cmd += ["--build-arg", f"PHYTOGRAPH_READER_STAMP={stamp}"]
+    cmd += ["-t", RIEGL_IMAGE, str(context)]
 
     with tempfile.NamedTemporaryFile(
         mode="w+", suffix=".riegl-build.log", delete=False
@@ -1448,17 +1603,93 @@ def riegl_status(rivlib_path: Optional[str] = None):
     return _riegl_status(rivlib_path)
 
 
+def _rebuild_stale_riegl_image(rivlib_override: "str | None" = None) -> dict:
+    """Rebuild an out-of-date reader image in place, then re-probe.
+
+    Only ever called for a STALE image (one that exists but was built by an
+    earlier Phytograph), never for a missing one — see _resolve_riegl_runtime
+    for why that distinction is what makes this safe to do unattended.
+    """
+    with _RIEGL_BUILD_LOCK:
+        # Re-probe under the lock. A concurrent import may have healed it while
+        # this thread waited, and rebuilding again would be pure waste.
+        status = _riegl_status(rivlib_override)
+        if status["available"] or not status.get("image_stale"):
+            return status
+
+        try:
+            _run_docker_build(
+                _riegl_docker_context(),
+                # A warm rebuild is seconds. Ten minutes means something is
+                # wrong, and the user is sitting in front of an import that
+                # looks hung — fail with an explanation instead of the 30-minute
+                # ceiling the manual build uses for its cold-cache first run.
+                timeout_s=600.0,
+            )
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The RIEGL reader image is out of date and updating it "
+                    f"automatically failed: {exc.detail} You can retry from "
+                    "Settings -> RIEGL RiVLib folder -> Rebuild reader image."
+                ),
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The RIEGL reader image is out of date and updating it "
+                    f"automatically failed: {exc} You can retry from Settings "
+                    "-> RIEGL RiVLib folder -> Rebuild reader image."
+                ),
+            ) from exc
+
+        return _riegl_status(rivlib_override)
+
+
 def _resolve_riegl_runtime(rivlib_override: "str | None" = None) -> dict:
     """Return the RIEGL runtime config, or raise 503 with the remediation.
 
     503 is the established status for "optional capability not installed" here
     (see _resolve_potree_converter_path), and the detail carries the same reason
     string the status endpoint reports so the UI can surface one message.
+
+    ONE STATE HEALS ITSELF rather than raising: an image that exists but was
+    built by an earlier Phytograph. Nothing else updates it — not the installer,
+    not electron-updater, which swap app bytes and cannot assume a Docker daemon
+    is even running — so left alone it surfaces as a failure partway through an
+    import the user has already committed to.
+
+    Rebuilding here is safe precisely BECAUSE the image already exists: that
+    means the base image, the apt layer and the pip layer are all in the local
+    build cache, and rxp_reader.py is the last COPY in the Dockerfile, so the
+    rebuild is one layer — measured at 1.7 s, with no network access at all, so
+    it works offline. A MISSING image is the opposite case (a cold cache pulls a
+    ~150 MB base and installs a toolchain, minutes) and is deliberately NOT
+    healed here: that is first-run setup, where the user is configuring RiVLib
+    and Docker anyway and the Settings button belongs.
+
+    This is also what makes a downgrade work: rolling back to an older
+    Phytograph sees a too-NEW image, which is stale by the same equality test
+    and rebuilds to match. Nothing needs a version ordering, and there is only
+    ever one image on disk rather than one per version.
     """
     status = _riegl_status(rivlib_override)
-    if not status["available"]:
-        raise HTTPException(status_code=503, detail=status["reason"])
-    return status
+    if status["available"]:
+        return status
+
+    if (
+        status.get("image_stale")
+        and status["platform_supported"]
+        and status["docker_present"]
+        and status["rivlib_valid"]
+    ):
+        status = _rebuild_stale_riegl_image(rivlib_override)
+        if status["available"]:
+            return status
+
+    raise HTTPException(status_code=503, detail=status["reason"])
 
 
 def _run_riegl_container(

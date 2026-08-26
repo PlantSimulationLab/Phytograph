@@ -389,6 +389,16 @@ export interface RieglStatus {
   platformSupported: boolean;
   dockerPresent: boolean;
   imageBuilt: boolean;
+  /**
+   * The image exists but was built by an earlier Phytograph.
+   *
+   * Distinct from `!imageBuilt` because the remedy differs in kind: an import
+   * heals this one itself (the rebuild is one cached layer, ~2s), whereas a
+   * missing image is first-run setup and a cold Docker cache. `available` is
+   * false either way — it reports what is on disk right now — so the UI reads
+   * this flag to tell "needs setting up" apart from "will sort itself out".
+   */
+  imageStale: boolean;
   rivlibPath: string | null;
   rivlibValid: boolean;
   image: string;
@@ -660,6 +670,7 @@ export async function getRieglStatus(
     platformSupported: j.platform_supported === true,
     dockerPresent: j.docker_present === true,
     imageBuilt: j.image_built === true,
+    imageStale: j.image_stale === true,
     rivlibPath: typeof j.rivlib_path === 'string' ? j.rivlib_path : null,
     rivlibValid: j.rivlib_valid === true,
     image: typeof j.image === 'string' ? j.image : '',

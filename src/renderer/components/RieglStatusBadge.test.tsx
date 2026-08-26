@@ -12,6 +12,7 @@ const READY = {
   imageBuilt: true,
   rivlibPath: '/riv',
   rivlibValid: true,
+  imageStale: false,
   image: 'phytograph-riegl:latest',
   reason: 'RIEGL .rxp import is ready.',
 };
@@ -87,5 +88,44 @@ describe('RieglStatusBadge', () => {
 
     rerender(<RieglStatusBadge rivlibPath="/riv" refreshKey={1} />);
     await waitFor(() => expect(getRieglStatus).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows a stale image as an update pending, not as unavailable', async () => {
+    // An out-of-date image is NOT the same kind of problem as a stopped Docker
+    // daemon: the next import rebuilds it in about a second with no action from
+    // the user. Reporting it as "unavailable" would overstate it and send them
+    // hunting for a fix that isn't needed — while "ready" would be a lie, since
+    // something does have to happen first. Hence a third state.
+    vi.mocked(getRieglStatus).mockResolvedValue({
+      ...READY,
+      available: false,
+      imageStale: true,
+      reason: 'The RIEGL reader image is out of date — the next import updates it.',
+    } as never);
+    render(<RieglStatusBadge rivlibPath="/riv" />);
+
+    const badge = await waitFor(() => screen.getByTestId('riegl-status-badge'));
+    await waitFor(() => expect(badge.dataset.state).toBe('stale'));
+    expect(badge.textContent).toMatch(/update pending/i);
+    expect(badge.textContent).not.toMatch(/unavailable/i);
+    // The tooltip still carries the backend's own explanation.
+    expect(badge.getAttribute('title')).toMatch(/out of date/i);
+  });
+
+  it('still reports a genuinely missing image as unavailable', async () => {
+    vi.mocked(getRieglStatus).mockResolvedValue({
+      ...READY,
+      available: false,
+      imageBuilt: false,
+      imageStale: false,
+      reason: 'The RIEGL reader image has not been built yet.',
+    } as never);
+    render(<RieglStatusBadge rivlibPath="/riv" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('riegl-status-badge').dataset.state).toBe(
+        'unavailable',
+      ),
+    );
   });
 });

@@ -56,10 +56,18 @@ Phytograph reads it from wherever you put it. Nothing is copied into the app.
     | --- | --- |
     | ✗ Docker running | Start Docker Desktop and reopen Settings |
     | ✗ RiVLib folder | Choose the extracted folder (the one with `bin/`, `include/`, `lib/`) |
-    | ✗ Reader image built | Click **Build reader image** — a one-time step; the image is ~300 MB on disk once built |
+    | ✗ Reader image up to date | Click **Build reader image** — a one-time step; the image is ~300 MB on disk once built |
 
     The image is always built locally from your own RiVLib copy; it is never
     downloaded pre-made, because publishing it would mean redistributing RiVLib.
+
+    After a Phytograph update the badge may read **RIEGL update pending**. That
+    is not something you need to act on: the reader inside the image travels
+    with the app, so an update can leave the image a version behind, and your
+    next import rebuilds it first — a second or two, since only the reader layer
+    changes and Docker already has the rest cached. It works offline. If you
+    would rather not wait mid-import, **Rebuild reader image** in Settings does
+    it now.
 
 ## Import a project
 
@@ -281,10 +289,12 @@ puts it back on the bounding box.
   position whose folder exists but holds no `.rxp` is skipped rather than
   listed as broken.
 
-**"The RIEGL reader image is out of date."**
-: The reader lives inside the container image you built, and nothing rebuilds it
-  automatically — so a version that predates `.PROJ` support cannot read one.
-  Click **Build reader image** again in Settings.
+**"The RIEGL reader image is out of date and updating it automatically failed."**
+: Phytograph normally rebuilds a stale reader image by itself at the start of an
+  import, so you only see this if that rebuild failed — most often because
+  Docker stopped between the check and the build. Start Docker Desktop and try
+  the import again, or click **Rebuild reader image** in Settings to see the
+  build's own error.
 
 **A `.PROJ` imports, but the scans are not aligned.**
 : Check the badges in the picker. If they say **prior only**, the instrument's

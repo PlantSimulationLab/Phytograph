@@ -15,6 +15,27 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 
+@pytest.fixture(autouse=True)
+def _riegl_image_stamp_is_current(monkeypatch):
+    """Keep the RIEGL image-staleness probe out of the test machine's Docker.
+
+    The probe shells out to `docker image inspect` to read the identity stamp
+    off phytograph-riegl:latest. Tests that fake "the image is built" (by
+    patching `_riegl_image_built`) must not then have the verdict swing on
+    whether the machine running pytest happens to have a real image, and a
+    hermetic suite must not shell out to a daemon at all.
+
+    So the default is "the built image matches the sources on disk", which is
+    what every pre-existing test means by "built". A test about staleness itself
+    overrides this with its own monkeypatch — see test_riegl_status.py.
+    """
+    import main
+
+    monkeypatch.setattr(
+        main, "_riegl_image_stamp", lambda: main._riegl_expected_stamp()
+    )
+
+
 @pytest.fixture(scope="session")
 def client():
     """FastAPI TestClient bound to the real app. No mocks."""
