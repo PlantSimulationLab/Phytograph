@@ -1,0 +1,13 @@
+# Runner labels actionlint cannot know about on its own.
+#
+# `linux-x64-gpu-githubhosted` is a GitHub-hosted LARGER runner with an NVIDIA
+# GPU, provisioned at the PlantSimulationLab org level. actionlint only ships the
+# standard hosted labels, so without this entry every lint run reports it as
+# unknown. Declared here rather than silenced inline so the label is documented
+# in one place.
+#
+# It is billed per minute even on a public repository (standard runners are free;
+# larger runners never are), so only .github/workflows/gpu.yml should use it.
+self-hosted-runner:
+  labels:
+    - linux-x64-gpu-githubhosted

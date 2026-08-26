@@ -1,0 +1,167 @@
+name: GPU
+
+# The one gap that costs real money to close, so it is the one thing here that
+# does not run on every push.
+#
+# What is already covered for free, and is NOT the point of this workflow:
+#   - that the CUDA path COMPILES — release.yml passes --require-gpu to
+#     scripts/build-pyhelios.mjs, which fails the build if it did not;
+#   - that /api/device-info's branching is correct — test_device_info.py covers
+#     it with a monkeypatched probe.
+#
+# Neither needs a GPU, and neither can tell you the two things that do:
+#
+#   1. Does the runtime probe actually work against a real driver? Every
+#      existing assertion about it runs against a lambda.
+#   2. Does the CUDA ray-tracing path compute the SAME ANSWERS as the CPU path?
+#
+# (2) is the reason this exists, and it needs no new test code. The 49 tests in
+# tests/test_lidar_scan*.py assert concrete scan outcomes — hit counts, geometry,
+# alpha gating, multibeam channel resolution — and every one of those
+# expectations was derived on CPU. Run them where libhelios dispatches to CUDA
+# and they become a differential test: if the GPU path disagrees with the CPU
+# path, the CPU-derived assertions fail. Writing a fresh, weaker set of GPU
+# expectations here would only dilute that signal.
+#
+# Cost: a Linux 4-core GPU larger runner bills per minute even on a public repo
+# (standard runners are free; larger ones never are). A ~30 minute run is on the
+# order of $1.50-2. Monthly plus a manual dispatch before a release keeps that
+# at roughly $20-40 a year, which is why the schedule is monthly and not nightly.
+
+on:
+  workflow_dispatch:
+  # 05:00 UTC on the 1st. Run it by hand before a release tag as well — that is
+  # when a CPU/GPU divergence would actually reach users.
+  schedule:
+    - cron: '0 5 1 * *'
+
+concurrency:
+  group: gpu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    # Org-provisioned GPU larger runner. Larger runners are only available to
+    # Team/Enterprise Cloud plans and are billed per minute regardless of repo
+    # visibility, so nothing else in this repo should use this label.
+    runs-on: linux-x64-gpu-githubhosted
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      # No pip cache: same reasoning as ci.yml — on Linux it caches downloads
+      # only, and it is not worth 3 GB of a 10 GB repo-wide cache budget.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Fail immediately if the runner has no GPU. Without this the suite would
+      # SKIP its way to a green tick: test_gpu_runtime.py skips when nvidia-smi
+      # sees nothing, and the lidar tests would quietly exercise the CPU path —
+      # a GPU job that tested no GPU and said so nowhere. That is the specific
+      # false-confidence failure this whole workflow exists to avoid, so assert
+      # the premise before doing any work.
+      - name: Verify a GPU is actually present
+        run: |
+          set -euo pipefail
+          if ! command -v nvidia-smi >/dev/null; then
+            echo "::error::nvidia-smi not found — this runner has no NVIDIA driver."
+            exit 1
+          fi
+          nvidia-smi
+          count=$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c . || true)
+          if [ "${count:-0}" -lt 1 ]; then
+            echo "::error::nvidia-smi ran but reported no devices."
+            exit 1
+          fi
+          echo "GPUs visible: $count"
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.6.3'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart-dev", "cudart"]'
+          use-github-cache: true
+          use-local-cache: true
+
+      - name: Verify CUDA toolkit
+        run: nvcc -V
+
+      # CUDA's apt transaction removes the mesa/GLVND/X11 dev packages (it
+      # resolves a conflict by uninstalling libgl1-mesa-dev, libglvnd-dev,
+      # libx11-dev and friends), after which the visualizer plugin's bundled glew
+      # fails find_package(OpenGL). Re-install the SAME set afterwards — xvfb
+      # included, since pytest runs under it. Mirrors release.yml.
+      - name: Re-install GL/X11 dev headers after CUDA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+
+      - name: Install Python dependencies
+        working-directory: backend-api
+        run: |
+          python -m pip install --upgrade pip
+          # CPU torch, as everywhere else: phytorch-lib pulls torch in, the
+          # backend only uses it for CPU curve-fitting, and Linux would
+          # otherwise fetch the multi-GB CUDA wheel. Nothing here exercises
+          # torch on the GPU — the GPU path under test is Helios ray tracing.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio httpx
+
+      # --require-gpu makes this FAIL rather than silently produce a CPU-only
+      # library, which would turn the entire parity run into a CPU-vs-CPU
+      # comparison that passes and proves nothing.
+      - name: Build PyHelios with the CUDA path (required)
+        run: node scripts/build-pyhelios.mjs --require-gpu
+
+      # Real-hardware assertions: the unmocked probe reaches the driver, and the
+      # loaded libhelios reports a usable CUDA runtime.
+      - name: GPU runtime checks
+        working-directory: backend-api
+        run: xvfb-run -a python -m pytest tests/test_gpu_runtime.py tests/test_device_info.py -v --no-cov
+
+      # The differential test. These expectations were written against the CPU
+      # path; running them where libhelios dispatches to CUDA is what makes a
+      # divergence visible.
+      #
+      # -p no:randomly is not used and no seed is pinned here on purpose: the
+      # scan tests are already deterministic, and if they are not, that is
+      # itself worth discovering on this runner.
+      - name: LiDAR scan parity (CPU-derived expectations, GPU execution)
+        working-directory: backend-api
+        run: xvfb-run -a python -m pytest tests/test_lidar_scan.py tests/test_lidar_scan_alpha.py tests/test_lidar_scan_organ.py tests/test_lidar_scan_risley.py -v --no-cov
+
+      # A skipped test here means the GPU vanished mid-run or the probe broke.
+      # Either way the job must not report success on a suite that quietly
+      # stopped testing the thing it is named after.
+      - name: Fail if the GPU tests skipped
+        if: always()
+        working-directory: backend-api
+        run: |
+          set -euo pipefail
+          out=$(xvfb-run -a python -m pytest tests/test_gpu_runtime.py --collect-only -q --no-cov 2>&1 || true)
+          echo "$out"
+          if echo "$out" | grep -qiE "^[0-9]+ skipped|, [0-9]+ skipped"; then
+            echo "::error::test_gpu_runtime.py skipped — the GPU was not visible to pytest."
+            exit 1
+          fi
