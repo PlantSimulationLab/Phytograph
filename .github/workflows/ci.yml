@@ -396,24 +396,37 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Six, not four. Measured at four (runs 32885918456 / 32888645240): the
-        # shards came in at 13/16/18/24 and 13/17/20/29 minutes — a 2.2x spread,
-        # and since the critical path is the SLOWEST shard, the suite was paying
-        # 24-29 min while the fastest runner idled for ten of them.
+        # FOUR. Six was tried and reverted — do not "optimise" this back up
+        # without reading why, because the failure mode is counterintuitive.
         #
-        # The imbalance is structural, not noise. Playwright shards by FILE
-        # balanced on test COUNT, and the alphabet happens to cluster the
-        # expensive work at the end: shard 4 held synthetic-scan*, triangulate-*
-        # and wood-segment* (Helios ray tracing, Poisson/ball-pivot,
-        # cut-pursuit), while shard 2 held import-* and label-* and finished in
-        # 13. Equal test counts, very unequal cost.
+        # The motivation was real: at four, shards measure roughly 13/16/18/24
+        # and 13/17/20/29 minutes (runs 32885918456, 32888645240). Playwright
+        # shards by FILE balanced on test COUNT, and the alphabet clusters the
+        # expensive work, so one shard inherits synthetic-scan*, triangulate-*
+        # and wood-segment* while another gets import-* and label-*. Equal
+        # counts, very unequal cost, and the critical path is the slowest shard.
         #
-        # More shards is the lever that needs no maintenance: it splits that
-        # heavy tail across two runners instead of one. The floor is the single
-        # slowest FILE, since fullyParallel:false keeps a file intact — so going
-        # much beyond this trades real gains for per-shard setup (~3 min of
-        # checkout, npm ci, and a ~1 GB cache restore each).
-        shard: [1, 2, 3, 4, 5, 6]
+        # Six did shorten the light shards (9/10/11/13). It also made THREE of
+        # the six fail (run 32987547865): plant-generate-cancel and
+        # scene-origin-camera both blew the 180 s per-test cap, and
+        # tree-seed-blocked-zone missed a 15 s visibility expect. Four shards had
+        # produced a fully green run (32888645240) on the same commit range.
+        #
+        # The reason is that MORE SHARDS MAKES EACH SHARD MORE HOMOGENEOUS. The
+        # alphabetical clustering that creates the imbalance also means a finer
+        # split concentrates rather than disperses: at six, shard 4 was all six
+        # lad-*, all six qsm-*, AND both plant-generate* specs, and shard 5 was
+        # the scan*/synthetic-scan*/skeleton/stitch group. With `workers: 2`
+        # those heavy specs then run CONCURRENTLY, where at four they were
+        # diluted by light neighbours. Every failure was a timeout; none was a
+        # wrong answer — the suite ran out of budget, it did not miscompute.
+        #
+        # So the wall-clock win (~7 min) cost two-to-three investigations per
+        # run, which is a bad trade under a no-retries policy where each failure
+        # costs human time. If more shards are ever wanted, move the compute-heavy
+        # specs into the `heavy` project (workers: 1) FIRST, so a finer split
+        # cannot pair them with each other.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
