@@ -270,6 +270,38 @@ jobs:
       - name: Smoke-test packaged app
         run: npm run test:smoke-packaged
 
+      # The cross-platform E2E subset — tests/e2e/platform-specs.json, 68 tests
+      # across 28 spec files. These are the ones Linux genuinely cannot check:
+      # the native menu and real file dialogs, per-platform native wheels
+      # (laspy/lazrs, pye57, plyfile, pyproj), the PotreeConverter subprocess,
+      # export round-trips that read bytes back off disk, and the octree cache
+      # root that shipped broken on Windows.
+      #
+      # This drives the DEV build (dist-main + a supervised backend), which is
+      # what launchApp.ts launches — not the packaged .app. The two are
+      # complementary: the smoke test above proves the ARTIFACT opens, this
+      # proves the BEHAVIOUR is right on this OS. `npm run build` already ran as
+      # part of the package step, so dist-main is in place.
+      #
+      # PHYTOGRAPH_E2E_PLATFORM=1 swaps playwright.config.ts's project list for
+      # the subset; without it the config is untouched, so local runs and ci.yml
+      # behave exactly as before.
+      - name: E2E (platform subset)
+        env:
+          PHYTOGRAPH_E2E_PLATFORM: '1'
+        run: npm run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.key }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
       # electron-builder writes its own logs next to the output; grab enough to
       # diagnose a packaging failure without shipping the ~1 GB unpacked app.
       - name: Upload packaging diagnostics on failure

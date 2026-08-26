@@ -1,4 +1,6 @@
 import { defineConfig, type ReporterDescription } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Opt-in test-span log for `npm run test:e2e:profile` — lets
 // scripts/monitor-resources.mjs attribute CPU/memory peaks to a spec file.
@@ -6,6 +8,26 @@ import { defineConfig, type ReporterDescription } from '@playwright/test';
 const timelineReporter: ReporterDescription[] = process.env.PHYTOGRAPH_E2E_TIMELINE
   ? [['./tests/e2e/helpers/timeline-reporter.ts']]
   : [];
+
+// The cross-platform subset, read from its JSON contract so the list lives in
+// exactly one reviewable place (and so scripts/platform-specs.test.mjs can pin
+// it — every entry must still resolve to a real file, or a rename would drop a
+// spec out of Windows/macOS coverage silently).
+const platformSpecs: string[] = (
+  JSON.parse(
+    readFileSync(fileURLToPath(new URL('./tests/e2e/platform-specs.json', import.meta.url)), 'utf-8'),
+  ) as { groups: { specs: string[] }[] }
+).groups.flatMap((g) => g.specs);
+
+// `PHYTOGRAPH_E2E_PLATFORM=1` swaps the project list for the platform subset
+// alone, rather than adding a third project alongside heavy/main.
+//
+// It has to be a swap. Playwright runs EVERY project when none is named, and
+// `npm run test:e2e` is exactly that bare invocation — so a permanently-defined
+// `platform` project would make every local full run execute those 28 spec
+// files twice. Gating on the env var keeps local runs and ci.yml (which names
+// --project explicitly) byte-identical to before, while platform.yml opts in.
+const platformOnly = process.env.PHYTOGRAPH_E2E_PLATFORM === '1';
 
 // E2E drives the packaged Electron app via `_electron.launch`. There is no
 // browser to install — Playwright reuses Phytograph's bundled Electron. Each
@@ -72,7 +94,17 @@ export default defineConfig({
   // scattered them among the main shards, putting exactly that neighbour back.
   // If you ever fold them into the sharded matrix, the ceilings become
   // measurements of a machine the spec does not control again.
-  projects: [
+  projects: platformOnly ? [
+    {
+      // Windows/macOS runners are smaller than the Linux CI box (the macOS
+      // arm64 runner is 3 vCPU / 7 GB), and each worker drives its own Electron
+      // plus PyInstaller backend at ~1-1.5 GB RSS. Two still fits, so keep the
+      // default; drop to `workers: 1` if this project starts flaking on memory
+      // rather than on a real defect.
+      name: 'platform',
+      testMatch: platformSpecs.map((s) => `**/${s}`),
+    },
+  ] : [
     {
       name: 'heavy',
       testMatch: [

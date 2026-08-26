@@ -1,0 +1,81 @@
+{
+  "_comment": [
+    "The E2E specs worth running on a REAL Windows / macOS runner, consumed by",
+    "playwright.config.ts's `platform` project and pinned by",
+    "scripts/platform-specs.test.mjs.",
+    "",
+    "Selection rule: a spec earns a place here only if Linux genuinely cannot",
+    "validate it — it reads bytes back off disk, drives OS integration, or loads",
+    "a per-platform native binary. The other ~96 specs are renderer maths or",
+    "identical Python and are fully covered by ci.yml; running them three times",
+    "would triple the wall clock for no signal.",
+    "",
+    "PREFER NOT ADDING TO THIS LIST. Anything expressible as a pure function over",
+    "a platform string belongs in a unit test instead, where the free Linux",
+    "runner checks all three platforms in about a second — see",
+    "src/main/octreeCacheRoot.ts and src/shared/octreeCacheRoot.contract.json.",
+    "That bug (the octree cache reader and writer disagreeing on Windows and",
+    "Linux, with macOS passing only because APFS is case-insensitive) is the",
+    "archetype: it is caught by a contract test, not by cross-OS E2E."
+  ],
+  "groups": [
+    {
+      "why": "Backend supervision and the octree cache root — the class of bug that shipped broken on Windows and Linux while macOS passed by accident.",
+      "specs": [
+        "octree-cache-recovery.spec.ts",
+        "about.spec.ts",
+        "export-octree-cloud.spec.ts"
+      ]
+    },
+    {
+      "why": "OS integration that has no Linux equivalent: the macOS app menu vs the Windows menubar, the real file dialogs, and Electron's webUtils.getPathForFile drag-drop path.",
+      "specs": [
+        "import-menu-paths.spec.ts",
+        "new-reset.spec.ts",
+        "import-drop-no-path.spec.ts",
+        "window-resize.spec.ts"
+      ]
+    },
+    {
+      "why": "Export round-trips, one per format family. These write real files and read the bytes back, so they are where path separators, drive letters and text-mode newline translation surface. Note main.py writes XML and the ASCII hits-only copy with open(path, 'w') and no newline='', which becomes CRLF on Windows.",
+      "specs": [
+        "export-scan-laz.spec.ts",
+        "export-scan-ptx.spec.ts",
+        "export-scan-xml.spec.ts",
+        "export-mesh.spec.ts",
+        "export-scalar-columns.spec.ts",
+        "export-batch-objects.spec.ts",
+        "generate-dem.spec.ts",
+        "qsm-export.spec.ts",
+        "scan-model-roundtrip.spec.ts"
+      ]
+    },
+    {
+      "why": "Imports that go through per-platform native wheels (laspy/lazrs, pye57, plyfile) or resolve relative asset paths. import-material-obj covers MTL and texture resolution, which is separator-sensitive; import-sbet-trajectory covers pyproj, whose bundled PROJ data directory is a classic per-platform packaging failure.",
+      "specs": [
+        "import-pointcloud-formats.spec.ts",
+        "import-e57-misses.spec.ts",
+        "import-ptx-multi-scan.spec.ts",
+        "import-ply-mesh.spec.ts",
+        "import-binary-stl.spec.ts",
+        "import-material-obj.spec.ts",
+        "import-sbet-trajectory.spec.ts",
+        "import-wizard.spec.ts"
+      ]
+    },
+    {
+      "why": "PotreeConverter is a separately-built external binary per platform, invoked as a subprocess.",
+      "specs": [
+        "octree-scalar-color.spec.ts",
+        "octree-scalar-filter.spec.ts"
+      ]
+    },
+    {
+      "why": "Proof that the native libraries actually load and compute from inside the packaged layout: libhelios (.dll/.dylib) with its lidar and plantarchitecture plugins, and the CSF C-extension.",
+      "specs": [
+        "helios-triangulate-sphere.spec.ts",
+        "ground-segment.spec.ts"
+      ]
+    }
+  ]
+}
