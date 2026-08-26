@@ -145,6 +145,13 @@ test('a textured plant carries texture materials into the renderer', async () =>
 // buildPlantCanopyFromLibrary). The whole grid comes back as one merged mesh,
 // so a 2x2 canopy must have substantially more geometry than a single plant.
 test('generates a 2x2 canopy as a single merged mesh', async () => {
+  // Headroom above this test's longest internal wait (180 s). Without it the
+  // per-test cap in playwright.config.ts (180 s) fires FIRST, so that wait can
+  // never actually elapse and the test can only report an opaque "Test timeout
+  // exceeded" instead of failing on its own assertion. Not a way to make a hang
+  // pass — a way to make one fail as the assertion it belongs to.
+  test.setTimeout(300_000);
+
   const { page } = session;
 
   await expect(page.getByTestId('empty-viewer-hint')).toBeVisible();

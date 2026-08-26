@@ -166,6 +166,13 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
 // PHYTOGRAPH_TREEISO_MAX_NODES low for a dedicated app so the committed fixture
 // crosses it. Everything else is the real path — real backend, real UI clicks.
 test('warns before an expensive run, then segments when confirmed', async () => {
+  // Headroom above this test's longest internal wait (180 s). Without it the
+  // per-test cap in playwright.config.ts (180 s) fires FIRST, so that wait can
+  // never actually elapse and the test can only report an opaque "Test timeout
+  // exceeded" instead of failing on its own assertion. Not a way to make a hang
+  // pass — a way to make one fail as the assertion it belongs to.
+  test.setTimeout(300_000);
+
   // Own app: the env override must not leak into the shared session above.
   const solo = await launchApp({ PHYTOGRAPH_TREEISO_MAX_NODES: '10' });
   try {

@@ -122,6 +122,13 @@ test.describe('stored-pose transform', () => {
   });
 
   test('a compute tool run on a posed cloud uses the MOVED geometry', async () => {
+    // Headroom above this test's longest internal wait (240 s). Without it the
+    // per-test cap in playwright.config.ts (180 s) fires FIRST, so that wait can
+    // never actually elapse and the test can only report an opaque "Test timeout
+    // exceeded" instead of failing on its own assertion. Not a way to make a hang
+    // pass — a way to make one fail as the assertion it belongs to.
+    test.setTimeout(360_000);
+  
     // The correctness claim behind the whole design: compute reads the session
     // arrays, which were written eagerly, so it must see the rotated cloud even
     // though the octree on disk is still the original.

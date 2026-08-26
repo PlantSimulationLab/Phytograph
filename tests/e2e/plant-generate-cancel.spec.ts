@@ -14,6 +14,18 @@ import { launchApp } from './helpers/launchApp';
 // (cancelled mid-build → `cancelled` event, never a result). This E2E proves the
 // user-facing cancel path end-to-end.
 test('cancelling a heavy canopy build abandons it and leaves the UI usable', async () => {
+  // The mesh-row wait below allows 180 s, which is exactly playwright.config.ts's
+  // per-test cap — so that inner timeout could never actually fire. The global
+  // one always won first, and this test could only ever die as an opaque "Test
+  // timeout of 180000ms exceeded" instead of failing on its own assertion with a
+  // usable message. That is precisely how it reported when CI contention slowed
+  // the canopy build (run 32987547865).
+  //
+  // Give the test real headroom above its longest internal wait. This does not
+  // make a genuine hang pass — it makes a genuine hang fail as the assertion it
+  // belongs to.
+  test.setTimeout(300_000);
+
   const { page, close } = await launchApp();
 
   try {

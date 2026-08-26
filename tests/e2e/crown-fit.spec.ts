@@ -48,6 +48,13 @@ function cellsByName(csvText: string): Record<string, string>[] {
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.xyz');
 
 test('fits a crown to leaf points and reports metrics + CSV', async () => {
+  // Headroom above this test's longest internal wait (180 s). Without it the
+  // per-test cap in playwright.config.ts (180 s) fires FIRST, so that wait can
+  // never actually elapse and the test can only report an opaque "Test timeout
+  // exceeded" instead of failing on its own assertion. Not a way to make a hang
+  // pass — a way to make one fail as the assertion it belongs to.
+  test.setTimeout(300_000);
+
   const { app, page, close } = await launchApp();
 
   try {
