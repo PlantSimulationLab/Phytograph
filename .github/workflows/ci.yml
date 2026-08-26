@@ -32,11 +32,23 @@ name: CI
 # attempt commonly fails, the re-run path matters more than the happy path.
 #
 # `prepare` exists so the expensive native build happens exactly once and its
-# cache is SAVED AT ~11 MIN INSTEAD OF ~86. Previously actions/cache's post-job
-# save ran at the very end of `heavy`, so a job that hit its timeout was
-# CANCELLED before saving — throwing away a good 10-minute native build and
-# forcing the next run to redo it. Now a red or timed-out E2E shard can never
-# cost you the build again.
+# cache is SAVED AT ~11 MIN INSTEAD OF ~86 — and, more importantly, saved at all.
+#
+# actions/cache declares `post-if: success()` (so do setup-node's and
+# setup-python's cache steps), which means it saves ONLY when the whole job
+# succeeds. Measured directly on platform.yml run 32891704413: a job that failed
+# at its build step shows `Post Cache PyInstaller backend  skipped`, while
+# `Post Run actions/checkout` still ran.
+#
+# So in the old single-`heavy` layout, ANY red E2E step — not just the timeout
+# that prompted this — discarded the ~10 minute native build, and the next run
+# rebuilt it from scratch. Since a first attempt commonly fails, that was the
+# normal case rather than the exception: the suite was paying for the native
+# build on most runs while appearing to have a warm cache.
+#
+# Splitting the build into its own job fixes that structurally. `prepare`
+# succeeds or fails on the build alone, so it saves its cache regardless of what
+# any test job does afterwards, and a red shard can never cost the build again.
 
 on:
   push:
@@ -384,7 +396,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # Six, not four. Measured at four (runs 32885918456 / 32888645240): the
+        # shards came in at 13/16/18/24 and 13/17/20/29 minutes — a 2.2x spread,
+        # and since the critical path is the SLOWEST shard, the suite was paying
+        # 24-29 min while the fastest runner idled for ten of them.
+        #
+        # The imbalance is structural, not noise. Playwright shards by FILE
+        # balanced on test COUNT, and the alphabet happens to cluster the
+        # expensive work at the end: shard 4 held synthetic-scan*, triangulate-*
+        # and wood-segment* (Helios ray tracing, Poisson/ball-pivot,
+        # cut-pursuit), while shard 2 held import-* and label-* and finished in
+        # 13. Equal test counts, very unequal cost.
+        #
+        # More shards is the lever that needs no maintenance: it splits that
+        # heavy tail across two runners instead of one. The floor is the single
+        # slowest FILE, since fullyParallel:false keeps a file intact — so going
+        # much beyond this trades real gains for per-shard setup (~3 min of
+        # checkout, npm ci, and a ~1 GB cache restore each).
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
         with:
