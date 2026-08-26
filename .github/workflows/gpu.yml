@@ -91,7 +91,16 @@ jobs:
 
       - name: Install Linux build dependencies
         run: |
-          sudo apt-get update
+          # `apt-get update` exits non-zero if ANY index fails — including the
+          # Google Chrome repo that GitHub preinstalls and we never install from.
+          # An upstream "Hash Sum mismatch" on dl.google.com took down `prepare`,
+          # and with it every E2E job, in run 32991688005. Nothing here comes from
+          # that repo; the packages below are all Ubuntu archive.
+          #
+          # The INSTALL is the real gate: if an index we actually need is stale or
+          # missing, apt-get install fails loudly. So a partial update is tolerable
+          # while a missing package is still fatal.
+          sudo apt-get update || echo 'apt-get update reported errors; the install below is the gate'
           sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
 
       - name: Install CUDA Toolkit
@@ -113,7 +122,16 @@ jobs:
       # included, since pytest runs under it. Mirrors release.yml.
       - name: Re-install GL/X11 dev headers after CUDA
         run: |
-          sudo apt-get update
+          # `apt-get update` exits non-zero if ANY index fails — including the
+          # Google Chrome repo that GitHub preinstalls and we never install from.
+          # An upstream "Hash Sum mismatch" on dl.google.com took down `prepare`,
+          # and with it every E2E job, in run 32991688005. Nothing here comes from
+          # that repo; the packages below are all Ubuntu archive.
+          #
+          # The INSTALL is the real gate: if an index we actually need is stale or
+          # missing, apt-get install fails loudly. So a partial update is tolerable
+          # while a missing package is still fatal.
+          sudo apt-get update || echo 'apt-get update reported errors; the install below is the gate'
           sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
 
       - name: Install Python dependencies
