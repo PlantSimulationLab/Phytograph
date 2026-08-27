@@ -172,14 +172,26 @@ jobs:
       # A skipped test here means the GPU vanished mid-run or the probe broke.
       # Either way the job must not report success on a suite that quietly
       # stopped testing the thing it is named after.
+      # `--collect-only` CANNOT detect this: collection does not evaluate
+      # skipif marks, so it prints "2 tests collected" whether or not a GPU is
+      # present and the grep below never matches. That made this guard report
+      # success on a GPU-less machine — the exact false-confidence outcome the
+      # step exists to prevent. Run the tests for real instead and read the
+      # summary line: a real run evaluates skipif, so `-rs` names every skip.
+      # Requiring a "passed" count as well catches the case where nothing ran
+      # at all (collection error, import failure), which reports neither.
       - name: Fail if the GPU tests skipped
         if: always()
         working-directory: backend-api
         run: |
           set -euo pipefail
-          out=$(xvfb-run -a python -m pytest tests/test_gpu_runtime.py --collect-only -q --no-cov 2>&1 || true)
+          out=$(xvfb-run -a python -m pytest tests/test_gpu_runtime.py -q -rs --no-cov 2>&1 || true)
           echo "$out"
-          if echo "$out" | grep -qiE "^[0-9]+ skipped|, [0-9]+ skipped"; then
+          if echo "$out" | grep -qiE "[0-9]+ skipped"; then
             echo "::error::test_gpu_runtime.py skipped — the GPU was not visible to pytest."
+            exit 1
+          fi
+          if ! echo "$out" | grep -qiE "[0-9]+ passed"; then
+            echo "::error::test_gpu_runtime.py reported no passing tests."
             exit 1
           fi
