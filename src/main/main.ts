@@ -232,12 +232,22 @@ function createWindow(): void {
   // lower cards, which reads as broken.
   //
   // The budget is: 49px top bar + 16px top pad + the column's own content +
-  // 64px bottom reserve, plus the macOS title bar (28px) on the OUTER height.
+  // 64px bottom reserve, plus the window FRAME on the OUTER height.
   // The column's content tracks the tool count, so THIS NUMBER MOVES WHENEVER
   // A TOOL IS ADDED — it was 800 for the 24 tools of the original fix, and
   // adding Label Points and Cross-section (26 tools, ~703px of cards) pushed
-  // the requirement to 703+49+16+64+28 = 860. window-resize.spec.ts asserts
+  // the requirement to 703+49+16+64+frame. window-resize.spec.ts asserts
   // the invariant, so it fails loudly rather than silently cropping.
+  //
+  // The frame term is PER-PLATFORM, and hardcoding macOS's 28px title bar
+  // silently under-budgeted Windows, where the title bar plus resize borders
+  // come to ~39px. minHeight is an OUTER constraint, so the same 860 delivered
+  // 832px of content on macOS but only 821 on Windows — 11px short, which is
+  // exactly the crop the platform E2E job caught (clientHeight 692 against a
+  // 703px column). macOS never saw it because 860 happens to be sufficient
+  // there. Measure the frame instead of assuming it: the difference between
+  // the outer and content heights is the real chrome on whatever platform this
+  // is running on, so the content budget is honoured everywhere.
   //
   // Capped to the display's work area so small screens (e.g. 1366x768
   // laptops) still get a window that fits on screen; the column falls back to
@@ -248,7 +258,12 @@ function createWindow(): void {
   // still gets its stable 1200x800 and the pixel-coordinate specs are
   // unaffected. Only an explicit resize clamps to minHeight — which is exactly
   // what window-resize.spec.ts exercises.
-  const minHeight = Math.min(860, screen.getPrimaryDisplay().workAreaSize.height);
+  // The CONTENT the column needs: 703px of cards + 49 top bar + 16 pad + 64
+  // bottom reserve. The frame is added after the window exists and can be
+  // measured (see below) — it cannot be known before construction.
+  const MIN_CONTENT_HEIGHT = 703 + 49 + 16 + 64;
+  const workAreaHeight = screen.getPrimaryDisplay().workAreaSize.height;
+  const minHeight = Math.min(MIN_CONTENT_HEIGHT + 28, workAreaHeight);
 
   mainWindow = new BrowserWindow({
     title: 'Phytograph',
@@ -275,6 +290,17 @@ function createWindow(): void {
       sandbox: false,
     },
   });
+
+  // Re-derive minHeight from the frame this platform ACTUALLY draws. The value
+  // passed to the constructor had to guess (28px, macOS's title bar), and that
+  // guess under-budgets Windows by ~11px — enough to scroll-crop the toolbar
+  // column's lowest card at the minimum height. getBounds() minus
+  // getContentBounds() is the real chrome, whatever it is here.
+  {
+    const frame = mainWindow.getBounds().height - mainWindow.getContentBounds().height;
+    const corrected = Math.min(MIN_CONTENT_HEIGHT + Math.max(0, frame), workAreaHeight);
+    if (corrected !== minHeight) mainWindow.setMinimumSize(900, corrected);
+  }
 
   if (shouldMaximize) mainWindow.maximize();
 
