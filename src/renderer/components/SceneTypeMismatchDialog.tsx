@@ -1,15 +1,19 @@
-// Shown when a cloud's geometry disagrees strongly with the scene type the user
-// picked — for example "crops or orchard" chosen for a street of buildings.
+// Shown when a cloud's geometry disagrees strongly with the method about to be
+// used — in practice, a street of buildings about to be matched plant by plant.
 //
-// It appears BEFORE the expensive stage, so a wrong choice costs a moment
-// instead of a minute of segmentation. And it only ever appears for a
-// disagreement that would change the ALGORITHM (vegetation vs built); a milder
-// one, like planted-vs-natural spacing, rides along as a note in the result.
-// A prompt that fired on ordinary variation would be dismissed reflexively,
-// which is worse than no prompt at all.
+// This prompt REPLACED a scene-type dropdown. Asking up front made the user
+// guess a value the software can measure in ~0.05 s, and two of the three
+// choices did the same thing anyway; detecting the one distinction that changes
+// the algorithm (vegetated vs built) and confirming it is both fewer questions
+// and harder to get wrong.
 //
-// The user's choice always wins: "use it anyway" re-runs with exactly what they
-// picked. Nothing is switched behind their back.
+// It appears BEFORE the expensive stage, so the detour costs a moment instead
+// of a minute of segmentation. It only ever appears for a disagreement that
+// would change the ALGORITHM; a milder one rides along as a note in the result,
+// because a prompt that fired on ordinary variation would be dismissed
+// reflexively — worse than no prompt at all.
+//
+// Nothing is switched behind the user's back: the run stops here and waits.
 import { AlertTriangle, X } from 'lucide-react';
 import type { SceneType } from '../utils/backendApi';
 
@@ -58,7 +62,8 @@ export function SceneTypeMismatchDialog({ mismatch, onCancel, onChoose }: Props)
         <div className="p-4 space-y-3">
           <p className="text-xs text-neutral-300">{message}</p>
           <p className="text-[11px] text-neutral-500">
-            You chose <span className="text-neutral-300">{SCENE_LABELS[chosen]}</span>.
+            Auto-Register was about to match this as{' '}
+            <span className="text-neutral-300">{SCENE_LABELS[chosen]}</span>.
             Nothing has been changed — pick how to continue.
           </p>
         </div>
@@ -76,7 +81,7 @@ export function SceneTypeMismatchDialog({ mismatch, onCancel, onChoose }: Props)
             onClick={() => onChoose(chosen)}
             className="px-3 py-1.5 rounded text-xs font-medium bg-neutral-700 text-neutral-100 hover:bg-neutral-600 transition-colors"
           >
-            Use {SCENE_LABELS[chosen]} anyway
+            Match as {SCENE_LABELS[chosen]} anyway
           </button>
           <button
             data-testid="scene-mismatch-switch"

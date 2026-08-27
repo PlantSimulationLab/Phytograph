@@ -11707,20 +11707,27 @@ export default function PointCloudViewer({
       label: 'Auto-Register',
       recordRegistration: true,
       runRegistration: async ({ targetPayload, sourcePayload, signal, onProgress, onRunId }) => {
-        const sceneType = confirmedSceneType ?? opts.sceneType;
+        // Vegetation is the default assumption; a built scene is DETECTED and
+        // confirmed below rather than declared up front. There is no scene-type
+        // control any more — `natural` and `agriculture` are the same code path
+        // in the backend, and `urban` is reached through the mismatch prompt.
+        const sceneType: SceneType = confirmedSceneType ?? 'agriculture';
         const response = await globalRegisterCloudToCloud({
           ...targetPayload,
           ...sourcePayload,
           scene_type: sceneType,
           scene_type_confirmed: confirmedSceneType !== undefined,
-          // The clouds are already placed by whatever pose the scanner
-          // recorded, so relative to each other the expected heading change is
-          // zero. Passing that as the prior constrains the search to the
-          // plausible neighbourhood instead of the whole circle.
+          // Only when EVERY selected scan recorded a pose — the dialog will not
+          // emit this otherwise. The prior asserts the clouds already sit in a
+          // common frame and so differ by ~0 degrees of heading, which clamps
+          // the yaw sweep to +/-30 degrees. Asserting that of scans with no
+          // recorded pose put the correct answer outside the search space:
+          // measured 89.16 deg / 11.82 m and 179.89 deg / 20.00 m wrong on
+          // pairs 90 and 180 degrees apart, both reported confident.
           ...(opts.useHeading ? { yaw_prior_deg: 0 } : {}),
-          anchor_method: opts.anchorMethod,
-          estimator: opts.estimator,
-          ...(opts.voxelSize ? { voxel_size: opts.voxelSize } : {}),
+          // anchor_method / estimator / voxel_size are deliberately not sent:
+          // the backend only consults them in the anchors-failed fallback, so
+          // on this path they never changed the result. See AutoRegisterDialog.
         }, signal, onProgress, onRunId);
 
         // The backend stops BEFORE the expensive stage when the cloud looks
@@ -21743,7 +21750,16 @@ export default function PointCloudViewer({
       <AutoRegisterDialog
         isOpen={showAutoRegisterDialog}
         onClose={() => setShowAutoRegisterDialog(false)}
-        clouds={clouds.map(c => ({ id: c.id, label: scanDisplayName(scans.find(s => s.id === c.id)!), color: c.color }))}
+        clouds={clouds.map(c => {
+          const scan = scans.find(s => s.id === c.id)!;
+          // `hasOrigin` gates the heading option: the prior asserts these scans
+          // are already placed in a common frame, which only a recorded pose
+          // can support. See AutoRegisterOptions.useHeading.
+          return {
+            id: c.id, label: scanDisplayName(scan), color: c.color,
+            hasOrigin: scanHasKnownOrigin(scan),
+          };
+        })}
         initialSelectedIds={selectedIds}
         isRunning={isRunningICP}
         onRegister={(targetId, sourceIds, opts) => {

@@ -105,9 +105,15 @@ hidden behind others.
    (<kbd>⌘/Ctrl</kbd>+<kbd>K</kbd>).
 2. Pick the **target** (stays fixed) and the **source** (moves onto it).
    Either may be a streamed cloud.
-3. Choose the **scene type** — see below. This is the important one.
-4. For vegetated scenes, choose what to **match on**.
-5. Click **Register**.
+3. Click **Register**.
+
+There is nothing else to set. Auto-Register used to ask you to declare the
+scene type, the search method and which plant part to match on; those settings
+either could not change the result or made it worse, so they are gone. What
+they were trying to decide is now either measured from the cloud (see
+[Built scenes](#built-scenes)) or, when several scans are registered together,
+settled by trying the alternatives and keeping whichever produces alignments
+that agree with each other.
 
 !!! note "Registering is fast, even for many scans"
     Registered clouds move as soon as the match is found, and the move is stored
@@ -122,21 +128,24 @@ hidden behind others.
     in — the first of those shows an **Updating display…** indicator, then
     applies normally.
 
-### Scene type
+### Built scenes
 
-This picks the *method*, not a preset, so it is worth getting right:
+Vegetation and built sites need genuinely different methods: buildings have no
+per-plant landmark to find, and the large flat walls and roofs they *do* have
+are what surface matching is designed for.
 
-| Scene type | What it does |
-|------------|--------------|
-| **Crops or orchard** | Matches plant by plant. For plantings set out on a grid or in rows. |
-| **Natural woodland** | Matches plant by plant, tuned for irregular spacing. |
-| **Buildings or built site** | Matches **surface shape** instead. Built scenes have no per-plant landmark to find, so plant matching does not apply. |
+You are not asked to declare which you have. Auto-Register measures it from the
+cloud in a fraction of a second — buildings are assemblies of large continuous
+planes, foliage is never flat at any scale, and the two are far apart on that
+measure — and if the scene looks built, it **stops and asks** before doing any
+of the slow work:
 
-If the cloud looks nothing like the type you chose — say you picked *crops* for
-a street of buildings — Phytograph stops and asks before doing the slow work,
-rather than spending a minute producing something wrong. You can switch to what
-it suggests, or keep your choice and continue. It never changes the method on
-its own.
+- **Switch to Buildings or built site** — matches on surface shape.
+- **Match as Crops or orchard anyway** — your call still wins.
+
+It never changes method on its own, and it only interrupts for a disagreement
+that would change the method. Anything milder rides along as a note on the
+result.
 
 !!! tip "Built scenes: try plain ICP too"
     For buildings, **Align Clouds (ICP)** below is often all you need. Flat
@@ -151,6 +160,16 @@ Most terrestrial scanners record their own position and heading (GNSS,
 inclination sensors, compass). When your scans carry that information, leave
 **Use the scanner heading** ticked — it makes registration markedly more
 reliable, and it is on by default.
+
+The option is **offered only when every scan in the run recorded a position**.
+On scans imported without one — a plain XYZ or LAS file with no pose — it is
+shown greyed out and the full circle of orientations is searched instead. That
+gate matters more than it looks: the option works by assuming your scans are
+already placed in a common frame and so differ by roughly zero heading, which
+narrows the search to ±30°. Assume that of data which never recorded a pose and
+the correct answer can sit outside the search entirely — a pair 90° apart came
+back 90° wrong, reported as a confident result. Phytograph will not make that
+assumption on your behalf any more.
 
 The reason is worth knowing. An orchard scanned from within looks much the same
 from several directions, so a search over all possible rotations can find an
@@ -172,18 +191,16 @@ easily fooled on repetitive plantings.
 
 ### If a run looks wrong
 
-Auto-Register offers three matching strategies. The default (**canopy pattern**)
-is the fastest and the most reliable on real data, and is what you should
-normally use.
+Auto-Register reports two things worth acting on, and neither is fixed by a
+setting:
 
-| Strategy | When to try it |
-|----------|----------------|
-| **Canopy pattern** (default) | Almost always. Matches the planting's overall layout. |
-| **Plant landmarks** | Sparse, well-separated plants where individual crowns or trunks are cleanly detectable in both scans. |
-| **Surface shape** | Built scenes rather than vegetation. |
+- **"another alignment fits almost as well"** — the scene is too repetitive to
+  tell two poses apart. On a regular planting this is the failure no residual
+  can catch, because a row-shifted result genuinely lands plant on plant.
+- **"too few plants found"** — it fell back to matching raw surface shape.
 
-If Auto-Register warns that the result may be wrong, the first thing to try is a
-different strategy — they fail in different ways.
+The fix for both is a **third overlapping scan**, not a different setting. See
+below for why that works where re-running with different options does not.
 
 ### Why three scans beat two
 
@@ -228,26 +245,6 @@ best on any individual pair.
 The cost is that every pair has to be registered, so time grows with the square
 of the scan count. Expect a few minutes for a handful of scans and appreciably
 longer for a dozen.
-
-### Choosing what to match on
-
-*(Only applies to the **plant landmarks** strategy on vegetated scenes.)*
-
-The right landmark depends on how the data was captured, not on which
-algorithm sounds better:
-
-| Match on | Use when | Notes |
-|----------|----------|-------|
-| **Tree crowns** (default) | Aerial/drone scans, or any data where trunks are hidden by canopy | Needs no visible trunk — the usual choice |
-| **Trunk bases** | Ground-based scans of trees or vines with clear trunks | The most repeatable landmark when trunks *are* visible |
-| **Canopy peaks** | Either of the above finds too few plants | Uses no segmentation at all, so it still works on dense or touching canopies |
-
-If a run looks wrong, switching the match method is the first thing to try —
-they fail in different ways, which is why all three ship.
-
-**Detail size** can normally stay blank; Phytograph sizes it from the cloud.
-Increase it if registration finds nothing; decrease it for small or very
-finely sampled plants.
 
 ### Reading the result
 

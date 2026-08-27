@@ -2,34 +2,64 @@
 //
 // Distinct from AlignDialog (plain ICP) on purpose. ICP is a LOCAL method: it
 // polishes a pair that already starts close together, and cannot recover a
-// large rotation. This tool first reduces both clouds to sparse per-plant
-// anchors and matches those, so it works from an arbitrary starting pose — at
-// the cost of running segmentation over both clouds. Keeping them separate lets
-// a user reach for the cheap one when that is all they need.
+// large rotation. This tool matches the clouds' overall top-down pattern first,
+// so it works from an arbitrary starting pose.
 //
 // Either side may be a streamed (octree) cloud; the transform is applied on its
 // backend session and the octree rebuilt.
+//
+// ---------------------------------------------------------------------------
+// Why this dialog has almost no settings
+//
+// It used to offer three: scene type, search method, and which per-plant
+// landmark to match on. All three were measured to be inert or misleading on
+// the path that actually runs, so they were removed rather than repaired:
+//
+//   * Search method — the backend only consults it in the anchors-failed
+//     fallback. On any vegetated cloud "plant landmarks" and "surface shape"
+//     produced bit-identical results (both took the landmark path, 16/16
+//     anchors, 0.00 deg / 0.00 m). It was a choice with one outcome.
+//   * Scene type — `natural` and `agriculture` are the same code path; the only
+//     branch is `!= "urban"`. And built scenes are now DETECTED and confirmed
+//     (see SceneTypeMismatchDialog) rather than declared up front, which is
+//     both fewer questions and harder to get wrong.
+//   * Match on / Detail size — only read by the fallback path, so on the
+//     default search they changed nothing at all.
+//
+// Registering three or more scans never consulted any of them in the first
+// place: that path tries several coarse variants per pair and keeps whichever
+// makes the whole scan graph self-consistent. Measuring the setting beats
+// asking the user to guess it, so the remaining control is the one piece of
+// information the software genuinely cannot derive — whether the recorded
+// scanner heading is trustworthy.
 import { useState, useEffect, useMemo } from 'react';
 import { Sparkles, X } from 'lucide-react';
 import { ObjectPicker, type PickerItem } from './ObjectPicker';
-import { DebouncedNumberInput } from './DebouncedNumberInput';
-import type { AnchorMethod, GlobalEstimator, SceneType } from '../utils/backendApi';
 
 export interface AutoRegisterCloudOption {
   id: string;
   label: string;
   color?: string;
+  /** Whether this scan recorded a scanner position/pose. Gates the heading
+   *  option below — see `AutoRegisterOptions.useHeading`. */
+  hasOrigin?: boolean;
 }
 
 export interface AutoRegisterOptions {
-  sceneType: SceneType;
   /** Use the scanner heading, when the scans carry one, to constrain the
-   *  search. Far more accurate on GNSS-seeded data than a blind global
-   *  search — the default whenever a heading is available. */
+   *  search.
+   *
+   *  This is only ever offered when EVERY selected scan recorded a pose. The
+   *  prior asserts that the scans are already placed in a common frame and so
+   *  differ by ~0 degrees of heading, which narrows the yaw sweep to +/-30
+   *  degrees. That is a large accuracy win when true and a silent catastrophe
+   *  when false: measured against known ground truth, a pair 90 degrees apart
+   *  came back 89.16 deg / 11.82 m wrong and a pair 180 degrees apart came back
+   *  179.89 deg / 20.00 m wrong, both reported CONFIDENT, because the correct
+   *  answer sat outside the search space entirely. Scans with no recorded pose
+   *  cannot support the assertion, so the box is disabled rather than trusted.
+   */
   useHeading: boolean;
-  anchorMethod: AnchorMethod;
-  estimator: GlobalEstimator;
-  voxelSize?: number;
 }
 
 interface AutoRegisterDialogProps {
@@ -43,40 +73,12 @@ interface AutoRegisterDialogProps {
   onRegister: (targetId: string, sourceIds: string[], options: AutoRegisterOptions) => void;
 }
 
-/** Scene type decides the ALGORITHM, so it is asked first and asked plainly.
- *  Vegetated scenes are matched plant-by-plant; built scenes have no per-plant
- *  landmark to find, so they are matched on surface shape instead — a different
- *  pipeline, not a tuning knob. */
-const SCENE_TYPES: { value: SceneType; label: string; hint: string }[] = [
-  { value: 'agriculture', label: 'Crops or orchard', hint: 'Plants set out on a regular grid or in rows' },
-  { value: 'natural', label: 'Natural woodland', hint: 'Self-seeded trees at irregular spacing' },
-  { value: 'urban', label: 'Buildings or built site', hint: 'Matched on surface shape — plant matching does not apply' },
-];
-
-/** Each option names the landmark it keys on, so the choice is about the DATA
- *  rather than about an algorithm the user has no way to evaluate. */
-const ANCHOR_METHODS: { value: AnchorMethod; label: string; hint: string }[] = [
-  { value: 'crown', label: 'Tree crowns', hint: 'Best for aerial scans — needs no visible trunks' },
-  { value: 'trunk', label: 'Trunk bases', hint: 'Best for ground scans of trees or vines' },
-  { value: 'chm', label: 'Canopy peaks', hint: 'No segmentation — try when the others find too few plants' },
-];
-
-const ESTIMATORS: { value: GlobalEstimator; label: string; hint: string }[] = [
-  { value: 'correlation', label: 'Canopy pattern (recommended)', hint: 'Matches the overall planting pattern — fastest and most reliable' },
-  { value: 'ransac_fpfh', label: 'Plant landmarks', hint: 'Matches individual plants; only works when both scans detect the same ones' },
-  { value: 'fgr', label: 'Surface shape', hint: 'For built scenes rather than vegetation' },
-];
-
 export function AutoRegisterDialog({
   isOpen, onClose, clouds, initialSelectedIds, isRunning, onRegister,
 }: AutoRegisterDialogProps) {
   const [targetId, setTargetId] = useState<string>('');
   const [sourceIds, setSourceIds] = useState<Set<string>>(new Set());
-  const [sceneType, setSceneType] = useState<SceneType>('agriculture');
   const [useHeading, setUseHeading] = useState(true);
-  const [anchorMethod, setAnchorMethod] = useState<AnchorMethod>('crown');
-  const [estimator, setEstimator] = useState<GlobalEstimator>('correlation');
-  const [voxelSize, setVoxelSize] = useState<number | undefined>(undefined);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -114,12 +116,24 @@ export function AutoRegisterDialog({
     }
   }, [targetId, sourceIds]);
 
+  // Whether every scan in this run recorded a pose. Derived from the CURRENT
+  // selection rather than stored, so changing the picker re-decides it.
+  const selected = useMemo(
+    () => clouds.filter(c => c.id === targetId || sourceIds.has(c.id)),
+    [clouds, targetId, sourceIds],
+  );
+  const headingAvailable = selected.length > 0 && selected.every(c => c.hasOrigin);
+
   if (!isOpen) return null;
 
   const canRun = !!targetId && sourceIds.size > 0 && !isRunning;
   // Three or more scans form a closed loop, which is the only way a
   // wrong-but-well-fitting alignment can be detected at all.
   const validated = sourceIds.size >= 2;
+  // A set is registered by a different path, which selects its own coarse
+  // settings by loop consistency and takes no heading prior. Offering the
+  // option there would be offering a control that does nothing.
+  const isSet = sourceIds.size >= 2;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
@@ -178,103 +192,42 @@ export function AutoRegisterDialog({
                 + 'third overlapping scan when you can.'}
           </p>
 
-          <label className="flex items-start gap-2 text-xs text-neutral-300">
-            <input
-              data-testid="auto-register-use-heading"
-              type="checkbox"
-              checked={useHeading}
-              onChange={(e) => setUseHeading(e.target.checked)}
-              className="mt-0.5"
-            />
-            <span>
-              Use the scanner heading
-              <span className="block text-[11px] text-neutral-500">
-                Much more reliable when the scans record their position and heading.
-                Untick only if the recorded heading is wrong or missing.
+          {/* Hidden for a set: that path chooses its own coarse settings by
+              loop consistency and never takes a heading prior. */}
+          {!isSet && (
+            <label
+              className={`flex items-start gap-2 text-xs ${headingAvailable
+                ? 'text-neutral-300' : 'text-neutral-500'}`}
+            >
+              <input
+                data-testid="auto-register-use-heading"
+                type="checkbox"
+                checked={headingAvailable && useHeading}
+                disabled={!headingAvailable}
+                onChange={(e) => setUseHeading(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                Use the scanner heading
+                <span className="block text-[11px] text-neutral-500">
+                  {headingAvailable
+                    ? 'These scans recorded their position, so the search can be narrowed '
+                      + 'to the heading they report. Untick it if you know that heading is wrong.'
+                    : 'Unavailable — these scans did not record a scanner position, so there '
+                      + 'is no heading to narrow the search with. Every orientation is searched.'}
+                </span>
               </span>
-            </span>
-          </label>
-
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-neutral-300">Scene type</label>
-            <select
-              data-testid="auto-register-scene"
-              value={sceneType}
-              onChange={(e) => setSceneType(e.target.value as SceneType)}
-              className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white"
-            >
-              {SCENE_TYPES.map(t => (
-                <option key={t.value} value={t.value}>{t.label}</option>
-              ))}
-            </select>
-            <p className="text-[11px] text-neutral-500">
-              {SCENE_TYPES.find(t => t.value === sceneType)?.hint}
-            </p>
-          </div>
-
-          {/* Landmark choice is meaningless on a built scene — there are no
-              plants to key on — so it is hidden rather than shown disabled. */}
-          {sceneType !== 'urban' && estimator === 'ransac_fpfh' && (
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-neutral-300">Match on</label>
-            <select
-              data-testid="auto-register-method"
-              value={anchorMethod}
-              onChange={(e) => setAnchorMethod(e.target.value as AnchorMethod)}
-              className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white"
-            >
-              {ANCHOR_METHODS.map(m => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-            <p className="text-[11px] text-neutral-500">
-              {ANCHOR_METHODS.find(m => m.value === anchorMethod)?.hint}
-            </p>
-          </div>
-          )}
-
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-neutral-300">Search method</label>
-            <select
-              data-testid="auto-register-estimator"
-              value={estimator}
-              onChange={(e) => setEstimator(e.target.value as GlobalEstimator)}
-              className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white"
-            >
-              {ESTIMATORS.map(m => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
-            <p className="text-[11px] text-neutral-500">
-              {ESTIMATORS.find(m => m.value === estimator)?.hint}
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-neutral-300">
-              Detail size (m) <span className="text-neutral-500 font-normal">— optional</span>
             </label>
-            <DebouncedNumberInput
-              data-testid="auto-register-voxel"
-              value={voxelSize ?? NaN}
-              onCommit={(v) => setVoxelSize(Number.isFinite(v) && v > 0 ? v : undefined)}
-              min={0}
-              debounceMs={0}
-              placeholder="Auto"
-              className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white"
-            />
-            <p className="text-[11px] text-neutral-500">
-              Leave blank to size it from the cloud. Increase it if registration finds
-              nothing; decrease it for small or finely-sampled plants.
-            </p>
-          </div>
+          )}
         </div>
 
         <div className="flex items-center justify-end px-4 py-3 border-t border-neutral-700 bg-neutral-800/90">
           <button
             data-testid="auto-register-run"
             onClick={() => {
-              onRegister(targetId, [...sourceIds], { sceneType, useHeading, anchorMethod, estimator, voxelSize });
+              // Never emit a heading prior the selection cannot support, even
+              // if the box was ticked before the picker changed under it.
+              onRegister(targetId, [...sourceIds], { useHeading: headingAvailable && useHeading });
               onClose();
             }}
             disabled={!canRun}

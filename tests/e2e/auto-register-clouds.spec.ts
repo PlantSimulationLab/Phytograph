@@ -28,6 +28,25 @@ import { resetToFreshScene } from './helpers/resetApp';
 // cloud's actual extent, not just that a success toast appeared.
 const ORCHARD = join(repoRoot, 'tests', 'e2e', 'fixtures', 'orchard-row.xyz');
 const ORCHARD_ROTATED = join(repoRoot, 'tests', 'e2e', 'fixtures', 'orchard-row-rotated.xyz');
+// A built scene, to prove the vegetation assumption is DETECTED and correctable
+// rather than declared. Turned 90 deg — far outside the +/-30 deg window a
+// scanner-heading prior would restrict the search to.
+//
+// The quarter turn is about the centre of a SQUARE ground patch, and that is
+// load-bearing for the assertion below rather than incidental. `data-scan-bounds`
+// on a registered streamed cloud reports the octree's BOUNDING BOX pushed
+// through the stored pose, not the true extent of the points: registration
+// deliberately does not reindex the octree (a rotation re-buckets every node),
+// so the cloud is drawn through a pose until a crop/erase/label forces a
+// rebuild. Re-bounding a rotated box inflates it — an earlier version of this
+// fixture turned 35 deg and read 18.6 m "off" while the returned matrix was
+// exactly right to 10 decimal places. A quarter turn of a square footprint
+// leaves the box invariant, so the comparison measures registration rather than
+// that artefact. orchard-row-rotated.xyz gets away with the same thing for the
+// same reason; this note is here so the next fixture does not have to
+// rediscover it.
+const BUILT = join(repoRoot, 'tests', 'e2e', 'fixtures', 'built-site.xyz');
+const BUILT_ROTATED = join(repoRoot, 'tests', 'e2e', 'fixtures', 'built-site-rotated.xyz');
 
 let session: LaunchedApp;
 test.beforeAll(async () => { session = await launchApp(); });
@@ -63,32 +82,39 @@ async function scanBounds(page: typeof session.page, scanId: string) {
   return { min: [n[0], n[1], n[2]], max: [n[3], n[4], n[5]] };
 }
 
-/** Run Auto-Register with target = row `t`, source = row `s`. */
-async function autoRegister(
-  page: typeof session.page,
-  t: number,
-  s: number,
-  method?: 'crown' | 'trunk' | 'chm',
-  sceneType?: 'agriculture' | 'natural' | 'urban',
-) {
+/** Run Auto-Register with target = row `t`, source = row `s`.
+ *
+ *  Takes no options because the dialog offers none: every setting it used to
+ *  expose either did nothing on the path that runs or made the result worse.
+ *  That makes these tests exercise exactly what a user gets by default, which
+ *  is the point — the previous version of this helper switched the estimator
+ *  away from the default to reach a per-plant control, and that is precisely
+ *  how a broken default survived here for weeks. */
+async function autoRegister(page: typeof session.page, t: number, s: number) {
   await runTool(page, 'cloud-auto-register');
   const dialog = page.getByTestId('auto-register-dialog');
   await expect(dialog).toBeVisible();
 
   await dialog.getByTestId('auto-register-target-picker').getByTestId('picker-row').nth(t).click();
   await dialog.getByTestId('auto-register-source-picker').getByTestId('picker-row').nth(s).click();
-  if (sceneType) await dialog.getByTestId('auto-register-scene').selectOption(sceneType);
-  if (method) {
-    // The per-plant "match on" control only applies to the landmark estimator;
-    // the default (canopy-pattern correlation) does not use landmarks at all.
-    await dialog.getByTestId('auto-register-estimator').selectOption('ransac_fpfh');
-    await dialog.getByTestId('auto-register-method').selectOption(method);
-  }
 
   await dialog.getByTestId('auto-register-run').click();
   await expect(dialog).toBeHidden();
 }
 
+// This is the regression test for the shipped default, and it earns that title
+// with a number. The dialog used to tick "Use the scanner heading" by default
+// and send a yaw prior of 0 regardless of whether the scans had recorded a pose
+// — which these plain-XYZ fixtures have not. That prior clamps the coarse yaw
+// sweep to +/-30 degrees, so the true 90-degree answer sat outside the search
+// space: measured on exactly these two files, 89.93 degrees and 4.13 m wrong,
+// returned with `confident: true`. With the prior correctly withheld the same
+// pair registers to 0.00 degrees / 0.00 m.
+//
+// It went unnoticed because the old version of this test reached for a per-plant
+// control, and doing so switched the estimator OFF the default and onto the
+// landmark path, where the yaw prior is never read. A test that configures its
+// way around the defaults cannot see a broken default.
 test('Auto-Register recovers a known rotation between two orchard scans', async () => {
   const { page } = session;
   const rows = await importBoth(page);
@@ -104,7 +130,7 @@ test('Auto-Register recovers a known rotation between two orchard scans', async 
   const startGap = Math.abs(sourceBefore!.min[0] - targetBefore!.min[0]);
   expect(startGap).toBeGreaterThan(0.5);
 
-  await autoRegister(page, 0, 1, 'crown');
+  await autoRegister(page, 0, 1);
 
   const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
   await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
@@ -128,7 +154,7 @@ test('Auto-Register recovers a known rotation between two orchard scans', async 
   }).toBeLessThan(1.0);
 });
 
-test('Auto-Register works with the trunk-bases method on octree-backed clouds', async () => {
+test('Auto-Register works on octree-backed (streamed) clouds', async () => {
   const { page } = session;
   const rows = await importBoth(page);
   // Imported clouds are octree/streamed — the source is moved by transforming
@@ -141,7 +167,7 @@ test('Auto-Register works with the trunk-bases method on octree-backed clouds', 
   const targetId = await rows.nth(0).getAttribute('data-scan-id');
   const pointCountBefore = await rows.nth(1).getAttribute('data-point-count');
 
-  await autoRegister(page, 0, 1, 'trunk');
+  await autoRegister(page, 0, 1);
 
   const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
   await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
@@ -180,7 +206,7 @@ test('Auto-Register says whether the scans can validate each other', async () =>
   await expect(note).toContainText(/nothing to cross-check/i);
 });
 
-test('Auto-Register dialog offers every anchor method and defaults to crowns', async () => {
+test('the dialog offers no setting that does not change the result', async () => {
   const { page } = session;
   await importBoth(page);
 
@@ -188,17 +214,17 @@ test('Auto-Register dialog offers every anchor method and defaults to crowns', a
   const dialog = page.getByTestId('auto-register-dialog');
   await expect(dialog).toBeVisible();
 
-  // The default matches the overall canopy pattern rather than individual
-  // plants, so the per-plant control is not shown until that path is chosen.
-  await expect(dialog.getByTestId('auto-register-estimator')).toHaveValue('correlation');
-  await expect(dialog.getByTestId('auto-register-method')).toHaveCount(0);
-
-  // Switching to landmark matching reveals all three extractors — they exist
-  // because no single anchor works on every acquisition.
-  await dialog.getByTestId('auto-register-estimator').selectOption('ransac_fpfh');
-  const method = dialog.getByTestId('auto-register-method');
-  await expect(method).toHaveValue('crown');
-  await expect(method.locator('option')).toHaveCount(3);
+  // Scene type, search method, match-on and detail size are all GONE, and this
+  // asserts their absence rather than their behaviour on purpose. Each was
+  // measured to be inert on the path that actually runs: the backend consults
+  // the estimator and the anchor method only in its anchors-failed fallback,
+  // and `natural` and `agriculture` are literally the same branch. A control
+  // that cannot change the answer is worse than no control, because a user who
+  // gets a bad result will spend their time on it.
+  for (const dead of ['auto-register-scene', 'auto-register-estimator',
+                      'auto-register-method', 'auto-register-voxel']) {
+    await expect(dialog.getByTestId(dead), `${dead} should no longer exist`).toHaveCount(0);
+  }
 
   // Run stays disabled until both clouds are chosen, so the tool can't be
   // fired with an incomplete setup.
@@ -210,53 +236,73 @@ test('Auto-Register dialog offers every anchor method and defaults to crowns', a
   await expect(run).toBeEnabled();
 });
 
-test('Scene type drives the method, and built-site hides the plant options', async () => {
+test('the scanner-heading option is refused to scans that recorded no pose', async () => {
   const { page } = session;
   await importBoth(page);
 
   await runTool(page, 'cloud-auto-register');
   const dialog = page.getByTestId('auto-register-dialog');
   await expect(dialog).toBeVisible();
+  await dialog.getByTestId('auto-register-target-picker').getByTestId('picker-row').nth(0).click();
+  await dialog.getByTestId('auto-register-source-picker').getByTestId('picker-row').nth(1).click();
 
-  // Vegetated scenes are matched plant by plant, so the landmark choice applies.
-  const scene = dialog.getByTestId('auto-register-scene');
-  await expect(scene).toHaveValue('agriculture');
-  await expect(scene.locator('option')).toHaveCount(3);
-
-  // The per-plant control needs BOTH a vegetated scene and the landmark
-  // estimator; the default correlation path does not use landmarks.
-  await dialog.getByTestId('auto-register-estimator').selectOption('ransac_fpfh');
-  await expect(dialog.getByTestId('auto-register-method')).toBeVisible();
-
-  // A built site is matched on surface shape — no per-plant landmark exists,
-  // so the control is hidden rather than shown disabled.
-  await scene.selectOption('urban');
-  await expect(dialog.getByTestId('auto-register-method')).toHaveCount(0);
-
-  await scene.selectOption('natural');
-  await expect(dialog.getByTestId('auto-register-method')).toBeVisible();
+  // These fixtures are plain XYZ — no scanner position, so no heading. The
+  // prior asserts "these clouds already sit in a common frame and differ by ~0
+  // degrees of heading", which clamps the yaw sweep to +/-30 degrees. Asserting
+  // that of data which never recorded a pose puts the correct answer OUTSIDE
+  // the search space, and the result still comes back marked confident:
+  // measured on this very fixture pair, 89.93 degrees and 4.13 m wrong. The
+  // box being ticked-by-default with no check for a pose is what shipped, so
+  // this test pins the gate rather than the checkbox's mere existence.
+  const heading = dialog.getByTestId('auto-register-use-heading');
+  await expect(heading).toBeDisabled();
+  await expect(heading).not.toBeChecked();
+  await expect(dialog.getByText(/did not record a scanner position/i)).toBeVisible();
 });
 
-test('Choosing the wrong scene type prompts instead of registering', async () => {
+test('a built scene is detected and offered surface matching', async () => {
   const { page } = session;
-  await importBoth(page);
+  // Four buildings, not plants. Nothing in the dialog declares that any more —
+  // the scene type used to be a dropdown the user had to get right up front,
+  // and is now measured from the geometry in ~0.05 s and confirmed.
+  await importFiles(session.app, page, 'import-auto', BUILT);
+  await completeImportWizard(page);
+  await importFiles(session.app, page, 'import-auto', BUILT_ROTATED);
+  await completeImportWizard(page);
+  const rows = page.locator('[data-testid="scan-row"]');
+  await expect(rows).toHaveCount(2, { timeout: 30_000 });
 
-  // These fixtures are a planting. Asking for a built site is a strong enough
-  // disagreement to change the algorithm, so it must stop and ask rather than
-  // quietly running the wrong method — and it must ask BEFORE the slow stage.
-  await autoRegister(page, 0, 1, undefined, 'urban');
+  const targetId = await rows.nth(0).getAttribute('data-scan-id');
+  const sourceId = await rows.nth(1).getAttribute('data-scan-id');
 
+  await autoRegister(page, 0, 1);
+
+  // It must stop and ask BEFORE the expensive stage rather than spending a
+  // minute of segmentation looking for plants that do not exist.
   const prompt = page.getByTestId('scene-mismatch-dialog');
   await expect(prompt).toBeVisible({ timeout: 60_000 });
-
-  // The user's choice always wins: keeping it re-runs with what they picked.
-  // Switching runs the suggested one. Either way it is their decision.
   await expect(prompt.getByTestId('scene-mismatch-keep')).toBeVisible();
   await prompt.getByTestId('scene-mismatch-switch').click();
   await expect(prompt).toBeHidden();
 
   const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
   await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
+
+  // Surface matching has to actually land it. The pair is 90 deg apart —
+  // deliberately past the +/-30 deg a heading prior would have clamped the
+  // search to, so this also fails if the prior ever comes back ungated.
+  await expect.poll(async () => {
+    const sb = await scanBounds(page, sourceId!);
+    const tb = await scanBounds(page, targetId!);
+    if (!sb || !tb) return Number.POSITIVE_INFINITY;
+    return Math.max(...[0, 1, 2].flatMap(a => [
+      Math.abs(sb.min[a] - tb.min[a]),
+      Math.abs(sb.max[a] - tb.max[a]),
+    ]));
+  }, {
+    message: 'the built scene should land on its target',
+    timeout: 30_000,
+  }).toBeLessThan(1.0);
 });
 
 // ── Registration provenance: the panel badge and Reset Registration ─────────
@@ -279,7 +325,7 @@ test('a registered scan is badged in the panel, and only the scan that moved', a
   await expect(rows.nth(0)).toHaveAttribute('data-registered', 'false');
   await expect(rows.nth(1)).toHaveAttribute('data-registered', 'false');
 
-  await autoRegister(page, 0, 1, 'crown');
+  await autoRegister(page, 0, 1);
   const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
   await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
 
@@ -325,7 +371,7 @@ test('Reset Registration returns the scan to its pre-registration position', asy
   expect(before, 'scene debug bounds unavailable').not.toBeNull();
   const targetBounds = await scanBounds(page, targetId!);
 
-  await autoRegister(page, 0, 1, 'crown');
+  await autoRegister(page, 0, 1);
   const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
   await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
 
@@ -422,7 +468,7 @@ test('Reset Registration is disabled until something has actually been registere
   await page.keyboard.press('Escape');
 
   // Register, and the same command becomes available.
-  await autoRegister(page, 0, 1, 'crown');
+  await autoRegister(page, 0, 1);
   const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
   await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
   const sourceId = await rows.nth(1).getAttribute('data-scan-id');
@@ -448,7 +494,7 @@ test('the reference scan is marked distinctly from the scan that moved', async (
   // below would pass on a marker that was always there.
   await expect(targetRow).toHaveAttribute('data-registration-reference', 'false');
 
-  await autoRegister(page, 0, 1, 'crown');
+  await autoRegister(page, 0, 1);
   const toast = page.locator('[data-testid="toast-success"], [data-testid="toast-warning"]').last();
   await expect(toast.getByTestId('toast-title')).toContainText(/Auto-Register/i, { timeout: 120_000 });
 
