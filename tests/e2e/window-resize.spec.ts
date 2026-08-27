@@ -34,11 +34,41 @@ async function setWindowSize(launched: LaunchedApp, w: number, h: number) {
   //
   // Settle on window.innerWidth first (the DOM viewport), then require the
   // canvas rect to agree and hold still for two consecutive reads.
-  await launched.page.waitForFunction(
-    (expected) => Math.abs(window.innerWidth - expected) <= 2,
-    w,
-    { timeout: 20_000 },
-  );
+  // A bare timeout here is undiagnosable: it says the width never arrived, not
+  // WHY. The usual why is that the display cannot grant it — the OS clamps a
+  // window to the work area, so on a 1280-wide runner `setSize(1600, …)`
+  // silently yields ~1280 and this poll can never succeed. ci.yml already hit
+  // exactly that on Linux and fixed it by giving Xvfb `-screen 0 1920x1080x24`.
+  // Report the work area and the bounds the OS actually granted, so the next
+  // reader gets the diagnosis instead of a stack trace.
+  try {
+    await launched.page.waitForFunction(
+      (expected) => Math.abs(window.innerWidth - expected) <= 2,
+      w,
+      { timeout: 20_000 },
+    );
+  } catch (err) {
+    const diag = await launched.app.evaluate(({ BrowserWindow, screen }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      const d = screen.getPrimaryDisplay();
+      return {
+        bounds: win?.getBounds(),
+        workArea: d.workAreaSize,
+        screen: d.size,
+        scaleFactor: d.scaleFactor,
+      };
+    });
+    const innerWidth = await launched.page.evaluate(() => window.innerWidth);
+    throw new Error(
+      `window never reached ${w}x${h}. innerWidth=${innerWidth}, ` +
+        `granted bounds=${JSON.stringify(diag.bounds)}, ` +
+        `workArea=${JSON.stringify(diag.workArea)}, ` +
+        `screen=${JSON.stringify(diag.screen)}@${diag.scaleFactor}x. ` +
+        `If the work area is narrower than ${w}, the display cannot grant this ` +
+        `size and the runner needs a larger screen (see ci.yml's xvfb ` +
+        `-screen 0 1920x1080x24).\n${(err as Error).message}`,
+    );
+  }
   await launched.page.waitForFunction(() => {
     const c = document.querySelector('canvas');
     if (!c) return false;
