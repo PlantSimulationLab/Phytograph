@@ -100,8 +100,22 @@ jobs:
           # The INSTALL is the real gate: if an index we actually need is stale or
           # missing, apt-get install fails loudly. So a partial update is tolerable
           # while a missing package is still fatal.
+          #
+          # cmake + build-essential are NOT in the other workflows' package lists
+          # because the standard ubuntu-24.04 image ships them (release.yml says
+          # as much: "Runners provide cmake + a C++ toolchain"). The GPU larger
+          # runner image is more minimal and ships neither, so build-pyhelios.mjs
+          # died with "CMake not found. Please install CMake." before compiling a
+          # single file. Install them explicitly here rather than inheriting an
+          # assumption that only holds on the standard image.
           sudo apt-get update || echo 'apt-get update reported errors; the install below is the gate'
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+          sudo apt-get install -y cmake build-essential libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+
+      - name: Verify the build toolchain
+        run: |
+          set -euo pipefail
+          cmake --version
+          c++ --version
 
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.24
@@ -132,7 +146,7 @@ jobs:
           # missing, apt-get install fails loudly. So a partial update is tolerable
           # while a missing package is still fatal.
           sudo apt-get update || echo 'apt-get update reported errors; the install below is the gate'
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+          sudo apt-get install -y cmake build-essential libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
 
       - name: Install Python dependencies
         working-directory: backend-api
