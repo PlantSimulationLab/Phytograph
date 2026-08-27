@@ -10161,6 +10161,64 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
                 progress(i / n, f"formatting {i:,} / {n:,} points")
         return f"{base}.{fmt}", ("\n".join(lines)).encode("utf-8")
 
+    # ---- ASC (bare positional ASCII, no header) ----
+    # Same bytes as .xyz would carry, under the extension GIS tools expect. It
+    # gets its own branch rather than joining the tuple above because that one
+    # always writes a legend line, and ASC must not have one — the importer reads
+    # these columns positionally.
+    if fmt == "asc":
+        cols = ["x", "y", "z"]
+        if colors is not None:
+            cols += ["r255", "g255", "b255"]
+        if intensity is not None:
+            cols += ["intensity"]
+        cols += ordered
+        rgb = (np.clip(np.rint(colors * 255.0), 0, 255).astype(int)
+               if colors is not None else None)
+        lines = []
+        for i in range(n):
+            row = [f"{xyz[i,0]:.6f}", f"{xyz[i,1]:.6f}", f"{xyz[i,2]:.6f}"]
+            if colors is not None:
+                row += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
+            if intensity is not None:
+                row += [f"{float(intensity[i]):.4f}"]
+            for s in ordered:
+                row.append(str(scalars[s][i]))
+            lines.append(" ".join(row))
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
+        return f"{base}.asc", ("\n".join(lines)).encode("utf-8")
+
+    # ---- PTS (Leica: count line, then `x y z intensity r g b`) ----
+    # FIXED schema, and the scalar columns are deliberately NOT appended: a PTS
+    # reader decodes by position, so anything past column 6 would be read as
+    # nothing at all by a conforming reader while making our own re-import
+    # ambiguous. Callers wanting the scalars have xyz/csv/txt/ply/las.
+    if fmt == "pts":
+        rgb = (np.clip(np.rint(colors * 255.0), 0, 255).astype(int)
+               if colors is not None else None)
+        lines = [str(n)]
+        for i in range(n):
+            row = [f"{xyz[i,0]:.6f}", f"{xyz[i,1]:.6f}", f"{xyz[i,2]:.6f}"]
+            if intensity is not None:
+                row += [f"{float(intensity[i]):.4f}"]
+            if colors is not None:
+                row += [str(rgb[i, 0]), str(rgb[i, 1]), str(rgb[i, 2])]
+            lines.append(" ".join(row))
+            if progress is not None and (i & 0xFFFF) == 0xFFFF:
+                progress(i / n, f"formatting {i:,} / {n:,} points")
+        return f"{base}.pts", ("\n".join(lines)).encode("utf-8")
+
+    # ---- PCD (PCL ASCII; position + packed-RGB colour only) ----
+    # Shares the single writer with the cloud-export path so the two cannot
+    # drift — see `_write_points_as_pcd` for why the schema is fixed.
+    if fmt == "pcd":
+        with tempfile.TemporaryDirectory() as td:
+            tmp_pcd = Path(td) / f"{base}.pcd"
+            _write_points_as_pcd(tmp_pcd, xyz, colors, progress=(
+                (lambda frac, msg: progress(frac, msg)) if progress is not None else None))
+            return f"{base}.pcd", tmp_pcd.read_bytes()
+
     # ---- OBJ (vertices only) ----
     if fmt == "obj":
         lines = [f"# Scan exported from Phytograph", f"# {n} points"]
@@ -11042,7 +11100,8 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
     instead of being base64'd back to the renderer.
     """
     fmt = (request.data_format or "xyz").lower()
-    if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj", "e57", "ptx"):
+    if fmt not in ("las", "laz", "ply", "xyz", "csv", "txt", "obj",
+                   "asc", "pts", "pcd", "e57", "ptx"):
         return {"success": False, "error": f"Unsupported data format: {fmt}"}
 
     is_ptx = fmt == "ptx"
@@ -18049,6 +18108,15 @@ class PointCloudImportResponse(BaseModel):
 # but add per-call overhead; larger ones make the bar jumpy.
 _TEXT_EXPORT_CHUNK_ROWS = 500_000
 
+# Every format `/api/pointcloud/export` accepts. The UI offers a subset (OBJ is
+# no longer listed for point clouds — see CLOUD_FORMATS in ExportModal.tsx — but
+# stays accepted here so an existing scripted call keeps working).
+#
+# Formats whose bytes are produced by `_text_export_layout` / `_write_points_as_text`.
+_TEXT_EXPORT_FORMATS = frozenset({"xyz", "txt", "csv", "ply", "obj", "asc", "pts"})
+# The full accepted set: the text family plus the binary/structured writers.
+_POINT_CLOUD_EXPORT_FORMATS = _TEXT_EXPORT_FORMATS | {"las", "laz", "pcd"}
+
 
 def _format_points_as_text(
     fmt: str,
@@ -18218,20 +18286,41 @@ def _text_export_layout(fmt, points, colors, intensity, extras=None, columns=Non
         default_slugs = geom + rgb_slugs + (["intensity"] if has_int else [])
     elif fmt == "ply":
         default_slugs = geom + rgb_slugs      # never carried intensity
+    elif fmt == "pts":
+        # PTS has ONE layout, and it is not negotiable: `x y z intensity r g b`,
+        # intensity BEFORE colour. Both trailing groups are optional but their
+        # order is not, so this is a fixed schema rather than a default the user
+        # may re-pick — see the `pts` branch below, which ignores `columns`.
+        default_slugs = geom + (["intensity"] if has_int else []) + rgb_slugs
     else:
-        default_slugs = geom                  # xyz / obj: geometry only
+        default_slugs = geom                  # xyz / asc / obj: geometry only
 
+    # PTS is a FIXED schema: a reader identifies its columns positionally, so a
+    # user-chosen subset or order would produce a file that still parses and is
+    # read wrong (drop intensity and every reader takes column 3 as red). The
+    # picker is hidden for it in the UI; ignoring `columns` here is the backstop
+    # that keeps a direct API call from writing a mislabelled file.
     resolved = _resolve_export_columns(
-        columns, points, colors, intensity, extras, default_slugs=default_slugs)
+        None if fmt == "pts" else columns,
+        points, colors, intensity, extras, default_slugs=default_slugs)
     slugs = [s for s, _, _ in resolved]
     cols = [v for _, v, _ in resolved]
     fmts = [f for _, _, f in resolved]
 
-    if fmt == "xyz":
+    if fmt in ("xyz", "asc"):
         # Bare XYZ carries no header line, so a selection beyond x/y/z is written
         # as extra whitespace-separated columns — the same convention the
-        # importer's ASCII_format reads back.
+        # importer's ASCII_format reads back. ASC is the same bytes under the
+        # extension GIS tools expect (and the one Phytograph's own importer
+        # already treats as an xyz-family file).
         return [], cols, fmts, " "
+
+    if fmt == "pts":
+        # The leading point COUNT is what distinguishes canonical PTS from a bare
+        # column file, and what Cyclone/CloudCompare expect. `_is_pts_count_header`
+        # + `_ascii_skiprows` read it back, so this round-trips through our own
+        # importer rather than costing a point on re-import.
+        return [str(n)], cols, fmts, " "
 
     if fmt in ("txt", "csv"):
         sep = "," if fmt == "csv" else " "
@@ -18318,6 +18407,85 @@ def _write_points_as_text(
         raise
 
 
+def _write_points_as_pcd(
+    dest: Path,
+    points: np.ndarray,
+    colors: Optional[np.ndarray],
+    progress=None,
+) -> None:
+    """Write an ASCII PCD (PCL's Point Cloud Data format).
+
+    Schema is FIXED at position + optional colour, and deliberately so: PCD
+    packs RGB as a single float-bit-cast field rather than three columns, and
+    our own reader for it (`_load_ply_pcd_arrays`, via open3d) returns position
+    and colour ONLY — it drops intensity and every scalar on read. Offering a
+    column picker here would let the user select fields that this format cannot
+    carry back into Phytograph, which is a worse outcome than stating the limit:
+    the export would look lossless and re-import short. Verified against open3d
+    directly — a PCD written with an `intensity` field reads back with the field
+    silently absent.
+
+    Streamed in chunks for the same reason as `_write_points_as_text`: a
+    25 M-point cloud must not be materialised as one Python string. Written to a
+    sibling `.part` and renamed on success so a cancel never leaves a truncated
+    file that looks like a finished export.
+    """
+    n = len(points)
+    has_colors = colors is not None and len(colors) == n
+
+    fields = "x y z rgb" if has_colors else "x y z"
+    size = "4 4 4 4" if has_colors else "4 4 4"
+    types = "F F F F" if has_colors else "F F F"
+    count = "1 1 1 1" if has_colors else "1 1 1"
+    header = [
+        "# .PCD v0.7 - Point Cloud Data file format",
+        "VERSION 0.7",
+        f"FIELDS {fields}",
+        f"SIZE {size}",
+        f"TYPE {types}",
+        f"COUNT {count}",
+        f"WIDTH {n}",
+        "HEIGHT 1",
+        # Identity pose. A non-identity VIEWPOINT is read back as a scan origin
+        # (`_pcd_viewpoint_origin`); we write points in world coordinates, so
+        # claiming a pose here would double-apply it on re-import.
+        "VIEWPOINT 0 0 0 1 0 0 0",
+        f"POINTS {n}",
+        "DATA ascii",
+    ]
+
+    if has_colors:
+        rgb8 = np.clip(np.rint(np.asarray(colors) * 255.0), 0, 255).astype(np.uint32)
+        packed = (rgb8[:, 0] << 16) | (rgb8[:, 1] << 8) | rgb8[:, 2]
+        # PCD stores the packed 24-bit colour in a float32's BIT PATTERN, not as
+        # a numeric value — reinterpret rather than cast.
+        rgb_f = packed.astype(np.uint32).view(np.float32)
+        stacked = np.column_stack([points[:, 0], points[:, 1], points[:, 2], rgb_f])
+        row_fmt = "%.6f %.6f %.6f %.9g\n"
+    else:
+        stacked = np.column_stack([points[:, 0], points[:, 1], points[:, 2]])
+        row_fmt = "%.6f %.6f %.6f\n"
+
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+            fh.write("\n".join(header) + "\n")
+            for start in range(0, n, _TEXT_EXPORT_CHUNK_ROWS):
+                chunk = stacked[start:start + _TEXT_EXPORT_CHUNK_ROWS]
+                fh.write(row_fmt * len(chunk) % tuple(chunk.ravel()))
+                if progress is not None:
+                    done = min(start + _TEXT_EXPORT_CHUNK_ROWS, n)
+                    progress(done / n if n else 1.0,
+                             f"Formatting {done:,} / {n:,} points")
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 @app.post("/api/pointcloud/export")
 def export_point_cloud_las(request: PointCloudExportRequest, http_request: Request):
     """Export a point cloud, streaming PHP1 progress ahead of a JSON tail.
@@ -18339,6 +18507,16 @@ def export_point_cloud_las(request: PointCloudExportRequest, http_request: Reque
     if request.dest_path:
         _resolve_export_dest(request.dest_path)
 
+    # Same reasoning for the format: raised inside the stream it would reach the
+    # client as a 200 with a broken body, not as the 400 it is. The worker
+    # re-checks (it is reachable directly), where it is then a no-op.
+    if request.format.lower() not in _POINT_CLOUD_EXPORT_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unsupported point cloud export format: {request.format}. "
+                    f"Supported: {', '.join(sorted(_POINT_CLOUD_EXPORT_FORMATS))}"),
+        )
+
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
@@ -18354,14 +18532,26 @@ def _do_point_cloud_export(
     Export a point cloud. Returns the PointCloudExportResponse dict.
 
     Flat clouds export LAS/LAZ via laspy. Octree-backed clouds send a `source`
-    descriptor and may export any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ — the backend
-    reads the source file (the renderer has no positions to format). Returns
-    base64-encoded file data that can be downloaded on the frontend.
+    descriptor and may export any of LAS/LAZ/XYZ/TXT/CSV/PLY/OBJ/ASC/PTS/PCD —
+    the backend reads the source file (the renderer has no positions to format).
+    Returns base64-encoded file data that can be downloaded on the frontend.
     """
     import tempfile
     import base64
 
     fmt = request.format.lower()
+
+    # Reject an unknown format up front. Without this the dispatch below falls
+    # through to the laspy writer and SILENTLY produces a `.las`: a request for
+    # `format:"pts"` used to return a LAS under a .pts name, which is a wrong
+    # file rather than an error. Validating here also means a typo is reported
+    # as a typo instead of surfacing later as an unreadable export.
+    if fmt not in _POINT_CLOUD_EXPORT_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unsupported point cloud export format: {request.format}. "
+                    f"Supported: {', '.join(sorted(_POINT_CLOUD_EXPORT_FORMATS))}"),
+        )
 
     # Octree-backed export: read points (+ colors/intensity) from the source
     # file, then dispatch by format. Text formats stream out here because the
@@ -18384,7 +18574,7 @@ def _do_point_cloud_export(
             progress(0.02, "Reading points")
         _cancel_checkpoint(progress)
         points, src_colors, src_intensity, src_extras = _read_points_and_extras(src)
-        if fmt in ("xyz", "txt", "csv", "ply", "obj"):
+        if fmt in _TEXT_EXPORT_FORMATS or fmt == "pcd":
             try:
                 # Formatting is ~97% of a text export's wall time; report it as
                 # the bulk of the bar, leaving a small head for the read above
@@ -18405,11 +18595,26 @@ def _do_point_cloud_export(
                 # (no dest_path) needs the whole thing in memory.
                 dest = _resolve_export_dest(request.dest_path) if request.dest_path else None
                 if dest is not None:
-                    _write_points_as_text(
-                        dest, fmt, points, src_colors, src_intensity,
-                        progress=_fmt_progress, extras=src_extras,
-                        columns=request.columns)
+                    if fmt == "pcd":
+                        _write_points_as_pcd(
+                            dest, points, src_colors, progress=_fmt_progress)
+                    else:
+                        _write_points_as_text(
+                            dest, fmt, points, src_colors, src_intensity,
+                            progress=_fmt_progress, extras=src_extras,
+                            columns=request.columns)
                     text = None
+                elif fmt == "pcd":
+                    # PCD has no in-memory formatter (it is written structurally,
+                    # not from a column layout). The legacy base64 path is only
+                    # used by callers with no filesystem destination, so serve it
+                    # by writing to a temp file and reading the bytes back rather
+                    # than duplicating the writer.
+                    with tempfile.TemporaryDirectory() as td:
+                        tmp_pcd = Path(td) / "cloud.pcd"
+                        _write_points_as_pcd(
+                            tmp_pcd, points, src_colors, progress=_fmt_progress)
+                        text = tmp_pcd.read_text(encoding="utf-8")
                 else:
                     text = _format_points_as_text(
                         fmt, points, src_colors, src_intensity, progress=_fmt_progress,
@@ -19668,6 +19873,11 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
     # RGB assumption, the actual value ranges of the candidate colour columns.
     sample: List[List[float]] = []
     ncols = 0
+    # A PTS count line is a bare integer, so the letter test below reads it as
+    # data — and being 1 column wide it would set ncols=1 and short-circuit the
+    # whole layout to a bare x/y/z, discarding the file's real colour/intensity
+    # columns. Drop it before sampling.
+    skip_count_line = _is_pts_count_header(file_path)
     with open(file_path) as f:
         for raw in f:
             line = raw.strip()
@@ -19676,6 +19886,9 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
             toks = line.split()
             # Skip a header row — use the first data row for the count.
             if any(re.search(r'[a-zA-Z]', tok) for tok in toks):
+                continue
+            if skip_count_line:
+                skip_count_line = False
                 continue
             if ncols == 0:
                 ncols = len(toks)
@@ -19714,6 +19927,24 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
     roles += ['x', 'y', 'z']
     rest_start = xyz_start + 3
     rest = ncols - rest_start
+
+    # Canonical PTS puts INTENSITY BETWEEN xyz and RGB — `x y z intensity r g b`
+    # (Leica Cyclone; also what CloudCompare writes). That one column of offset
+    # defeats the generic rule below, which only recognises RGB directly after
+    # xyz: a real 7-column PTS came back as ['x','y','z','skip','skip','skip',
+    # 'skip'], silently dropping BOTH colour and intensity. Checked before the
+    # generic rule (an `x y z i r g b` file satisfies neither on its own) and
+    # gated on the extension, so no other ASCII layout changes meaning.
+    #
+    # PTS intensity is conventionally -2048..2047, but exporters vary (0..255
+    # and 0..1 both occur), so intensity is identified POSITIONALLY and only the
+    # RGB triple is range-checked — that check is what keeps a 7-column file
+    # whose columns 4-6 aren't colour from being mislabelled here.
+    if (rest == 4
+            and os.path.splitext(file_path)[1].lower() == '.pts'
+            and _columns_look_like_rgb255(
+                sample, (rest_start + 1, rest_start + 2, rest_start + 3))):
+        return roles + ['intensity', 'r255', 'g255', 'b255']
 
     # An RGB triple — three consecutive 0-255 integer columns — typically
     # follows xyz when present. Tagging it r255/g255/b255 saves the user three
@@ -19838,6 +20069,51 @@ def _ascii_pandas_sep(file_path: str) -> str:
     return {'comma': ',', 'tab': '\t', 'semicolon': ';'}.get(delim, r'\s+')
 
 
+def _is_pts_count_header(file_path: str) -> bool:
+    """True when the file opens with a PTS point-COUNT line.
+
+    The canonical `.pts` layout (Leica Cyclone, and what CloudCompare writes)
+    puts the number of points on its own first line, then one row per point.
+    That line is a bare integer, so it survives every other check here: it is not
+    commented, and `_ascii_skiprows`'s "does it contain a letter" test — which is
+    what distinguishes a text header from data — reads it as data.
+
+    Its symptom was not a crash, which is why it went unnoticed. pandas gets a
+    1-column row where the layout wants N, `on_bad_lines='skip'` drops it, and
+    the cloud loads with the right geometry — so a count line looks harmless
+    right up until it shifts a column plan built from the wizard's preview.
+    Detecting it explicitly means the count line is never data.
+
+    Deliberately narrow, because a false positive would EAT A REAL POINT: the
+    line must be a single token, a non-negative integer, and the next data row
+    must be wider (a genuine 1-column file has nothing to shift). A file whose
+    first point happens to be a lone integer is not a shape any point cloud has.
+    """
+    if os.path.splitext(file_path)[1].lower() != '.pts':
+        return False
+    first = _first_nonblank_ascii_line(file_path)
+    if first is None:
+        return False
+    line, was_commented = first
+    if was_commented:
+        return False
+    toks = line.split()
+    if len(toks) != 1 or not re.fullmatch(r'\d+', toks[0]):
+        return False
+    # Require a wider row after it, so a single-column file is left alone.
+    seen_first = False
+    with open(file_path) as f:
+        for raw in f:
+            s = raw.strip()
+            if not s or s.startswith('#') or s.startswith('//'):
+                continue
+            if not seen_first:
+                seen_first = True
+                continue
+            return len(s.split()) > 1
+    return False
+
+
 def _ascii_skiprows(file_path: str) -> int:
     """How many leading lines pandas must be told to skip explicitly.
 
@@ -19872,7 +20148,10 @@ def _ascii_skiprows(file_path: str) -> int:
                 return 1 if stripped.startswith('//') else 0
         return 0
     # Bare (uncommented) line: skip it only if it's a text header, not data.
-    return 1 if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()) else 0
+    if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
+        return 1
+    # A PTS point-count line is all digits, so the letter test above misses it.
+    return 1 if _is_pts_count_header(file_path) else 0
 
 
 # Roles that already map to a dedicated LAS field — never carried as extra

@@ -424,20 +424,24 @@ which writes one file per object.
 
 ### Point cloud formats
 
-Pick a **Format** in the Export window, then click **Export**. Every format
-except OBJ shows a **field picker**: check which fields to write (x, y, z, colour,
+Pick a **Format** in the Export window, then click **Export**. Most formats show
+a **field picker**: check which fields to write (x, y, z, colour,
 intensity, scalars, labels). Everything is checked by default, so a plain export
 stays lossless and you prune from there. The picker lists **every field the cloud
 actually holds** — including scalars that came from a LAS extra dimension or an
 import-wizard column, and the class labels a segmentation added.
 
-For XYZ / TXT / CSV / PLY you can also **drag the rows to reorder** them; the
-chosen order becomes the file's column order. **LAS / LAZ** identify their
+For XYZ / TXT / CSV / ASC / PLY you can also **drag the rows to reorder** them;
+the chosen order becomes the file's column order. **LAS / LAZ** identify their
 dimensions by name rather than by position, so order doesn't apply there and the
 drag handle is omitted.
 
-**OBJ** stores vertex coordinates only and cannot carry colour or scalars at all,
-so it has no picker.
+**PTS** and **PCD** have no picker: each has a fixed schema a reader decodes by
+position, so writing a chosen subset would produce a file that still parses and
+is read *wrong* rather than one that's merely smaller. PTS is always
+`x y z intensity r g b` (after its point-count line); PCD always carries
+position plus, if present, colour. Use `.ply`, `.las`, `.csv` or `.txt` when you
+need to pick fields or keep other scalars.
 
 !!! note "What LAS/LAZ cannot leave out"
 
@@ -459,7 +463,9 @@ so it has no picker.
 | `.xyz` | The columns you select, whitespace-separated, with no header line |
 | `.txt` | The columns you select, whitespace-separated, with a `#`-prefixed column header |
 | `.csv` | Same columns as `.txt` but comma-separated with a plain header row |
-| `.obj` | Vertices only (no faces) — geometry cannot carry scalars in OBJ |
+| `.asc` | The columns you select, whitespace-separated, no header line (same bytes as `.xyz`) |
+| `.pts` | Point-count line, then `x y z intensity r g b` — **fixed order**, no picker |
+| `.pcd` | Position + colour only (PCL ASCII, colour packed into one `rgb` field) — no picker |
 
 The `.txt` export writes a leading `#`-prefixed column header (the CloudCompare
 convention, e.g. `# X Y Z is_miss`). Phytograph's own importer reads that header
@@ -554,7 +560,7 @@ mode is still checked when you switch back to **Data only**.
   Helios triangulation) again. It is the round-trip-faithful path for synthetic
   and edited scans.
 - **Data only** — writes just the per-scan data files, no XML, and reveals a
-  **Format** chooser: `LAS`, `LAZ`, `PLY`, `XYZ`, `CSV`, `TXT`, `OBJ`, `E57`, or
+  **Format** chooser: `LAS`, `LAZ`, `PLY`, `XYZ`, `CSV`, `TXT`, `E57`, or
   `PTX`. Use this to round-trip a scan into any supported format for another
   tool.
 
@@ -571,10 +577,11 @@ mode is still checked when you switch back to **Data only**.
     header, so the file opens in the right place in Cyclone or CloudCompare.
 
 **Columns** — for the text formats (XYZ / CSV / TXT, and the XML bundle's
-`.xyz` data), a column picker lets you check which fields to write and **drag to
-reorder** them. `x`, `y`, `z` are required and locked on. Binary / structured
-formats (LAS / LAZ / PLY / OBJ / E57 / PTX) use their own fixed schema, so the
-column picker is hidden for them.
+`.xyz` data) plus PLY and LAS / LAZ, a column picker lets you check which fields
+to write. `x`, `y`, `z` are required and locked on. Only the text formats and PLY
+let you **drag to reorder**: LAS / LAZ identify their dimensions by name rather
+than position, so order doesn't apply. **E57** and **PTX** use their own fixed
+schema, so the column picker is hidden for them.
 
 **Include miss points** — when on (default), the sky/miss points and the
 `is_miss` flag are written, so misses survive the round-trip. The `is_miss`

@@ -9,6 +9,10 @@ import {
   lockFixedDimsForLas,
   cellValue,
   buildAsciiExport,
+  buildBareAsciiExport,
+  buildPtsExport,
+  buildPcdExport,
+  ptsColumnSlugs,
   type ExportColumn,
 } from './exportColumns';
 
@@ -22,15 +26,23 @@ describe('supportsColumnSelection', () => {
     // named extra dimension. Both can therefore honor a subset. Treating LAS as
     // "fixed schema, nothing to choose" conflated its fixed STANDARD dimensions
     // with its freely-declared extra dimensions.
-    for (const f of ['xyz', 'txt', 'csv', 'ply', 'las', 'laz', 'scan']) {
+    // ASC belongs here too: it is bare positional ASCII, exactly like xyz.
+    for (const f of ['xyz', 'txt', 'csv', 'ply', 'las', 'laz', 'asc', 'scan']) {
       expect(supportsColumnSelection(f)).toBe(true);
     }
   });
 
-  it('is false only for OBJ, where a `v` line takes exactly x/y/z', () => {
+  it('is false for the fixed-schema formats', () => {
+    // OBJ: a `v` line takes exactly x/y/z.
     expect(supportsColumnSelection('obj')).toBe(false);
-    // E57 is not in the set either — the scan writer gives it a fixed schema.
+    // E57/PTX: the scan writer gives each its own fixed schema.
     expect(supportsColumnSelection('e57')).toBe(false);
+    // PTS is positional (`x y z intensity r g b`) — a chosen subset would still
+    // parse and be read WRONG, so the picker must not be offered.
+    expect(supportsColumnSelection('pts')).toBe(false);
+    // PCD packs colour into one float-cast `rgb` field and its reader returns
+    // position + colour only.
+    expect(supportsColumnSelection('pcd')).toBe(false);
   });
 });
 
@@ -40,7 +52,7 @@ describe('usesFixedColumnOrder', () => {
   });
 
   it('is false for the positional formats, whose column order is the file order', () => {
-    for (const f of ['xyz', 'txt', 'csv', 'ply', 'scan']) {
+    for (const f of ['xyz', 'txt', 'csv', 'ply', 'asc', 'scan']) {
       expect(usesFixedColumnOrder(f)).toBe(false);
     }
   });
@@ -385,6 +397,107 @@ describe('buildAsciiExport', () => {
     const lines = csv.split('\n');
     expect(lines[0]).toBe('is_miss,z,x');
     expect(lines[1]).toBe('0,0.000000,0.000000');
+  });
+});
+
+// The renderer writes these three itself for a FLAT cloud (only LAS/LAZ go to
+// the backend from that path), so they are a second implementation of the same
+// file formats and need their own coverage — the pytest suite exercises the
+// backend's copies.
+describe('buildBareAsciiExport', () => {
+  const data = {
+    pointCount: 2,
+    positions: new Float32Array([0, 0, 0, 1, 1, 1]),
+    colors: new Float32Array([1, 1, 1, 0, 0, 0]),
+    scalarFields: {},
+  };
+  it('writes no header line at all', () => {
+    // .asc/.xyz columns are positional; a legend line would be read as a point.
+    const lines = buildBareAsciiExport(data as never, ['x', 'y', 'z']).split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe('0.000000 0.000000 0.000000');
+  });
+  it('honors the chosen column order', () => {
+    const lines = buildBareAsciiExport(data as never, ['z', 'x']).split('\n');
+    expect(lines[0]).toBe('0.000000 0.000000');
+    expect(lines[1]).toBe('1.000000 1.000000');
+  });
+});
+
+describe('ptsColumnSlugs', () => {
+  it('puts intensity BEFORE colour', () => {
+    // Canonical PTS is `x y z intensity r g b`. Any other order still parses and
+    // is read wrong — a reader takes column 3 as red if intensity is absent.
+    expect(ptsColumnSlugs({
+      colors: new Float32Array([1, 1, 1]),
+      intensities: new Float32Array([0.5]),
+      scalarFields: {},
+    } as never)).toEqual(['x', 'y', 'z', 'intensity', 'r', 'g', 'b']);
+  });
+  it('omits each optional group when the cloud lacks it', () => {
+    expect(ptsColumnSlugs({ scalarFields: {} } as never)).toEqual(['x', 'y', 'z']);
+    expect(ptsColumnSlugs({
+      colors: new Float32Array([1, 1, 1]), scalarFields: {},
+    } as never)).toEqual(['x', 'y', 'z', 'r', 'g', 'b']);
+  });
+});
+
+describe('buildPtsExport', () => {
+  const data = {
+    pointCount: 2,
+    positions: new Float32Array([0, 0, 0, 1, 1, 1]),
+    colors: new Float32Array([1, 0, 0, 0, 0, 1]),
+    intensities: new Float32Array([0.25, 0.5]),
+    scalarFields: {},
+  };
+  it('opens with the point count, then canonical rows', () => {
+    const lines = buildPtsExport(data as never).split('\n');
+    expect(lines[0]).toBe('2');            // the count line Cyclone expects
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toBe('0.000000 0.000000 0.000000 0.2500 255 0 0');
+    expect(lines[2]).toBe('1.000000 1.000000 1.000000 0.5000 0 0 255');
+  });
+  it('still writes a count line for an empty cloud', () => {
+    expect(buildPtsExport({
+      pointCount: 0, positions: new Float32Array(), scalarFields: {},
+    } as never)).toBe('0');
+  });
+});
+
+describe('buildPcdExport', () => {
+  const data = {
+    pointCount: 2,
+    positions: new Float32Array([0, 0, 0, 1, 1, 1]),
+    colors: new Float32Array([1, 0, 0, 0, 1, 0]),
+  };
+  it('writes a valid PCD header', () => {
+    const text = buildPcdExport(data as never);
+    expect(text.startsWith('# .PCD v0.7')).toBe(true);
+    expect(text).toContain('FIELDS x y z rgb');
+    expect(text).toContain('WIDTH 2');
+    expect(text).toContain('POINTS 2');
+    expect(text).toContain('DATA ascii');
+    // Identity pose: points are world coordinates, and a non-identity VIEWPOINT
+    // is read back as a scan origin, which would double-apply on re-import.
+    expect(text).toContain('VIEWPOINT 0 0 0 1 0 0 0');
+  });
+  it('packs rgb into a float32 BIT PATTERN, not a numeric cast', () => {
+    const body = buildPcdExport(data as never).split('DATA ascii\n')[1].split('\n');
+    const decode = (row: string) => {
+      const buf = new ArrayBuffer(4);
+      new Float32Array(buf)[0] = parseFloat(row.split(' ')[3]);
+      const p = new Uint32Array(buf)[0];
+      return [(p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff];
+    };
+    expect(decode(body[0])).toEqual([255, 0, 0]);
+    expect(decode(body[1])).toEqual([0, 255, 0]);
+  });
+  it('omits the rgb field for a cloud with no colour', () => {
+    const text = buildPcdExport({
+      pointCount: 1, positions: new Float32Array([0, 0, 0]),
+    } as never);
+    expect(text).toContain('FIELDS x y z\n');
+    expect(text.split('DATA ascii\n')[1]).toBe('0.000000 0.000000 0.000000');
   });
 });
 

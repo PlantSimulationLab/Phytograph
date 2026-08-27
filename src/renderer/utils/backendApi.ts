@@ -2424,7 +2424,7 @@ export interface PointCloudExportRequest {
   source?: BackendPointSource;  // octree-backed clouds export from disk
   // Flat clouds send 'las'/'laz' here (text formats are built in the renderer);
   // octree clouds may send any of these (the backend formats the text).
-  format: 'las' | 'laz' | 'xyz' | 'txt' | 'csv' | 'ply' | 'obj';
+  format: 'las' | 'laz' | 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'asc' | 'pts' | 'pcd';
   filename?: string;
   // Absolute path for the backend to write directly. Always set this when a
   // destination is known: the base64-in-JSON alternative inflates the body ~1.8x,

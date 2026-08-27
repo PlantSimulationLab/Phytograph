@@ -69,9 +69,9 @@ export interface ExportModalProps {
   onClose: () => void;
   // Point-cloud export. For the formats that take a column selection (text +
   // PLY), `columns` is the ordered slug list the user chose; for the fixed-schema
-  // formats (LAS/LAZ/OBJ) it is null.
+  // formats it is null.
   onExportCloud: (
-    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
+    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'asc' | 'pts' | 'pcd' | 'las' | 'laz',
     columns: string[] | null,
     cloudId: string,
   ) => void;
@@ -94,17 +94,34 @@ export interface ExportModalProps {
 
 // Per-scan data-only formats (Data only mode). The text formats (xyz/csv/txt)
 // and PLY get the column picker; the rest use their fixed schema.
-const SCAN_DATA_FORMATS = ['las', 'laz', 'ply', 'xyz', 'csv', 'txt', 'obj', 'e57', 'ptx'] as const;
+//
+// OBJ is deliberately absent — see CLOUD_FORMATS.
+const SCAN_DATA_FORMATS = ['las', 'laz', 'ply', 'xyz', 'csv', 'txt', 'asc', 'pts', 'pcd', 'e57', 'ptx'] as const;
 export type ScanDataFormat = typeof SCAN_DATA_FORMATS[number];
 
-const CLOUD_FORMATS: { id: 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj'; label: string; title?: string }[] = [
+// OBJ is deliberately NOT offered for point clouds, though the backend writers
+// still accept it (`_write_scan_to_bytes`, `_text_export_layout`) so an existing
+// scripted /api/pointcloud/export call keeps working. Three reasons it was a bad
+// choice in the UI, all of them one-way doors for the user:
+//   * It cannot be read back. `.obj` is not a point-cloud import format at all —
+//     `isMeshFile()` routes it to the mesh parser unconditionally, so exporting a
+//     cloud as OBJ and re-importing yields a FACE-LESS MESH, not the cloud. It
+//     was the only cloud format Phytograph could not round-trip.
+//   * It is lossy in a way no sibling is. A `v` line takes exactly x/y/z, so
+//     colour, intensity and every scalar are dropped — which is why it was the
+//     one format excluded from the column picker.
+//   * XYZ dominates it: the same information, smaller, and re-importable. For
+//     getting points into Blender/MeshLab, PLY is offered and is the better fit.
+const CLOUD_FORMATS: { id: 'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'asc' | 'pts' | 'pcd'; label: string; title?: string }[] = [
   { id: 'las', label: 'LAS' },
   { id: 'laz', label: 'LAZ', title: 'Compressed LAS (requires backend)' },
   { id: 'ply', label: 'PLY' },
   { id: 'xyz', label: 'XYZ' },
   { id: 'csv', label: 'CSV' },
   { id: 'txt', label: 'TXT', title: 'Space-delimited with header and scalar fields' },
-  { id: 'obj', label: 'OBJ' },
+  { id: 'asc', label: 'ASC', title: 'Bare whitespace-separated ASCII, no header line' },
+  { id: 'pts', label: 'PTS', title: 'Leica PTS: point-count line, then x y z intensity r g b (fixed order)' },
+  { id: 'pcd', label: 'PCD', title: 'PCL Point Cloud Data (ASCII) — position and colour only' },
 ];
 
 export function ExportModal({
@@ -129,7 +146,7 @@ export function ExportModal({
   onExportSkeleton,
 }: ExportModalProps) {
   // ---- Point-cloud export state -------------------------------------------
-  const [cloudFormat, setCloudFormat] = useState<'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'obj'>('las');
+  const [cloudFormat, setCloudFormat] = useState<'las' | 'laz' | 'ply' | 'xyz' | 'csv' | 'txt' | 'asc' | 'pts' | 'pcd'>('las');
 
   // ---- Scan export state --------------------------------------------------
   const [includeMisses, setIncludeMisses] = useState(true);
@@ -235,8 +252,8 @@ export function ExportModal({
   }, [cloudColumnsKey]);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
 
-  // Every format except OBJ takes a column selection (PLY names each column as a
-  // `property`; LAS/LAZ declare each scalar as a named extra dimension).
+  // Every cloud format on offer takes a column selection (PLY names each column
+  // as a `property`; LAS/LAZ declare each scalar as a named extra dimension).
   const cloudFormatTakesColumns = supportsColumnSelection(cloudFormat);
   // LAS/LAZ store dimensions by name in the header, so the row ORDER is not
   // meaningful there — the picker drops its drag affordance for them.
@@ -265,9 +282,9 @@ export function ExportModal({
 
   // The scan column picker applies when writing the XML bundle (always .xyz) or
   // when the chosen data-only format takes a selection — which is everything the
-  // scan writer supports except OBJ (geometry only) and E57 (its own fixed
-  // schema). The scan backend already filters its scalar set by the requested
-  // columns for every format, LAS/LAZ included.
+  // scan writer offers except E57 and PTX (each has its own fixed schema). The
+  // scan backend already filters its scalar set by the requested columns for
+  // every format, LAS/LAZ included.
   const scanFormatTakesColumns = xmlMode || supportsColumnSelection(scanDataFormat);
   const scanFormatIsOrdered = xmlMode || !usesFixedColumnOrder(scanDataFormat);
   // PTX emits every cell of the scan raster, so "include misses" is inert for it
@@ -424,12 +441,14 @@ export function ExportModal({
                   )}
                 </>
               ) : (
+                /* Unreachable today: every format in CLOUD_FORMATS takes a column
+                   selection, now that OBJ (the one that could not — a `v` line is
+                   exactly x/y/z) is no longer offered for point clouds. Kept as
+                   the branch a fixed-schema format would land in if one is added
+                   back; `cloudFormatTakesColumns` still gates the picker. */
                 <div className="text-[10px] text-neutral-500" data-testid="export-fixed-schema-note">
-                  {/* OBJ is the only format with nothing to pick: a `v` line takes
-                      exactly x/y/z. Everything else (LAS/LAZ included) now has a
-                      picker. */}
-                  OBJ stores vertex coordinates only — it has no way to carry colour
-                  or scalar fields. Use PLY, LAS or CSV to keep them.
+                  This format writes a fixed set of fields — colour and scalars
+                  cannot be chosen. Use PLY, LAS or CSV to keep them.
                 </div>
               )}
 
@@ -515,7 +534,7 @@ export function ExportModal({
                 </>
               )}
 
-              {/* Column picker — applies to every data format except OBJ and E57
+              {/* Column picker — applies to every data format except E57 and PTX
                   (XML mode is always .xyz). x/y/z are always locked on: a scan
                   that drops geometry can't be re-loaded. For LAS/LAZ, intensity is
                   locked too (it is in every LAS point record) and order is not
@@ -663,9 +682,14 @@ export function ExportModal({
                 <div data-testid="export-dem-raster" className="mt-2">
                   <div className="text-[10px] text-neutral-500 mb-1">GIS raster (elevation grid)</div>
                   <div className="grid grid-cols-2 gap-1">
+                    {/* "ASC grid", not "ASC": the cloud format list also offers an
+                        ASC now, and though the two never render for the same object
+                        (this row is DEM-mesh only), one window with two differently
+                        -meaning ASC buttons is a needless ambiguity. This one is a
+                        raster elevation GRID; that one is a point list. */}
                     <button data-testid="export-dem-asc" onClick={() => onExportDEMRaster('asc')}
-                      title="ESRI ASCII grid (.asc)"
-                      className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200">ASC</button>
+                      title="ESRI ASCII raster grid (.asc) — an elevation grid, not a point list"
+                      className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200">ASC grid</button>
                     <button data-testid="export-dem-tif" onClick={() => onExportDEMRaster('tif')}
                       title="GeoTIFF (.tif)"
                       className="px-2 py-1.5 bg-neutral-700 hover:bg-neutral-600 rounded text-xs text-neutral-200">GeoTIFF</button>

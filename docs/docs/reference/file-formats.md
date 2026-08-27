@@ -9,14 +9,14 @@
 | `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and colour. |
 | `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** writes only x/y/z + optional RGB. Structured/organized PLYs recover sky/miss points (see below). |
 | `.ptx` | ✅ | ✅ | Leica Cyclone's structured-scan ASCII format (also written by RiSCAN and FARO). A **multi-block** `.ptx` imports as one scan per block, each with its own pose. Carries intensity and RGB, and recovers **sky/miss points** from the grid (see below), so LAD works. Export is per-object via the batch export's **Data only** mode; PTX always writes the full grid with no-return cells left empty, so misses round-trip whether or not the *write misses* box is ticked. |
-| `.pcd` | ✅ | — | Point Cloud Data format (PCL). Import only; parsed via Open3D, which drops non-standard scalar fields. |
+| `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL), ASCII. Parsed via Open3D, which drops non-standard scalar fields — so **export carries position and colour only** and shows no field picker. Colour is packed into a single `rgb` field, as the format requires. Use `.ply` or `.las` to keep intensity and scalars. |
 | `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. macOS only, and needs Docker plus a user-supplied RiVLib: see **[Import a RIEGL project](../workflows/import-riegl-project.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**, though each position can be **levelled** using the instrument's own inclinometer (tilt only — not aligned to north or to each other); sky/miss points are recovered from the scanner's per-shot record, so LAD works. |
 | `.PROJ` | ✅ | — | RIEGL **on-instrument project** from a newer scanner (e.g. VZ-2000i) — also a *directory*. Same requirements and same columns as `.riproject`, but it also carries the instrument's **own registration**, so scans can land already aligned, level and north-oriented. Registration is often partial; each position reports whether it was registered or only placed from a metre-level prior. The `.rdbx` files beside each `.rxp` are not used. |
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
-| `.pts` | ✅ | — | Whitespace-separated, usually with a header line of the point count. Import only. |
-| `.asc` | ✅ | — | ASCII point cloud, treated like `.xyz`. Import only as a point cloud — `.asc` *is* available as a DEM raster export (see below). |
-| `.obj` | — | ✅ | Vertices only, no faces. |
+| `.pts` | ✅ | ✅ | Leica/Cyclone PTS. A leading line holding the **point count**, then `x y z intensity r g b` — intensity *before* colour. The order is **fixed** (a reader decodes these columns positionally), so PTS export shows no field picker; export to `.txt`/`.csv`/`.ply`/`.las` if you need to choose fields or carry other scalars. |
+| `.asc` | ✅ | ✅ | ASCII point cloud, treated like `.xyz`: whitespace-separated columns with **no header line**. Not to be confused with the DEM **ASC grid** raster export (see [DEM rasters](#dem-rasters)) — that `.asc` is an elevation *grid*, this one is a point list. |
+| `.obj` | — | — | **Not a point-cloud format in Phytograph** — it is a *mesh* format (see [Meshes](#meshes)). A vertex-only `.obj` cannot be imported as a cloud: `.obj` always loads as a mesh, so a cloud written to `.obj` would come back as a face-less mesh rather than a point cloud. Use `.ply` to carry points into Blender or MeshLab, or `.xyz` for a plain column file. |
 
 ### ASCII format details
 
@@ -88,6 +88,20 @@ colour (0–255 integers), so columns that hold timestamps, return counts, or a
 reflectance that ranges above 255 (e.g. Helios multi-return
 `x y z timestamp intensity return#`) are left as reassignable scalars rather
 than silently mislabelled as colour.
+
+`.pts` files get two extra rules, because the canonical PTS layout breaks both
+of the general ones above:
+
+- A leading line holding just the **point count** is recognised as a header, not
+  as data. It is all digits, so the usual "does this line contain a letter"
+  header test doesn't catch it.
+- Columns are read as `x y z intensity r g b` — intensity **before** colour.
+  The general rule only recognises an RGB triple sitting directly after xyz, so
+  without this a 7-column PTS lost both its colour *and* its intensity.
+
+Both rules apply only to `.pts`, so no other ASCII layout changes meaning. A
+`.pts` written the other way round (`x y z r g b intensity`) still resolves
+through the general rule.
 
 `.ply` clouds are parsed directly (not via open3d), so arbitrary per-vertex
 scalar properties — intensity, reflectance, and any custom numeric field —

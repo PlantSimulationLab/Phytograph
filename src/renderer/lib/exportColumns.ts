@@ -43,8 +43,15 @@ export interface ExportColumn {
 // that conflates two different things: the STANDARD dimensions are a fixed menu,
 // while every scalar rides as an explicitly declared EXTRA dimension and is
 // freely omittable. See LAS_LOCKED_KINDS for the parts that really are fixed.
+// ASC belongs here — it is bare positional ASCII, exactly like xyz.
+//
+// PTS and PCD deliberately do NOT: each has a FIXED positional/structural schema
+// that a reader decodes by position, so a user-chosen subset or order produces a
+// file that still parses and is read wrong. PTS is `x y z intensity r g b` (drop
+// intensity and every reader takes column 3 as red); PCD packs colour into one
+// float-bit-cast `rgb` field and its reader returns position + colour only.
 export const COLUMN_PICKER_FORMATS = new Set([
-  'xyz', 'txt', 'csv', 'ply', 'las', 'laz', 'scan',
+  'xyz', 'txt', 'csv', 'ply', 'las', 'laz', 'asc', 'scan',
 ]);
 
 // True when the format lets the user pick its columns. (Named for the capability
@@ -291,6 +298,100 @@ export function buildAsciiExport(
   const lines: string[] = [header];
   for (let i = 0; i < data.pointCount; i++) {
     lines.push(slugs.map(s => cellValue(data, s, i)).join(delimiter));
+  }
+  return lines.join('\n');
+}
+
+// Build a HEADERLESS whitespace-separated cloud — the `.xyz`/`.asc` body. Split
+// out from `buildAsciiExport` because those two formats carry no legend line at
+// all: their columns are positional, which is exactly what the importer's
+// `ASCII_format` convention reads back.
+export function buildBareAsciiExport(
+  data: Pick<PointCloudData, 'positions' | 'colors' | 'intensities' | 'scalarFields'> & { pointCount: number },
+  slugs: string[],
+): string {
+  const lines: string[] = [];
+  for (let i = 0; i < data.pointCount; i++) {
+    lines.push(slugs.map(s => cellValue(data, s, i)).join(' '));
+  }
+  return lines.join('\n');
+}
+
+// The canonical PTS column order: `x y z intensity r g b`, intensity BEFORE
+// colour. Both trailing groups are optional, their order is not — a reader
+// identifies PTS columns positionally, so writing them in any other order
+// yields a file that still parses and is read WRONG (drop intensity and the
+// reader takes column 3 as red). That is why PTS takes no column picker.
+export function ptsColumnSlugs(
+  data: Pick<PointCloudData, 'colors' | 'intensities' | 'scalarFields'>,
+): string[] {
+  const slugs = ['x', 'y', 'z'];
+  if (data.intensities || data.scalarFields?.intensity) slugs.push('intensity');
+  if (data.colors) slugs.push('r', 'g', 'b');
+  return slugs;
+}
+
+// Build a canonical `.pts`: a leading point-COUNT line, then one row per point
+// in `ptsColumnSlugs` order. The count line is what distinguishes PTS from a
+// bare column file for Cyclone/CloudCompare, and Phytograph's own importer
+// recognises it (`_is_pts_count_header`), so this round-trips.
+export function buildPtsExport(
+  data: Pick<PointCloudData, 'positions' | 'colors' | 'intensities' | 'scalarFields'> & { pointCount: number },
+): string {
+  const slugs = ptsColumnSlugs(data);
+  const lines: string[] = [String(data.pointCount)];
+  for (let i = 0; i < data.pointCount; i++) {
+    lines.push(slugs.map(s => cellValue(data, s, i)).join(' '));
+  }
+  return lines.join('\n');
+}
+
+// Build an ASCII PCD (PCL's Point Cloud Data format).
+//
+// Fixed schema — position + optional colour — and no column picker, because
+// PCD packs RGB into ONE float-bit-cast field and the reader Phytograph uses
+// for it (open3d) returns position and colour only, dropping intensity and
+// every scalar. Offering more fields would write a file that re-imports short.
+export function buildPcdExport(
+  data: Pick<PointCloudData, 'positions' | 'colors'> & { pointCount: number },
+): string {
+  const n = data.pointCount;
+  const hasColors = !!data.colors;
+  const fields = hasColors ? 'x y z rgb' : 'x y z';
+  const three = hasColors ? '4 4 4 4' : '4 4 4';
+  const types = hasColors ? 'F F F F' : 'F F F';
+  const count = hasColors ? '1 1 1 1' : '1 1 1';
+  const lines: string[] = [
+    '# .PCD v0.7 - Point Cloud Data file format',
+    'VERSION 0.7',
+    `FIELDS ${fields}`,
+    `SIZE ${three}`,
+    `TYPE ${types}`,
+    `COUNT ${count}`,
+    `WIDTH ${n}`,
+    'HEIGHT 1',
+    // Identity pose: points are written in world coordinates, and a non-identity
+    // VIEWPOINT is read back as a scan origin, which would double-apply.
+    'VIEWPOINT 0 0 0 1 0 0 0',
+    `POINTS ${n}`,
+    'DATA ascii',
+  ];
+  // Reused across points so the float<->uint32 reinterpret isn't reallocated.
+  const buf = new ArrayBuffer(4);
+  const f32 = new Float32Array(buf);
+  const u32 = new Uint32Array(buf);
+  for (let i = 0; i < n; i++) {
+    const x = data.positions[i * 3].toFixed(6);
+    const y = data.positions[i * 3 + 1].toFixed(6);
+    const z = data.positions[i * 3 + 2].toFixed(6);
+    if (!hasColors) { lines.push(`${x} ${y} ${z}`); continue; }
+    const c = data.colors!;
+    const r = Math.min(255, Math.max(0, Math.round(c[i * 3] * 255)));
+    const g = Math.min(255, Math.max(0, Math.round(c[i * 3 + 1] * 255)));
+    const b = Math.min(255, Math.max(0, Math.round(c[i * 3 + 2] * 255)));
+    // PCD stores packed 24-bit colour in a float32's BIT PATTERN, not its value.
+    u32[0] = ((r << 16) | (g << 8) | b) >>> 0;
+    lines.push(`${x} ${y} ${z} ${f32[0]}`);
   }
   return lines.join('\n');
 }

@@ -228,7 +228,7 @@ import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
 import { SkeletonExtractionPanel } from './viewer/panels/SkeletonExtractionPanel';
 import { AlignmentPanel } from './viewer/panels/AlignmentPanel';
 import { ExportModal } from './ExportModal';
-import { defaultExportColumns, buildAsciiExport, cellValue, type ExportColumn } from '../lib/exportColumns';
+import { defaultExportColumns, buildAsciiExport, buildBareAsciiExport, buildPtsExport, buildPcdExport, cellValue, type ExportColumn } from '../lib/exportColumns';
 import { QSMExportPanel } from './viewer/panels/QSMExportPanel';
 import { PlantGrowthPanel } from './viewer/panels/PlantGrowthPanel';
 import { TransformPanel } from './viewer/panels/TransformPanel';
@@ -8039,7 +8039,7 @@ export default function PointCloudViewer({
   // `destPath` is the absolute path the user already chose; the caller resolves
   // it BEFORE calling so the save dialog never appears behind a progress pill.
   const exportPointCloudInner = useCallback(async (
-    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
+    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'asc' | 'pts' | 'pcd' | 'las' | 'laz',
     columns: string[] | null,
     cloud: PointCloudEntry,
     destPath: string,
@@ -8131,6 +8131,30 @@ export default function PointCloudViewer({
         showToast({ title: 'Export Failed', message: error instanceof Error ? error.message : 'Unknown error', type: 'error' });
       }
       return null;
+    }
+
+    if (format === 'pcd') {
+      // Fixed schema (position + colour) — see buildPcdExport for why PCD takes
+      // no column selection.
+      const saved = await writeToPath(buildPcdExport(data), destPath);
+      return { fileName: saved, pointCount: data.pointCount };
+    }
+
+    if (format === 'pts') {
+      // Canonical PTS: count line + `x y z intensity r g b`. Fixed order, so the
+      // picker's `columns` is deliberately not consulted (see ptsColumnSlugs).
+      const saved = await writeToPath(buildPtsExport(data), destPath);
+      return { fileName: saved, pointCount: data.pointCount };
+    }
+
+    if (format === 'asc') {
+      // ASC is bare positional ASCII — the same bytes as .xyz under the
+      // extension GIS tools expect, so it carries NO header line (matching the
+      // backend's octree-backed writer and what our importer reads back).
+      let slugs = columns ?? [];
+      if (slugs.length === 0) slugs = ['x', 'y', 'z'];
+      const saved = await writeToPath(buildBareAsciiExport(data, slugs), destPath);
+      return { fileName: saved, pointCount: data.pointCount };
     }
 
     if (format === 'xyz' || format === 'txt' || format === 'csv') {
@@ -8328,7 +8352,10 @@ export default function PointCloudViewer({
   }, [getDisplayData, buildPointSource, writeToPath]);
 
   const exportPointCloud = useCallback(async (
-    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'obj' | 'las' | 'laz',
+    // No 'obj': the Export window stopped offering it for point clouds (see
+    // CLOUD_FORMATS in ExportModal for why). `exportPointCloudInner` still
+    // writes it, mirroring the backend writers that also still accept it.
+    format: 'xyz' | 'txt' | 'csv' | 'ply' | 'asc' | 'pts' | 'pcd' | 'las' | 'laz',
     columns: string[] | null = null,
     // The Export window names the cloud explicitly (it is whatever is CHECKED in
     // its object list, which is seeded from — but no longer tied to — the scene
