@@ -702,11 +702,12 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          codesign --force --options runtime --timestamp \
-            --entitlements build/backend.entitlements \
-            --sign "$APPLE_SIGNING_IDENTITY" \
+          # Retries only a timestamp-service outage, which is what killed the
+          # Intel build of v0.74.0 after a 21-minute compile. See the script.
+          bash scripts/codesign-with-retry.sh \
+            build/backend.entitlements \
+            "$APPLE_SIGNING_IDENTITY" \
             resources/phytograph_backend/phytograph_backend
-          codesign -dv --verbose=4 resources/phytograph_backend/phytograph_backend
 
       - name: Sign PotreeConverter (macOS)
         if: startsWith(matrix.platform, 'macos')
@@ -717,11 +718,10 @@ jobs:
           # as the backend (hardened runtime + timestamp). Notarization
           # otherwise rejects the bundle for an unsigned executable.
           bin=$(find resources/potree_converter -type f -name 'PotreeConverter' | head -1)
-          codesign --force --options runtime --timestamp \
-            --entitlements build/backend.entitlements \
-            --sign "$APPLE_SIGNING_IDENTITY" \
+          bash scripts/codesign-with-retry.sh \
+            build/backend.entitlements \
+            "$APPLE_SIGNING_IDENTITY" \
             "$bin"
-          codesign -dv --verbose=4 "$bin"
 
       # ---------------- App build ----------------
       - name: Install frontend dependencies
