@@ -31,7 +31,41 @@ permissions:
   contents: write
 
 jobs:
+  # ---------------- Pre-build gate ----------------
+  # Packages UNSIGNED installers on macOS-arm64 + Windows and runs the 28-spec
+  # platform E2E subset against them. `build` needs it, so a packaging or
+  # behavioural regression on either OS stops the release before anything is
+  # signed, notarized, or published.
+  #
+  # It has to run BEFORE `build`, not after. `build` invokes electron-builder
+  # with `--publish always` and package.json pins `releaseType: "release"`, so
+  # the artifacts are public the instant that step succeeds. Everything already
+  # inside `build` — the packaged-app smoke test, the Windows signature check,
+  # the macOS notarization check — therefore runs against a release the world
+  # can already download. Those are detectors. This is the gate.
+  #
+  # Why it is worth ~19 minutes on the front of a release: this is the coverage
+  # that was written for the Windows octree-cache-root bug (issue #4), which
+  # shipped in 0.70.0 and reached a user because nothing exercised a packaged
+  # Windows build. The subset's first group is that exact failure class. Before
+  # this, the workflow existed but nothing ran it — its own header asked a human
+  # to remember, and the release before this one was tagged without it.
+  #
+  # Deliberately unsigned: signing and notarization are the slow, credential-
+  # bound part of a release, and neither is needed to answer "does the assembled
+  # installer produce an app that behaves correctly on this OS?".
+  # Skipped in signing_test mode, which exists to iterate on Windows signing in
+  # ~5 minutes instead of ~35 by stubbing the sidecars. It never publishes, and
+  # gating it would defeat the only reason it exists.
+  platform-gate:
+    if: '!inputs.signing_test'
+    uses: ./.github/workflows/platform.yml
+
   build:
+    # `always()` keeps the SKIPPED gate (signing_test) from cascading a skip
+    # onto build, while still requiring a real pass whenever the gate ran.
+    needs: platform-gate
+    if: always() && needs.platform-gate.result != 'failure' && needs.platform-gate.result != 'cancelled'
     strategy:
       fail-fast: false
       matrix:

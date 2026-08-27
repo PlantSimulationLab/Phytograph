@@ -50,6 +50,16 @@ name: Platform
 #   Linux bundle from the same sources.
 
 on:
+  # Called by release.yml as a PRE-BUILD gate, so a packaging or behavioural
+  # regression on Windows/macOS stops the release before anything is signed,
+  # notarized, or published. That ordering is the whole point: release.yml's
+  # `build` job runs electron-builder with `--publish always` and package.json
+  # pins `releaseType: "release"`, so artifacts go public the moment `build`
+  # succeeds — every check inside that job (smoke test, signature, notarization)
+  # necessarily runs AFTER the upload and can only detect, never prevent. A gate
+  # has to sit upstream of `build` to gate anything at all.
+  workflow_call:
+
   workflow_dispatch:
     inputs:
       platforms:
@@ -65,8 +75,15 @@ on:
   schedule:
     - cron: '0 9 * * 1'
 
+# `github.workflow` disambiguates a called run from a standalone one. A called
+# workflow inherits the CALLER's `github.ref`, so keying on the ref alone put a
+# release's gate and a hand-dispatched Platform run on the same tag into one
+# group — and with cancel-in-progress that means dispatching Platform silently
+# kills the gate of an in-flight release (or vice versa). Including the workflow
+# name keeps the two in separate groups while preserving the original behaviour
+# of superseding an older run of the SAME kind on the same ref.
 concurrency:
-  group: platform-${{ github.ref }}
+  group: platform-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
