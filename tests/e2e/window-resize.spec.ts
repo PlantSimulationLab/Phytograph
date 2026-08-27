@@ -19,8 +19,18 @@ import { launchApp, type LaunchedApp } from './helpers/launchApp';
 //    to hide behind the translucent Tools card, which also ate its clicks).
 
 async function setWindowSize(launched: LaunchedApp, w: number, h: number) {
+  // setContentSize, NOT setSize. setSize sets the OUTER frame, and every
+  // assertion here — the innerWidth poll below, the canvas rect, the
+  // `canvas.w === 950` check — is about the CONTENT area. On macOS and Linux
+  // the left/right frame is 0px so the two happen to coincide and setSize
+  // passed; Windows draws an ~8px resize border per side, so `setSize(1600)`
+  // yields innerWidth 1584 and a poll for |innerWidth - 1600| <= 2 can never
+  // succeed. That is not a resize that was too slow, it is one whose target
+  // the platform cannot express — it failed identically on every attempt.
+  // Setting the content size states what the test actually means and makes the
+  // three platforms agree.
   await launched.app.evaluate(({ BrowserWindow }, size) => {
-    BrowserWindow.getAllWindows()[0]?.setSize(size.w, size.h);
+    BrowserWindow.getAllWindows()[0]?.setContentSize(size.w, size.h);
   }, { w, h });
   // Wait for the resize to actually land in the renderer instead of sleeping a
   // fixed interval. The chain is X11/WM → Electron → window.innerWidth →
