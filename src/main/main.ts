@@ -296,10 +296,19 @@ function createWindow(): void {
   // guess under-budgets Windows by ~11px — enough to scroll-crop the toolbar
   // column's lowest card at the minimum height. getBounds() minus
   // getContentBounds() is the real chrome, whatever it is here.
+  //
+  // Only ever RAISE it. setMinimumSize is an explicit resize, and the E2E
+  // launch size (1200x800) sits deliberately BELOW this minimum — see the note
+  // above: the suite relies on Electron honouring the initial size so pixel
+  // coordinates stay stable. Lowering the minimum is never needed (the guess is
+  // only ever too small, never too large), but the call itself would drag the
+  // 800px-high E2E window up to the new floor and shift every pixel coordinate
+  // under it. That is what broke ground-outliers and grid-snap-roundtrip on
+  // Linux, where the measured frame is ~0 and the correction went 860 -> 832.
   {
     const frame = mainWindow.getBounds().height - mainWindow.getContentBounds().height;
     const corrected = Math.min(MIN_CONTENT_HEIGHT + Math.max(0, frame), workAreaHeight);
-    if (corrected !== minHeight) mainWindow.setMinimumSize(900, corrected);
+    if (corrected > minHeight) mainWindow.setMinimumSize(900, corrected);
   }
 
   if (shouldMaximize) mainWindow.maximize();
