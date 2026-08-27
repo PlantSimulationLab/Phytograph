@@ -327,10 +327,17 @@ jobs:
         shell: pwsh
         run: |
           Set-DisplayResolution -Width 1920 -Height 1080 -Force
-          $out = (Get-DisplayResolution | Out-String).Trim()
-          Write-Host "Get-DisplayResolution: $out"
-          if ($out -notmatch '1920\s*x\s*1080') {
-            Write-Error "display is '$out', expected 1920x1080 — window-resize.spec.ts needs >=1600 wide."
+          # Get-DisplayResolution emits UTF-16, which pwsh surfaces as ASCII with
+          # a NUL between every character — the raw string reads "1 9 2 0 x 1 0 8 0".
+          # So match on the digits alone rather than on any spacing: strip every
+          # character that is not a digit or 'x' first. A naive '1920\s*x\s*1080'
+          # fails against correctly-resized output, which is a false alarm on the
+          # step whose entire job is to be trustworthy.
+          $raw = (Get-DisplayResolution | Out-String)
+          $norm = ($raw -replace '[^0-9x]', '')
+          Write-Host "Get-DisplayResolution (normalized): $norm"
+          if ($norm -notmatch '1920x1080') {
+            Write-Error "display is '$norm', expected 1920x1080 — window-resize.spec.ts needs >=1600 wide."
             exit 1
           }
 
