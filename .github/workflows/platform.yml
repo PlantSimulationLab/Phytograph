@@ -303,6 +303,37 @@ jobs:
       # PHYTOGRAPH_E2E_PLATFORM=1 swaps playwright.config.ts's project list for
       # the subset; without it the config is untouched, so local runs and ci.yml
       # behave exactly as before.
+      # Windows hosted runners come up at 1024x768 — not a GitHub choice but
+      # Windows Session 0 isolation, which caps the desktop for anything running
+      # as a service. window-resize.spec.ts grows the window to 1600x1000 to
+      # exercise the canvas-ratchet regression, and the OS clamps a window to
+      # the work area, so on a 1024-wide desktop that resize silently yields
+      # ~1024 and the spec's poll for innerWidth==1600 can never succeed. It is
+      # not a slow resize, it is an impossible one — which is why it failed
+      # twice, identically, while macOS (a real display) passed.
+      #
+      # This is the same fix ci.yml applies on Linux by handing Xvfb
+      # `-screen 0 1920x1080x24`; the Windows equivalent is Set-DisplayResolution
+      # (a built-in ServerCore cmdlet). 1920x1080 is the documented practical
+      # ceiling for these images, and the driver exposes a fixed MODE LIST — an
+      # arbitrary size like 1440x1080 is rejected as unsupported — so keep this a
+      # standard mode.
+      #
+      # Verify rather than trust: a silently-unresized desktop would put us back
+      # at 1024x768 and reproduce the same CI-only geometry failure, so parse
+      # what the cmdlet actually reports and fail loudly if it did not take.
+      - name: Give the desktop room for the resize specs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          $out = (Get-DisplayResolution | Out-String).Trim()
+          Write-Host "Get-DisplayResolution: $out"
+          if ($out -notmatch '1920\s*x\s*1080') {
+            Write-Error "display is '$out', expected 1920x1080 — window-resize.spec.ts needs >=1600 wide."
+            exit 1
+          }
+
       - name: E2E (platform subset)
         env:
           PHYTOGRAPH_E2E_PLATFORM: '1'
