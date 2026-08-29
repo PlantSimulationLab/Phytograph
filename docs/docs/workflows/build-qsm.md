@@ -217,7 +217,7 @@ to keep a QSM: that file imports straight back into Phytograph (see
 | Format | What it is | Use it for |
 |---|---|---|
 | **CSV** | One row per cylinder — `ID, parentID, branchID, branchOrder, segmentID, parentSegmentID`, start/end coordinates, axis, radius, length, plus surface-coverage and fit residual. Uses the **SimpleForest** column layout. | Keeping the model — **this is the only format Phytograph can read back**. Also analysis and round-tripping into the standard QSM ecosystem: it follows the SimpleForest schema that [rTwig](https://aidanmorales.github.io/rTwig/) and [aRchi](https://github.com/umr-amap/aRchi) read (the TreeQSM-compatible path). The column set is validated against rTwig's importer. |
-| **OBJ** | Triangulated tube mesh with smooth vertex normals — the same geometry the viewport draws. Each shoot is one named object (`shoot_<id>_rank_<n>`), so the tree arrives separable. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
+| **OBJ** | Triangulated tube mesh with smooth vertex normals — the same geometry the viewport draws. Each shoot is one named object (`shoot_<id>_rank_<n>`), so the tree arrives separable. Writes a **bundle**: the `.obj`, a sibling `.mtl`, and the bark image in Texture mode. | Viewing the model anywhere — Blender, CloudCompare, MeshLab, Rhino. |
 | **PLY** | The same tube mesh plus vertex normals, with each face tagged by **branch order** and **radius**. | Viewing with attribute-based coloring (color faces by branching order in CloudCompare/Blender). |
 
 !!! note "Coordinates and units"
@@ -236,6 +236,30 @@ to keep a QSM: that file imports straight back into Phytograph (see
     cylinder. If you need the raw fitted cylinder parameters (each with its own
     single radius, start, and end), export **CSV** — that's the format that
     preserves them.
+
+!!! note "OBJ carries the colours too"
+    The OBJ export writes the **colour mode you have selected** into a sibling
+    `.mtl` file, so the tree opens in Blender looking the way it looks in the
+    viewer rather than as untextured grey. **Rank** mode writes one material per
+    rank, **Shoot** mode one per shoot, **Colour** mode a single material with
+    your picked colour, and **Texture** mode a `bark` material plus the bark
+    image and the UV coordinates that tile it at the size you set.
+
+    Keep the exported files together — an `.obj` separated from its `.mtl` (and
+    its images) loses the colours. PLY carries `branch_order` and `radius`
+    per face instead, which is the better choice if you want to colour by
+    branching order in a downstream tool.
+
+!!! note "Leaves are exported too"
+    If you have added foliage with [Add Leaves](add-leaves.md), the OBJ export
+    includes it as a final `leaves` object with its own textured materials, so
+    the tree opens leafy rather than as a bare winter skeleton. Leaf textures are
+    alpha cutouts and are exported as such, which is what makes each leaf come
+    back leaf-shaped instead of as an opaque rectangle.
+
+    **CSV and PLY carry the woody structure only** — leaves are not part of the
+    cylinder model, so re-importing a CSV gives you the bare QSM back and you can
+    re-run Add Leaves on it.
 
 ### Re-importing a QSM
 

@@ -20,8 +20,27 @@
 // a pile of disjoint cylinders in Blender while the viewport showed a smooth tube.
 
 import type { QSMEntry } from './pointCloudTypes';
-import { buildShootPolylines, cylinderAxis, cylinderLength, sweepTube } from './qsmTube';
+import {
+  DEFAULT_TEXTURE_TILE_SIZE,
+  buildShootPolylines,
+  cylinderAxis,
+  cylinderLength,
+  sweepTube,
+} from './qsmTube';
 import type { Vec3 } from './qsmTube';
+import {
+  decodeBase64,
+  imageExtFromBytes,
+  resolveMaterials,
+  type MeshExportFile,
+} from './meshExport';
+import {
+  rankColorRgb,
+  shootColorSrgb,
+  hexToRgb,
+  linearToSrgb,
+  type QSMColorMode,
+} from './qsmColors';
 
 export type QSMExportFormat = 'csv' | 'obj' | 'ply';
 
@@ -44,8 +63,21 @@ export function qsmExtForFormat(fmt: QSMExportFormat): string {
 // .ply — so keeping it would suggest 'tree.xyz.csv'). Empty result falls back to
 // 'qsm'.
 export function sanitizeQsmFilename(name: string): string {
+  return sanitizeQsmStem(name.replace(/\.[A-Za-z0-9]{1,5}$/, '')); // drop source ext
+}
+
+/**
+ * Filesystem-sanitize a stem that is ALREADY a stem — the part of a path the user
+ * typed, with its extension removed by the caller.
+ *
+ * Deliberately does NOT strip a trailing `.xyz`, unlike sanitizeQsmFilename: a user
+ * who saves as `tree.v2.obj` means the stem `tree.v2`, and eating the `.v2` would
+ * make the OBJ's `mtllib tree.mtl` name a file we never wrote — a dangling
+ * reference that loads as untextured grey, the very bug the MTL exists to fix.
+ * Inner dots are kept for that reason; only leading/trailing ones are trimmed.
+ */
+export function sanitizeQsmStem(name: string): string {
   const cleaned = name
-    .replace(/\.[A-Za-z0-9]{1,5}$/, '') // trailing source extension, if any
     .replace(/[/\\:*?"<>|]/g, '_') // path separators + Windows-reserved chars
     .replace(/\s+/g, '_')
     .replace(/_+/g, '_')
@@ -63,6 +95,8 @@ export function sanitizeQsmFilename(name: string): string {
 interface ShootTube {
   positions: Vec3[];
   normals: Vec3[];
+  /** Tile-unit texture coordinates, parallel to `positions` (see qsmTube). */
+  uvs: [number, number][];
   faces: [number, number, number][];
   ringStride: number;
   shootId: number;
@@ -76,14 +110,19 @@ interface ShootTube {
  * same shared builder the viewport renders. Shoots whose polyline is too short to
  * sweep are skipped.
  */
-export function buildQsmTubes(qsm: QSMEntry, segments = TUBE_SEGMENTS): ShootTube[] {
+export function buildQsmTubes(
+  qsm: QSMEntry,
+  segments = TUBE_SEGMENTS,
+  tileSize = DEFAULT_TEXTURE_TILE_SIZE,
+): ShootTube[] {
   const out: ShootTube[] = [];
   for (const poly of buildShootPolylines(qsm.cylinders, qsm.shoots)) {
-    const swept = sweepTube(poly.nodes, poly.radii, segments);
+    const swept = sweepTube(poly.nodes, poly.radii, segments, [0, 0, 0], tileSize);
     if (!swept) continue;
     out.push({
       positions: swept.positions,
       normals: swept.normals,
+      uvs: swept.uvs,
       faces: swept.faces,
       ringStride: swept.ringStride,
       shootId: poly.shootId,
@@ -152,34 +191,364 @@ export function qsmToCylinderCsv(qsm: QSMEntry): string {
 
 // --- OBJ --------------------------------------------------------------------
 
-// Each shoot becomes one OBJ group `o shoot_<id>_rank_<n>`, so the tree arrives in Blender
-// as separable objects rather than one anonymous soup. Vertex normals are written
-// (`vn` + `f v//vn`) because they're the smooth swept normals from the tube frame —
-// without them a viewer computes flat per-face normals and the tube looks faceted
-// even though the geometry is smooth.
-export function qsmToCylinderMeshObj(qsm: QSMEntry): string {
-  const tubes = buildQsmTubes(qsm);
+/**
+ * Appearance the OBJ should reproduce — the same settings driving the viewport,
+ * so the exported bundle looks like what the user is looking at. Omitted entirely
+ * (the default) means 'rank' with the standard palette, which is the viewer's own
+ * default.
+ */
+export interface QSMObjAppearance {
+  colorMode?: QSMColorMode;
+  /** Flat tree color for colorMode='color' (hex, e.g. '#8b6f47'). */
+  solidColor?: string;
+  /** Base64 bark image + its MIME type, for colorMode='texture'. */
+  barkTexture?: { data: string; mime: string } | null;
+  /** World-space edge length (m) of one bark tile. Defaults to Helios' 0.25 m. */
+  textureTileSize?: number;
+}
+
+// Fallback bark brown, mirroring the viewport's BARK_FALLBACK — used when texture
+// mode is selected but the image is missing/undecodable, so the tree exports a
+// plausible wood colour rather than white.
+const BARK_FALLBACK: [number, number, number] = hexToRgb('#8b6f47');
+
+const f6 = (n: number): string => (Number.isFinite(n) ? n : 0).toFixed(6);
+
+// One material the OBJ groups faces under, plus the shoots it claims.
+interface QsmMaterial {
+  mtlName: string;
+  color: [number, number, number];
+  /** Texture image to write beside the OBJ, when this material is textured. */
+  textureFile?: MeshExportFile;
+  /**
+   * Whether the texture carries a real alpha channel, i.e. it's a CUTOUT. True
+   * only for leaves; bark tiles opaquely. Drives `map_d` in the MTL — without it
+   * a leaf re-imports as an opaque rectangle instead of a leaf-shaped one.
+   */
+  hasAlpha?: boolean;
+  /**
+   * Whether `color` is in three.js's LINEAR working space and must be encoded to
+   * sRGB before it is written to `Kd`.
+   *
+   * The two sources genuinely differ, so this can't be assumed either way: the
+   * tube colours come from lib/qsmColors, which defines the palette directly in
+   * **sRGB** (the space a hex swatch and a `Kd` are both written in), while the
+   * leaf colours come from meshExport's resolveMaterials, which reads them off
+   * `MeshData.vertexColors` — held **linear**, because that is what three.js
+   * requires of a `color` BufferAttribute. Getting this wrong is invisible in
+   * geometry and shows up only as a wrong shade.
+   */
+  colorIsLinear?: boolean;
+}
+
+/**
+ * Assign a material to every shoot tube, per color mode.
+ *
+ * 'rank' / 'shoot' encode DATA as hue, so they produce one material per distinct
+ * rank / per shoot — that's what makes the structure readable in Blender. 'color'
+ * and 'texture' are appearance modes and collapse to a single material for the
+ * whole tree.
+ *
+ * Exhaustive switch, not a chain of ifs: the `never` check makes the compiler
+ * reject a newly-added QSMColorMode that forgets a case here, rather than
+ * silently exporting everything as rank colours.
+ */
+function materialsForTubes(
+  tubes: ShootTube[],
+  appearance: QSMObjAppearance,
+  baseName: string,
+): { materials: QsmMaterial[]; materialOfTube: number[] } {
+  const mode: QSMColorMode = appearance.colorMode ?? 'rank';
+  const materials: QsmMaterial[] = [];
+  const materialOfTube: number[] = new Array(tubes.length).fill(0);
+  // Key -> index into `materials`, so shoots sharing a rank share one material.
+  const byKey = new Map<string, number>();
+  const claim = (key: string, make: () => QsmMaterial): number => {
+    const existing = byKey.get(key);
+    if (existing !== undefined) return existing;
+    const idx = materials.length;
+    materials.push(make());
+    byKey.set(key, idx);
+    return idx;
+  };
+
+  switch (mode) {
+    case 'rank':
+      tubes.forEach((t, i) => {
+        materialOfTube[i] = claim(`rank_${t.rank}`, () => ({
+          mtlName: `rank_${t.rank}`,
+          color: rankColorRgb(t.rank),
+        }));
+      });
+      break;
+    case 'shoot':
+      tubes.forEach((t, i) => {
+        materialOfTube[i] = claim(`shoot_${t.shootId}`, () => ({
+          mtlName: `shoot_${t.shootId}`,
+          color: shootColorSrgb(t.shootId),
+        }));
+      });
+      break;
+    case 'color': {
+      const idx = claim('solid', () => ({
+        mtlName: 'qsm_color',
+        color: hexToRgb(appearance.solidColor ?? '#8b6f47'),
+      }));
+      materialOfTube.fill(idx);
+      break;
+    }
+    case 'texture': {
+      // Decode the bark image so the bundle ships the actual file the MTL names.
+      // Extension comes from the MAGIC BYTES, never the declared mime/name — a
+      // JPEG written as .png is a hard load error in Blender/three.js (the same
+      // trap that bit the plant-mesh textures). An undecodable image degrades to
+      // the flat bark colour rather than naming a file no reader can open.
+      const bytes = appearance.barkTexture?.data
+        ? decodeBase64(appearance.barkTexture.data)
+        : null;
+      const ext = bytes ? imageExtFromBytes(bytes) : null;
+      const textureFile: MeshExportFile | undefined =
+        bytes && ext ? { name: `${baseName}_bark${ext}`, bytes } : undefined;
+      const idx = claim('bark', () => ({
+        mtlName: 'bark',
+        // White under a diffuse map so the image shows its true colours (Kd
+        // multiplies map_Kd); the fallback brown only when there is no map.
+        color: textureFile ? [1, 1, 1] : BARK_FALLBACK,
+        textureFile,
+      }));
+      materialOfTube.fill(idx);
+      break;
+    }
+    default: {
+      const _exhaustive: never = mode;
+      void _exhaustive;
+      tubes.forEach((t, i) => {
+        materialOfTube[i] = claim(`rank_${t.rank}`, () => ({
+          mtlName: `rank_${t.rank}`,
+          color: rankColorRgb(t.rank),
+        }));
+      });
+    }
+  }
+  return { materials, materialOfTube };
+}
+
+/** Serialize the QSM material library. */
+function serializeQsmMtl(materials: QsmMaterial[]): string {
+  const lines: string[] = ['# Material library exported from Phytograph', ''];
+  for (const mat of materials) {
+    // `Kd` is always sRGB; encode only the sources that are held linear.
+    const c = mat.colorIsLinear
+      ? (mat.color.map(linearToSrgb) as [number, number, number])
+      : mat.color;
+    lines.push(`newmtl ${mat.mtlName}`);
+    lines.push(`Ka ${f6(c[0])} ${f6(c[1])} ${f6(c[2])}`);
+    lines.push(`Kd ${f6(c[0])} ${f6(c[1])} ${f6(c[2])}`);
+    lines.push('Ks 0.000000 0.000000 0.000000');
+    lines.push('d 1.000000');
+    lines.push('illum 1');
+    if (mat.textureFile) {
+      lines.push(`map_Kd ${mat.textureFile.name}`);
+      // `map_d` ONLY for a real alpha cutout (leaves). Bark tiles opaquely across
+      // the tube, so pointing a dissolve map at it would punch holes in the trunk
+      // wherever the photo happened to carry an alpha channel.
+      if (mat.hasAlpha) lines.push(`map_d ${mat.textureFile.name}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Serialize a QSM's tube mesh to an OBJ bundle: the `.obj`, a sibling `.mtl`, and
+ * — in texture mode — the bark image the MTL names.
+ *
+ * Why a bundle and not just the OBJ: an OBJ carries no colour of its own. Without
+ * the MTL the tree arrived in Blender/CloudCompare as untextured grey geometry, so
+ * every distinction the user set up in the viewport — rank palette, per-shoot hues,
+ * their chosen tree colour, the bark photo — was silently dropped on export. `Kd`
+ * via `usemtl` is the only colour channel that portably survives OBJ.
+ *
+ * Leaves, when the QSM has them, are appended as a final `o leaves` group with
+ * their own textured (alpha-cutout) materials — the viewport draws them as part of
+ * the tree, so an export without them hands the user a bare winter skeleton.
+ *
+ * Each shoot stays its own `o shoot_<id>_rank_<n>` group (separable objects in
+ * Blender) and additionally gets a `usemtl`. Vertex normals are written (`vn`)
+ * because they're the smooth swept normals from the tube frame — without them a
+ * viewer computes flat per-face normals and the tube looks faceted. UVs (`vt`) are
+ * written only in texture mode, where they're what makes the bark tile; they're
+ * V-flipped on the way out to undo the importer's V-up convention, matching
+ * serializeMeshObj.
+ */
+export function qsmToCylinderMeshObjBundle(
+  qsm: QSMEntry,
+  opts: { baseName: string } & QSMObjAppearance,
+): MeshExportFile[] {
+  const baseName = sanitizeQsmStem(opts.baseName);
+  const textured = (opts.colorMode ?? 'rank') === 'texture';
+  const tubes = buildQsmTubes(
+    qsm,
+    TUBE_SEGMENTS,
+    opts.textureTileSize && opts.textureTileSize > 0
+      ? opts.textureTileSize
+      : DEFAULT_TEXTURE_TILE_SIZE,
+  );
+  const { materials, materialOfTube } = materialsForTubes(tubes, opts, baseName);
+
   const lines: string[] = [
     `# Phytograph QSM tube mesh`,
     `# one continuous tube per shoot (matches the Phytograph viewport)`,
     `# cylinders: ${qsm.cylinders.length}  shoots: ${tubes.length}`,
   ];
-  // OBJ v/vn indices are 1-based and accumulate across the whole file. Positions
-  // and normals are parallel arrays here, so one offset serves both.
+  // `mtllib` must precede the first `usemtl`, so it is emitted here — before the
+  // leaves pass appends its own materials to `materials`. Safe because the tube
+  // materials are never empty (every color mode yields at least one), so the
+  // library is always written; the leaves only ever ADD to it.
+  if (materials.length > 0) lines.push(`mtllib ${baseName}.mtl`);
+
+  // OBJ keeps THREE INDEPENDENT 1-based index spaces (v, vt, vn) that each count
+  // only the lines of their own kind. For the tubes alone one counter sufficed,
+  // because every ring vertex emits a v, a vn and (in texture mode) a vt in
+  // lockstep. It stops being true once leaves join: the tubes skip `vt` entirely
+  // outside texture mode, so a leaf's UV indices would be offset by the tube
+  // vertex count that never wrote any. Hence a separate vt counter.
   let vOffset = 0;
-  for (const t of tubes) {
+  let vtOffset = 0;
+  tubes.forEach((t, ti) => {
     lines.push(`o shoot_${t.shootId}_rank_${t.rank}`);
     for (const p of t.positions) lines.push(`v ${p[0]} ${p[1]} ${p[2]}`);
+    if (textured) {
+      // Undo the importer's V-flip so the OBJ is in OBJ's own V-down space.
+      for (const uv of t.uvs) lines.push(`vt ${f6(uv[0])} ${f6(1 - uv[1])}`);
+    }
     for (const nrm of t.normals) lines.push(`vn ${nrm[0]} ${nrm[1]} ${nrm[2]}`);
+    const mat = materials[materialOfTube[ti]];
+    if (mat) lines.push(`usemtl ${mat.mtlName}`);
     for (const f of t.faces) {
       const a = f[0] + 1 + vOffset;
       const b = f[1] + 1 + vOffset;
       const c = f[2] + 1 + vOffset;
-      lines.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
+      lines.push(
+        textured
+          ? `f ${a}/${a}/${a} ${b}/${b}/${b} ${c}/${c}/${c}`
+          : `f ${a}//${a} ${b}//${b} ${c}//${c}`,
+      );
     }
     vOffset += t.positions.length;
+    if (textured) vtOffset += t.uvs.length;
+  });
+
+  // --- leaves -----------------------------------------------------------------
+  // A QSM with foliage added (the Add Leaves tool) renders leaves in the viewport
+  // as part of the tree, so an export that dropped them handed the user a bare
+  // winter skeleton. The leaf mesh is already built in the SAME world frame as the
+  // cylinders (both sit under one group in the viewer, and the render-only
+  // displayOffset is applied inside the tube build, never baked into the data), so
+  // the vertices append as-is with no frame conversion.
+  //
+  // Materials come from meshExport's resolveMaterials — the same resolver the
+  // plant-mesh OBJ export uses — rather than a second copy of the texture-decode
+  // and alpha rules here. Leaf textures are alpha CUTOUTS, so they need `map_d`
+  // (handled via hasAlpha above); without it every leaf re-imports as an opaque
+  // rectangle.
+  const leaves = qsm.leaves;
+  if (leaves && leaves.data.triangleCount > 0) {
+    const d = leaves.data;
+    const leafMats = resolveMaterials(
+      leaves.plantMaterials ?? [],
+      baseName,
+      // Share the tube materials' name set so a leaf material can't collide with
+      // (and silently override) a `rank_0` / `bark` already in the library.
+      new Set(materials.map(m => m.mtlName)),
+      d,
+    );
+    const hasLeafUVs = !!d.uvCoordinates && d.uvCoordinates.length === d.vertexCount * 2;
+    const hasLeafNormals = !!d.normals && d.normals.length === d.vertexCount * 3;
+
+    lines.push(`o leaves`);
+    for (let i = 0; i < d.vertexCount; i++) {
+      lines.push(`v ${d.vertices[i * 3]} ${d.vertices[i * 3 + 1]} ${d.vertices[i * 3 + 2]}`);
+    }
+    if (hasLeafUVs) {
+      // V-flipped on the way out, matching serializeMeshObj: the importer flips
+      // OBJ's V-down space into three.js's V-up, so the export must undo it or
+      // every leaf texture lands upside down on re-import.
+      for (let i = 0; i < d.vertexCount; i++) {
+        lines.push(`vt ${f6(d.uvCoordinates![i * 2])} ${f6(1 - d.uvCoordinates![i * 2 + 1])}`);
+      }
+    }
+    if (hasLeafNormals) {
+      for (let i = 0; i < d.vertexCount; i++) {
+        lines.push(`vn ${f6(d.normals![i * 3])} ${f6(d.normals![i * 3 + 1])} ${f6(d.normals![i * 3 + 2])}`);
+      }
+    }
+
+    // One face line, in whichever v/vt/vn combination this mesh actually carries —
+    // a triple naming a slot the file never wrote is a parse error in strict
+    // readers. Each index space gets its OWN offset (see above).
+    const leafFace = (tri: number): string => {
+      const parts: string[] = [];
+      for (let k = 0; k < 3; k++) {
+        const li = d.indices[tri * 3 + k];
+        const v = li + 1 + vOffset;
+        const vt = li + 1 + vtOffset;
+        const vn = li + 1 + vOffset;
+        if (hasLeafUVs && hasLeafNormals) parts.push(`${v}/${vt}/${vn}`);
+        else if (hasLeafUVs) parts.push(`${v}/${vt}`);
+        else if (hasLeafNormals) parts.push(`${v}//${vn}`);
+        else parts.push(`${v}`);
+      }
+      return `f ${parts.join(' ')}`;
+    };
+
+    // Group faces under their material, first claim winning so overlapping groups
+    // can't duplicate a face. Anything unclaimed still gets written under a
+    // `leaf_default` material — silently dropping triangles would shrink the mesh.
+    const written = new Uint8Array(d.triangleCount);
+    for (const m of leafMats) {
+      const tris = m.triangleIndices.filter(
+        t => t >= 0 && t < d.triangleCount && !written[t],
+      );
+      if (tris.length === 0) continue;
+      materials.push({
+        mtlName: m.mtlName,
+        // resolveMaterials reads MeshData.vertexColors, which are LINEAR.
+        color: m.color ?? [0.35, 0.6, 0.25], // a leaf green, not a grey
+        colorIsLinear: true,
+        textureFile: m.textureFile,
+        hasAlpha: m.hasAlpha,
+      });
+      lines.push(`usemtl ${m.mtlName}`);
+      for (const t of tris) {
+        written[t] = 1;
+        lines.push(leafFace(t));
+      }
+    }
+    const orphans: number[] = [];
+    for (let t = 0; t < d.triangleCount; t++) if (!written[t]) orphans.push(t);
+    if (orphans.length > 0) {
+      materials.push({ mtlName: 'leaf_default', color: [0.35, 0.6, 0.25], colorIsLinear: true });
+      lines.push('usemtl leaf_default');
+      for (const t of orphans) lines.push(leafFace(t));
+    }
   }
-  return lines.join('\n') + '\n';
+
+  const files: MeshExportFile[] = [{ name: `${baseName}.obj`, text: lines.join('\n') + '\n' }];
+  if (materials.length > 0) {
+    files.push({ name: `${baseName}.mtl`, text: serializeQsmMtl(materials) });
+    for (const m of materials) if (m.textureFile) files.push(m.textureFile);
+  }
+  return files;
+}
+
+/**
+ * The OBJ text alone. Kept for callers (and tests) that only want the geometry
+ * file; the material library it references comes from qsmToCylinderMeshObjBundle.
+ */
+export function qsmToCylinderMeshObj(qsm: QSMEntry, appearance: QSMObjAppearance = {}): string {
+  const files = qsmToCylinderMeshObjBundle(qsm, { baseName: 'qsm', ...appearance });
+  return files[0].text!;
 }
 
 // --- PLY --------------------------------------------------------------------
@@ -241,14 +610,25 @@ export function qsmToCylinderMeshPly(qsm: QSMEntry): string {
   return header.concat(body).join('\n') + '\n';
 }
 
-// Dispatch helper used by the export handler.
-export function serializeQsm(qsm: QSMEntry, fmt: QSMExportFormat): string {
+/**
+ * Dispatch helper used by the export handler. Returns the FILE BUNDLE, since an
+ * OBJ is more than one file — the caller writes each entry (text or bytes) beside
+ * the others so the `mtllib` / `map_Kd` references resolve.
+ *
+ * `baseName` names the bundle; CSV/PLY ignore it (they're single files whose name
+ * the caller already chose) but OBJ needs it for its sibling filenames.
+ */
+export function serializeQsm(
+  qsm: QSMEntry,
+  fmt: QSMExportFormat,
+  opts: { baseName: string } & QSMObjAppearance = { baseName: 'qsm' },
+): MeshExportFile[] {
   switch (fmt) {
     case 'csv':
-      return qsmToCylinderCsv(qsm);
+      return [{ name: `${opts.baseName}.csv`, text: qsmToCylinderCsv(qsm) }];
     case 'obj':
-      return qsmToCylinderMeshObj(qsm);
+      return qsmToCylinderMeshObjBundle(qsm, opts);
     case 'ply':
-      return qsmToCylinderMeshPly(qsm);
+      return [{ name: `${opts.baseName}.ply`, text: qsmToCylinderMeshPly(qsm) }];
   }
 }

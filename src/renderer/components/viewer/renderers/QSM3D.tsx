@@ -8,6 +8,8 @@ import {
 } from '../../../lib/qsmTube';
 import type { ShootPolyline as PlainShootPolyline } from '../../../lib/qsmTube';
 import { useImageTexture } from './useImageTexture';
+import { RANK_COLOR_HEXES, rankColorLinear, shootColorRgb } from '../../../lib/qsmColors';
+import type { QSMColorMode } from '../../../lib/qsmColors';
 
 // QSM (Quantitative Structure Model) visualization. Each SHOOT is drawn as ONE
 // CONTINUOUS TUBE: a single shared ring of vertices per node, swept along the
@@ -33,7 +35,9 @@ import { useImageTexture } from './useImageTexture';
 // A selected shoot is highlighted (brightened) and the others dimmed so clicking a
 // shoot shows the whole continuous axis.
 
-export type QSMColorMode = 'rank' | 'shoot' | 'color' | 'texture';
+// Re-exported from the shared (three-free) appearance module so the OBJ exporter
+// can share one definition of the modes and the palette — see lib/qsmColors.
+export type { QSMColorMode };
 
 // 'rank' and 'shoot' encode DATA as hue, so they get the emissive lift that keeps
 // categorical colors legible against the dark viewport. 'color' and 'texture' are
@@ -84,38 +88,23 @@ export interface QSM3DProps {
 // keeps the trunk a neutral wood-tan but makes rank 1 a clearly different
 // red-orange, and cycles well-separated hues after (every adjacent pair RGB dist
 // >= 0.42), while keeping every colour bright enough for the dark background.
-export const RANK_COLORS = [
-  new THREE.Color('#b08d57'), // rank 0 trunk - neutral wood tan
-  new THREE.Color('#e8552d'), // rank 1 scaffold - red-orange (distinct from trunk)
-  new THREE.Color('#3e9bff'), // rank 2 - blue
-  new THREE.Color('#2fcf6b'), // rank 3 - green
-  new THREE.Color('#b76bff'), // rank 4 - violet
-  new THREE.Color('#ff5fa8'), // rank 5+ - pink
-];
+export const RANK_COLORS = RANK_COLOR_HEXES.map((h) => new THREE.Color(h));
 
+// Thin THREE wrappers over the shared palette/hue math in lib/qsmColors. The math
+// lives there (three-free) so the OBJ exporter writes the SAME colors the viewport
+// shows; keeping a second copy here is how the two drifted before.
+// Note the asymmetry, which is three.js's not ours: the hex parser converts sRGB
+// -> linear, while setHSL stores its output verbatim. So the rank palette (defined
+// as hex) must be linearized to match what `new THREE.Color(hex)` produced before
+// this refactor, and the shoot hues (defined in HSL) are passed through untouched.
 export function rankColor(rank: number): THREE.Color {
-  const idx = Math.min(Math.max(rank, 0), RANK_COLORS.length - 1);
-  return RANK_COLORS[idx];
+  const [r, g, b] = rankColorLinear(rank);
+  return new THREE.Color(r, g, b);
 }
 
-// Deterministic distinct color per shoot id via the golden-ratio hue rotation
-// (so adjacent shoot ids look clearly different, and the same id always maps to
-// the same color across renders). At equal HSL lightness, reds (~0deg) and blues
-// (~0.66) look much darker than yellows/greens, so a plain red sampled here used
-// to read as a near-black maroon against the dark viewer background; we add
-// lightness back for those hues so no shoot color comes out dark/muddy.
 export function shootColor(shootId: number): THREE.Color {
-  const hue = (shootId * 0.61803398875) % 1.0;
-  // Keep colors vivid (not pastel) but never DARK: a modest per-hue lightness lift
-  // for the hues that read darkest at equal HSL lightness -- red (~0deg) and blue
-  // (~0.66) -- so a sampled red comes out a clear red, not the near-black maroon
-  // the old fixed 0.55 lightness produced against the dark viewer background. The
-  // material's emissive glow provides the overall "lift off the background", so we
-  // don't push lightness so high that colors wash out.
-  const redLift = Math.cos(hue * 2 * Math.PI) * 0.5 + 0.5; // 1 at red, 0 at cyan
-  const blueLift = Math.cos((hue - 0.66) * 2 * Math.PI) * 0.5 + 0.5; // 1 at blue
-  const lightness = 0.54 + 0.06 * Math.max(redLift, blueLift); // 0.54..0.60
-  return new THREE.Color().setHSL(hue, 0.7, lightness);
+  const [r, g, b] = shootColorRgb(shootId);
+  return new THREE.Color(r, g, b);
 }
 
 // One shoot reduced to a continuous polyline: M = (cylinders + 1) nodes, each with

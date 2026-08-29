@@ -106,6 +106,27 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
     const obj = readFileSync(renamedObj, 'utf-8');
     expect(obj).toMatch(/^v /m); // has vertex lines
     expect(obj).toMatch(/^f /m); // has face lines
+
+    // An OBJ carries no colour of its own, so the sibling .mtl has to land on
+    // disk beside it -- without it the tree opens in Blender as untextured grey
+    // and the viewport's rank palette is lost. Named from the stem the USER
+    // typed, since that's what the OBJ's mtllib line references.
+    expect(obj).toContain('mtllib my-custom-name.mtl');
+    expect(readdirSync(outDir).filter(f => f.endsWith('.mtl'))).toEqual([
+      'my-custom-name.mtl',
+    ]);
+    const mtl = readFileSync(join(outDir, 'my-custom-name.mtl'), 'utf-8');
+    // Every material the OBJ references must be declared in the library, or the
+    // reader falls back to grey for the ones it can't resolve.
+    const used = [...obj.matchAll(/^usemtl (\S+)$/gm)].map(m => m[1]);
+    expect(used.length).toBeGreaterThan(0);
+    for (const name of new Set(used)) {
+      expect(mtl).toContain(`newmtl ${name}`);
+    }
+    // Default rank mode -> the trunk material carries the palette's wood tan
+    // (sRGB 0xb0/0x8d/0x57), not a placeholder grey.
+    expect(mtl).toContain('newmtl rank_0');
+    expect(mtl).toMatch(/Kd 0\.690196 0\.552941 0\.341176/);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
     await close();

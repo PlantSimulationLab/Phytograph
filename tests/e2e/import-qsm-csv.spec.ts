@@ -240,4 +240,84 @@ test.describe('QSM CSV import', () => {
     await expect(page.getByTestId('scan-row')).toHaveCount(1, { timeout: 60_000 });
     await expect(page.getByTestId('qsm-row')).toHaveCount(0);
   });
+
+  test('a QSM CSV -> OBJ -> mesh round trip keeps the colours it was exported with', async () => {
+    // The reported bug: import a QSM, export it to OBJ, re-import, and the tree
+    // came back lighter and desaturated. An MTL's `Kd` is an sRGB display colour,
+    // but three.js treats a `color` BufferAttribute as LINEAR and encodes it to
+    // sRGB at output — so an unconverted Kd was encoded a second time, and the
+    // error compounded on every trip.
+    //
+    // This drives the whole chain through the real UI: import the CSV, export
+    // OBJ, re-import the exported file as a mesh, then compare the colours that
+    // actually reach the renderer against the ones the MTL declares.
+    await importFiles(app, page, 'import-qsm', [QSM_CSV]);
+    await expect(page.getByTestId('qsm-row')).toHaveCount(1, { timeout: 60_000 });
+
+    const outDir = mkdtempSync(join(tmpdir(), 'phytograph-qsm-color-'));
+    try {
+      const objPath = join(outDir, 'roundtrip.obj');
+      await stubSaveDialog(app, objPath);
+
+      await page.getByTestId('qsm-export-open').click();
+      await expect(page.getByTestId('qsm-export-panel')).toBeVisible();
+      await page.getByTestId('qsm-export-format-obj').click();
+      await page.getByTestId('qsm-export-confirm').click();
+      await expect(page.getByTestId('qsm-export-panel')).toHaveCount(0, { timeout: 30_000 });
+
+      // What the exporter declared for the trunk. Default colour mode is rank, so
+      // rank_0 is the palette's wood tan — an sRGB value near 0.69/0.55/0.34.
+      const mtl = readFileSync(join(outDir, 'roundtrip.mtl'), 'utf-8');
+      const trunkBlock = mtl.slice(mtl.indexOf('newmtl rank_0'));
+      const kd = trunkBlock.match(/^Kd (\S+) (\S+) (\S+)$/m)!.slice(1, 4).map(Number);
+      // Guard the premise: Kd really is the sRGB palette value, not the linear one
+      // (0.434...), which is what made the re-import wash out.
+      expect(kd[0]).toBeCloseTo(0.690196, 4);
+
+      // Re-import the exported OBJ as a mesh.
+      await importFiles(app, page, 'import-mesh', objPath);
+      await expect(page.getByTestId('mesh-row')).toHaveCount(1, { timeout: 60_000 });
+
+      const palette = await page.evaluate(
+        () => (window as any).__meshVertexColorPalette?.() ?? null,
+      );
+      expect(palette, '__meshVertexColorPalette hook missing').not.toBeNull();
+      expect(palette.length).toBeGreaterThan(0);
+
+      // The renderer holds vertex colours LINEAR, so the trunk's stored colour is
+      // the linear form of the Kd we exported. If the importer skipped the
+      // conversion it would still be 0.690 here, and three.js would then encode
+      // it a second time on the way to the screen — the washed-out tree.
+      const srgbToLinear = (c: number) =>
+        c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      const expected = kd.map(srgbToLinear);
+      const match = palette.find(
+        ([r, g, b]: number[]) =>
+          Math.abs(r - expected[0]) < 0.01 &&
+          Math.abs(g - expected[1]) < 0.01 &&
+          Math.abs(b - expected[2]) < 0.01,
+      );
+      expect(
+        match,
+        `no re-imported colour matched the exported trunk Kd. expected linear ` +
+          `[${expected.map(v => v.toFixed(3))}], got ${JSON.stringify(palette.slice(0, 8))}`,
+      ).toBeDefined();
+
+      // And the un-converted value must NOT be present — that is the bug's
+      // signature, and asserting its absence is what makes this test fail if the
+      // conversion is dropped.
+      const unconverted = palette.find(
+        ([r, g, b]: number[]) =>
+          Math.abs(r - kd[0]) < 0.005 &&
+          Math.abs(g - kd[1]) < 0.005 &&
+          Math.abs(b - kd[2]) < 0.005,
+      );
+      expect(
+        unconverted,
+        'a vertex colour still holds the raw sRGB Kd — it will be encoded twice and render washed out',
+      ).toBeUndefined();
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
 });

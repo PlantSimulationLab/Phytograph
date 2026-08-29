@@ -204,6 +204,14 @@ Keep the three together: an `.obj` moved away from its `.mtl` and images
 re-imports as untextured geometry. Meshes without materials (a triangulated
 point cloud, a DEM surface) export as a single `.obj`, with no `.mtl`.
 
+!!! note "Colors round-trip exactly"
+    `Kd` is written as an **sRGB** display color, which is what the MTL format
+    means by it and what other tools expect. Export a model and re-import it and
+    the colors are unchanged — including after repeated trips. (Earlier versions
+    wrote and read this value without converting between sRGB and the renderer's
+    internal linear space, so a re-imported model came back progressively lighter
+    and desaturated.)
+
 A [DEM](../workflows/generate-dem.md) is stored as a surface mesh, so it
 exports through the same OBJ / PLY / STL formats.
 
@@ -312,8 +320,43 @@ MeshLab.
 | Format | Import | Export | Notes |
 |---|---|---|---|
 | `.csv` | ✅ | ✅ | One row per cylinder. The only importable QSM format, and the one that round-trips. |
-| `.obj` | ❌ | ✅ | Triangulated cylinder mesh, for Blender / CloudCompare / MeshLab. |
+| `.obj` | ❌ | ✅ | Triangulated cylinder mesh + materials, for Blender / CloudCompare / MeshLab. Writes a **bundle** — see below. |
 | `.ply` | ❌ | ✅ | Same geometry as OBJ, with per-face `branch_order` and `radius`. |
+
+### QSM OBJ bundle
+
+Exporting a QSM to `.obj` writes the geometry *and* its colours, matching what
+the viewer is showing at the time of export:
+
+- `<name>.obj` — one continuous tube per shoot, each its own `o` group (so the
+  tree arrives as separable objects), with vertex normals and a `usemtl` per
+  group. **Leaves**, if the QSM has them, follow as a final `o leaves` group.
+- `<name>.mtl` — the material library the `.obj` references.
+- `<name>_bark.png` / `.jpg` — the bark image, in **Texture** colour mode only.
+- `<name>_<material>.png` / `.jpg` — one image per textured leaf material, when
+  the QSM has leaves.
+
+What lands in the `.mtl` depends on the QSM's colour mode in the viewer:
+
+| Colour mode | Materials written |
+|---|---|
+| **Rank** (default) | One material per shoot rank (`rank_0`, `rank_1`, …), each carrying that rank's palette colour. |
+| **Shoot** | One material per shoot (`shoot_0`, `shoot_1`, …), each with that shoot's distinct hue. |
+| **Colour** | A single `qsm_color` material holding the colour you picked. |
+| **Texture** | A single `bark` material with `map_Kd` pointing at the exported bark image; UV coordinates (`vt`) are written, and the tile size you set is baked into them. |
+
+Colors round-trip exactly: `Kd` is written as an sRGB display value, so
+re-importing an exported QSM mesh reproduces the shades the viewer showed.
+
+Leaves added with the [Add Leaves](../workflows/add-leaves.md) tool are exported
+with the tree, carrying their own textured materials. Leaf textures are
+alpha **cutouts**, so their materials get `map_d` alongside `map_Kd` — that is
+what makes a leaf come back leaf-shaped instead of as an opaque rectangle.
+
+Keep the files together: an `.obj` moved away from its `.mtl` (and the images the
+`.mtl` names) loads as untextured grey geometry. `.ply` carries `branch_order` and `radius` per face
+instead of materials, so use it when you want to colour by branching order in a
+downstream tool.
 
 ### QSM cylinder CSV
 

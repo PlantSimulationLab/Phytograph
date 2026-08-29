@@ -12867,31 +12867,75 @@ export default function PointCloudViewer({
       let written = 0;
       for (const qsm of targets) {
         // De-dup filenames within this batch (two scans can share a fileName).
-        let base = sanitizeQsmFilename(qsmDisplayLabel(qsm));
-        let name = `${base}.${ext}`;
+        // The de-dup suffix must land on the STEM, not just the final name: an
+        // OBJ's siblings (.mtl, bark image) are all named from the stem, so a
+        // stem that stayed un-suffixed would have the second tree's .mtl
+        // overwrite the first's.
+        const rawBase = sanitizeQsmFilename(qsmDisplayLabel(qsm));
+        let base = rawBase;
         let n = 2;
-        while (usedNames.has(name)) name = `${base}_${n++}.${ext}`;
+        while (usedNames.has(`${base}.${ext}`)) base = `${rawBase}_${n++}`;
+        const name = `${base}.${ext}`;
         usedNames.add(name);
 
-        const content = serializeQsm(qsm, format);
-        if (window.electronAPI && singlePath) {
-          // Exactly the path the user typed — no renaming behind their back.
-          await window.electronAPI.fs.writeText(singlePath, content);
-        } else if (window.electronAPI && dir) {
-          const sep = dir.includes('\\') ? '\\' : '/';
-          const path = dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
-          await window.electronAPI.fs.writeText(path, content);
-        } else {
-          // Browser fallback: anchor-download a single file.
-          const blob = new Blob([content], { type: 'text/plain;charset=utf-8;' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = name;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
+        // Where the siblings go, and under what stem. On a single export the user
+        // typed a full path, so the stem must come from THAT — not from the QSM's
+        // label. Getting this backwards writes `mtllib <label>.mtl` next to a file
+        // actually named `<typed>.obj`, i.e. a reference to a file that doesn't
+        // exist, which loads as untextured grey exactly like having no MTL at all.
+        const sep = (singlePath ?? dir ?? '').includes('\\') ? '\\' : '/';
+        const slash = singlePath ? singlePath.lastIndexOf(sep) : -1;
+        const outDir = singlePath
+          ? (slash >= 0 ? singlePath.slice(0, slash) : '')
+          : (dir ?? '');
+        const baseName = singlePath
+          ? singlePath.slice(slash + 1).replace(/\.[^.]+$/, '') || base
+          : base;
+
+        // OBJ is a BUNDLE, not a file: the .obj plus its sibling .mtl (and, in
+        // texture mode, the bark image the MTL names). Without those the tree
+        // arrives in Blender as untextured grey geometry — every appearance
+        // choice the user made in the viewport silently dropped. CSV/PLY come
+        // back as a one-entry bundle so the write loop below is uniform.
+        //
+        // The appearance passed here is the LIVE viewport state, so the export
+        // reproduces what the user is actually looking at.
+        const files = serializeQsm(qsm, format, {
+          baseName,
+          colorMode: qsmColorMode,
+          solidColor: qsmSolidColor,
+          barkTexture: qsmBarkTexture,
+          textureTileSize: qsmTextureTile,
+        });
+        for (const [i, f] of files.entries()) {
+          // The first entry is the primary file: write it to EXACTLY the path the
+          // user typed (single export), so we never rename behind their back.
+          const target = i === 0 && singlePath
+            ? singlePath
+            : outDir
+              ? (outDir.endsWith(sep) ? `${outDir}${f.name}` : `${outDir}${sep}${f.name}`)
+              : f.name;
+          if (window.electronAPI && (singlePath || dir)) {
+            if (f.bytes) {
+              await window.electronAPI.fs.writeBinary(target, f.bytes.buffer.slice(0) as ArrayBuffer);
+            } else {
+              await window.electronAPI.fs.writeText(target, f.text ?? '');
+            }
+          } else {
+            // Browser fallback: anchor-download each file in the bundle.
+            const blob = new Blob(
+              [f.bytes ? new Uint8Array(f.bytes) : (f.text ?? '')],
+              { type: f.bytes ? 'application/octet-stream' : 'text/plain;charset=utf-8;' },
+            );
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = i === 0 ? name : f.name;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }
         }
         written++;
       }
@@ -12902,7 +12946,7 @@ export default function PointCloudViewer({
     } finally {
       setQSMExporting(false);
     }
-  }, [qsms, qsmDisplayLabel, showToast]);
+  }, [qsms, qsmDisplayLabel, showToast, qsmColorMode, qsmSolidColor, qsmBarkTexture, qsmTextureTile]);
 
 
   // Confirm and execute deletion

@@ -104,4 +104,7 @@ always editable — override it if you know the species' phyllotaxis.
   distribution from a leaf-on Helios triangulation.
 - Read the [QSM concept page](../concepts/qsm.md) for how shoots and ranks
   define which shoots are terminal.
-- Export the foliated model via the QSM export tools.
+- Export the foliated model with **[QSM → Export → OBJ](build-qsm.md#export)**.
+  The leaves come along as their own `leaves` object, with their textures written
+  beside the `.obj` as alpha cutouts. (CSV and PLY carry the woody cylinders
+  only.)

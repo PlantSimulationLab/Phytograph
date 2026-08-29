@@ -2784,6 +2784,47 @@ export async function importPointCloudByPath(
 
 // ==================== TEXTURED MESH IMPORT (OBJ + MTL) ====================
 
+/**
+ * An MTL's `Kd` is an **sRGB** display colour — that's what the format means, and
+ * what every other tool writes there. three.js's working space is LINEAR, and the
+ * two places an imported mesh's colour lands both treat their input as already
+ * linear:
+ *
+ *   - `MeshData.vertexColors` -> a `color` BufferAttribute, which three.js encodes
+ *     to sRGB at output (`outputColorSpace`).
+ *   - `PlantMaterialDef.color` -> `new THREE.Color(r, g, b)` in TexturedPlantMesh,
+ *     whose NUMERIC form applies no conversion (unlike the `'#hex'` string form,
+ *     which does decode sRGB).
+ *
+ * So an unconverted `Kd` gets encoded to sRGB a second time on the way to the
+ * framebuffer and renders lighter and desaturated. Measured on a QSM round-trip
+ * (export to OBJ, re-import): the rank-0 trunk went from 176,141,87 to
+ * 216,196,158 — visibly washed out, and drifting further on every extra trip.
+ *
+ * Converting here, at the single point where imported mesh colours enter the
+ * renderer, fixes both consumers at once. This is the same fix `srgbToLinear` in
+ * renderers/PointCloud.tsx applies to generated point-cloud colours, for the same
+ * reason; see renderers/pointCloudColorSpace.test.ts for the pipeline comparison.
+ */
+export const srgbChannelToLinear = (c: number): number =>
+  c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+
+/** In-place sRGB -> linear over a packed rgb buffer. Undefined passes through. */
+function srgbBufferToLinear(buf: Float32Array | undefined): Float32Array | undefined {
+  if (!buf) return buf;
+  for (let i = 0; i < buf.length; i++) buf[i] = srgbChannelToLinear(buf[i]);
+  return buf;
+}
+
+/** sRGB -> linear for a single material colour triple. Undefined passes through. */
+function srgbTripleToLinear(
+  c: [number, number, number] | undefined,
+): [number, number, number] | undefined {
+  return c
+    ? [srgbChannelToLinear(c[0]), srgbChannelToLinear(c[1]), srgbChannelToLinear(c[2])]
+    : c;
+}
+
 export interface MeshImportResult {
   success: boolean;
   data: MeshData;
@@ -2825,7 +2866,7 @@ export async function importTexturedMesh(filePath: string): Promise<MeshImportRe
       const textureData = mat.texture_name && textures ? textures[mat.texture_name] : undefined;
       return {
         name: mat.name,
-        color: mat.color as [number, number, number] | undefined,
+        color: srgbTripleToLinear(mat.color as [number, number, number] | undefined),
         textureData,
         hasAlpha: mat.has_alpha,
         triangleIndices: group?.triangle_indices ?? [],
@@ -2839,7 +2880,7 @@ export async function importTexturedMesh(filePath: string): Promise<MeshImportRe
       vertices: (buffers.vertices as Float32Array) ?? new Float32Array(0),
       indices: (buffers.indices as Uint32Array) ?? new Uint32Array(0),
       normals: buffers.normals as Float32Array | undefined,
-      vertexColors: buffers.colors as Float32Array | undefined,
+      vertexColors: srgbBufferToLinear(buffers.colors as Float32Array | undefined),
       uvCoordinates: buffers.uv_coordinates as Float32Array | undefined,
       vertexCount: meta.vertex_count as number,
       triangleCount: meta.triangle_count as number,

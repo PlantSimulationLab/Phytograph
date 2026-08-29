@@ -9,6 +9,22 @@ import {
 } from './meshExport';
 import type { MeshData, PlantMaterialDef } from './pointCloudTypes';
 
+// `Kd` in an MTL is an sRGB display colour, while MeshData.vertexColors and
+// PlantMaterialDef.color are held in three.js's LINEAR working space. So the
+// writer encodes on the way out, and these tests state the LINEAR colour they
+// set and let the helper compute the sRGB text to look for — asserting the
+// conversion happens, rather than hardcoding numbers that would still pass if
+// the encode were silently dropped.
+const linearToSrgb = (c: number): number =>
+  c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+const kdLine = (...linear: number[]): string =>
+  `Kd ${linear.map(c => linearToSrgb(c).toFixed(6)).join(' ')}`;
+// Same, but for a colour the writer read back out of a Float32Array (a mesh's
+// vertexColors). The f32 round-trip shifts the value by an ulp, which is enough
+// to move the 6th decimal place — so match what the code actually computes.
+const kdLineF32 = (...linear: number[]): string =>
+  kdLine(...Array.from(new Float32Array(linear)));
+
 // Two triangles sharing an edge, forming a unit quad in the z=0 plane.
 function quad(withUVs = false, withNormals = false): MeshData {
   return {
@@ -233,7 +249,7 @@ describe('serializeMeshObj — material bundle', () => {
     });
     const mtl = files[1].text!;
     expect(mtl).toContain('newmtl leaf');
-    expect(mtl).toContain('Kd 0.200000 0.600000 0.200000');
+    expect(mtl).toContain(kdLine(0.2, 0.6, 0.2));
     expect(mtl).toContain('map_Kd bean_leaf.png');
     // The leaf's alpha mask must survive the round-trip.
     expect(mtl).toContain('map_d bean_leaf.png');
@@ -295,7 +311,7 @@ describe('serializeMeshObj — material bundle', () => {
     });
     // obj + mtl only — no image file for an unrecognised format.
     expect(files.map(f => f.name)).toEqual(['bean.obj', 'bean.mtl']);
-    expect(files[1].text!).toContain('Kd 0.300000 0.500000 0.100000');
+    expect(files[1].text!).toContain(kdLine(0.3, 0.5, 0.1));
     expect(files[1].text!).not.toContain('map_Kd');
   });
 
@@ -346,8 +362,8 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
   it('writes a Kd material per distinct vertex colour, not one flat grey', () => {
     const files = serializeMeshObj(coloredStrip([OLIVE, STEM]), { baseName: 'bean' });
     const mtl = files[1].text!;
-    expect(mtl).toContain('Kd 0.210000 0.250000 0.050000');
-    expect(mtl).toContain('Kd 0.280000 0.350000 0.070000');
+    expect(mtl).toContain(kdLine(0.21, 0.25, 0.05));
+    expect(mtl).toContain(kdLine(0.28, 0.35, 0.07));
     // The old behaviour — everything flattened to the default grey — is exactly
     // what made the petioles come back wrong.
     expect(mtl).not.toContain('Kd 0.800000 0.800000 0.800000');
@@ -394,8 +410,8 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
     expect(mtl).toContain('newmtl bean_leaf');
     expect(mtl).toContain('map_Kd bean_bean_leaf.png');
     // …and the two leftover organs keep their own colours.
-    expect(mtl).toContain('Kd 0.280000 0.350000 0.070000');
-    expect(mtl).toContain('Kd 0.210000 0.250000 0.050000');
+    expect(mtl).toContain(kdLine(0.28, 0.35, 0.07));
+    expect(mtl).toContain(kdLine(0.21, 0.25, 0.05));
     expect(files[0].text!).not.toContain('usemtl default');
     expect(linesStartingWith(files[0].text!, 'f ')).toHaveLength(3);
   });
@@ -418,7 +434,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
     const mtl = files[1].text!;
     expect(mtl).toContain('newmtl bean_leaf');
     // The leaf's own vertex colour, not grey.
-    expect(mtl).toContain('Kd 0.300000 0.550000 0.200000');
+    expect(mtl).toContain(kdLineF32(0.3, 0.55, 0.2));
     expect(mtl).not.toContain('Kd 0.800000 0.800000 0.800000');
   });
 
@@ -439,7 +455,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
       }],
     });
     expect(files[1].text!).not.toContain('Kd 1.000000 1.000000 1.000000');
-    expect(files[1].text!).toContain('Kd 0.300000 0.550000 0.200000');
+    expect(files[1].text!).toContain(kdLineF32(0.3, 0.55, 0.2));
   });
 
   it('keeps an explicitly declared material colour over the geometry mean', () => {
@@ -448,7 +464,7 @@ describe('serializeMeshObj — untextured organs keep their colour', () => {
       baseName: 'bean',
       materials: [{ name: 'stem', color: [0.9, 0.1, 0.1], hasAlpha: false, triangleIndices: [0, 1] }],
     });
-    expect(files[1].text!).toContain('Kd 0.900000 0.100000 0.100000');
+    expect(files[1].text!).toContain(kdLine(0.9, 0.1, 0.1));
   });
 
   it('gives colour materials names that do not collide with supplied ones', () => {

@@ -72,7 +72,9 @@ export function decodeBase64(data: string): Uint8Array | null {
 
 // A material resolved for writing: its sanitized (unique) MTL name, its colour,
 // and — when it carries a usable image — the texture file to write beside the OBJ.
-interface ResolvedMaterial {
+// Exported so the QSM exporter can reuse this resolver for a QSM's leaves rather
+// than growing a second copy of the texture-decode / alpha rules.
+export interface ResolvedMaterial {
   mtlName: string;
   color?: [number, number, number];
   hasAlpha: boolean;
@@ -189,7 +191,7 @@ function meanTriangleColor(
  * preserve. Deriving `<material>.<ext>` keeps the bundle self-consistent and
  * collision-free.
  */
-function resolveMaterials(
+export function resolveMaterials(
   materials: PlantMaterialDef[],
   baseName: string,
   used: Set<string>,
@@ -229,6 +231,24 @@ function resolveMaterials(
 
 // Format a float the way the OBJ/MTL writers do everywhere else in the app.
 const f6 = (n: number): string => (Number.isFinite(n) ? n : 0).toFixed(6);
+
+/**
+ * linear -> sRGB, for a colour on its way into an MTL `Kd`.
+ *
+ * `MeshData.vertexColors` and `PlantMaterialDef.color` are held in three.js's
+ * LINEAR working space (the import path converts them on the way in — see
+ * `srgbChannelToLinear` in utils/backendApi.ts — and that is what three.js
+ * expects of a `color` BufferAttribute). An MTL's `Kd`, by contrast, is an sRGB
+ * display colour. Writing the linear value straight out makes the exported model
+ * darker and over-saturated, and re-importing it compounds the error on every
+ * trip. This is the exact inverse of the import conversion, so a round-trip is
+ * now colour-stable.
+ */
+const linearChannelToSrgb = (c: number): number =>
+  c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+
+/** Format a linear colour channel as an sRGB `Kd`/`Ka` component. */
+const kd6 = (n: number): string => f6(linearChannelToSrgb(Number.isFinite(n) ? n : 0));
 
 /**
  * Serialize a mesh to an OBJ bundle: the `.obj` itself, plus — when the mesh
@@ -377,10 +397,15 @@ export function serializeMeshObj(
 function serializeMtl(materials: ResolvedMaterial[], includeDefault: boolean): string {
   const lines: string[] = ['# Material library exported from Phytograph', ''];
   for (const mat of materials) {
-    const c = mat.color ?? [0.8, 0.8, 0.8];
     lines.push(`newmtl ${mat.mtlName}`);
-    lines.push(`Ka ${f6(c[0])} ${f6(c[1])} ${f6(c[2])}`);
-    lines.push(`Kd ${f6(c[0])} ${f6(c[1])} ${f6(c[2])}`);
+    // A resolved colour is LINEAR and gets encoded to sRGB; the fallback grey is
+    // already an sRGB display value (it matches the `default` material below and
+    // the 0.8 the importer fills in), so it is written through untouched.
+    const kd = mat.color
+      ? mat.color.map(kd6)
+      : [f6(0.8), f6(0.8), f6(0.8)];
+    lines.push(`Ka ${kd[0]} ${kd[1]} ${kd[2]}`);
+    lines.push(`Kd ${kd[0]} ${kd[1]} ${kd[2]}`);
     lines.push('Ks 0.000000 0.000000 0.000000');
     lines.push('d 1.000000');
     lines.push('illum 1');
