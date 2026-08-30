@@ -15,11 +15,13 @@ downstream consumer works unchanged. Two real assertions:
   - they are EXCLUDED from the hits-only octree, so `tight_bounds` is the real
     ~metre-scale geometry, NOT the ~1001 m far field.
 
-The end-to-end case uses the `example-datasets/leafcube_multi.xyz` fixture (the
-exact file the bug was reported against) — a large, local-only dataset that is
-NOT committed (see example-datasets/README.md), so the whole module skips when
-it's absent (e.g. CI). Unit cases cover the distance fallback and the no-signal
-control via the helper directly.
+The end-to-end case uses the `leafcube_multi.xyz` fixture (the exact file the bug
+was reported against), committed at 360 KB under
+`backend-api/tests/fixtures/lad-leafcube-multi/`. It previously pointed at an
+untracked `example-datasets/` copy and was gated behind a skipif, so it — and 28
+sibling miss-exclusion tests — reported "skipped" rather than "failed" on CI for
+as long as that path was wrong. Unit cases cover the distance fallback and the
+no-signal control via the helper directly.
 """
 
 from pathlib import Path
@@ -34,8 +36,8 @@ from tests.binframe import decode_streamed_json
 # leafcube_multi.xyz: x y z timestamp target_index target_count. 9301 rows,
 # 2779 of them misses (target_index == 99) placed at 1001 m from origin
 # (-5, 0, 0.5); the real leaf-cube geometry sits ~4.5-5.5 m out.
-LEAFCUBE_XYZ = (Path(__file__).resolve().parents[2]
-                / "example-datasets" / "leafcube_multi.xyz")
+LEAFCUBE_XYZ = (Path(__file__).resolve().parent
+                / "fixtures" / "lad-leafcube-multi" / "leafcube_multi.xyz")
 LEAFCUBE_FORMAT = "x y z timestamp target_index target_count"
 LEAFCUBE_ORIGIN = [-5.0, 0.0, 0.5]
 EXPECTED_MISS_COUNT = 2779
@@ -50,15 +52,14 @@ def _converter_available() -> bool:
         return False
 
 
-# leafcube_multi.xyz is a large, local-only dataset (not committed — see
-# example-datasets/README.md). Every test here reads it (the unit tests via the
-# leafcube_arrays fixture, the endpoint tests via source_path), so skip the whole
-# module when it's absent (e.g. CI). Endpoint tests add a _converter_available()
-# guard on top.
-pytestmark = pytest.mark.skipif(
-    not LEAFCUBE_XYZ.is_file(),
-    reason="leafcube_multi.xyz fixture not available (local-only example dataset)",
-)
+# leafcube_multi.xyz is COMMITTED (backend-api/tests/fixtures/lad-leafcube-multi/,
+# 360 KB), so its absence is a broken checkout, not an environment difference.
+# Deliberately NOT a skipif: this module guards the most-recurring bug in the
+# project (a miss-carrying cloud fed to a compute tool hangs it), and gating it
+# on a path that CI did not have meant 29 such tests reported "skipped" rather
+# than "failed" for as long as the path was wrong -- green runs that had tested
+# none of it. A hard error is the point.
+assert LEAFCUBE_XYZ.is_file(), f"missing committed fixture: {LEAFCUBE_XYZ}"
 
 
 # ---------------------------------------------------------------------------

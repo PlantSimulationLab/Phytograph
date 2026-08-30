@@ -20,8 +20,8 @@ import main
 from tests.binframe import decode_streamed_json
 
 
-LEAFCUBE_XYZ = (Path(__file__).resolve().parents[2]
-                / "example-datasets" / "leafcube_multi.xyz")
+LEAFCUBE_XYZ = (Path(__file__).resolve().parent
+                / "fixtures" / "lad-leafcube-multi" / "leafcube_multi.xyz")
 LEAFCUBE_FORMAT = "x y z timestamp target_index target_count"
 LEAFCUBE_ORIGIN = [-5.0, 0.0, 0.5]
 EXPECTED_MISS_COUNT = 2779
@@ -36,9 +36,16 @@ def _converter_available() -> bool:
         return False
 
 
+# The fixture is COMMITTED (backend-api/tests/fixtures/lad-leafcube-multi/), so
+# its absence is a broken checkout and must fail loudly -- gating it behind a
+# skip is how 26 miss-exclusion tests reported "skipped" instead of "failed"
+# while pointing at a path CI never had. PotreeConverter is a genuine build
+# dependency, so that half stays a skip.
+assert LEAFCUBE_XYZ.is_file(), f"missing committed fixture: {LEAFCUBE_XYZ}"
+
 pytestmark = pytest.mark.skipif(
-    not _converter_available() or not LEAFCUBE_XYZ.is_file(),
-    reason="PotreeConverter binary or leafcube fixture not available",
+    not _converter_available(),
+    reason="PotreeConverter binary not available",
 )
 
 

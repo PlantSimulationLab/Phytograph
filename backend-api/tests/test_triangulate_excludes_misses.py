@@ -1,6 +1,6 @@
 """Triangulation must drop sky/miss points before meshing.
 
-Regression for the reported hang: loading `example-datasets/leafcube_multi.xyz`
+Regression for the reported hang: loading `leafcube_multi.xyz`
 (a full-waveform multi-return scan, 9301 points of which 2779 are sky/misses
 placed ~1001 m out) and running Ball Pivoting hung forever on a cloud of only
 ~6500 real surface points.
@@ -33,20 +33,21 @@ import main
 from tests.binframe import decode_bin_frame
 
 
-LEAFCUBE_XYZ = (Path(__file__).resolve().parents[2]
-                / "example-datasets" / "leafcube_multi.xyz")
+LEAFCUBE_XYZ = (Path(__file__).resolve().parent
+                / "fixtures" / "lad-leafcube-multi" / "leafcube_multi.xyz")
 LEAFCUBE_ORIGIN = [-5.0, 0.0, 0.5]
 EXPECTED_TOTAL = 9301
 EXPECTED_MISSES = 2779
 EXPECTED_HITS = EXPECTED_TOTAL - EXPECTED_MISSES  # 6522
 
-# The leafcube_multi.xyz fixture is a large, local-only dataset (not committed —
-# see example-datasets/README.md), so skip when it's absent (e.g. CI). Mirrors
-# the guard in test_miss_octree.py / test_miss_autodetect.py.
-pytestmark = pytest.mark.skipif(
-    not LEAFCUBE_XYZ.is_file(),
-    reason="leafcube_multi.xyz fixture not available (local-only example dataset)",
-)
+# leafcube_multi.xyz is COMMITTED (backend-api/tests/fixtures/lad-leafcube-multi/,
+# 360 KB), so its absence is a broken checkout, not an environment difference.
+# Deliberately NOT a skipif: this module guards the most-recurring bug in the
+# project (a miss-carrying cloud fed to a compute tool hangs it), and gating it
+# on a path that CI did not have meant 29 such tests reported "skipped" rather
+# than "failed" for as long as the path was wrong -- green runs that had tested
+# none of it. A hard error is the point.
+assert LEAFCUBE_XYZ.is_file(), f"missing committed fixture: {LEAFCUBE_XYZ}"
 
 
 @pytest.fixture
