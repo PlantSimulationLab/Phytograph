@@ -29786,9 +29786,31 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
         if progress is not None:
             progress(0.50, "Building raycasting scene")
 
+        # RECENTRE BEFORE THE float32 CAST. Open3D's RaycastingScene is Embree-
+        # backed and accepts float32 only (a float64 tensor is rejected outright),
+        # but `_read_points_from_source` adds `world_shift` back, so these are
+        # ABSOLUTE coordinates — real UTM magnitudes for a projected cloud. float32
+        # spacing at a UTM northing of 4,210,000 is 0.5 m, i.e. the quantisation is
+        # 500x coarser than the millimetre clearances this endpoint reports
+        # (`points_within_1mm`). Measured on a true 5 mm clearance at UTM 32N:
+        # mean 0.0128 m (2.6x), RMSE 0.0619 m (12x), max 0.5000 m — a confidently
+        # wrong answer, no error raised.
+        #
+        # A point-to-mesh distance is translation-invariant, so subtracting a
+        # common origin from BOTH the mesh and the query points leaves every
+        # distance unchanged while moving the coordinates into float32's precise
+        # range (sub-micron even across a 1 km scene). The mesh centroid is the
+        # origin: it is finite whenever the mesh is non-empty, and keeps the
+        # geometry that actually matters closest to zero.
+        origin = vertices.mean(axis=0)
+        if not np.all(np.isfinite(origin)):
+            origin = np.zeros(3, dtype=np.float64)
+        vertices_local = vertices - origin
+        points_local = points - origin
+
         # Create Open3D triangle mesh
         mesh = o3d.t.geometry.TriangleMesh()
-        mesh.vertex.positions = o3d.core.Tensor(vertices, dtype=o3d.core.float32)
+        mesh.vertex.positions = o3d.core.Tensor(vertices_local, dtype=o3d.core.float32)
         mesh.triangle.indices = o3d.core.Tensor(triangles, dtype=o3d.core.int32)
 
         # Create raycasting scene for efficient distance queries
@@ -29800,7 +29822,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
             progress(0.90, "Computing distances")
 
         # Compute unsigned distances from each point to the mesh
-        query_points = o3d.core.Tensor(points, dtype=o3d.core.float32)
+        query_points = o3d.core.Tensor(points_local, dtype=o3d.core.float32)
         distances = scene.compute_distance(query_points).numpy()
 
         # Compute statistics
