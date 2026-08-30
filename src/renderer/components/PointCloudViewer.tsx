@@ -8481,6 +8481,17 @@ export default function PointCloudViewer({
     // user may have renamed away from.
     const scan = scans.find(sc => sc.id === cloud.id);
     const label = scan ? scanDisplayName(scan) : (cloud.data.fileName || cloud.id);
+    // Every scan export writes the session's STORED points (world − worldShift),
+    // but params.origin / octree.scanOrigin are WORLD-frame (recovered from the
+    // source file's header). Shift the origin into the STORED frame so it agrees
+    // with the points, exactly as buildLADRequest does. PTX computes
+    // `local = xyz - origin` from it (a world-frame origin made local radii
+    // read in thousands of km) and re-adds worldShift for its absolute header
+    // pose (which double-shifted an origin that already contained it).
+    // No-op when the cloud carries no shift (worldShift null → [0,0,0]).
+    const ws = cloud.data.octree?.worldShift ?? [0, 0, 0];
+    const toStored = (o: readonly number[]): [number, number, number] =>
+      [o[0] - ws[0], o[1] - ws[1], o[2] - ws[2]];
     // A cloud with no scanner parameters is still exportable as DATA — only the
     // Helios XML bundle and PTX need the scan geometry, and the modal blocks
     // those rows for exactly that reason. Everything below this point (source
@@ -8489,7 +8500,7 @@ export default function PointCloudViewer({
     if (!params) {
       const scanOrigin = cloud.data.octree?.scanOrigin;
       const entry: ScanExportEntry = {
-        origin: scanOrigin ? [...scanOrigin] : [0, 0, 0],
+        origin: scanOrigin ? toStored(scanOrigin) : [0, 0, 0],
         scan_pattern: 'raster',
         label,
       };
@@ -8497,7 +8508,7 @@ export default function PointCloudViewer({
     }
     const entry: ScanExportEntry = {
       label,
-      origin: [params.origin.x, params.origin.y, params.origin.z],
+      origin: toStored([params.origin.x, params.origin.y, params.origin.z]),
       scan_pattern: params.pattern,
       beam_elevation_angles_deg:
         params.pattern === 'spinning_multibeam' ? params.beamElevationAnglesDeg : undefined,

@@ -184,6 +184,53 @@ class TestPtxWorldShift:
         assert shifted[10:] == plain[10:], "the point block must be shift-invariant"
 
 
+    def test_a_scanner_away_from_the_stored_origin_keeps_its_true_radii(self):
+        """The regression the shift-invariance test above cannot see.
+
+        That test puts the scanner at (0,0,0), where the STORED origin the
+        writer needs and the WORLD origin the renderer used to send are the
+        same three zeros -- so `local = xyz - origin` is right either way and
+        the header's `origin + shift` reads correctly by accident. Move the
+        scanner off zero and the two frames separate: a WORLD-frame origin on
+        a georeferenced cloud made `local` wrong by the whole shift (radii in
+        thousands of km instead of metres) and double-shifted the header pose.
+
+        Points are built 5 m around a scanner that sits at `local_origin` in
+        the session's STORED frame, so the true local radius is exactly 5 m
+        and the true registered pose is `local_origin + shift`.
+        """
+        import time
+        rows, cols = 3, 4
+        shift = np.array([512000.0, 4210000.0, 100.0])
+        local_origin = np.array([7.0, -3.0, 2.0])
+        pts, rr, cc = _grid_points(rows, cols, origin=tuple(local_origin), radius=5.0)
+        n = pts.shape[0]
+        sess = main.CloudSession(
+            session_id="ptx_off_origin", source_path="<test>", ascii_format=None,
+            column_plan=None, positions=pts.copy(), colors=None, intensity=None,
+            extras={"row_index": rr.astype(np.float32),
+                    "column_index": cc.astype(np.float32)},
+            extra_dims_meta=[], deleted=np.zeros(n, bool), deleted_history=[],
+            octree_cache_id=None, created_at=time.time(), world_shift=shift)
+        main._cloud_sessions[sess.session_id] = sess
+        try:
+            lines = _lines(_text(_export([_entry(
+                None, n_theta=rows, n_phi=cols, origin=tuple(local_origin),
+                session_id=sess.session_id)])))
+        finally:
+            main._cloud_sessions.pop(sess.session_id, None)
+
+        # Header pose: the scanner's true WORLD position, shifted back exactly
+        # once. A double shift would read local_origin + 2*shift.
+        np.testing.assert_allclose([float(v) for v in lines[2].split()],
+                                   local_origin + shift, atol=1e-6)
+        # Every written return is 5 m from the scanner, in scanner-local coords.
+        xyz = np.array([[float(v) for v in l.split()[:3]] for l in lines[10:]])
+        placed = xyz[np.any(xyz != 0.0, axis=1)]
+        assert placed.shape[0] == rows * cols, "every cell should carry a return"
+        np.testing.assert_allclose(np.linalg.norm(placed, axis=1), 5.0, atol=1e-6)
+
+
 class TestPtxCellAssignment:
     def test_indices_beat_contradicting_angles(self):
         """Instrument indices are ground truth; deliberately wrong angles must
