@@ -414,8 +414,9 @@ To set a filter:
       [Segment ground](segment-ground.md)) and `tree_instance` (from
       [Segment trees](segment-trees.md)) — are categorical, so instead of
       a range you get a **checkbox per class** (Ground, Non-ground, or
-      Tree 1…N). Tick the classes to **keep**; use **All** / **None** to
-      toggle the whole set. This is the natural way to isolate, say, just
+      Tree 1…N). Tick the classes to **keep**; the checkbox next to the
+      **Keep classes** heading ticks or clears the whole set at once.
+      This is the natural way to isolate, say, just
       the non-ground points after a ground classification.
 3. Repeat for other fields to stack filters — they compose with **AND**,
    so only points passing every active filter are "in range".

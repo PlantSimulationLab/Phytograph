@@ -11,6 +11,7 @@ import {
 } from '../lib/leafAngleDistribution';
 import type { Histogram } from '../lib/leafAngleDistribution';
 import { buildRoseGeometry, polarToXY } from '../lib/azimuthRose';
+import { SelectAllHeader } from './SelectAllHeader';
 
 interface LeafAnglePlotPopupProps {
   isOpen: boolean;
@@ -630,25 +631,21 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
 
             {/* Right: per-cell tick-boxes */}
             <div className="w-56 flex-shrink-0">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-xs font-medium text-neutral-300">
-                  Cells ({visibleCells.length}/{cells.length})
-                </h3>
-                {cells.length > 1 && (
-                  <div className="flex gap-2">
-                    <button
-                      data-testid="cells-all"
-                      onClick={() => setHidden(new Set())}
-                      className="text-[10px] text-neutral-400 hover:text-neutral-200"
-                    >All</button>
-                    <span className="text-neutral-600 text-[10px]">|</span>
-                    <button
-                      data-testid="cells-none"
-                      onClick={() => setHidden(new Set(cells.map(c => c.id)))}
-                      className="text-[10px] text-neutral-400 hover:text-neutral-200"
-                    >None</button>
-                  </div>
-                )}
+              {/* Same master-checkbox header as the tool dialogs. Here it
+                  toggles cell VISIBILITY rather than a run selection, but the
+                  control reads the same way and lines up with the per-cell
+                  boxes below it. */}
+              <div className="mb-2">
+                <SelectAllHeader
+                  data-testid="cells-select-all"
+                  label="Cells"
+                  countNoun="visible"
+                  actionLabels={{ check: 'Show all', uncheck: 'Hide all' }}
+                  selectedCount={visibleCells.length}
+                  totalCount={cells.length}
+                  onSelectAll={() => setHidden(new Set())}
+                  onDeselectAll={() => setHidden(new Set(cells.map(c => c.id)))}
+                />
               </div>
               <div className="max-h-[60vh] overflow-y-auto space-y-1 pr-1" data-testid="cell-list">
                 {cells.map(cell => {

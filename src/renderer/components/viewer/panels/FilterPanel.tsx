@@ -1,5 +1,6 @@
 import { Filter, X } from 'lucide-react';
 import type { FilterRange } from '../../../lib/pointCloudTypes';
+import { SelectAllHeader } from '../../SelectAllHeader';
 
 interface FieldOption {
   value: string;
@@ -102,8 +103,20 @@ export function FilterPanel({
       {/* Categorical field: class checkboxes (keep the checked classes). */}
       {selectedFilterField && selectedField && categoricalScheme && (
         <div className="mb-3">
-          <div className="text-[10px] text-neutral-500 mb-1">
-            Keep classes ({selectedClasses.length}/{categoricalScheme.classes.length})
+          {/* Master checkbox at the head of the list, same as every other
+              checkbox list in the app — it lines up with the class boxes and
+              shows the all/none/partial state. */}
+          <div className="mb-1">
+            <SelectAllHeader
+              data-testid="filter-class-all"
+              label="Keep classes"
+              countNoun="kept"
+              actionLabels={{ check: 'Keep all classes', uncheck: 'Keep none' }}
+              selectedCount={selectedClasses.length}
+              totalCount={categoricalScheme.classes.length}
+              onSelectAll={() => onCommitClasses(categoricalScheme.classes.map(c => c.value))}
+              onDeselectAll={() => onCommitClasses([])}
+            />
           </div>
           <div className="max-h-40 overflow-y-auto space-y-1 mb-2 pr-1">
             {categoricalScheme.classes.map(c => {
@@ -133,22 +146,6 @@ export function FilterPanel({
                 </label>
               );
             })}
-          </div>
-          <div className="flex gap-2 mb-2">
-            <button
-              data-testid="filter-class-all"
-              onClick={() => onCommitClasses(categoricalScheme.classes.map(c => c.value))}
-              className="flex-1 px-2 py-1 text-[10px] bg-neutral-700 hover:bg-neutral-600 rounded"
-            >
-              All
-            </button>
-            <button
-              data-testid="filter-class-none"
-              onClick={() => onCommitClasses([])}
-              className="flex-1 px-2 py-1 text-[10px] bg-neutral-700 hover:bg-neutral-600 rounded"
-            >
-              None
-            </button>
           </div>
           {currentFilter?.enabled && (
             <button

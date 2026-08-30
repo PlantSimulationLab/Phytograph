@@ -60,7 +60,9 @@ All five methods live in one **Triangulation Setup** modal:
    listed scan carries scan parameters, otherwise **Ball Pivot**.
 3. **Scans** — tick which scans to triangulate. Each row shows the scan's
    color, point count, and (when it has parameters) its scanner origin.
-   Use **All / None** to select in bulk. To change a scan's parameters,
+   The checkbox next to the **Scans** heading ticks or clears the whole
+   list at once (it shows a dash while only some are ticked). To change a
+   scan's parameters,
    edit it from the Scans panel before opening this modal.
 4. **Output** *(non-Helios methods)* — choose **Triangulate each scan
    separately** (one mesh per scan) or **Merge selected scans into one
@@ -384,16 +386,17 @@ window opens with:
 If the mesh was triangulated inside a **voxel grid** (rather than the auto
 single-cell grid), the window splits the distribution **per grid cell**. Each
 cell's inclination curve is overlaid in its own color, with a checkbox list on
-the right. Untick a cell to drop it from both plots, or use **All / None** to
-toggle them in bulk — useful for comparing canopy layers (e.g. top vs. bottom
+the right. Untick a cell to drop it from both plots, or use the checkbox next
+to the **Cells** heading to show or hide them all at once — useful for
+comparing canopy layers (e.g. top vs. bottom
 voxels) or isolating one region. With the auto grid the list collapses to a
 single **Whole mesh** entry.
 
 When **more than 24 cells are visible** (a fine grid quickly has hundreds of
 occupied voxels), the window shows a single **combined** curve over all visible
 cells instead of one line per cell — overlaying hundreds of curves is neither
-readable nor fast. Narrow the selection (untick cells, or click **None** and
-tick the handful you want) to ≤ 24 visible cells and the per-cell overlays,
+readable nor fast. Narrow the selection (untick cells, or clear the **Cells**
+checkbox and tick the handful you want) to ≤ 24 visible cells and the per-cell overlays,
 the per-cell parameters table, and the **Show Beta fit** option come back.
 
 ### Canonical de Wit fit

@@ -2,6 +2,15 @@
 // run-scan, …). Renders a checkbox/radio list of selectable objects (clouds,
 // meshes, scans) so a tool can pick its own inputs explicitly instead of reading
 // the current viewport selection. Modeled on the scan list in LADPopup.
+//
+// Multi-select lists get a tri-state master checkbox to the LEFT of the list
+// label, aligned with the row checkboxes beneath it. That replaced the old
+// right-aligned "All | None" text pair, which read as two unrelated words rather
+// than a control and never showed whether anything was already selected. Any
+// new checkbox list should use this component, or copy the master-checkbox
+// header if it can't (see QSMPopup / LADPopup / TriangulationPopup /
+// BackfillMissesPopup / SyntheticScanOptionsPopup, which have bespoke row
+// layouts but share this header).
 import { useCallback } from 'react';
 
 export interface PickerItem {
@@ -24,13 +33,6 @@ interface ObjectPickerProps {
   /** Message shown when there are no eligible items. */
   emptyMessage?: string;
   label?: string;
-  /**
-   * How "select all" is offered. 'link' (default) is the compact All/None text
-   * button every tool dialog uses; 'checkbox' is the tri-state master checkbox
-   * (see RieglProjectDialog), for dialogs where the list is the
-   * primary control and a checkbox reads like the rows beneath it.
-   */
-  selectAllControl?: 'link' | 'checkbox';
   /** Row test id, for callers whose specs already target a different one. */
   rowTestId?: string;
   'data-testid'?: string;
@@ -43,7 +45,6 @@ export function ObjectPicker({
   mode = 'multi',
   emptyMessage = 'No eligible objects.',
   label = 'Objects',
-  selectAllControl = 'link',
   rowTestId = 'picker-row',
   'data-testid': testId,
 }: ObjectPickerProps) {
@@ -72,44 +73,46 @@ export function ObjectPicker({
   return (
     <div data-testid={testId}>
       <div className="flex items-center justify-between mb-1">
+        {/* The master checkbox leads the header so it lines up with the row
+            checkboxes below it — the control reads as "the box for all of
+            these", which a right-aligned text link never did. */}
         <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-neutral-300">{label}</span>
-          <span className="text-[10px] text-neutral-500">
-            ({selectedIds.size}/{items.length} selected)
-          </span>
-        </div>
-        {mode === 'multi' && selectAllControl === 'link' && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={toggleAll}
-              className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
+          {mode === 'multi' ? (
+            <label
+              className={`flex items-center gap-2 ${
+                selectable.length === 0
+                  ? 'cursor-not-allowed'
+                  : 'cursor-pointer group'
+              }`}
+              title={
+                selectable.length === 0
+                  ? undefined
+                  : allSelected ? 'Deselect all' : 'Select all'
+              }
             >
-              {allSelected ? 'None' : 'All'}
-            </button>
-          </div>
-        )}
-        {mode === 'multi' && selectAllControl === 'checkbox' && (
-          <label
-            className={`flex items-center gap-1.5 text-[10px] ${
-              selectable.length === 0
-                ? 'text-neutral-600 cursor-not-allowed'
-                : 'text-neutral-400 hover:text-neutral-200 cursor-pointer'
-            }`}
-          >
-            <input
-              type="checkbox"
-              data-testid={testId ? `${testId}-select-all` : undefined}
-              // Indeterminate is a DOM property, not an attribute, so it can only
-              // be set through a ref — the partial state is the common one here.
-              ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
-              checked={allSelected}
-              disabled={selectable.length === 0}
-              onChange={toggleAll}
-              className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-green-500 focus:ring-0 focus:ring-offset-0"
-            />
-            {allSelected ? 'Deselect all' : 'Select all'}
-          </label>
-        )}
+              <input
+                type="checkbox"
+                aria-label={allSelected ? 'Deselect all' : 'Select all'}
+                data-testid={testId ? `${testId}-select-all` : undefined}
+                // Indeterminate is a DOM property, not an attribute, so it can only
+                // be set through a ref — the partial state is the common one here.
+                ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                checked={allSelected}
+                disabled={selectable.length === 0}
+                onChange={toggleAll}
+                className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-green-500 focus:ring-0 focus:ring-offset-0"
+              />
+              <span className="text-xs font-medium text-neutral-300 group-hover:text-neutral-100 transition-colors">
+                {label}
+              </span>
+            </label>
+          ) : (
+            <span className="text-xs font-medium text-neutral-300">{label}</span>
+          )}
+        </div>
+        <span className="text-[10px] text-neutral-500">
+          ({selectedIds.size}/{items.length} selected)
+        </span>
       </div>
 
       {items.length === 0 ? (

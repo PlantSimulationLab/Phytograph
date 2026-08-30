@@ -371,7 +371,6 @@ export function ExportModal({
               <ObjectPicker
                 data-testid="export-object-list"
                 rowTestId="export-scan-row"
-                selectAllControl="checkbox"
                 label="Objects"
                 items={pickerItems}
                 selectedIds={effectiveIdSet}

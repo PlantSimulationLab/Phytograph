@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Download, Loader2, X } from 'lucide-react';
 import type { QSMExportFormat } from '../../../lib/qsmExport';
+import { SelectAllHeader } from '../../SelectAllHeader';
 
 // Modal export dialog for QSMs. The user picks a format, then a folder (native
 // dialog, triggered by the parent's onExport), and which QSMs to write. One file
@@ -31,8 +32,6 @@ export function QSMExportPanel({ qsms, exporting, onClose, onExport }: QSMExport
   const [format, setFormat] = useState<QSMExportFormat>('csv');
   const [selected, setSelected] = useState<Set<string>>(() => new Set(qsms.map(q => q.id)));
 
-  const allSelected = qsms.length > 0 && selected.size === qsms.length;
-
   const toggle = (id: string) => {
     setSelected(prev => {
       const next = new Set(prev);
@@ -42,9 +41,8 @@ export function QSMExportPanel({ qsms, exporting, onClose, onExport }: QSMExport
     });
   };
 
-  const toggleAll = () => {
-    setSelected(allSelected ? new Set() : new Set(qsms.map(q => q.id)));
-  };
+  const selectAll = () => setSelected(new Set(qsms.map(q => q.id)));
+  const deselectAll = () => setSelected(new Set());
 
   return (
     <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
@@ -83,17 +81,15 @@ export function QSMExportPanel({ qsms, exporting, onClose, onExport }: QSMExport
         </div>
 
         {/* QSM selection */}
-        <div className="flex items-center justify-between mb-1">
-          <div className="text-[10px] font-medium text-neutral-400">
-            QSMs ({selected.size}/{qsms.length})
-          </div>
-          <button
+        <div className="mb-1">
+          <SelectAllHeader
             data-testid="qsm-export-select-all"
-            onClick={toggleAll}
-            className="text-[10px] text-green-400 hover:text-green-300"
-          >
-            {allSelected ? 'Select none' : 'Select all'}
-          </button>
+            label="QSMs"
+            selectedCount={selected.size}
+            totalCount={qsms.length}
+            onSelectAll={selectAll}
+            onDeselectAll={deselectAll}
+          />
         </div>
         <div className="overflow-y-auto flex-1 min-h-0 border border-neutral-700 rounded mb-4 divide-y divide-neutral-700/50">
           {qsms.map(q => (

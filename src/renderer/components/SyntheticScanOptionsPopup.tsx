@@ -10,6 +10,7 @@ import { scanDisplayName, type Scan } from '../lib/scan';
 import { SCAN_HIT_FIELDS, availabilityNote } from '../lib/scanHitFields';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { ComputePathBadge } from './ComputePathBadge';
+import { SelectAllHeader } from './SelectAllHeader';
 import { deriveMovingScanGrid, trajectoryDurationS } from '../lib/poseStream';
 
 // Above this many total pulses a scan starts taking a long time and produces a
@@ -247,31 +248,14 @@ export function SyntheticScanOptionsPopup({
               ray-traces the chosen subset (mirrors the triangulation / LAD
               source pickers). */}
           <div>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <label className="text-sm font-medium text-neutral-300">Scan positions</label>
-                <span className="text-[10px] text-neutral-500">
-                  ({selectedCount}/{scanners.length} selected)
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={selectAllScanners}
-                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
-                >
-                  All
-                </button>
-                <span className="text-neutral-600 text-[10px]">|</span>
-                <button
-                  type="button"
-                  onClick={deselectAllScanners}
-                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
-                >
-                  None
-                </button>
-              </div>
-            </div>
+            <SelectAllHeader
+              data-testid="scan-opt-scanners-select-all"
+              label="Scan positions"
+              selectedCount={selectedCount}
+              totalCount={scanners.length}
+              onSelectAll={selectAllScanners}
+              onDeselectAll={deselectAllScanners}
+            />
 
             <div className="mt-1.5 border border-neutral-700 rounded-lg overflow-hidden">
               <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-2 px-3 py-2 bg-neutral-900/80 border-b border-neutral-700 items-center">
@@ -432,26 +416,14 @@ export function SyntheticScanOptionsPopup({
             data-testid="scan-opt-retained-fields"
             className="border border-neutral-700 rounded-lg p-3 space-y-2 bg-neutral-800/50"
           >
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-neutral-400">Retained per-hit fields</p>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={selectAllFields}
-                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
-                >
-                  All
-                </button>
-                <span className="text-neutral-600 text-[10px]">|</span>
-                <button
-                  type="button"
-                  onClick={deselectAllFields}
-                  className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
-                >
-                  None
-                </button>
-              </div>
-            </div>
+            <SelectAllHeader
+              data-testid="scan-opt-fields-select-all"
+              label="Retained per-hit fields"
+              selectedCount={opts.retainedFields.length}
+              totalCount={fieldChoices.length}
+              onSelectAll={selectAllFields}
+              onDeselectAll={deselectAllFields}
+            />
             <p className="text-[11px] text-neutral-500">
               Checked fields are kept on the cloud and appear in Color by, even
               when constant-valued.

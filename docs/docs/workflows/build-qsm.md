@@ -45,8 +45,9 @@ first:
 2. The **Build QSM** dialog opens. It lists every scan that has point
    data, with a checkbox per scan. If you had scans selected in the
    **Scans** panel, those are **pre-checked**; otherwise all eligible
-   scans are checked. Use **All / None** to toggle the whole list, or tick
-   individual scans.
+   scans are checked. The checkbox next to the **Scans** heading toggles
+   the whole list at once — it shows a dash when only some scans are
+   checked — or tick individual scans.
 
 ![The Build QSM dialog](../assets/screenshots/qsm-01-panel.png)
 
@@ -206,8 +207,8 @@ to keep a QSM: that file imports straight back into Phytograph (see
 1. Click the **Export** (download) icon at the top of the **QSM** results
    panel.
 2. In the export dialog, pick a **format**, then tick which QSMs to write
-   (all are selected by default — use **Select all / Select none** to
-   toggle).
+   (all are selected by default — the checkbox next to the list heading
+   toggles them all at once).
 3. Click **Export**. For a **single** QSM you get a save dialog with a
    suggested filename (the source scan's name, with the format's
    extension) — edit it to whatever you like before saving. When you

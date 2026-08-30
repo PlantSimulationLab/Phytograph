@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, CloudFog } from 'lucide-react';
 import type { Scan } from '../lib/scan';
 import { hasData, isBackfillEligible, scanHasKnownOrigin, missReconSources } from '../lib/scan';
+import { SelectAllHeader } from './SelectAllHeader';
 
 interface BackfillMissesPopupProps {
   isOpen: boolean;
@@ -172,19 +173,14 @@ export function BackfillMissesPopup({
           </p>
 
           {/* Select controls + count */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-neutral-300">Scans</label>
-              <span className="text-[10px] text-neutral-500">
-                ({selectedScanIds.size}/{eligible.length} selected)
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button onClick={selectAll} className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors">All</button>
-              <span className="text-neutral-600 text-[10px]">|</span>
-              <button onClick={deselectAll} className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors">None</button>
-            </div>
-          </div>
+          <SelectAllHeader
+            data-testid="backfill-select-all"
+            label="Scans"
+            selectedCount={selectedScanIds.size}
+            totalCount={eligible.length}
+            onSelectAll={selectAll}
+            onDeselectAll={deselectAll}
+          />
 
           {eligible.length === 0 ? (
             <div className="p-4 text-center text-xs text-neutral-500" data-testid="backfill-none-eligible">

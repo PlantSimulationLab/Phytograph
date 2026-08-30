@@ -9,6 +9,7 @@ import type { GridOption } from '../lib/gridOption';
 import type { Scan } from '../lib/scan';
 import { hasData, hasParams } from '../lib/scan';
 import { buildHeliosTriangulationRequest, gridCropBox } from '../lib/pointCloudHelpers';
+import { SelectAllHeader } from './SelectAllHeader';
 
 // What the modal hands back when the user clicks Triangulate. The Open3D path
 // (ball_pivoting / poisson / alpha_shape / delaunay) is a thin descriptor the
@@ -348,29 +349,14 @@ export function TriangulationPopup({
           </div>
 
           {/* Select controls + count */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-neutral-300">Scans</label>
-              <span className="text-[10px] text-neutral-500">
-                ({selectedScanIds.size}/{eligible.length} selected)
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={selectAll}
-                className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
-              >
-                All
-              </button>
-              <span className="text-neutral-600 text-[10px]">|</span>
-              <button
-                onClick={deselectAll}
-                className="text-[10px] text-neutral-400 hover:text-neutral-200 transition-colors"
-              >
-                None
-              </button>
-            </div>
-          </div>
+          <SelectAllHeader
+            data-testid="triangulate-select-all"
+            label="Scans"
+            selectedCount={selectedScanIds.size}
+            totalCount={eligible.length}
+            onSelectAll={selectAll}
+            onDeselectAll={deselectAll}
+          />
 
           {eligible.length === 0 ? (
             <div className="p-4 text-center text-xs text-neutral-500">
