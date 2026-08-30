@@ -144,6 +144,54 @@ describe('absolute-distance parameters are seeded from a hits-only extent', () =
     expect(block).toContain('extentForParameterSeeding(sel.data)');
     expect(block).not.toContain('sel?.data.bounds?.size');
   });
+
+  it('TreeIso decimation + gap distances', async () => {
+    const src = await viewerSource();
+    const i = src.indexOf('if (showTreeSegmentPanel && !treePanelWasOpen.current)');
+    expect(i).toBeGreaterThan(-1);
+    const block = src.slice(i, i + 1600);
+    expect(block).toContain('extentForParameterSeeding(sel.data)');
+    expect(block).not.toContain('sel?.data.bounds?.size');
+  });
+
+  // The three `it`s above are ANCHORED: each names a call site that was already
+  // known to be wrong. That shape cannot catch the NEXT tool -- it has no anchor,
+  // so no assertion fires and the suite stays green. Tree segmentation proved it:
+  // it was the third consumer of a *DefaultsForExtent helper, was left on
+  // bounds.size when its two siblings were fixed, and this file passed anyway
+  // (it even asserts `not.toContain('sel?.data.bounds?.size')` -- but only inside
+  // the two windows it knew to open). The assertions below are anchor-free and
+  // hold over the WHOLE file, so a newly added seed site is covered by default.
+  it('NO *DefaultsForExtent call is fed from a raw bounds extent', async () => {
+    const src = await viewerSource();
+    // Every helper that turns an extent into absolute metric parameters.
+    const calls = [...src.matchAll(/(\w*DefaultsForExtent)\(/g)];
+    expect(calls.length, 'expected to find the extent-seeded default helpers')
+      .toBeGreaterThan(0);
+    for (const m of calls) {
+      // These are all called as f(Math.max(size.x, size.y), ...) -- the extent
+      // arrives via a local, so checking the argument text alone proves nothing
+      // (that is exactly how tree segmentation passed while broken). Walk BACK
+      // to where that local was assigned and check its source instead.
+      const head = src.slice(Math.max(0, m.index! - 900), m.index!);
+      const assign = [...head.matchAll(/const (\w+) = ([^;]+);/g)].pop();
+      expect(assign, `${m[1]}: could not find the extent local it is called with`)
+        .toBeTruthy();
+      expect(assign![2], `${m[1]} is seeded from a raw bounds extent (via ${assign![1]})`)
+        .not.toMatch(/bounds[?.]*\.size/);
+    }
+  });
+
+  it('NO extent handed to a panel or a world-space brush comes from bounds.size', async () => {
+    const src = await viewerSource();
+    // A raw extent reaching a panel is the same bug one layer out: DEMPanel
+    // divides extentX/extentY by the cell size, compares against DEM_MAX_CELLS
+    // and DISABLES Generate, so a miss-set extent locked the user out entirely.
+    // The erase brush is the same shape again -- both the seeded size and the
+    // slider min/max derive from the cloud diagonal.
+    expect(src).not.toMatch(/extent[XY]=\{[^}]*bounds[?.]*\.size/);
+    expect(src).not.toMatch(/const diag = \w+\.data\.bounds\.size\.length\(\)/);
+  });
 });
 
 describe('the deliberate exceptions stay deliberate', () => {

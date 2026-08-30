@@ -150,6 +150,7 @@ import {
   collectHitPoints,
   collectHitPointsCapped,
   extentForParameterSeeding,
+  eraseDiagonal,
   scatterToFullLength,
   type Vec3Like,
   type ReuseMeshPayload,
@@ -1038,7 +1039,15 @@ export default function PointCloudViewer({
   useEffect(() => {
     if (showTreeSegmentPanel && !treePanelWasOpen.current) {
       const sel = clouds.find((c) => selectedIds.has(c.id));
-      const size = sel?.data.bounds?.size;
+      // Hits-only extent — same reason as the CSF and DEM seeds above, and the
+      // stakes are higher here: treeSegmentDefaultsForExtent returns ABSOLUTE
+      // metric distances that all four saturate at their clamps on a miss-set
+      // extent (decimateRes1 0.05 -> 1.0 m, maxGap 2 -> 6 m), and the backend
+      // CANNOT rescue them — _auto_treeiso_decimation only ever bumps a value
+      // still at-or-below the paper default, so a UI-seeded 1.0 m passes
+      // straight through. The knobs are deliberately not in the panel, so the
+      // user cannot see or override the bad values either.
+      const size = sel ? extentForParameterSeeding(sel.data) : null;
       if (size) {
         const d = treeSegmentDefaultsForExtent(Math.max(size.x, size.y));
         setTreeDecimateRes1(d.decimateRes1);
@@ -16252,7 +16261,11 @@ export default function PointCloudViewer({
     eraseBrushInitKeyRef.current = firstSelectedCloud.id;
     // Flat clouds use a world-space brush; seed it to a fraction of the cloud
     // diagonal. Octree clouds use a screen-pixel brush (no cloud-scaling needed).
-    const diag = firstSelectedCloud.data.bounds.size.length();
+    // Hits-only extent: a miss sits ~1 km out, and flat clouds are exactly the
+    // ones exposed (robustExtent exists only on session clouds), so bounds.size
+    // would seed a brush ~1000x too big — and the slider's own min/max below are
+    // derived from the same diagonal, so the user could not dial it back either.
+    const diag = eraseDiagonal(firstSelectedCloud.data);
     if (diag > 0) setEraseBrushSize(diag / 50);
     // Start each activation with a clean preview and erase mode OFF, so the user
     // can frame the view before toggling erase on.
@@ -20022,7 +20035,9 @@ export default function PointCloudViewer({
 
         // Flat-cloud brush is world-space (scaled to the cloud diagonal); octree
         // brush is screen-space pixels (constant on-screen, independent of scale).
-        const diag = firstSelectedCloud.data.bounds.size.length();
+        // Hits-only diagonal, matching the seed above — these bounds must agree
+        // with it or the seeded value lands outside its own slider range.
+        const diag = eraseDiagonal(firstSelectedCloud.data);
         const flatMin = diag > 0 ? diag / 500 : 0.01;
         const flatMax = diag > 0 ? diag / 5 : 1;
         const flatStep = (flatMax - flatMin) / 100;
@@ -20557,6 +20572,12 @@ export default function PointCloudViewer({
           sel?.data.scalarFields?.[GROUND_CLASS_ATTRIBUTE] ||
           sel?.data.octree?.attributeRanges?.[GROUND_CLASS_ATTRIBUTE]
         );
+        // Hits-only extent, for the same reason the cell-size seed above uses it.
+        // The panel divides these by the cell size to ESTIMATE the raster grid
+        // and disables Generate when nx*ny exceeds DEM_MAX_CELLS, so a miss-set
+        // extent doesn't just mislead the readout — it locks the user out of a
+        // legitimate DEM with "too fine; increase cell size".
+        const demExtent = sel ? extentForParameterSeeding(sel.data) : null;
         return (
           <DEMPanel
             selectedSurfaces={demSurfaces}
@@ -20565,8 +20586,8 @@ export default function PointCloudViewer({
             fillVoids={demFillVoids}
             computeHeightAboveGround={demComputeHAG}
             hasGroundClass={hasGroundClass}
-            extentX={sel?.data.bounds?.size?.x}
-            extentY={sel?.data.bounds?.size?.y}
+            extentX={demExtent?.x}
+            extentY={demExtent?.y}
             inProgress={demInProgress}
             progress={demProgress?.value ?? null}
             progressLabel={demBatchLabel}

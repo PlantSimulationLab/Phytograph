@@ -248,6 +248,20 @@ export function extentForParameterSeeding(data: PointCloudData): Vec3Like | null
   return { x: maxX - minX, y: maxY - minY, z: maxZ - minZ };
 }
 
+// The hits-only bounding-box DIAGONAL, for the callers that scale a world-space
+// interaction (the erase brush and its slider range) to "how big is this cloud".
+// Same argument as `extentForParameterSeeding`, which it delegates to: with the
+// ~1 km miss shell included the diagonal is ~1000x the real one, so the brush is
+// seeded far larger than the whole visible cloud AND the slider bounds derived
+// from it are too, leaving no way to dial it back. Returns 0 when the extent is
+// unknown, matching the `diag > 0` guards at the call sites.
+export function eraseDiagonal(data: PointCloudData): number {
+  const e = extentForParameterSeeding(data);
+  if (!e) return 0;
+  const d = Math.sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+  return Number.isFinite(d) ? d : 0;
+}
+
 // `collectHitPoints` + a point budget: filter misses FIRST, then stride the
 // survivors down to `maxPoints`.
 //

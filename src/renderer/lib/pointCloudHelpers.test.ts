@@ -38,6 +38,7 @@ import {
   collectHitPoints,
   collectHitPointsCapped,
   extentForParameterSeeding,
+  eraseDiagonal,
   scatterToFullLength,
 } from './pointCloudHelpers';
 import { projectWorldToCanvasPixel } from './cropGeometry';
@@ -1795,5 +1796,31 @@ describe('extentForParameterSeeding', () => {
     const e = extentForParameterSeeding(data)!;
     expect(Number.isFinite(e.x)).toBe(true);
     expect(e.x).toBeCloseTo(data.bounds.size.x, 5);
+  });
+
+  describe('eraseDiagonal', () => {
+    // The erase brush is world-space on flat clouds: its seeded size AND the
+    // slider min/max are both fractions of the cloud diagonal, so a miss-set
+    // diagonal seeds a brush bigger than the visible cloud with no way to dial
+    // it back.
+    it('measures the hits, not the miss shell', () => {
+      const data = cloud({
+        hits: [[0, 0, 0], [3, 4, 0]],            // true diagonal = 5
+        misses: [[1000, 0, 0], [0, -1000, 0]],   // ~1km shell
+      });
+      expect(eraseDiagonal(data)).toBeCloseTo(5, 5);
+      // The bug this guards: the raw diagonal is ~400x larger here.
+      expect(data.bounds.size.length()).toBeGreaterThan(1000);
+    });
+
+    it('uses robustExtent when the cloud carries one', () => {
+      const data = cloud({ hits: [[0, 0, 0], [1, 1, 1]], robustExtent: [3, 4, 0] });
+      expect(eraseDiagonal(data)).toBeCloseTo(5, 5);
+    });
+
+    it('returns 0 (not NaN) when there is no extent to measure', () => {
+      // The call sites guard on `diag > 0`, so an unknown extent must read 0.
+      expect(eraseDiagonal({ pointCount: 0 } as unknown as PointCloudData)).toBe(0);
+    });
   });
 });
