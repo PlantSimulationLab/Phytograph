@@ -570,6 +570,46 @@ class TestLeafCubeLAD:
         assert cells[0]["gtheta"] == pytest.approx(0.30, abs=1e-4)
         assert cells[1]["gtheta"] == pytest.approx(0.70, abs=1e-4)
 
+    def test_gtheta_pools_hit_beams_only(self):
+        """G(theta) is a LEAF-projection term, so only beams that met foliage
+        may weight it. `dirs` is the vstack of hit AND sky/miss beams (LAD is
+        the one tool that legitimately carries misses, for the Beer's-law
+        transmission denominator), and this fixture is 47% misses — pooling
+        them tilts the beam-zenith distribution and biases G.
+
+        Asserted against the SHIPPED pooling, by driving the real endpoint and
+        comparing its reported G(theta) to de Wit evaluated over the hit beams
+        only. Planophile, deliberately: spherical G is 0.5 at every zenith, so
+        the suite's other override test (constant_dewit_spherical) reads an
+        exact 0.0% error whether or not misses are pooled and is mathematically
+        incapable of detecting this. Same blind spot that hid the
+        spherical-vs-Cartesian bug on this very line.
+        """
+        pytest.importorskip("pyhelios")
+        import lad_gtheta
+
+        d = np.loadtxt(_FIXTURE_XYZ)
+        miss = d[:, 3]
+        assert (miss != 0).any(), "fixture must carry misses for this to mean anything"
+        dirs = main._directions_from_origin(d[:, :3], np.asarray(_FIXTURE_ORIGIN, float))
+        hits_only = lad_gtheta.gtheta_from_dewit(
+            "planophile", lad_gtheta.beam_zenith_from_spherical(dirs[miss == 0]))
+        pooled = lad_gtheta.gtheta_from_dewit(
+            "planophile", lad_gtheta.beam_zenith_from_spherical(dirs))
+        # The two must be distinguishable, or this test proves nothing.
+        assert abs(hits_only - pooled) > 1e-4, (
+            "fixture geometry cannot separate the two poolings; pick another")
+
+        spec = main.GThetaOverrideSpec(
+            spatial="constant",
+            spec=main.GThetaValueSpec(kind="dewit", dewit="planophile"))
+        result = main._do_lad_computation(self._request_spec(spec))
+        assert result["success"] is True, result.get("error")
+        got = result["cells"][0]["gtheta"]
+        assert got == pytest.approx(hits_only, abs=1e-5), (
+            f"G(theta)={got} matches the miss-polluted pooling {pooled}, "
+            f"not the hits-only {hits_only}")
+
     def test_profile_length_mismatch_errors(self):
         pytest.importorskip("pyhelios")
         spec = main.GThetaOverrideSpec(

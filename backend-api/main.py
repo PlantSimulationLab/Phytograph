@@ -9117,8 +9117,38 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 # and collapses every beam toward 90 degrees (~-29% G error, and hence
                 # LAD error, on a planophile canopy; spherical G is 0.5 at every zenith
                 # so it alone cannot reveal the mistake).
-                beam_dirs = [s["dirs"] for s in scans_arrays
-                             if s.get("dirs") is not None and len(s["dirs"]) > 0]
+                # HITS ONLY. `dirs` is the vstack of hit beams AND sky/miss beams
+                # (see the miss append above, which stacks m_dirs onto dirs), but
+                # G(theta) is a LEAF-projection term: it weights the leaf-normal
+                # kernel by the zenith distribution of beams that actually met
+                # foliage. A miss hit no leaf and contributes no projection, and
+                # misses concentrate at the angles that see sky, so pooling them
+                # tilts the distribution and biases G. The size is GEOMETRY-
+                # dependent, not fixed: on the leaf-cube fixture (47% misses,
+                # but misses sharing the hits' angular spread) planophile G moves
+                # only 0.28%, while on a sweep where the sky beams are angularly
+                # distinct (25% misses above 60 deg zenith) it reaches ~12%.
+                # This is the SAME line as the spherical-vs-Cartesian bug above,
+                # from a different cause, and it shares that bug's blind spot: spherical
+                # G is 0.5 at every zenith, so a spherical-only fixture reads
+                # EXACTLY 0.0% error and cannot reveal either mistake. Any
+                # regression test here must use planophile/erectophile.
+                # Misses are legitimately present for the Beer's-law transmission
+                # denominator (LAD is the one tool that needs them) — they just
+                # must not reach this term.
+                beam_dirs = []
+                for s in scans_arrays:
+                    d = s.get("dirs")
+                    if d is None or len(d) == 0:
+                        continue
+                    s_labels, s_vals = s.get("labels"), s.get("vals")
+                    if (s_labels is not None and s_vals is not None
+                            and _MISS_SLUG in s_labels
+                            and np.asarray(s_vals).shape[0] == len(d)):
+                        hit = np.asarray(s_vals)[:, s_labels.index(_MISS_SLUG)] == 0
+                        d = np.asarray(d)[hit]
+                    if len(d) > 0:
+                        beam_dirs.append(d)
                 if beam_dirs:
                     pooled_dirs = np.vstack(beam_dirs)
                     beam_zen = lad_gtheta.beam_zenith_from_spherical(pooled_dirs)
