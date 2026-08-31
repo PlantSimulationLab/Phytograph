@@ -63,8 +63,21 @@ class TreeIsoParams:
     score_candidate_thresh: float = 0.7
     init_stem_rel_length_thresh: float = 1.5
 
-    # Optional post-processing: split instances across large 3D gaps.
-    max_outlier_gap: float = 3.0
+    # Post-processing: split an instance wherever its own points are separated by
+    # a 3D gap wider than this (see `_split_across_gaps`). Note this is SMALLER
+    # than `max_gap`, and intentionally so — `max_gap` is how far stage 2 may
+    # reach to CONNECT an occlusion-separated limb, whereas this is the distance
+    # beyond which a body is a DIFFERENT tree.
+    #
+    # 0.65 m is the midpoint of the range that is correct on BOTH calibration
+    # datasets: 0.55-0.90 on TreeIso's 9-ground-truth-tree demo cloud (0.5 splits
+    # it into 10; 0.4 into 22) and 0.50-0.75 on the Nickels almond scan (1.0
+    # reabsorbs the neighbouring tree). See treeSegmentDefaults.ts for the full
+    # sweep. Upstream's 3.0 is NOT a comparable default — it is commented
+    # "trivial: post-processing to remove isolated points", i.e. noise cleanup
+    # behind an opt-in flag, and at that distance nothing splits on close-range
+    # TLS (measured inter-tree merges at 0.92 m / 1.72 m).
+    max_outlier_gap: float = 0.65
 
 
 # --------------------------------------------------------------------------- #
@@ -435,7 +448,12 @@ def decimate_pcd(columns, min_res):
 
 
 def isolate_gaps(pcd, max_gap, search_K=20):
-    """Label connected components, splitting across gaps larger than ``max_gap``."""
+    """Label connected components, splitting across gaps larger than ``max_gap``.
+
+    Runs on the DECIMATED cloud (see :func:`_split_across_gaps`): the adjacency
+    matrix is (n, n) sparse over the node count, so feeding it a multi-million
+    point cloud at full resolution is not viable.
+    """
     pcd = pcd[:, :3] - np.mean(pcd[:, :3], axis=0)
     point_count = len(pcd)
     if point_count == 0:
@@ -498,6 +516,122 @@ def _process_point_cloud(pcd, p: TreeIsoParams):
     return init_labels, intermediate_labels, final_labels, dec_inverse_idx, dec_inverse_idx2
 
 
+# Components smaller than this share of their parent tree are treated as debris
+# rather than a mis-merged neighbour, and are left attached. Splitting on every
+# component would shard a tree into confetti: occlusion leaves plenty of small
+# genuinely-detached twigs, and each one becoming its own "tree" is a worse
+# answer than the over-merge we are fixing. A mis-merged neighbouring tree is a
+# substantial body — the measured case is 3.5% of its parent — while occlusion
+# debris is orders of magnitude below that.
+_MIN_SPLIT_FRACTION = 0.005
+
+# ...and an ABSOLUTE floor in decimated nodes, because the fraction alone is not
+# enough. `_split_across_gaps` works on the DECIMATED cloud, where a whole small
+# tree can be ~126 nodes: 0.5% of that is 0.63, so the fraction rounds away to
+# nothing and every speck of noise becomes its own "tree" (measured: 56-point and
+# 1-point instances). A component must clear BOTH bars to be split off.
+_MIN_SPLIT_NODES = 20
+
+# Voxel size (m) the connectivity test runs at, as a fraction of the gap being
+# tested. Connectivity only needs enough resolution to tell "touching" from
+# "separated by more than `gap`", so testing at gap/8 is ample — and it is what
+# keeps the cost bounded.
+#
+# The obvious alternatives both fail. A radius query at the FULL stage-1
+# resolution is quadratic in the neighbourhood: `query_pairs` returns every pair
+# within the radius, and inside a dense crown that measured 1.6 s at a 0.5 m gap
+# rising to 369 s at 3.0 m on the Nickels tree_8 scan — the most permissive
+# setting being the slowest, exactly backwards for a knob a user raises to be
+# less aggressive. Capping the graph with a k-NN budget instead (isolate_gaps'
+# own `search_K=20` formulation) is fast but WRONG at these densities: at 0.05 m
+# decimation a node's 20th-nearest neighbour is a median 0.108 m away, so with a
+# 0.6 m gap the entire budget is spent on neighbours a few cm away and no edge
+# ever reaches across a gap — trees shattered into 21-27 fragments instead of 7.
+# Coarsening the cloud fixes both at once: it shrinks the neighbourhood a radius
+# query has to enumerate, while keeping the radius semantics that decide the
+# split.
+_SPLIT_RES_FRACTION = 1.0 / 8.0
+
+
+def _split_across_gaps(xyz_dec, labels_dec, max_outlier_gap):
+    """Split each tree label wherever its own points are separated by a 3D gap
+    wider than ``max_outlier_gap``.
+
+    Stage 3 merges a rootless segment into whichever neighbour scores best, and
+    its score has no distance ceiling: ``min3DSpacing`` only enters the exponent,
+    so a segment metres away still merges if nothing closer competes. That is the
+    intended behaviour for an occluded branch whose own trunk is present, but it
+    also captures a NEIGHBOURING tree whose trunk was cropped out of the scene —
+    the common case at the edge of a single-tree crop, where every surrounding
+    tree is a trunkless crown fragment.
+
+    This is upstream's ``if_isolate_outlier`` post-process (``process_las_file``,
+    guarded by ``PR_MAX_OUTLIER_GAP``), which Phytograph's adaptation dropped
+    along with the laspy I/O that hosted it. Upstream intersects the tree labels
+    with the connectivity components; we do the same, but only for components
+    that are a meaningful share of their parent (see ``_MIN_SPLIT_FRACTION``),
+    and per-tree rather than globally so an unrelated tree's geometry can never
+    influence another's split.
+
+    Args:
+        xyz_dec: (M, 3) decimated points.
+        labels_dec: (M,) tree label per decimated point.
+        max_outlier_gap: gap (m) above which one tree's points are separate trees.
+
+    Returns:
+        (M,) relabelled array, aligned to ``labels_dec``.
+    """
+    gap = float(max_outlier_gap)
+    if not np.isfinite(gap) or gap <= 0:
+        return labels_dec
+
+    out = np.array(labels_dec, dtype=np.int64, copy=True)
+    next_label = int(out.max()) + 1 if len(out) else 1
+
+    for tree_id in np.unique(labels_dec):
+        member = np.where(labels_dec == tree_id)[0]
+        if len(member) < 2:
+            continue
+
+        # Coarsen to a fraction of the gap for the connectivity test, then push
+        # each component's label back to every point of its voxel. Splitting is a
+        # decision about whole limbs, so it does not need cm resolution.
+        coarse_uidx, coarse_inv = decimate_pcd(
+            xyz_dec[member], gap * _SPLIT_RES_FRACTION
+        )
+        pts = xyz_dec[member][coarse_uidx]
+        if len(pts) < 2:
+            continue
+
+        # Connect every pair closer than the gap, then take connected components.
+        # The coarsening above is what makes this radius query affordable.
+        pairs = cKDTree(pts).query_pairs(gap, output_type="ndarray")
+        adjacency = csr_matrix(
+            (np.ones(len(pairs), dtype=np.int8), (pairs[:, 0], pairs[:, 1])),
+            shape=(len(pts), len(pts)),
+        )
+        n_comp, comp = connected_components(
+            csgraph=adjacency, directed=False, connection="weak", return_labels=True
+        )
+        if n_comp <= 1:
+            continue
+
+        comp = comp[coarse_inv]
+        sizes = np.bincount(comp, minlength=n_comp)
+        # Keep the largest component under the original id; only components that
+        # are substantial in their own right become new trees. Everything else
+        # stays with the parent, so debris never inflates the tree count.
+        keep = int(np.argmax(sizes))
+        threshold = max(_MIN_SPLIT_FRACTION * len(member), _MIN_SPLIT_NODES)
+        for ci in range(n_comp):
+            if ci == keep or sizes[ci] < threshold:
+                continue
+            out[member[comp == ci]] = next_label
+            next_label += 1
+
+    return out
+
+
 def segment_trees(xyz: np.ndarray, params: TreeIsoParams | None = None) -> np.ndarray:
     """Segment a multi-tree point cloud into per-point tree instance ids.
 
@@ -520,8 +654,25 @@ def segment_trees(xyz: np.ndarray, params: TreeIsoParams | None = None) -> np.nd
         return np.zeros(0, dtype=np.int64)
 
     _, _, final_labels, dec_inverse_idx, _ = _process_point_cloud(xyz, params)
+    final_labels = np.asarray(final_labels)
+
+    # Post-process: split any tree that stage 3 assembled across a gap wider than
+    # `max_outlier_gap`. Runs on the DECIMATED cloud, which is both what the
+    # labels are indexed against and the only tractable size for a neighbour
+    # graph — the full cloud here is routinely millions of points.
+    #
+    # `_process_point_cloud` mean-centres before decimating, so rebuild the same
+    # decimated coordinates rather than re-deriving them from `xyz`: the split
+    # must see the geometry the labels were computed on.
+    centred = xyz - np.mean(xyz, axis=0)
+    dec_uidx, _ = decimate_pcd(centred, params.decimate_res1)
+    if len(dec_uidx) == len(final_labels):
+        final_labels = _split_across_gaps(
+            centred[dec_uidx], final_labels, params.max_outlier_gap
+        )
+
     # final_labels is per decimated point; map back to full resolution.
-    per_point = np.asarray(final_labels)[dec_inverse_idx].astype(np.int64)
+    per_point = final_labels[dec_inverse_idx].astype(np.int64)
     # Re-base to contiguous 1..K (0 is reserved for the caller's "unassigned").
     _, per_point = np.unique(per_point, return_inverse=True)
     return per_point.astype(np.int64) + 1

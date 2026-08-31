@@ -647,3 +647,179 @@ def test_endpoint_inline_from_ply_source(client, make_file_session):
     points, _ = _load_fixture()
     assert body["num_points"] == len(points)
     assert body["num_trees"] >= 2
+
+
+# --------------------------------------------------------------------------- #
+# Post-merge gap splitting (`max_outlier_gap`)
+# --------------------------------------------------------------------------- #
+# Regression coverage for a real failure on the Nickels almond scan
+# (`tree_8.asc`, 23.9 M pts): a single focal tree cropped out of an orchard, so
+# every SURROUNDING tree appears as a trunkless crown fragment. Stage 3 flags a
+# trunkless fragment as a merge candidate (correctly — it has no stem of its
+# own) and then merges it into the best-scoring neighbour with NO distance
+# ceiling: `min3DSpacing` only enters the score exponentially. The neighbour's
+# branches, a measured 0.878 m away in mid-air at z≈3.3 m, were absorbed into the
+# focal tree. `max_outlier_gap` is the knob that exists to prevent exactly this,
+# and it was threaded from the UI through the request model into TreeIsoParams
+# and then read by nothing — `isolate_gaps` was vendored but never called.
+
+
+def _ball(rng, n, centre, radius):
+    """`n` points uniformly inside a ball — a BOUNDED blob.
+
+    Deliberately not a Gaussian: a normal cloud's tails reach far past its
+    nominal sigma, so two "1.2 m apart" Gaussian crowns actually come within
+    0.051 m of each other (measured) and the fixture silently stops testing the
+    gap it claims to. With a hard radius the separation in the fixture is the
+    separation the test asserts on.
+    """
+    direction = rng.normal(0, 1, (n, 3))
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+    return centre + direction * radius * rng.uniform(0, 1, (n, 1)) ** (1 / 3)
+
+
+def _two_bodies(gap: float, seed: int = 0):
+    """A trunked tree plus a trunkless crown fragment separated by `gap` metres.
+
+    Mirrors the real failure's geometry: the fragment has no stem reaching the
+    ground, so stage 3 treats it as something to be merged into a neighbour.
+    `gap` is the true closest approach between the two bodies (negative to make
+    them overlap).
+    """
+    rng = np.random.default_rng(seed)
+
+    # Trunk from the ground up, plus a crown around its top.
+    trunk = np.column_stack([
+        rng.normal(0, 0.03, 600),
+        rng.normal(0, 0.03, 600),
+        rng.uniform(0.0, 2.0, 600),
+    ])
+    crown_r, frag_r = 0.6, 0.5
+    crown = _ball(rng, 2500, np.array([0.0, 0.0, 2.6]), crown_r)
+
+    # A crown-only body offset in +x, floating at the same height (no trunk).
+    fragment = _ball(
+        rng, 1200, np.array([crown_r + gap + frag_r, 0.0, 2.6]), frag_r
+    )
+
+    points = np.vstack([trunk, crown, fragment])
+    is_fragment = np.zeros(len(points), dtype=bool)
+    is_fragment[len(trunk) + len(crown):] = True
+    return points, is_fragment
+
+
+@requires_treeiso
+def test_distant_fragment_is_not_merged_into_its_neighbour():
+    """A body separated by more than `max_outlier_gap` is its own instance."""
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    points, is_fragment = _two_bodies(gap=1.2)
+    labels = segment_trees(points, TreeIsoParams(max_outlier_gap=0.75))
+
+    frag_ids = set(np.unique(labels[is_fragment]).tolist())
+    tree_ids = set(np.unique(labels[~is_fragment]).tolist())
+    assert not (frag_ids & tree_ids), (
+        f"fragment {sorted(frag_ids)} shares an instance id with the tree "
+        f"{sorted(tree_ids)} despite a 1.2 m gap"
+    )
+
+
+@requires_treeiso
+def test_touching_crown_stays_one_instance():
+    """The split must not shatter a tree whose parts are genuinely connected.
+
+    The guard against over-correcting: with the bodies overlapping, the gap test
+    finds one component and the instance is left alone.
+    """
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    points, is_fragment = _two_bodies(gap=-0.6)   # bodies overlap
+    labels = segment_trees(points, TreeIsoParams(max_outlier_gap=0.75))
+
+    # One connected body -> exactly one instance over the WHOLE cloud. Asserting
+    # on the tree side alone would pass even if the post-process shattered the
+    # cloud, since a shattered tree still has "one" id per queried subset.
+    assert len(np.unique(labels)) == 1, (
+        f"a fully connected cloud was split into {len(np.unique(labels))} "
+        "instances"
+    )
+
+
+@requires_treeiso
+def test_split_does_not_emit_speck_instances():
+    """Debris must never become an instance.
+
+    `_split_across_gaps` runs on the DECIMATED cloud, where a small tree can be
+    ~126 nodes — so a fraction-of-parent threshold alone rounds to less than one
+    node and every isolated speck becomes its own "tree" (measured: 56-point and
+    1-point instances on the Nickels scan). `_MIN_SPLIT_NODES` is the absolute
+    floor that stops it.
+    """
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    rng = np.random.default_rng(1)
+
+    # The parent must be SMALL in DECIMATED nodes for the fraction to round away
+    # — that is the exact condition the absolute floor exists for, and the real
+    # scan's was a 126-node tree whose 0.5% works out to 0.63 of a node. A tight
+    # cluster is only a few nodes after 5 cm decimation, so build the scene from
+    # small bodies rather than the large `_two_bodies` crowns (whose thousands of
+    # nodes make the fraction alone sufficient, and the test vacuous).
+    body = _ball(rng, 400, np.array([0.0, 0.0, 2.0]), 0.12)
+    far = _ball(rng, 400, np.array([4.0, 0.0, 2.0]), 0.12)
+    specks = _ball(rng, 4, np.array([0.0, 2.0, 2.0]), 0.02)
+    points = np.vstack([body, far, specks])
+
+    labels = segment_trees(points, TreeIsoParams(max_outlier_gap=0.75))
+    sizes = np.bincount(labels)[1:]
+    assert sizes.min() > 10, f"speck-sized instances emitted: {sorted(sizes)}"
+
+
+@requires_treeiso
+def test_max_outlier_gap_is_actually_read():
+    """The parameter must change the result — it was inert for its whole life.
+
+    Threading a knob from the UI to a dataclass field nothing reads produces a
+    tool that silently ignores the user. A gap wide enough to span the two bodies
+    must merge them; a tight one must not.
+    """
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    points, is_fragment = _two_bodies(gap=1.2)
+
+    tight = segment_trees(points, TreeIsoParams(max_outlier_gap=0.75))
+    loose = segment_trees(points, TreeIsoParams(max_outlier_gap=5.0))
+
+    tight_split = not (set(np.unique(tight[is_fragment]).tolist())
+                       & set(np.unique(tight[~is_fragment]).tolist()))
+    loose_split = not (set(np.unique(loose[is_fragment]).tolist())
+                       & set(np.unique(loose[~is_fragment]).tolist()))
+    assert tight_split, "tight max_outlier_gap failed to separate the bodies"
+    assert not loose_split, "loose max_outlier_gap should leave them merged"
+
+
+@requires_treeiso
+def test_default_gap_preserves_ground_truth_tree_count():
+    """The DEFAULT split distance must not disturb a known-good segmentation.
+
+    Calibration guard, on the fixture's 9 reference trees. The split is a new
+    post-process applied to every run, so the way it fails is by over-splitting
+    clouds that were already correct — and that failure is invisible unless a
+    test pins a cloud whose true tree count is known. Swept: 0.4 gives 22 trees
+    (recall 0.968) and 0.5 gives 10; 0.55-0.9 all give exactly 9. The default
+    sits mid-band, so this has margin on both sides rather than sitting on a
+    cliff edge.
+    """
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    points, ref = _load_fixture()
+    assert ref is not None, "fixture must carry its reference labels"
+    n_reference = len(np.unique(ref))
+
+    labels = segment_trees(points, TreeIsoParams())   # defaults, incl. the split
+    assert len(np.unique(labels)) == n_reference, (
+        f"default max_outlier_gap changed the tree count on the reference cloud: "
+        f"{len(np.unique(labels))} vs {n_reference} ground-truth trees"
+    )
+    # And it must not have degraded the partition itself.
+    assert _purity(labels, ref) > 0.85

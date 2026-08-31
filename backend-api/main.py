@@ -5512,7 +5512,11 @@ class TreeSegmentationRequest(BaseModel):
     min_nn3: int = 20
     score_candidate_thresh: float = 0.7
     init_stem_rel_length_thresh: float = 1.5
-    max_outlier_gap: float = 3.0
+    # Post-merge SPLIT distance (see TreeIsoParams.max_outlier_gap). Deliberately
+    # BELOW max_gap, not above it: max_gap reaches across a void to reconnect an
+    # occluded limb, while this declares a body far from its instance to be a
+    # different tree.
+    max_outlier_gap: float = 0.65
 
 
 class TreeSegmentationResponse(BaseModel):

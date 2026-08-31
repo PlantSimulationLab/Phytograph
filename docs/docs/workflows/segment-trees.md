@@ -104,7 +104,13 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 ## Tips
 
 - Results are best on ground-removed, reasonably dense clouds.
-- If neighbouring trees merge into one, lower **Max intra-tree gap** or add
+- Trees are automatically separated where one instance's own points are split by
+  a wide 3D gap, so a neighbouring tree's branches are not absorbed into the tree
+  you are measuring. This matters most when you have **cropped the cloud around a
+  single tree**: the surrounding trees then appear as crown fragments with no
+  trunk, which is exactly the shape the segmentation is otherwise inclined to
+  attach to the nearest complete tree.
+- If neighbouring trees still merge into one, lower **Max intra-tree gap** or add
   trunk **seeds**.
 - If one tree is split into several, raise **2D reg. strength** or **Merge** the
   pieces afterward.

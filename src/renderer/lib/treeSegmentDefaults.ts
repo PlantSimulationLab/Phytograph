@@ -48,13 +48,64 @@ const DEC1_MAX = 1.0;
 const DEC1_FRACTION = 1 / 372;
 
 // Gap thresholds are occlusion-gap distances (tree-spacing scale), not
-// density-driven, so the paper's 2 m / 3 m suit ALS forests already. We only
-// loosen them on very large tiles (wider-spaced crowns); the floor keeps TLS
-// scans at exactly 2 m / 3 m.
+// density-driven, so the paper's 2 m suits ALS forests already. We only loosen
+// it on very large tiles (wider-spaced crowns); the floor keeps TLS scans at
+// exactly 2 m.
 const MAX_GAP_FRACTION = 2 / 186;
 const MAX_GAP_MIN = 2.0;
 const MAX_GAP_MAX = 6.0;
-const OUTLIER_GAP_RATIO = 1.5;
+
+// `maxOutlierGap` is the post-merge SPLIT distance: how far apart one instance's
+// own points may be and still be called one tree. It is NOT a looser twin of
+// `maxGap` — the two point in opposite directions. `maxGap` is how far stage 2
+// may reach ACROSS a void to connect an occluded limb back to its tree, so it
+// wants to be generous; `maxOutlierGap` is the distance beyond which a body is
+// declared a DIFFERENT tree, so it wants to be tight. Seeding it at 1.5x maxGap
+// (the previous rule, a 3 m floor) made it unreachable in practice: measured on
+// the Nickels tree_8 almond scan, segments genuinely belonging to one tree touch
+// at 0.49-0.52 m while a neighbouring tree's branches were merged in across
+// 0.92 m and 1.72 m, so nothing at or above 2 m ever splits anything and the
+// knob was inert.
+//
+// The value is calibrated on TWO independent datasets rather than one, because a
+// threshold tuned on a single scan generalises badly. Sweeping both:
+//
+//   Nickels almond tree_8 (8.85 m extent, the reported failure)
+//     0.40  over-splits (12 trees) AND reabsorbs the neighbour
+//     0.50-0.75  correct: focal tree ends at x=6.63, neighbour separated
+//     1.00  neighbour reabsorbed into the focal tree again
+//   TreeIso's own demo cloud (17.1 m extent, 9 GROUND-TRUTH trees)
+//     0.40  badly over-segments: 22 trees, recall 0.968
+//     0.50  one spurious split (10 trees)
+//     0.55-0.90+  exactly 9 trees, purity/recall 0.995
+//
+// Safe on both = 0.55-0.75 m; 0.65 is its midpoint, so it carries the most
+// margin against over-splitting below and re-merging above.
+//
+// For outside corroboration: treeX (2025), which ships a TLS-specific preset,
+// uses a 0.5 m maximum crown region-growing radius for the same decision — how
+// far a crown may extend before it stops belonging to that tree. That is the
+// same order of magnitude, and measurably a touch too tight for this algorithm
+// (0.5 splits the demo fixture's 9 trees into 10). There is no published default
+// to copy: upstream TreeIso's PR_MAX_OUTLIER_GAP=3.0 is commented "trivial:
+// post-processing to remove isolated points", i.e. noise cleanup rather than
+// tree separation, and the CloudCompare TreeIso plugin — the reference
+// implementation — exposes no outlier-gap parameter at all.
+//
+// Kept as a FLOOR that still scales with extent, on the same reasoning as the
+// Deliberately NOT scaled by extent, unlike the decimation knobs above. That
+// analogy is tempting and wrong: decimation tracks point SPACING, which really
+// does change with survey scale, whereas this is a crown-to-crown separation set
+// by canopy architecture. The two calibration clouds settle it — 8.85 m and
+// 17.1 m extent, a ~2x difference, both correct at the same 0.65 m. Scaling it
+// linearly (the first attempt here) pushed the 17.1 m demo cloud to 1.256 m,
+// past the 0.75 m ceiling that cloud needs — and only the UI path would have
+// shown it, since the backend default is a flat constant.
+//
+// It is still capped at `maxGap`: stage 2 uses maxGap to CONNECT an occluded
+// limb back to its tree, so a split distance above it would tear apart exactly
+// what stage 2 just joined.
+const OUTLIER_GAP_DEFAULT = 0.65;
 
 function clampRound(value: number, lo: number, hi: number): number {
   const clamped = Math.max(lo, Math.min(hi, value));
@@ -74,6 +125,6 @@ export function treeSegmentDefaultsForExtent(horizontalExtentM: number): TreeSeg
   // Preserve the paper's 2× res1:res2 ratio (5 cm → 10 cm).
   const decimateRes2 = clampRound(2 * decimateRes1, DEC1_MIN, 2 * DEC1_MAX);
   const maxGap = clampRound(ext * MAX_GAP_FRACTION, MAX_GAP_MIN, MAX_GAP_MAX);
-  const maxOutlierGap = clampRound(OUTLIER_GAP_RATIO * maxGap, MAX_GAP_MIN, OUTLIER_GAP_RATIO * MAX_GAP_MAX);
+  const maxOutlierGap = clampRound(OUTLIER_GAP_DEFAULT, 0, maxGap);
   return { decimateRes1, decimateRes2, maxGap, maxOutlierGap };
 }
