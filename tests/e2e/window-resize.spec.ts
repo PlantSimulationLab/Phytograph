@@ -43,7 +43,9 @@ async function setWindowSize(launched: LaunchedApp, w: number, h: number) {
   // round-trip is ~50 ms, which is why only CI ever saw it.
   //
   // Settle on window.innerWidth first (the DOM viewport), then require the
-  // canvas rect to agree and hold still for two consecutive reads.
+  // canvas rect to MATCH it and hold still for two consecutive reads. Both
+  // halves matter: "held still" alone is satisfied by a canvas that has not
+  // started resizing yet, which is what let this return mid-flight.
   // A bare timeout here is undiagnosable: it says the width never arrived, not
   // WHY. The usual why is that the display cannot grant it — the OS clamps a
   // window to the work area, so on a 1280-wide runner `setSize(1600, …)`
@@ -79,15 +81,49 @@ async function setWindowSize(launched: LaunchedApp, w: number, h: number) {
         `-screen 0 1920x1080x24).\n${(err as Error).message}`,
     );
   }
-  await launched.page.waitForFunction(() => {
-    const c = document.querySelector('canvas');
-    if (!c) return false;
-    const r = c.getBoundingClientRect();
-    const prev = (window as any).__lastCanvasProbe;
-    (window as any).__lastCanvasProbe = `${Math.round(r.width)}x${Math.round(r.height)}`;
-    // Stable across two polls AND consistent with the current viewport width.
-    return prev === (window as any).__lastCanvasProbe && r.width <= window.innerWidth + 1;
-  }, undefined, { timeout: 20_000, polling: 100 });
+  // Clear the probe before every poll. It used to persist across calls, so the
+  // "held still for two reads" test could be satisfied by a value left behind
+  // by the PREVIOUS resize rather than by two reads of the current one.
+  await launched.page.evaluate(() => { delete (window as any).__lastCanvasProbe; });
+  try {
+    await launched.page.waitForFunction(() => {
+      const c = document.querySelector('canvas');
+      if (!c) return false;
+      const r = c.getBoundingClientRect();
+      // The canvas must AGREE with the viewport, not merely hold still. The old
+      // guard was `r.width <= window.innerWidth + 1`, which constrains only the
+      // SHRINK direction — and the grow phase is where this poll is load-bearing.
+      // Growing to 1600 leaves a not-yet-resized canvas at its launch 1200, where
+      // `1200 <= 1601` is trivially true; two 100ms polls of a canvas sitting
+      // still at the OLD size then read as "settled", and layout() measured 1200.
+      // That is exactly how this returned mid-flight on a slow macOS runner
+      // (run 33375915377) while reporting no diagnostic at all. The canvas is
+      // full-bleed — the spec's own `canvas.w === 950` at a 950 viewport says so
+      // — so equality with innerWidth is the correct invariant, not an upper bound.
+      if (Math.abs(r.width - window.innerWidth) > 2) return false;
+      const probe = `${Math.round(r.width)}x${Math.round(r.height)}`;
+      const prev = (window as any).__lastCanvasProbe;
+      (window as any).__lastCanvasProbe = probe;
+      return prev === probe;
+    }, undefined, { timeout: 20_000, polling: 100 });
+  } catch (err) {
+    // The viewport poll above already succeeded, so the window DID reach the
+    // requested size and the display is not the problem. Say that outright and
+    // report the gap the canvas failed to close — a bare timeout here would
+    // otherwise be read as the display clamp diagnosed above it.
+    const seen = await launched.page.evaluate(() => {
+      const c = document.querySelector('canvas');
+      const r = c?.getBoundingClientRect();
+      return { canvasW: r?.width ?? null, canvasH: r?.height ?? null, innerWidth: window.innerWidth };
+    });
+    throw new Error(
+      `the window reached ${w}x${h} but the canvas never followed: ` +
+        `canvas=${seen.canvasW}x${seen.canvasH}, innerWidth=${seen.innerWidth}. ` +
+        `The viewport resized, so this is the ResizeObserver → react-use-measure → ` +
+        `R3F gl.setSize chain failing to track it (the canvas-ratchet bug this ` +
+        `spec guards), not a display too small to grant the size.\n${(err as Error).message}`,
+    );
+  }
 }
 
 async function layout(launched: LaunchedApp) {

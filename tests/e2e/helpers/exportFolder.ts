@@ -13,13 +13,19 @@ import { stubOpenDialog } from './stubOpenDialog';
 // Call this BEFORE clicking `export-scan-xml`. It re-stubs `dialog:open`, so any
 // earlier stub used for importing a fixture is replaced — which is what you want:
 // the import has already happened by then.
+//
+// Pass `{ hold: true }` to keep the folder picker "open" until the test calls
+// releaseOpenDialog — the only way to observe the window between "the picker
+// fired" and "the export ran", which is where a premature success toast would
+// appear. See stubOpenDialog.
 export async function stubExportFolder(
   app: ElectronApplication,
   page: Page,
   dir: string,
   baseName?: string,
+  opts: { hold?: boolean } = {},
 ): Promise<void> {
-  await stubOpenDialog(app, dir);
+  await stubOpenDialog(app, dir, opts);
   if (baseName !== undefined) {
     await page.getByTestId('export-base-name').fill(baseName);
   }

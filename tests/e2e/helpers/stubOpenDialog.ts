@@ -9,19 +9,35 @@ import type { ElectronApplication } from '@playwright/test';
 //
 // The real `fs:readText` / `fs:readBinary` handlers still run, so tests
 // assert against real file contents on disk — no mocked I/O.
+//
+// `hold: true` makes the stub behave like a picker the user has NOT answered
+// yet: the handler records the call, then parks on a promise that only
+// `releaseOpenDialog` resolves. Without it there is no such state to observe —
+// the handler records and returns the path in one synchronous body, so by the
+// time `getOpenDialogCalls` reports a call the caller already has its
+// destination and the work is running. Any assertion of the form "nothing has
+// claimed success while the picker is open" is then a race against however long
+// the work takes, which for a small fixture is well under one poll interval.
 export async function stubOpenDialog(
   app: ElectronApplication,
   filePathOrResponses: string | (string | null)[],
+  opts: { hold?: boolean } = {},
 ): Promise<void> {
   const responses = Array.isArray(filePathOrResponses) ? filePathOrResponses : [filePathOrResponses];
-  await app.evaluate(async ({ ipcMain }, openResponses: (string | null)[]) => {
+  await app.evaluate(async ({ ipcMain }, { openResponses, hold }: { openResponses: (string | null)[]; hold: boolean }) => {
     const g = globalThis as unknown as {
       __openDialogCalls?: unknown[];
       __openDialogIndex?: number;
+      __openDialogRelease?: (() => void) | null;
+      __openDialogGate?: Promise<void> | null;
       __phytographAllowPath?: (p: string, kind?: 'file' | 'saveFile' | 'directory') => void;
     };
     g.__openDialogCalls = [];
     g.__openDialogIndex = 0;
+    g.__openDialogRelease = null;
+    g.__openDialogGate = hold
+      ? new Promise<void>((resolve) => { g.__openDialogRelease = resolve; })
+      : null;
     // Seed the fs allowlist with every path this stub may return, mirroring the
     // real dialog:open handler — otherwise downstream fs:readBinary/readText is
     // denied (src/main/fsAllowlist.ts). null entries (user-cancel) are skipped.
@@ -29,6 +45,10 @@ export async function stubOpenDialog(
     ipcMain.removeHandler('dialog:open');
     ipcMain.handle('dialog:open', async (_e, opts) => {
       g.__openDialogCalls!.push(opts);
+      // Park BEFORE returning a path, so the caller is genuinely still waiting
+      // on the picker while the test inspects the UI. The call is already
+      // recorded, so getOpenDialogCalls observes it during the hold.
+      if (g.__openDialogGate) await g.__openDialogGate;
       const idx = g.__openDialogIndex ?? 0;
       const value = openResponses[Math.min(idx, openResponses.length - 1)];
       g.__openDialogIndex = idx + 1;
@@ -41,7 +61,17 @@ export async function stubOpenDialog(
       }
       return value;
     });
-  }, responses);
+  }, { openResponses: responses, hold: opts.hold === true });
+}
+
+// Answer a picker stubbed with `hold: true`. No-op if nothing is holding, so a
+// test can release unconditionally in a finally block.
+export async function releaseOpenDialog(app: ElectronApplication): Promise<void> {
+  await app.evaluate(async () => {
+    const g = globalThis as unknown as { __openDialogRelease?: (() => void) | null };
+    g.__openDialogRelease?.();
+    g.__openDialogRelease = null;
+  });
 }
 
 export async function getOpenDialogCalls(app: ElectronApplication): Promise<unknown[]> {

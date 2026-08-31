@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { mkdtempSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
-import { stubOpenDialog, getOpenDialogCalls } from './helpers/stubOpenDialog';
+import { stubOpenDialog, getOpenDialogCalls, releaseOpenDialog } from './helpers/stubOpenDialog';
 import { stubExportFolder } from './helpers/exportFolder';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
@@ -65,19 +65,34 @@ test('exports scan data as LAZ with no premature success toast and a real comple
   }
   await expect(page.getByTestId('toast-title')).toHaveCount(0, { timeout: 15_000 });
 
-  await stubExportFolder(app, page, outDir, 'scan');
+  // Hold the folder picker open, mirroring a user who has been asked for a
+  // destination and has not answered yet. This is what makes assertion (1)
+  // deterministic: without it the stub records the call and returns the path in
+  // the same breath, so by the time the poll below observes a call the export is
+  // already running, and a ~236-point fixture can finish — and fire its
+  // legitimate completion toast — inside a single poll interval. That is a race
+  // no timeout can settle, and it is how this failed on a macOS runner
+  // (run 33375915377) while the product ordering was correct all along.
+  await stubExportFolder(app, page, outDir, 'scan', { hold: true });
   await page.getByTestId('export-scan-xml').click();
 
-  // (1) NOTHING may claim success before the user has even chosen a path. The
-  // save dialog is stubbed to return instantly, so poll for the first toast and
-  // the dialog together and require the dialog to have fired first.
+  // (1) NOTHING may claim success before the user has even chosen a path.
   await expect.poll(async () => (await getOpenDialogCalls(app)).length, { timeout: 15_000 })
     .toBeGreaterThan(0);
+  // The picker is genuinely still open here and stays open until released, so
+  // this snapshot cannot be a post-write toast caught late.
   const titlesBeforeWrite = await page.getByTestId('toast-title').allTextContents();
   expect(
     titlesBeforeWrite.filter(t => /complete|success|exported/i.test(t)),
     `a success toast appeared before any file was written: ${JSON.stringify(titlesBeforeWrite)}`,
   ).toHaveLength(0);
+  // Nothing may be on disk yet either — the destination has not been chosen.
+  expect(
+    readdirSync(outDir).filter(f => f.toLowerCase().endsWith('.laz')),
+    'files were written before the folder picker was answered',
+  ).toHaveLength(0);
+
+  await releaseOpenDialog(app);
 
   // (2) The export must actually produce LAZ files on disk. Poll the SIZE, not
   // existence — the write isn't atomic, so a separate existence check followed
