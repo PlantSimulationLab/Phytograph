@@ -493,3 +493,41 @@ input[type="number"] {
 .animate-slide-in {
   animation: slide-in 0.3s ease-out;
 }
+
+/* Error and warning text is always selectable, everywhere.
+
+   The app root sets `select-none` (App.tsx) so dragging in the 3D viewport
+   doesn't smear a text selection across the UI — right for the chrome, wrong
+   for the one kind of text a user most often needs to copy: the error message
+   they're about to paste into a bug report or an email. Toasts opted back in
+   individually with `select-text`, but the ~30 dialogs, popups and panels that
+   render their own inline errors did not, so a failure shown in a modal could
+   be read and not copied.
+
+   Keying on the semantic colour classes rather than on a wrapper component or a
+   data-testid is deliberate: those are the only marker every one of these sites
+   already shares (testids exist on well under a third of them, and there is no
+   common error component to hook). It also means a NEW error message is
+   selectable the moment it's given the standard colour — the fix can't drift
+   out of date the way a hand-maintained list of call sites would.
+
+   Matched with attribute selectors rather than a list of exact class names so
+   the opacity modifiers come along for free: Tailwind emits `text-red-200/60`
+   as the escaped class `.text-red-200\/60`, which a plain `.text-red-200` rule
+   does NOT match. Twenty-one call sites use a modifier, and they include the
+   single most important one — the crash text in `ErrorBoundary`
+   (`text-red-200/60`) and the backend-startup failure in `BackendSplash`
+   (`text-red-200/80`).
+
+   Scoped to text colours only. Amber/red used as a border, background or icon
+   tint is unaffected, and an icon carries no selectable text anyway. The
+   `~=`-style prefix match is safe because Tailwind's colour utilities are
+   whole tokens: `text-red-300` and `text-red-300/70` are the only shapes, and
+   `border-red-300` / `bg-red-300` do not start with `text-`. */
+[class*="text-red-"],
+[class*="text-amber-"],
+[class*="text-yellow-"],
+[class*="text-orange-"] {
+  -webkit-user-select: text;
+  user-select: text;
+}

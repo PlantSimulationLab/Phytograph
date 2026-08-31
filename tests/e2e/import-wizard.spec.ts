@@ -442,3 +442,48 @@ test('a params-less import still expands to show its fields and extent', async (
   await expect(info).toBeHidden();
   await expect(cols).toBeHidden();
 });
+
+// Error text in a dialog must be SELECTABLE so the user can copy it into a bug
+// report. The app root sets `select-none` (right for the 3D viewport, where a
+// drag would otherwise smear a selection across the UI), and that inherits into
+// every dialog — so the one string a user most needs to copy was the one string
+// they could not. Toasts had opted back in with `select-text`; the ~30 popups,
+// dialogs and panels that render inline errors had not.
+//
+// Asserted against the REAL rendered element via getComputedStyle, not by
+// grepping for a class: what matters is the value the browser actually resolves
+// after the cascade, since an inherited `select-none` beats a rule that never
+// matched.
+test('wizard warning text is selectable so it can be copied', async () => {
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+
+  const wizard = page.getByTestId('import-wizard');
+  await expect(wizard).toBeVisible({ timeout: 30_000 });
+
+  // Untick Target Index (col 5) — a PROTECTED slug, so the wizard raises its
+  // real inline warning. This is the genuine UI path, not an injected string.
+  const targetIdx = page
+    .locator('[data-testid="import-wizard-column"][data-col-index="5"]')
+    .getByTestId('import-wizard-include');
+  await expect(targetIdx).toBeChecked();
+  await targetIdx.uncheck();
+
+  const warn = page.getByTestId('import-wizard-drop-warning');
+  await expect(warn).toBeVisible();
+
+  // The element that actually holds the text resolves to `user-select: text`
+  // despite the ancestor `select-none`. Asserted on the COMPUTED value, not on
+  // the presence of a class: an inherited `select-none` silently beats a rule
+  // that never matched, and only the resolved value proves the cascade won.
+  const warnSelect = await warn.evaluate((el) => getComputedStyle(el).userSelect);
+  expect(warnSelect).toBe('text');
+  expect((await warn.innerText()).trim().length).toBeGreaterThan(10);
+
+  // The fix must stay scoped: ordinary chrome is still unselectable, so a drag
+  // in the viewport can't smear a selection across the UI.
+  const rootSelect = await page
+    .getByTestId('app-root')
+    .evaluate((el) => getComputedStyle(el).userSelect);
+  expect(rootSelect).toBe('none');
+});
