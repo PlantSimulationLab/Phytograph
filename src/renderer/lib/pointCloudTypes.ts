@@ -64,6 +64,19 @@ export interface OctreeRef {
   // heightMin/Max + intensityRange uniforms — without them the gradient
   // lookups all hit the same texel and the cloud renders solid colour.
   attributeRanges?: Record<string, { min: number[]; max: number[] }>;
+  // Exact distinct integer values per attribute slug, computed by the backend
+  // over the points that actually survive (alive AND not sky/miss).
+  //
+  // A categorical class list must come from HERE, not from attributeRanges: a
+  // [min,max] pair cannot express gaps, and its floor is not the lowest
+  // surviving class. Filtering a plot to "Tree 3" leaves the range [3,3], which
+  // a 0..max enumeration still renders as Unassigned/Tree 1/Tree 2/Tree 3 —
+  // three classes owning no points; keeping Trees 1 and 3 leaves [1,3], and
+  // Tree 2 reappears however carefully the endpoints are read.
+  //
+  // Absent for clouds whose octree metadata didn't come from a live session, so
+  // consumers must keep the range-derived fallback.
+  observedClasses?: Record<string, number[]>;
   // Display-name map for imported extra-dimension scalars, keyed by the
   // on-disk attribute slug (e.g. 'Reflectance_dB' → 'Reflectance [dB]').
   // Drives the scalar picker's option labels; slugs without an entry fall

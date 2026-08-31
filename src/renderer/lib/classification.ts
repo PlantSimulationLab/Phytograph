@@ -129,6 +129,25 @@ export function buildTreeInstanceScheme(maxId: number): CategoricalScheme {
   return { attribute: TREE_INSTANCE_ATTRIBUTE, classes };
 }
 
+// Build a tree-instance scheme over an EXACT list of surviving ids. Preferred
+// over buildTreeInstanceScheme whenever the backend reported observed classes:
+// the 0..max enumeration above cannot represent a filtered cloud (keeping only
+// Tree 3 must list Tree 3 alone, not Unassigned/Tree 1/Tree 2/Tree 3), and no
+// [min,max] pair can represent the gap left by keeping Trees 1 and 3.
+// Colours stay keyed to the id, so a class's colour never shifts when its
+// siblings are filtered away.
+export function buildTreeInstanceSchemeFromValues(values: readonly number[]): CategoricalScheme {
+  const ids = Array.from(new Set(values.map((v) => Math.round(v)))).sort((a, b) => a - b);
+  return {
+    attribute: TREE_INSTANCE_ATTRIBUTE,
+    classes: ids.map((i) => ({
+      value: i,
+      label: i === 0 ? 'Unassigned' : `Tree ${i}`,
+      color: treeInstanceColor(i),
+    })),
+  };
+}
+
 // Build a generic categorical scheme spanning the integer values in [min,max],
 // for a field the user marked categorical in the import wizard. Reuses the
 // tree-instance golden-angle palette so successive classes stay distinct, with
@@ -154,6 +173,26 @@ export function buildGenericCategoricalScheme(
     });
   }
   return { attribute, classes };
+}
+
+// Generic wizard-marked scheme over an EXACT list of surviving values — the
+// gap-safe counterpart of buildGenericCategoricalScheme, for the same reason
+// buildTreeInstanceSchemeFromValues exists.
+export function buildGenericCategoricalSchemeFromValues(
+  attribute: string,
+  values: readonly number[],
+): CategoricalScheme {
+  const vals = Array.from(new Set(values.map((v) => Math.round(v))))
+    .sort((a, b) => a - b)
+    .slice(0, GENERIC_CATEGORICAL_MAX_CLASSES);
+  return {
+    attribute,
+    classes: vals.map((v) => ({
+      value: v,
+      label: `Class ${v}`,
+      color: treeInstanceColor(v),
+    })),
+  };
 }
 
 // Sky/miss flag (is_miss): 0 = a real return (hit), 1 = a sky/miss point (the
@@ -338,6 +377,12 @@ export function isDynamicCategoricalAttribute(attribute: string | undefined | nu
 export function categoricalSchemeForRange(
   attribute: string | undefined | null,
   range: [number, number] | undefined | null,
+  // The attribute's EXACT surviving values, when the backend reported them
+  // (octree.observedClasses). Always preferred over `range` for a dynamic
+  // scheme: a range cannot express gaps and its floor is not the lowest
+  // surviving class, so a filtered cloud otherwise lists classes that own no
+  // points. Omitted/empty falls back to the range-derived enumeration.
+  observed?: readonly number[] | null,
 ): CategoricalScheme | null {
   if (!attribute) return categoricalSchemeFor(attribute);
   const key = attribute.toLowerCase();
@@ -345,14 +390,18 @@ export function categoricalSchemeForRange(
   // tree_instance, and the generic wizard-marked one) — the user asked for a
   // gradient, so report no scheme and let the continuous path run.
   if (FORCE_CONTINUOUS.has(key)) return null;
+  const haveObserved = !!observed && observed.length > 0;
   if (key === TREE_INSTANCE_ATTRIBUTE) {
+    if (haveObserved) return buildTreeInstanceSchemeFromValues(observed!);
     const maxId = range ? range[1] : 0;
     return buildTreeInstanceScheme(maxId);
   }
   const registered = categoricalSchemeFor(attribute);
   if (registered) return registered;
   if (DYNAMIC_CATEGORICAL.has(key)) {
-    return buildGenericCategoricalScheme(attribute, range ?? null);
+    return haveObserved
+      ? buildGenericCategoricalSchemeFromValues(attribute, observed!)
+      : buildGenericCategoricalScheme(attribute, range ?? null);
   }
   return null;
 }
@@ -411,6 +460,11 @@ export function categoricalSchemeForCloud(
   attribute: string | undefined | null,
   range: [number, number] | undefined | null,
   palettes: Record<string, { slug: string; classes: ClassDef[] }> | undefined | null,
+  // This cloud's exact surviving values for the attribute, when known. A user
+  // palette still outranks it: the palette is the class list the user AUTHORED,
+  // and hiding one of its classes because the current cloud happens to have no
+  // points in it would make the legend flicker as they paint.
+  observed?: readonly number[] | null,
 ): CategoricalScheme | null {
   if (!attribute) return null;
   const key = attribute.toLowerCase();
@@ -419,7 +473,7 @@ export function categoricalSchemeForCloud(
   if (palette && palette.classes.length > 0) {
     return { attribute: key, classes: palette.classes };
   }
-  return categoricalSchemeForRange(attribute, range);
+  return categoricalSchemeForRange(attribute, range, observed);
 }
 
 const UNKNOWN_CLASS_COLOR: RGB = [0.6, 0.6, 0.6];

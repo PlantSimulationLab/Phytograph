@@ -679,7 +679,7 @@ def test_any_rebuild_clears_the_stale_flag(tmp_path, monkeypatch):
         sid, main.SessionTransformRequest(matrix=_rot_matrix(), octree_mode="pose"))
     assert sess.octree_pose is not None
 
-    main.session_filter(sid, main.SessionFilterRequest(
+    main._do_session_filter(sid, main.SessionFilterRequest(
         region=main.CropOctreeRegion(kind="box", min=[-1e6] * 3, max=[1e6] * 3)))
 
     assert sess.octree_pose is None

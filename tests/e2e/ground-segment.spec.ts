@@ -186,10 +186,30 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
   // Filter (remove points): the segment→filter flow must succeed (not 400) and
   // keep only the ~600 plant points (CSF matches the fixture's ground truth).
   await page.getByTestId('filter-remove').click();
+
+  // While the backend rebuilds the octree the user MUST get a signal, or the
+  // button reads as dead and they re-click — each click queueing another full
+  // filter. The pill is cancellable; here we just let it finish.
+  // (Raced deliberately: on this small fixture the rebuild can beat the poll,
+  // so a missing pill is only a failure if the work is still running.)
+  const pill = page.getByTestId('filter-running');
+  const commitButton = page.getByTestId('filter-remove');
   await expect(async () => {
     const n = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
     expect(n).toBe(600);
   }).toPass({ timeout: 60_000 });
+  // The pill and the disabled state must both be gone once the work is done.
+  await expect(pill).toHaveCount(0);
+  await expect(commitButton).toBeEnabled();
+
+  // NOTE: ground_class is a REGISTERED scheme (a fixed Ground/Non-ground
+  // vocabulary), so its class list is deliberately NOT narrowed to the values
+  // that survive — the two classes are the meaning of the column, not an
+  // observation of it. The generated schemes (tree_instance and wizard-marked
+  // columns) are the ones that must reflect the surviving values; that is
+  // covered where it can be asserted precisely, in
+  // src/renderer/lib/treeInstance.test.ts and
+  // backend-api/tests/test_cloud_session.py.
 });
 
 // Regression: the Ground Class legend must disappear when the segmented scan is

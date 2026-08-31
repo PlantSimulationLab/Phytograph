@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.74.0"
+BACKEND_VERSION = "0.75.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -21102,6 +21102,15 @@ class _ProgressReporter:
         return self._cancel_event is not None and self._cancel_event.is_set()
 
     @property
+    def cancel_event(self):
+        """The run's cancel Event, for handing to a child-process/subprocess
+        stage that polls an Event directly rather than calling `should_cancel`
+        (e.g. `_run_potree_converter`). Part of the duck-typed cancel protocol —
+        `_WindowedProgress` delegates it — so a sub-range reporter never
+        silently degrades a hard kill into a detached fetch."""
+        return self._cancel_event
+
+    @property
     def cancelled(self) -> bool:
         return self.should_cancel()
 
@@ -21157,6 +21166,10 @@ class _WindowedProgress:
     @property
     def cancelled(self) -> bool:
         return self.should_cancel()
+
+    @property
+    def cancel_event(self):
+        return getattr(self._outer, "cancel_event", None)
 
     def raise_if_cancelled(self) -> None:
         if self.should_cancel():
@@ -27127,7 +27140,13 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
     _sweep_cloud_sessions()
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
-    meta = {"cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+        # Exact class lists for the categorical pickers/legend at IMPORT, not
+        # just after the first edit (every later edit re-attaches these in
+        # `_session_rebuild`). Without it a freshly imported cloud whose class
+        # column starts at 1 would still list a phantom class 0.
+        observed_classes = _session_observed_classes_locked(sess)
+    meta = {"cache_id": cache_key, "cache_dir": str(cache_dir),
+            "observed_classes": observed_classes, **meta}
 
     # Surface sky/miss info so the renderer can hide misses by default, colour
     # them distinctly, and relocate them onto the bounding sphere for display.
@@ -28206,6 +28225,56 @@ def _session_editable_mask_locked(sess: "CloudSession") -> np.ndarray:
     return editable
 
 
+# Widest class list we will enumerate for a categorical column. Matches the
+# import wizard's `_CATEGORICAL_MAX_DISTINCT` in spirit but is deliberately far
+# looser: this runs over the REAL column (not a sampled preview), and a
+# per-tree instance column on a forest plot legitimately carries hundreds of
+# classes. A column with more distinct values than this is continuous in
+# practice, so we report nothing and the renderer falls back to its range-derived
+# scheme rather than shipping a huge list on every rebuild.
+_OBSERVED_CLASSES_MAX = 4096
+
+
+def _session_observed_classes_locked(sess: "CloudSession") -> dict:
+    """{slug: [sorted distinct int values]} for every integer-valued extra-dim
+    column, over the points that actually SURVIVE and are real returns. Caller
+    holds the lock.
+
+    This exists because a categorical class list cannot be reconstructed from an
+    attribute's [min,max] alone, which is all PotreeConverter's metadata carries.
+    Filtering a plot down to "Tree 3" leaves the range [3,3] — and a renderer
+    enumerating 0..max from that still invents Unassigned/Tree 1/Tree 2, listing
+    three classes that no longer own a single point. Worse, min/max cannot
+    express GAPS: keeping Trees 1 and 3 gives [1,3], and Tree 2 reappears no
+    matter how carefully the endpoints are honoured. Only the distinct values are
+    the truth, so we compute them where the arrays live.
+
+    Restricted to alive-and-not-miss for the same reason
+    `_label_class_summary_locked` is: sky/miss points are 0 in every class
+    column, so including them would resurrect a phantom class 0 ("Unassigned")
+    on exactly the filtered scans this is meant to fix."""
+    editable = _session_editable_mask_locked(sess)
+    out: dict = {}
+    if not editable.any():
+        return out
+    for slug, col in sess.extras.items():
+        if slug == _MISS_SLUG or col is None:
+            continue
+        vals = col[editable]
+        # Integer-valued only: a continuous column (reflectance, timestamp) has
+        # no class list, and `np.unique` over millions of floats is wasted work.
+        finite = np.isfinite(vals)
+        if not finite.all() or vals.size == 0:
+            continue
+        if not np.array_equal(vals, np.rint(vals)):
+            continue
+        uniq = np.unique(vals.astype(np.int64))
+        if len(uniq) > _OBSERVED_CLASSES_MAX:
+            continue
+        out[slug] = [int(v) for v in uniq]
+    return out
+
+
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
     """Append (or replace) a per-point scalar extra-dim column on the session
     array. `values` is aligned to the SURVIVING points (positions[~deleted]);
@@ -28222,11 +28291,22 @@ def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, value
         sess.extra_dims_meta.append({"slug": slug, "label": label})
 
 
-def _session_rebuild(sess: "CloudSession") -> tuple[str, _Path, dict]:
+def _session_rebuild(
+    sess: "CloudSession",
+    progress=None,
+    cancel_event: "Optional[threading.Event]" = None,
+    span: "Tuple[float, float]" = (0.0, 1.0),
+) -> tuple[str, _Path, dict]:
     """Rebuild the session's derived octree FROM THE IN-RAM ARRAYS (survivors +
     all attributes), update octree_cache_id, and return (cache_key, dir, meta).
     No source file read. Caller must NOT hold the lock (PotreeConverter is slow);
-    this snapshots under the lock then converts outside it."""
+    this snapshots under the lock then converts outside it.
+
+    `progress`/`cancel_event`/`span` are optional and forwarded to
+    `_build_octree_from_las`, so a streaming caller gets real PotreeConverter
+    progress and a cancel that HARD-KILLS the converter child rather than merely
+    detaching the client's fetch. Every non-streaming caller omits them and is
+    unaffected."""
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "rebuilt.las"
@@ -28234,7 +28314,10 @@ def _session_rebuild(sess: "CloudSession") -> tuple[str, _Path, dict]:
             # Octree is hits-only (misses stay in the session for LAD/overlay).
             _session_to_las(sess, las_path, exclude_misses=True)
             extra_dims_meta = list(sess.extra_dims_meta)
-        cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
+        cache_key, cache_dir, meta = _build_octree_from_las(
+            las_path, extra_dims_meta,
+            progress=progress, cancel_event=cancel_event, span=span,
+        )
     with _cloud_session_lock:
         sess.octree_cache_id = cache_key
         # The octree was just built FROM the current arrays, so any posed
@@ -28245,6 +28328,13 @@ def _session_rebuild(sess: "CloudSession") -> tuple[str, _Path, dict]:
         # eventually forgets, and forgetting leaves the renderer posing an octree
         # that already has the transform baked in.
         sess.octree_pose = None
+        # Exact class lists, attached HERE for the same reason the pose is
+        # cleared here: every edit that changes which points exist (filter,
+        # split, segment, extract, bake, commit_labels) funnels through this one
+        # function, so a per-caller attach is a rule someone eventually forgets —
+        # and forgetting leaves the renderer listing classes the cloud no longer
+        # contains. See `_session_observed_classes_locked`.
+        meta = {**meta, "observed_classes": _session_observed_classes_locked(sess)}
     return cache_key, cache_dir, meta
 
 
@@ -29538,15 +29628,17 @@ class SessionFilterRequest(BaseModel):
     rebuild: bool = True
 
 
-@app.post("/api/cloud/session/{session_id}/filter")
-def session_filter(session_id: str, request: SessionFilterRequest):
-    """Delete the points a spatial+scalar filter excludes, on the in-RAM arrays."""
+def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=None) -> dict:
+    """Body of the filter endpoint, split out so the route can stream PHP1
+    progress and be cancelled. `progress` is a _ProgressReporter or None."""
     sess = _get_cloud_session(session_id)
     region_dict = request.region.model_dump() if request.region else None
     if region_dict is not None:
         _canonical_region(region_dict)
     if region_dict is None and not request.scalar_filters:
         raise HTTPException(status_code=400, detail="filter requires `region` or `scalar_filters`.")
+    if progress is not None:
+        progress(0.0, "Selecting points…")
 
     with _cloud_session_lock:
         # keep-mask over the SURVIVING points: region (defaults all-True) AND
@@ -29603,8 +29695,39 @@ def session_filter(session_id: str, request: SessionFilterRequest):
 
     if not request.rebuild:
         return {"session_id": session_id, "remaining_count": remaining, "deleted_count": total - remaining, "total_count": total, "rebuilt": False}
-    cache_key, cache_dir, meta = _session_rebuild(sess)
+    # The deliberately-slow step. The mask commit above is milliseconds; this
+    # octree reconversion is the whole wait the user sees, so it owns almost the
+    # entire progress span and carries the cancel that kills the converter child.
+    cache_key, cache_dir, meta = _session_rebuild(
+        sess, progress=progress, span=(0.05, 1.0),
+        cancel_event=getattr(progress, "cancel_event", None),
+    )
     return {"session_id": session_id, "point_count": remaining, "rebuilt": True, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+
+
+@app.post("/api/cloud/session/{session_id}/filter")
+def session_filter(session_id: str, request: SessionFilterRequest, http_request: Request):
+    """Delete the points a spatial+scalar filter excludes, on the in-RAM arrays.
+
+    Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+    Applying a filter rebuilds the octree via PotreeConverter — a minute-scale
+    job on a large plot — and before this streamed the button looked dead:
+    the user had no signal it was running, clicked again, and each click queued
+    ANOTHER full filter+reconversion. Cancel targets `/api/cancel/{run_id}`,
+    which fires the event `_run_potree_converter` polls, so the converter child
+    is hard-killed rather than left running behind a detached fetch."""
+    # Validate before the stream opens: once the 200 + first chunk is out, an
+    # HTTPException can only reach the client as a truncated body.
+    _get_cloud_session(session_id)
+    if request.region is None and not request.scalar_filters:
+        raise HTTPException(status_code=400, detail="filter requires `region` or `scalar_filters`.")
+
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_session_filter(session_id, request, progress)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 @app.delete("/api/cloud/session/{session_id}")

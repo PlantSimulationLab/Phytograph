@@ -438,9 +438,19 @@ point, you're offered the chance to delete the cloud instead.
     Small (in-memory) clouds preview the filter live in the viewport as you
     edit the range. Large, octree-backed clouds have no live preview —
     committing applies the filter to the in-memory points and rebuilds the
-    displayed octree from the survivors (the file is not re-read), so the
-    change appears once that brief step finishes. A second filter composes on
-    the first result, never re-admitting points an earlier filter removed.
+    displayed octree from the survivors (the file is not re-read). On a large
+    plot that rebuild takes a while, so a **progress pill** appears at the top
+    of the viewport while it runs and the commit button reads *Filtering…* —
+    there's no need to click it again. **Cancel** on the pill stops the work
+    for real (the conversion is killed, not just left running in the
+    background) and leaves the cloud untouched, so you can adjust the
+    selection and retry. A second filter composes on the first result, never
+    re-admitting points an earlier filter removed.
+
+!!! tip "The class list reflects what's left"
+    After a filter, re-opening the panel shows only the classes the cloud
+    still contains — filter to Tree 3 and Tree 3 is the only class listed.
+    So an unchanged list is a genuine signal that nothing was removed.
 
 ## Resample
 

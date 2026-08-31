@@ -3749,6 +3749,14 @@ export interface OctreeMetadata {
   bounds: { min: [number, number, number]; max: [number, number, number] };
   tight_bounds: { min: [number, number, number]; max: [number, number, number] };
   attributes: OctreeAttribute[];
+  // Exact distinct integer values per scalar slug, over the points that
+  // actually survive (alive and not sky/miss). Categorical class lists MUST come
+  // from this rather than an attribute's [min,max]: a range cannot express gaps
+  // (keeping Trees 1 and 3 reads as [1,3], resurrecting Tree 2) and its floor is
+  // not the lowest surviving class (keeping only Tree 3 reads as [3,3], which a
+  // 0..max enumeration still turns into Unassigned/Tree 1/Tree 2/Tree 3).
+  // Absent on octree metadata not produced from a live session.
+  observed_classes?: Record<string, number[]>;
 }
 
 /**
@@ -4375,30 +4383,34 @@ export async function bakeCloudSession(
  */
 export async function sessionFilter(
   sessionId: string,
-  options: { region?: CropOctreeRegion | null; scalarFilters?: ScalarFilter[] | null; rebuild?: boolean },
+  options: {
+    region?: CropOctreeRegion | null;
+    scalarFilters?: ScalarFilter[] | null;
+    rebuild?: boolean;
+    // Applying a filter reconverts the octree — a minute-scale job on a large
+    // plot — so the caller needs a status pill and a REAL cancel. `onRunId`
+    // surfaces the backend run id so the pill can POST /api/cancel/{run_id},
+    // which hard-kills the PotreeConverter child; aborting the signal alone
+    // would only detach this fetch and leave the work running.
+    signal?: AbortSignal;
+    onProgress?: BinaryFrameProgress;
+    onRunId?: (runId: string) => void;
+  },
 ): Promise<CloudSessionBakeResult & { rebuilt: boolean }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/filter');
   try {
-    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/filter`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    return await fetchJsonWithProgress<CloudSessionBakeResult & { rebuilt: boolean }>(
+      `/api/cloud/session/${sessionId}/filter`,
+      {
         region: options.region ?? null,
         scalar_filters: options.scalarFilters ?? null,
         rebuild: options.rebuild ?? true,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionBakeResult & { rebuilt: boolean };
+      },
+      options.signal,
+      600000,
+      options.onProgress,
+      options.onRunId,
+    );
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('session_filter failed:', error);
     throw error;
   }

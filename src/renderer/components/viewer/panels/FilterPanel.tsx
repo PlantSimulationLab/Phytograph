@@ -43,6 +43,10 @@ interface FilterPanelProps {
   onClearAllFilters: () => void;
   onApplyFilter: () => void;
   onSegmentFilter: () => void;
+  // True while the permanent filter's backend round-trip (octree reconversion)
+  // is in flight. Disables the commit button so an impatient re-click can't
+  // queue a second full filter; the cancellable StatusPill carries the progress.
+  isApplying?: boolean;
 }
 
 export function FilterPanel({
@@ -66,6 +70,7 @@ export function FilterPanel({
   onClearAllFilters,
   onApplyFilter,
   onSegmentFilter,
+  isApplying = false,
 }: FilterPanelProps) {
   return (
     <div className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
@@ -239,9 +244,10 @@ export function FilterPanel({
           <button
             data-testid="filter-remove"
             onClick={onApplyFilter}
-            className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white"
+            disabled={isApplying}
+            className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-600"
           >
-            Filter (remove points)
+            {isApplying ? 'Filtering…' : 'Filter (remove points)'}
           </button>
           <button
             data-testid="filter-segment"

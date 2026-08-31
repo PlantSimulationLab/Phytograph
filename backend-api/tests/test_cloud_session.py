@@ -390,7 +390,9 @@ def test_session_filter_deletes_excluded_points_no_file_read(client, cache_root,
         json={"region": BOX, "rebuild": True},
     )
     assert res.status_code == 200, res.text
-    body = res.json()
+    # The filter streams PHP1 progress markers ahead of its JSON tail (the
+    # octree rebuild is the slow, cancellable step), so decode rather than .json().
+    body = decode_streamed_json(res.content)
     assert body["rebuilt"] is True
     assert body["point_count"] == expected_keep
     assert called["loaded"] is False  # no source file read during filter
@@ -408,7 +410,7 @@ def test_session_filter_empty_result_does_not_commit_or_rebuild(client, cache_ro
     empty_box = {"kind": "box", "min": [100, 100, 100], "max": [200, 200, 200], "invert": False}
     res = client.post(f"/api/cloud/session/{sid}/filter", json={"region": empty_box, "rebuild": True})
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
     assert body["point_count"] == 0
     assert body["rebuilt"] is False
     # Session untouched — still 1000 live points.
@@ -433,14 +435,94 @@ def test_session_filter_composes_on_survivors_not_original(client, cache_root, t
     # First filter: keep dev in [0,3] → 4 survivors.
     r1 = client.post(f"/api/cloud/session/{sid}/filter",
                      json={"scalar_filters": [{"slug": "dev", "min": 0, "max": 3}], "rebuild": True})
-    assert r1.json()["point_count"] == 4
+    assert decode_streamed_json(r1.content)["point_count"] == 4
 
     # Second filter: keep dev in [6,9] — disjoint from the survivors (dev 0..3),
     # so it keeps NOTHING. Must report empty (not re-admit the original points).
     r2 = client.post(f"/api/cloud/session/{sid}/filter",
                      json={"scalar_filters": [{"slug": "dev", "min": 6, "max": 9}], "rebuild": True})
-    assert r2.json()["point_count"] == 0
+    assert decode_streamed_json(r2.content)["point_count"] == 0
     assert int((~main._cloud_sessions[sid].deleted).sum()) == 4  # still the 4 survivors
+
+
+def test_filter_reports_only_the_classes_that_survive(client, cache_root, tmp_path):
+    """REGRESSION: after filtering to a single tree instance, the Filter panel
+    still listed Unassigned/Tree 1/Tree 2/Tree 3.
+
+    The class list was derived from the attribute's [min,max], and the renderer
+    enumerated 0..max. Keeping only Tree 3 leaves the range [3,3], which still
+    expands to four classes — three of which own no points — so re-opening the
+    panel implied the filter had never run. `observed_classes` reports the EXACT
+    surviving values, which is the only thing a range cannot encode.
+    """
+    f = tmp_path / "trees.xyz"
+    rows = []
+    for cls in range(4):
+        for i in range(40):
+            rows.append(f"{cls + i * 0.01:.4f} {i * 0.01:.4f} 0.0 {cls}")
+    f.write_text("\n".join(rows) + "\n")
+    plan = {"columns": [
+        {"index": 0, "role": "x"}, {"index": 1, "role": "y"}, {"index": 2, "role": "z"},
+        {"index": 3, "role": "extra", "slug": "tree_instance", "label": "Tree Instance"},
+    ]}
+    created = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(f), "column_plan": plan}).content)
+    sid = created["session_id"]
+    # At import every class is present.
+    assert created["observed_classes"]["tree_instance"] == [0, 1, 2, 3]
+
+    # Keep ONLY Tree 3 — the reported case.
+    body = decode_streamed_json(client.post(
+        f"/api/cloud/session/{sid}/filter",
+        json={"scalar_filters": [{"slug": "tree_instance", "values": [3]}],
+              "rebuild": True}).content)
+    assert body["point_count"] == 40
+    assert body["observed_classes"]["tree_instance"] == [3]
+    # The range alone still spans a single value here, which is exactly why the
+    # 0..max enumeration invented Unassigned/Tree 1/Tree 2 on top of it.
+    tree_attr = next(a for a in body["attributes"] if a["name"] == "tree_instance")
+    assert tree_attr["min"] == [3.0] and tree_attr["max"] == [3.0]
+
+
+def test_filter_reports_class_gaps_a_range_cannot_express(client, cache_root, tmp_path):
+    """Keeping Trees 1 and 3 leaves the range [1,3]: ANY range-derived list
+    resurrects Tree 2. Only the distinct values carry the gap."""
+    f = tmp_path / "trees.xyz"
+    rows = []
+    for cls in range(4):
+        for i in range(40):
+            rows.append(f"{cls + i * 0.01:.4f} {i * 0.01:.4f} 0.0 {cls}")
+    f.write_text("\n".join(rows) + "\n")
+    plan = {"columns": [
+        {"index": 0, "role": "x"}, {"index": 1, "role": "y"}, {"index": 2, "role": "z"},
+        {"index": 3, "role": "extra", "slug": "tree_instance", "label": "Tree Instance"},
+    ]}
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(f), "column_plan": plan}).content)["session_id"]
+
+    body = decode_streamed_json(client.post(
+        f"/api/cloud/session/{sid}/filter",
+        json={"scalar_filters": [{"slug": "tree_instance", "values": [1, 3]}],
+              "rebuild": True}).content)
+    assert body["point_count"] == 80
+    assert body["observed_classes"]["tree_instance"] == [1, 3]
+
+
+def test_filter_streams_progress_markers(client, cache_root, grid_xyz):
+    """The filter must stream PHP1 progress ahead of its JSON tail. Without it
+    the button read as dead during the octree reconversion and users re-clicked,
+    queueing another full filter each time — and there was no run_id to cancel."""
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    raw = client.post(f"/api/cloud/session/{sid}/filter",
+                      json={"region": BOX, "rebuild": True}).content
+    assert raw.count(b"PHP1") >= 1, "filter emitted no progress markers"
+    # The first marker carries the run_id the cancel button targets.
+    assert b'"run_id"' in raw[:raw.index(b'{"session_id"')]
 
 
 def test_session_segment_ground_appends_class_no_file_read(client, cache_root, tmp_path, monkeypatch):

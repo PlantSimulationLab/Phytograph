@@ -1643,6 +1643,16 @@ export default function PointCloudViewer({
   const alignDistRunIdRef = useRef<string | null>(null);
   // Backfill Misses: a setup modal (scan picker) + a streamed StatusPill progress
   // bar, mirroring the Triangulation / LAD pattern.
+  // Applying a filter permanently reconverts the octree (PotreeConverter) — a
+  // minute-scale job on a large plot. Without a pill the button looked dead and
+  // the user re-clicked, queueing another full filter+reconversion each time.
+  // `filterRunIdRef` carries the backend run id so Cancel can hard-kill the
+  // converter child, not merely detach the fetch.
+  const [isFilterRunning, setIsFilterRunning] = useState(false);
+  const [filterProgress, setFilterProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const filterAbortRef = useRef<AbortController | null>(null);
+  const filterRunIdRef = useRef<string | null>(null);
+
   const [showBackfillPopup, setShowBackfillPopup] = useState(false);
   const [isBackfillRunning, setIsBackfillRunning] = useState(false);
   const [backfillProgress, setBackfillProgress] = useState<{ label: string; value: number | null } | null>(null);
@@ -5325,6 +5335,10 @@ export default function PointCloudViewer({
   // Apply filter permanently - removes filtered out points from the point cloud
   const handleApplyFilterPermanently = useCallback(async () => {
     if (selectedIds.size !== 1) return;
+    // Re-entry guard. The octree rebuild takes long enough that the button reads
+    // as unresponsive; without this, every impatient click fired ANOTHER full
+    // filter + reconversion against the same session.
+    if (isFilterRunning) return;
 
     const cloudId = Array.from(selectedIds)[0];
     const cloud = clouds.find(c => c.id === cloudId);
@@ -5345,11 +5359,20 @@ export default function PointCloudViewer({
       const octreeInfo = cloud.data.octree;
       const sessionId = octreeInfo.sessionId!;
       const args = buildOctreeFilterArgs(cloud, filters);
+      const controller = new AbortController();
+      filterAbortRef.current = controller;
+      filterRunIdRef.current = null;
+      setIsFilterRunning(true);
+      setFilterProgress({ label: 'Filtering points…', value: 0 });
       try {
         const result = await sessionFilter(sessionId, {
           region: args.region ?? null,
           scalarFilters: args.scalarFilters ?? null,
           rebuild: true,
+          signal: controller.signal,
+          onProgress: (value, label) =>
+            setFilterProgress({ label: label || 'Filtering points…', value }),
+          onRunId: (runId) => { filterRunIdRef.current = runId; },
         });
         if (result.point_count === 0) {
           setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
@@ -5357,9 +5380,20 @@ export default function PointCloudViewer({
         }
         onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
       } catch (err) {
+        // A user cancel is not a failure — the pill's Cancel already killed the
+        // backend work, so report nothing and leave the filter state intact so
+        // the selection survives for a retry.
+        if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+          return;
+        }
         console.error('[handleApplyFilterPermanently] session filter failed:', err);
         showToast({ title: `Filter failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
         return;
+      } finally {
+        setIsFilterRunning(false);
+        setFilterProgress(null);
+        filterAbortRef.current = null;
+        filterRunIdRef.current = null;
       }
       clearFilterStateForCloud(cloud.id);
       return;
@@ -5379,7 +5413,21 @@ export default function PointCloudViewer({
     }
     onUpdateCloud(cloud.id, newData);
     clearFilterStateForCloud(cloud.id);
-  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
+  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData, isFilterRunning]);
+
+  // Cancel an in-flight permanent filter. Kills the BACKEND work first (the
+  // PotreeConverter child polls this run's cancel event and is hard-killed), then
+  // tears down the fetch — aborting the fetch alone would leave the reconversion
+  // running to completion on a cloud the user already abandoned.
+  const cancelFilter = useCallback(() => {
+    const runId = filterRunIdRef.current;
+    if (runId) void cancelRun(runId).catch(() => {});
+    filterAbortRef.current?.abort();
+    setIsFilterRunning(false);
+    setFilterProgress(null);
+    filterAbortRef.current = null;
+    filterRunIdRef.current = null;
+  }, []);
 
   // Segment by filter: keep the in-range points on the original cloud AND add
   // the out-of-range points as a second cloud. Nothing is discarded — kept +
@@ -18427,6 +18475,18 @@ export default function PointCloudViewer({
         />
       )}
 
+      {/* Permanent-filter status. The panel stays open behind it, so this pill is
+          the only signal that the octree reconversion is running — and its
+          Cancel kills the converter child, not just the fetch. */}
+      {isFilterRunning && (
+        <StatusPill
+          testId="filter-running"
+          label={filterProgress?.label ?? 'Filtering points…'}
+          progress={filterProgress?.value ?? null}
+          onCancel={cancelFilter}
+        />
+      )}
+
       {isBackfillRunning && (
         <StatusPill
           testId="backfill-running"
@@ -20286,7 +20346,14 @@ export default function PointCloudViewer({
           // immediately narrows the kept set — no "nothing happens" first toggle.
           const slug = fieldValue.startsWith('scalar:') ? fieldValue.substring(7) : null;
           if (slug && field && isCategoricalAttribute(slug) && !currentFilter?.selectedClasses) {
-            const scheme = categoricalSchemeForRange(slug, [field.bounds.min, field.bounds.max]);
+            // Same observed-values source as the panel's own scheme below —
+            // seeding from a wider list would pre-tick classes the panel never
+            // renders, so "keep everything" and the visible boxes would disagree.
+            const scheme = categoricalSchemeForRange(
+              slug,
+              [field.bounds.min, field.bounds.max],
+              data.octree?.observedClasses?.[slug],
+            );
             if (scheme) {
               const existing = filters.scalarFields[slug];
               const newFilters = { ...filters };
@@ -20317,12 +20384,24 @@ export default function PointCloudViewer({
         // Categorical fields (ground_class / tree_instance) get a class-checkbox
         // UI instead of min/max inputs. The slug is the dropdown value minus the
         // `scalar:` prefix; the class list comes from the registered scheme
-        // (ground_class) or is generated from the field's [min,max] (tree_instance).
+        // (ground_class), the backend's EXACT surviving values when it reported
+        // them, or — only as a fallback — the field's [min,max].
+        //
+        // The observed list is what makes the panel honest after a filter: with
+        // the range alone, keeping just Tree 3 still listed Unassigned/Tree 1/
+        // Tree 2/Tree 3, so re-opening the panel implied the filter hadn't run.
         const selectedSlug = selectedFilterField?.startsWith('scalar:')
           ? selectedFilterField.substring(7)
           : null;
+        const observedForSlug = selectedSlug
+          ? data.octree?.observedClasses?.[selectedSlug]
+          : undefined;
         const categoricalScheme = selectedSlug && selectedField && isCategoricalAttribute(selectedSlug)
-          ? categoricalSchemeForRange(selectedSlug, [selectedField.bounds.min, selectedField.bounds.max])
+          ? categoricalSchemeForRange(
+              selectedSlug,
+              [selectedField.bounds.min, selectedField.bounds.max],
+              observedForSlug,
+            )
           : null;
         // Default selection when first opening a categorical field: all classes.
         const selectedClasses = currentFilter?.selectedClasses
@@ -20351,6 +20430,7 @@ export default function PointCloudViewer({
             onClearAllFilters={clearAllFilters}
             onApplyFilter={handleApplyFilterPermanently}
             onSegmentFilter={handleSegmentFilter}
+            isApplying={isFilterRunning}
           />
         );
       })()}

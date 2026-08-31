@@ -1018,6 +1018,20 @@ export function buildPointCloudFromOctree(
       asciiFormat: asciiFormat ?? null,
       attributeRanges,
       attributeLabels,
+      // Exact per-slug class lists from the backend session (see
+      // OctreeMetadata.observed_classes). Categorical schemes prefer this over
+      // attributeRanges, which cannot express gaps or a non-zero floor.
+      observedClasses: (() => {
+        const oc = (meta as OctreeMetadata & { observed_classes?: unknown }).observed_classes;
+        if (!oc || typeof oc !== 'object') return undefined;
+        const out: Record<string, number[]> = {};
+        for (const [slug, vals] of Object.entries(oc as Record<string, unknown>)) {
+          if (Array.isArray(vals) && vals.every((v) => typeof v === 'number' && isFinite(v))) {
+            out[slug] = vals as number[];
+          }
+        }
+        return Object.keys(out).length ? out : undefined;
+      })(),
       columnPlan: columnPlan ?? null,
       categoricalAttributes: categoricalAttributes && categoricalAttributes.length
         ? categoricalAttributes
