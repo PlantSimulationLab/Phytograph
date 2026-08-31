@@ -19831,6 +19831,32 @@ def _tokenize_ascii_format(fmt: str) -> List[str]:
     return roles
 
 
+def _is_header_row(line: str, delimiter: Optional[str] = None) -> bool:
+    """True when `line` reads as a column legend rather than a row of data.
+
+    The test is "does at least one token FAIL to parse as a number", not "does
+    the line contain a letter". The letter test looks equivalent and is not:
+    `nan`, `inf`, `-Infinity` and scientific notation (`1.234e+05`) are all
+    letter-bearing values that `float()` accepts, so a legitimate first data row
+    written in `%e` format was classified as a header — and the caller then told
+    pandas to skip it, silently eating a real point with no error anywhere.
+
+    Delimiter-aware because a comma/semicolon file splits into one whitespace
+    token, which would make every such row a single unparseable blob. Callers
+    that already know the delimiter pass it; the default splits on whitespace.
+    """
+    toks = _split_ascii_row(line, delimiter)
+    toks = [t for t in toks if t.strip()]
+    if not toks:
+        return False
+    for t in toks:
+        try:
+            float(t)
+        except ValueError:
+            return True
+    return False
+
+
 def _first_nonblank_ascii_line(file_path: str) -> Optional[tuple]:
     """Return (line_text, was_commented) for the first meaningful line of an
     ASCII point file, or None if the file is empty/all-blank.
@@ -19908,15 +19934,26 @@ def _autodetect_xyz_columns(file_path: str) -> List[str]:
     # whole layout to a bare x/y/z, discarding the file's real colour/intensity
     # columns. Drop it before sampling.
     skip_count_line = _is_pts_count_header(file_path)
+    seen_uncommented = False
     with open(file_path) as f:
-        for raw in f:
+        for lineno, raw in enumerate(f):
+            if lineno >= _DELIM_SNIFF_MAX_LINES:
+                break
             line = raw.strip()
             if not line or line.startswith('#') or line.startswith('//'):
                 continue
             toks = line.split()
-            # Skip a header row — use the first data row for the count.
-            if any(re.search(r'[a-zA-Z]', tok) for tok in toks):
-                continue
+            # Skip a header row — use the first data row for the count. Only the
+            # FIRST uncommented line is a header candidate, and the test is
+            # "unparseable as a number", not "contains a letter": scientific
+            # notation and nan/inf are letter-bearing DATA, and skipping every
+            # such row walked the entire file and then returned an empty sample
+            # (falling back to a bare x/y/z layout that discards the file's real
+            # colour/intensity columns). See `_is_header_row`.
+            if not seen_uncommented:
+                seen_uncommented = True
+                if _is_header_row(line):
+                    continue
             if skip_count_line:
                 skip_count_line = False
                 continue
@@ -20078,7 +20115,11 @@ def _first_data_row_has_letters(file_path: str) -> bool:
     line, was_commented = first
     if was_commented:
         return False
-    return any(re.search(r'[a-zA-Z]', tok) for tok in line.split())
+    # "Unparseable as a number", not "contains a letter" — `1.234e+05` and `nan`
+    # are letter-bearing DATA, and calling them a header eats a real point. See
+    # `_is_header_row`.
+    return all(_is_header_row(line, d)
+               for d in ('comma', 'tab', 'semicolon', None))
 
 
 def _ascii_pandas_sep(file_path: str) -> str:
@@ -20178,7 +20219,10 @@ def _ascii_skiprows(file_path: str) -> int:
                 return 1 if stripped.startswith('//') else 0
         return 0
     # Bare (uncommented) line: skip it only if it's a text header, not data.
-    if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
+    # A row is a header only if it reads as one under EVERY candidate delimiter
+    # — see `_is_header_row` for why "contains a letter" is the wrong test (it
+    # ate the first point of any file whose coordinates are in `%e` form).
+    if all(_is_header_row(line, d) for d in ('comma', 'tab', 'semicolon', None)):
         return 1
     # A PTS point-count line is all digits, so the letter test above misses it.
     return 1 if _is_pts_count_header(file_path) else 0
@@ -20279,7 +20323,11 @@ def _read_ascii_header_names(file_path: str) -> Optional[List[str]]:
     if first is None:
         return None
     line, was_commented = first
-    if not any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
+    # A row of `%e` coordinates contains letters but is data, not names — test
+    # for unparseable tokens instead (see `_is_header_row`), or a scientific-
+    # notation first row would be consumed as the column legend.
+    if not all(_is_header_row(line, d)
+               for d in ('comma', 'tab', 'semicolon', None)):
         return None
     parts = line.split(',') if ',' in line else line.split()
     names = [p.strip() for p in parts]
@@ -24261,19 +24309,60 @@ def _evict_octree_cache(max_bytes: int,
 # How a value column reads, used to pre-tick the wizard's "categorical" box.
 _CATEGORICAL_MAX_DISTINCT = 32
 
+# Hard cap on how far the delimiter sniff will read looking for a data row. A
+# well-formed file answers on line 1 or 2 (legend row, then data); anything that
+# hasn't answered within this many lines is not going to. The cap exists so a
+# malformed or unexpected file costs a bounded read in a preview endpoint the
+# renderer calls once per file in the import batch, in parallel.
+_DELIM_SNIFF_MAX_LINES = 1000
+
 
 def _detect_ascii_delimiter(file_path: str) -> Optional[str]:
     """Sniff the delimiter of the first data row. Mirrors the renderer's
     detectDelimiter precedence (comma → tab → semicolon → whitespace). Returns a
-    human label ('comma'/'tab'/'semicolon'/'whitespace') or None if no data."""
+    human label ('comma'/'tab'/'semicolon'/'whitespace') or None if no data.
+
+    The letter test skips at most ONE leading header row, and the scan is capped.
+    Both bounds are load-bearing, and the original had neither:
+
+    A `continue` on "this row contains a letter" was meant for a single legend
+    row, but it applied to EVERY row — so on a file whose data rows legitimately
+    contain letters it skipped the entire file and returned None. Scientific
+    notation is the common case (`1.234e+05`), and `nan`/`inf` or a trailing text
+    label do it too. The cost is not just the wrong answer: `None` falls back to
+    whitespace in `_ascii_pandas_sep`, which is silently right for a space-
+    delimited file and silently WRONG for a comma one — while `_ascii_skiprows`'s
+    own copy of the letter test then eats the first real point as a "header".
+    Measured on a 223 MB whitespace file of `%.6e` coordinates: 18.4 s versus
+    0.05 s for the same file written as plain decimals, and this runs twice per
+    preview (once here, once via `_suggest_global_shift`), on a request the
+    renderer fires in parallel for every file in the import batch.
+
+    So: only the first non-comment line is eligible to be skipped as a header,
+    and the search stops after `_DELIM_SNIFF_MAX_LINES` regardless. Past that cap
+    a file has no recognisable data row, and reading further cannot change the
+    answer — a full-file scan only ever bought a slower None."""
+    seen_uncommented = False
     with open(file_path) as f:
-        for raw in f:
+        for lineno, raw in enumerate(f):
+            if lineno >= _DELIM_SNIFF_MAX_LINES:
+                break
             line = raw.strip()
             if not line or line.startswith('#') or line.startswith('//'):
                 continue
             # Skip a leading text header row — we want a data row's delimiter.
-            if any(re.search(r'[a-zA-Z]', tok) for tok in line.split()):
-                continue
+            # Only the FIRST uncommented line is a header candidate; a later row
+            # with letters in it (`nan`, `1.2e+05`) is data, and its delimiter is
+            # exactly what we came for. The header test is delimiter-agnostic
+            # here by necessity (we're still deciding the delimiter), so it tries
+            # each candidate split and treats the row as a header only if it
+            # reads as one under every one of them — a comma legend row splits to
+            # a single blob on whitespace, and that blob is unparseable too.
+            if not seen_uncommented:
+                seen_uncommented = True
+                if all(_is_header_row(line, d)
+                       for d in ('comma', 'tab', 'semicolon', None)):
+                    continue
             if ',' in line:
                 return 'comma'
             if '\t' in line:

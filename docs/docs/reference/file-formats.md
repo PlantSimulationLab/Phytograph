@@ -15,7 +15,7 @@
 | `.xyz` / `.txt` | ✅ | ✅ | Whitespace-separated. First three columns = x, y, z. |
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
 | `.pts` | ✅ | ✅ | Leica/Cyclone PTS. A leading line holding the **point count**, then `x y z intensity r g b` — intensity *before* colour. The order is **fixed** (a reader decodes these columns positionally), so PTS export shows no field picker; export to `.txt`/`.csv`/`.ply`/`.las` if you need to choose fields or carry other scalars. |
-| `.asc` | ✅ | ✅ | ASCII point cloud, treated like `.xyz`: whitespace-separated columns with **no header line**. Not to be confused with the DEM **ASC grid** raster export (see [DEM rasters](#dem-rasters)) — that `.asc` is an elevation *grid*, this one is a point list. |
+| `.asc` | ✅ | ✅ | ASCII point cloud, treated like `.xyz`. The delimiter is sniffed from the contents (RIEGL's ASCII export, for instance, is comma-separated with a header row), and a header line is read if present. Not to be confused with the DEM **ASC grid** raster export (see [DEM rasters](#dem-rasters)) — that `.asc` is an elevation *grid*, this one is a point list. |
 | `.obj` | — | — | **Not a point-cloud format in Phytograph** — it is a *mesh* format (see [Meshes](#meshes)). A vertex-only `.obj` cannot be imported as a cloud: `.obj` always loads as a mesh, so a cloud written to `.obj` would come back as a face-less mesh rather than a point cloud. Use `.ply` to carry points into Blender or MeshLab, or `.xyz` for a plain column file. |
 
 ### ASCII format details
@@ -26,7 +26,12 @@
 - Additional columns become scalar fields. If the file has a header row,
   column names become field names. Otherwise fields are named
   `field_0`, `field_1`, ….
-- Separator is auto-detected: comma for `.csv`, whitespace otherwise.
+- Separator is auto-detected from the file's **contents**, not its extension:
+  the first data row is sniffed for comma, then tab, then semicolon, falling
+  back to whitespace. So a comma-delimited `.asc` or `.txt` reads correctly,
+  and a whitespace-delimited `.csv` does too.
+- Coordinates may be written in scientific notation (`1.234e+05`), and
+  `nan` / `inf` are accepted in scalar columns.
 - Lines starting with `#` (or `//`) are treated as comments. A comment on
   the **first** line is also read as a column header when its tokens resolve
   to a valid `x`/`y`/`z` layout — so a legend like
