@@ -823,3 +823,36 @@ def test_default_gap_preserves_ground_truth_tree_count():
     )
     # And it must not have degraded the partition itself.
     assert _purity(labels, ref) > 0.85
+
+
+@requires_treeiso
+def test_split_gap_is_floored_at_point_spacing():
+    """A gap below the cloud's own spacing must not disconnect a tree from itself.
+
+    Below roughly 2x the median nearest-neighbour distance the connectivity test
+    stops measuring tree structure and starts measuring sampling. The failure is
+    not "splits too eagerly" — it inverts: every component falls under the debris
+    guards and gets reabsorbed, so the two obviously-separate bodies below come
+    back as ONE tree at gaps of 0.05-0.3 m without the floor, and the effect is
+    non-monotonic (on the sparse e2e fixture, 0.65 -> 0.2 m gave 11 -> 7
+    instances). A user reaching for a smaller number to split more would get the
+    opposite, with no indication.
+
+    Sparse on purpose: 120 points per body over a 1.5 m radius is ~0.27 m
+    decimated spacing, so a sub-0.5 m request is genuinely under-sampled. A
+    denser fixture never trips the floor and would pass with it removed.
+    """
+    from treeiso.treeiso_core import segment_trees, TreeIsoParams
+
+    rng = np.random.default_rng(3)
+    a = _ball(rng, 120, np.array([0.0, 0.0, 2.0]), 1.5)
+    b = _ball(rng, 120, np.array([4.0, 0.0, 2.0]), 1.5)
+    points = np.vstack([a, b])
+
+    # Two bodies 1 m apart stay two trees no matter how small the gap request is.
+    for gap in (0.05, 0.1, 0.2, 0.3):
+        labels = segment_trees(points, TreeIsoParams(max_outlier_gap=gap))
+        assert len(np.unique(labels)) == 2, (
+            f"a sub-spacing gap of {gap} m collapsed two separate bodies into "
+            f"{len(np.unique(labels))} instance(s)"
+        )

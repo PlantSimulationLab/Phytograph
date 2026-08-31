@@ -1034,7 +1034,11 @@ export default function PointCloudViewer({
   // treeSegmentDefaults.ts and _auto_treeiso_decimation in backend-api/main.py.
   const [treeDecimateRes1, setTreeDecimateRes1] = useState(0.05);
   const [treeDecimateRes2, setTreeDecimateRes2] = useState(0.1);
-  const [treeMaxOutlierGap, setTreeMaxOutlierGap] = useState(3.0);
+  // Keep in step with OUTLIER_GAP_DEFAULT in treeSegmentDefaults.ts — this is
+  // only the pre-seed value (the panel reseeds on open), but a stale one shows
+  // in the field for the frame before seeding and is what a cloud with no usable
+  // extent falls back to.
+  const [treeMaxOutlierGap, setTreeMaxOutlierGap] = useState(0.65);
   const treePanelWasOpen = useRef(false);
   useEffect(() => {
     if (showTreeSegmentPanel && !treePanelWasOpen.current) {
@@ -1045,8 +1049,10 @@ export default function PointCloudViewer({
       // extent (decimateRes1 0.05 -> 1.0 m, maxGap 2 -> 6 m), and the backend
       // CANNOT rescue them — _auto_treeiso_decimation only ever bumps a value
       // still at-or-below the paper default, so a UI-seeded 1.0 m passes
-      // straight through. The knobs are deliberately not in the panel, so the
-      // user cannot see or override the bad values either.
+      // straight through. The decimation knobs are deliberately not in the panel
+      // (raw voxel sizes are a foot-gun), so the user cannot see or override a
+      // bad value there either; max_outlier_gap IS surfaced, but seeding it from
+      // a miss-set extent would still start it in the wrong place.
       const size = sel ? extentForParameterSeeding(sel.data) : null;
       if (size) {
         const d = treeSegmentDefaultsForExtent(Math.max(size.x, size.y));
@@ -11140,9 +11146,16 @@ export default function PointCloudViewer({
     refineTreeLabels((labels) => mergeTrees(labels, [treeMergeA, treeMergeB]), 'Trees Merged');
   }, [refineTreeLabels, treeMergeA, treeMergeB]);
 
+  // Refine -> Split uses the SPLIT distance, not `treeMaxGap`. It previously
+  // used maxGap, which is the distance stage 2 reaches ACROSS to CONNECT an
+  // occluded limb back to its tree — the opposite question, and ~3x too
+  // permissive, so a hand-split rarely separated anything. Both the automatic
+  // post-process and this manual button now ask "how far apart is too far to be
+  // one tree?" with the same number, so the button's result matches the field
+  // above it.
   const handleSplitTree = useCallback(() => {
-    refineTreeLabels((labels, positions) => splitTreeByGaps(positions, labels, treeSplitId, treeMaxGap), 'Tree Split');
-  }, [refineTreeLabels, treeSplitId, treeMaxGap]);
+    refineTreeLabels((labels, positions) => splitTreeByGaps(positions, labels, treeSplitId, treeMaxOutlierGap), 'Tree Split');
+  }, [refineTreeLabels, treeSplitId, treeMaxOutlierGap]);
 
   // Compute Alignment distance statistics
   // Cloud-to-mesh distance. Inputs are picked in the MeshCloudDistanceDialog and
@@ -20721,6 +20734,7 @@ export default function PointCloudViewer({
           regStrength1={treeRegStrength1}
           regStrength2={treeRegStrength2}
           maxGap={treeMaxGap}
+          maxOutlierGap={treeMaxOutlierGap}
           seedMode={treeSeedMode}
           seedCount={treeSeedPoints.length}
           splitClouds={treeSplitClouds}
@@ -20735,6 +20749,7 @@ export default function PointCloudViewer({
           onRegStrength1Change={setTreeRegStrength1}
           onRegStrength2Change={setTreeRegStrength2}
           onMaxGapChange={setTreeMaxGap}
+          onMaxOutlierGapChange={setTreeMaxOutlierGap}
           onSeedModeChange={setTreeSeedMode}
           onClearSeeds={() => setTreeSeedPoints([])}
           onSplitCloudsChange={setTreeSplitClouds}

@@ -11,6 +11,7 @@ interface TreeSegmentPanelProps {
   regStrength1: number;
   regStrength2: number;
   maxGap: number;
+  maxOutlierGap: number;
   seedMode: boolean;
   seedCount: number;
   splitClouds: boolean;
@@ -31,6 +32,7 @@ interface TreeSegmentPanelProps {
   onRegStrength1Change: (n: number) => void;
   onRegStrength2Change: (n: number) => void;
   onMaxGapChange: (n: number) => void;
+  onMaxOutlierGapChange: (n: number) => void;
   onSeedModeChange: (v: boolean) => void;
   onClearSeeds: () => void;
   onSplitCloudsChange: (v: boolean) => void;
@@ -47,6 +49,7 @@ export function TreeSegmentPanel({
   regStrength1,
   regStrength2,
   maxGap,
+  maxOutlierGap,
   seedMode,
   seedCount,
   splitClouds,
@@ -61,6 +64,7 @@ export function TreeSegmentPanel({
   onRegStrength1Change,
   onRegStrength2Change,
   onMaxGapChange,
+  onMaxOutlierGapChange,
   onSeedModeChange,
   onClearSeeds,
   onSplitCloudsChange,
@@ -159,6 +163,37 @@ export function TreeSegmentPanel({
           disabled={inProgress}
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
         />
+      </div>
+
+      {/* Split distance. Sits next to Max intra-tree gap because the two are the
+          paired distances and are easy to confuse: this one is SMALLER, and the
+          two point in opposite directions (connect vs. separate). */}
+      <div className="mb-3">
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Separate trees beyond (m)
+          <InfoHint
+            data-testid="tree-max-outlier-gap-help"
+            label="Separate trees beyond"
+            text="After trees are assembled, any part of one tree that sits further than this from the rest of it is treated as a different tree. Lower it if a neighbour's branches are absorbed into the tree you want; raise it if one tree is broken into pieces. Note this is the opposite of the gap above: that one joins an occluded limb back to its tree, this one separates bodies that are too far apart to belong together."
+          />
+        </label>
+        <DebouncedNumberInput
+          data-testid="tree-max-outlier-gap"
+          value={maxOutlierGap}
+          onCommit={(n) => onMaxOutlierGapChange(n)}
+          min={0.05} max={10} step={0.05}
+          disabled={inProgress}
+          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+        />
+        {maxOutlierGap > maxGap && (
+          <div
+            data-testid="tree-outlier-gap-warning"
+            className="mt-1 text-[10px] text-amber-400/90 leading-tight"
+          >
+            Above the intra-tree gap, so nothing will be separated — lower it
+            below {maxGap} m to split anything.
+          </div>
+        )}
       </div>
 
       {/* Trunk seeding (human-in-the-loop) */}
@@ -284,7 +319,7 @@ export function TreeSegmentPanel({
             <InfoHint
               data-testid="tree-refine-help"
               label="Refine"
-              text="Hand-correct the segmentation by tree ID (read the IDs off the legend). Merge combines two trees that should be one; Split separates a single ID that actually holds two trees by breaking it at spatial gaps. Changes apply to the existing tree_instance field in place."
+              text="Hand-correct the segmentation by tree ID (read the IDs off the legend). Merge combines two trees that should be one; Split separates a single ID that actually holds two trees, breaking it wherever its parts are further apart than the “Separate trees beyond” distance above. Changes apply to the existing tree_instance field in place."
             />
           </div>
           {/* Merge */}

@@ -585,6 +585,24 @@ def _split_across_gaps(xyz_dec, labels_dec, max_outlier_gap):
     if not np.isfinite(gap) or gap <= 0:
         return labels_dec
 
+    # Floor the gap at the cloud's own point spacing. Below roughly 2x the median
+    # nearest-neighbour distance, "is this point connected to that one?" stops
+    # being a question about tree structure and becomes one about sampling: the
+    # test disconnects a tree from ITSELF, and the result is not merely more
+    # aggressive but meaningless. It is also non-monotonic, which is the part
+    # that misleads — on the sparse e2e fixture (0.21 m spacing) tightening the
+    # gap from 0.65 to 0.2 m gave FEWER instances (11 -> 7), not more, because
+    # whole crowns crumbled into sub-threshold debris that the size guards then
+    # reabsorbed. A user on sparse data who reaches for a smaller number to split
+    # more would otherwise get quieter, wronger output with no indication.
+    if len(xyz_dec) >= 2:
+        nn = cKDTree(xyz_dec).query(xyz_dec, k=2, workers=-1)[0][:, 1]
+        nn = nn[np.isfinite(nn) & (nn > 0)]
+        if nn.size:
+            floor = 2.0 * float(np.median(nn))
+            if gap < floor:
+                gap = floor
+
     out = np.array(labels_dec, dtype=np.int64, copy=True)
     next_label = int(out.max()) + 1 if len(out) else 1
 

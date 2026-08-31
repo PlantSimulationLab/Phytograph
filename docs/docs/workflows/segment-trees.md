@@ -49,6 +49,17 @@ Phytograph warns you (but still runs).
       treated as belonging to one tree. Default `2.0` (seeded larger for very
       large tiles). Lower it when trees stand close together so neighbours aren't
       merged.
+    - **Separate trees beyond (m)** — after trees are assembled, any part of one
+      tree sitting further than this from the rest of it is treated as a
+      different tree. Default `0.65`. Lower it if a neighbour's branches are
+      absorbed into the tree you want; raise it if one tree is broken into
+      pieces. Note this is the **opposite** of the gap above: that one *joins* an
+      occluded limb back to its tree, this one *separates* bodies too far apart
+      to belong together — so it is normally the smaller of the two, and setting
+      it above **Max intra-tree gap** means nothing will ever be separated (the
+      panel warns when you do). Values below the cloud's own point spacing are
+      raised automatically, since below that the test measures sampling rather
+      than tree structure.
     - **Split into one cloud per tree** — when checked, also adds a separate
       cloud for each tree to the scan list.
 5. Click **Segment Trees**. While it runs, the button shows a spinner and a
@@ -99,7 +110,8 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 - **Merge** — combine two tree IDs into one (e.g. when one tree was split in
   two): enter the two IDs and click **Merge**.
 - **Split** — separate a tree that actually contains two by spatial gaps: enter
-  the tree ID and click **Split**; disconnected blobs become new trees.
+  the tree ID and click **Split**; parts further apart than **Separate trees
+  beyond** become new trees.
 
 ## Tips
 
@@ -110,8 +122,9 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
   single tree**: the surrounding trees then appear as crown fragments with no
   trunk, which is exactly the shape the segmentation is otherwise inclined to
   attach to the nearest complete tree.
-- If neighbouring trees still merge into one, lower **Max intra-tree gap** or add
-  trunk **seeds**.
+- If neighbouring trees still merge into one, lower **Separate trees beyond**
+  first — that is the knob for this — then **Max intra-tree gap**, or add trunk
+  **seeds**.
 - If one tree is split into several, raise **2D reg. strength** or **Merge** the
   pieces afterward.
 - Segmentation runs in the background, so the rest of the app stays responsive

@@ -209,3 +209,101 @@ test('warns before an expensive run, then segments when confirmed', async () => 
     await solo?.close();
   }
 });
+
+test('the split distance is editable and changes how many trees come out', async () => {
+  // `max_outlier_gap` was wired from this panel's own defaults all the way to
+  // the backend and read by nothing, so it silently ignored the user. Now that
+  // it is surfaced, the thing worth proving is that typing in it CHANGES THE
+  // RESULT — a test that only asserts the field renders would have passed
+  // throughout the entire period the parameter was inert.
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+  await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-tree-segment').click();
+  await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
+
+  // The control is seeded, visible and editable.
+  const gapField = page.getByTestId('tree-max-outlier-gap');
+  await expect(gapField).toBeVisible();
+  await expect(gapField).toHaveValue('0.65');
+
+  // Also split into per-tree clouds, so the tree COUNT is readable from the
+  // scan list rather than inferred from colours.
+  await page.getByTestId('tree-split-clouds').check();
+
+  // A tighter split distance separates more bodies, so more instances come out.
+  // 0.4 rather than something extreme: this fixture's median point spacing is
+  // 0.21 m, and the backend floors the gap at ~2x spacing because below that the
+  // test disconnects a tree from itself (see `_split_across_gaps`). Asking for a
+  // gap under the floor is therefore not a stronger version of this assertion —
+  // it is the same clamped run.
+  await gapField.fill('0.4');
+  await gapField.blur();
+  await page.getByTestId('tree-segment-run-button').click();
+  await expect(page.getByTestId('scalar-overlay'))
+    .toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 180_000 });
+  const childRows = page.locator('[data-testid="scan-row"][data-scan-name*="(tree "]');
+  await expect.poll(async () => childRows.count(), { timeout: 60_000 })
+    .toBeGreaterThan(0);
+  const tightCount = await childRows.count();
+
+  // Start over and run the same cloud at the default distance.
+  await resetToFreshScene(session.app, session.page);
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+  await page.getByTestId('tool-tree-segment').click();
+  await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
+  await page.getByTestId('tree-split-clouds').check();
+  await expect(page.getByTestId('tree-max-outlier-gap')).toHaveValue('0.65');
+  await page.getByTestId('tree-segment-run-button').click();
+  await expect(page.getByTestId('scalar-overlay'))
+    .toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 180_000 });
+  await expect.poll(async () => childRows.count(), { timeout: 60_000 })
+    .toBeGreaterThan(0);
+  const defaultCount = await childRows.count();
+
+  // The tighter setting must produce strictly MORE instances. This is the
+  // assertion that fails if the parameter is ignored again: an inert knob makes
+  // both runs identical.
+  expect(tightCount).toBeGreaterThan(defaultCount);
+});
+
+test('warns when the split distance is set above the intra-tree gap', async () => {
+  // The two distances are easy to confuse — one connects, one separates — and
+  // setting this one above `maxGap` makes it silently do nothing (upstream's
+  // 3.0 default was inert for exactly that reason). The panel says so rather
+  // than leaving the user to wonder why nothing split.
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]'))
+    .toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-tree-segment').click();
+  await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
+
+  // Default is below the intra-tree gap, so no warning.
+  await expect(page.getByTestId('tree-outlier-gap-warning')).toHaveCount(0);
+
+  // Push it above the intra-tree gap (seeded at 2.0 for this cloud).
+  const maxGap = await page.getByTestId('tree-max-gap').inputValue();
+  await page.getByTestId('tree-max-outlier-gap').fill('5');
+  await page.getByTestId('tree-max-outlier-gap').blur();
+
+  const warning = page.getByTestId('tree-outlier-gap-warning');
+  await expect(warning).toBeVisible();
+  await expect(warning).toContainText(maxGap);
+
+  // And it clears again when brought back under.
+  await page.getByTestId('tree-max-outlier-gap').fill('0.65');
+  await page.getByTestId('tree-max-outlier-gap').blur();
+  await expect(warning).toHaveCount(0);
+});
