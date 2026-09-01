@@ -93,6 +93,30 @@ architectures.
 The classifier is the `cloth-simulation-filter` package (`import CSF`), a
 SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
 
+## Noise filtering
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| POST | `/api/pointcloud/denoise` | `main.py`, `denoise.py` | Classify points into clean (1) / noise (2). Takes inline `points` or a `source` descriptor (full resolution, labels align 1:1). Returns per-point `labels`, the flagged count/fraction, the resolved parameters, and any warnings. Used for flat (in-memory) clouds |
+| POST | `/api/cloud/session/{id}/denoise` | `main.py`, `denoise.py` | Same classification on the session's in-RAM hit survivors, appending a `noise_class` column and rebuilding the octree so the flagged points render. Nothing is deleted — removal goes through `/filter` or `/split` |
+
+Three criteria, all in `backend-api/denoise.py` as index-preserving keep-masks:
+`ror` (radius outlier, the default), `voxel_count` (O(N), for very large
+clouds) and `sor` (statistical). Any parameter left unset is derived from the
+cloud's own p95 nearest-neighbour spacing and echoed back in `params_used`.
+
+Both routes run the compute in the killable `seg_worker` subprocess
+(`tool: "denoise"`), so a client disconnect actually stops it — a single
+`cKDTree.query` is a monolithic C call that cannot poll a cancel flag.
+
+!!! warning "Don't change the SOR default to 2.0"
+    `DEFAULT_SOR_STD_RATIO` is 4.0, not the conventional open3d value. SOR's
+    threshold is set by the extremes still present in the cloud, so it becomes
+    more aggressive on each pass — measured at 73% of a test tree's twig points
+    destroyed on a second run. The reasoning and the numbers are in
+    `denoise.py`'s module docstring, pinned by
+    `tests/test_denoise.py::test_sor_second_pass_eats_fine_structure`.
+
 ## Tree segmentation
 
 | Method | Path | Source | Purpose |
@@ -237,6 +261,7 @@ sessions from the array. All of it is file-read-free after import.
 | POST | `/api/cloud/session/{id}/duplicate` | `main.py` | Copy a session's surviving points into a NEW independent session (parent untouched) and build its octree. A pure array copy — no file read, so every wizard customization is preserved. Powers scan "Duplicate" |
 | POST | `/api/cloud/session/merge` | `main.py` | Concatenate the surviving points of **≥2 sessions** (body `{session_ids}`) into one NEW session and build its octree. Reconciles differing global shifts (re-expresses every input into a common `world_shift`) and **unions** scalar extra-dim columns (zero-filling inputs that lack a column). Builds a projected-miss octree when any input carried misses. Returns `{merged: {session_id, point_count, world_shift, cache_id, has_misses, miss_octree_cache_id, …octree}}`. Powers **Stitch Clouds** — the merge runs here, not in the renderer, because octree clouds hold their points in the session (the renderer's flat `positions` is empty) |
 | POST | `/api/cloud/session/{id}/segment_ground` | `main.py` | Run CSF on the array, append a `ground_class` column, rebuild from arrays |
+| POST | `/api/cloud/session/{id}/denoise` | `main.py` | Classify noise on the array's hit survivors, append a `noise_class` column, rebuild from arrays. Non-destructive |
 | POST | `/api/cloud/session/{id}/segment_trees` | `main.py` | Run TreeIso on the array, append a `tree_instance` column, rebuild from arrays |
 | POST | `/api/cloud/session/{id}/segment_wood` | `main.py` | Wood/leaf segmentation on the in-RAM survivors → append `wood_class` → rebuild the octree. No file read. The compute runs in a **killable subprocess** so Cancel can SIGKILL it; the column write + rebuild happen in the parent afterwards, so a cancel mid-compute leaves the session pristine |
 | POST | `/api/cloud/session/{id}/dem` | `main.py` | DEM from the session's in-RAM survivors (ground-aware). Returns a PHB1 frame (heightmap mesh + grid). With `add_height_column`, also appends a `height_above_ground` scalar and rebuilds the octree |

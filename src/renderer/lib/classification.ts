@@ -69,6 +69,31 @@ const WOOD_SCHEME: CategoricalScheme = {
   classes: WOOD_SCHEME_CLASSES,
 };
 
+// Noise classification (the Filter panel's Noise section writes `noise_class`):
+// 1 = clean, 2 = noise. Deliberately only two classes so the panel's categorical
+// checkbox UI stays a single "keep clean / keep noise" choice.
+//
+// Muted grey for clean and a hot red for noise, because the whole point of the
+// Detect step is that the flagged points POP against the rest of the cloud —
+// this colouring IS the preview the user judges before committing a removal.
+// Nothing else in the registry uses saturated red.
+export const NOISE_CLASS_ATTRIBUTE = 'noise_class';
+
+// The two class values, named so no call site writes a bare 1/2. They must match
+// NOISE_CLEAN / NOISE_NOISE in backend-api/denoise.py.
+export const NOISE_CLEAN = 1;
+export const NOISE_NOISE = 2;
+
+export const NOISE_SCHEME_CLASSES: ClassDef[] = [
+  { value: NOISE_CLEAN, label: 'Clean', color: [0.55, 0.55, 0.58] },
+  { value: NOISE_NOISE, label: 'Noise', color: [0.90, 0.20, 0.20] },
+];
+
+const NOISE_SCHEME: CategoricalScheme = {
+  attribute: NOISE_CLASS_ATTRIBUTE,
+  classes: NOISE_SCHEME_CLASSES,
+};
+
 // Tree instance segmentation (TreeIso) writes a `tree_instance` attribute:
 // 0 = unassigned, 1..N = individual trees. Unlike ground_class, N is unbounded
 // and only known at runtime, so this scheme is GENERATED from the data's id
@@ -287,6 +312,7 @@ const LAS_CLASSIFICATION_SCHEME: CategoricalScheme = {
 const SCHEMES: Record<string, CategoricalScheme> = {
   [GROUND_CLASS_ATTRIBUTE]: GROUND_SCHEME,
   [WOOD_CLASS_ATTRIBUTE]: WOOD_SCHEME,
+  [NOISE_CLASS_ATTRIBUTE]: NOISE_SCHEME,
   [MISS_ATTRIBUTE]: MISS_SCHEME,
   [ORGAN_ATTRIBUTE]: ORGAN_SCHEME,
   [LAS_CLASSIFICATION_ATTRIBUTE]: LAS_CLASSIFICATION_SCHEME,

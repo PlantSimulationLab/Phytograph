@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeFor, colorForClassValue } from '../../../lib/classification';
 import type { PointCloudData, ColorMode, CloudFilters } from '../../../lib/pointCloudTypes';
+import { hasEnabledFilter, pointPassesFilters } from '../../../lib/pointCloudHelpers';
 
 export interface PointCloudProps {
   // Source point cloud — typed arrays are SHARED with three.js, never
@@ -91,36 +92,15 @@ export function PointCloud({
   const drawIndices = useMemo<Uint32Array | null>(() => {
     if (!data || data.pointCount === 0) return null;
 
-    const hasFilters = !!filters && (
-      filters.x.enabled || filters.y.enabled || filters.z.enabled ||
-      filters.intensity?.enabled ||
-      Object.values(filters.scalarFields).some(f => f.enabled)
-    );
+    const hasFilters = hasEnabledFilter(filters);
 
     // No filtering needed — three.js will draw [0, pointCount).
     if (!indices && !hasFilters) return null;
 
-    const passesFilters = (i: number): boolean => {
-      if (!hasFilters || !filters) return true;
-      const x = data.positions[i * 3];
-      const y = data.positions[i * 3 + 1];
-      const z = data.positions[i * 3 + 2];
-      if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) return false;
-      if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) return false;
-      if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) return false;
-      if (filters.intensity?.enabled && data.intensities) {
-        const v = data.intensities[i];
-        if (v < filters.intensity.min || v > filters.intensity.max) return false;
-      }
-      for (const name in filters.scalarFields) {
-        const sf = filters.scalarFields[name];
-        if (sf.enabled && data.scalarFields?.[name]) {
-          const v = data.scalarFields[name].values[i];
-          if (v < sf.min || v > sf.max) return false;
-        }
-      }
-      return true;
-    };
+    // Shared with the destructive commit path (buildFlatKeepPredicate) so the
+    // preview can never show a different set from the one Filter/Segment act on.
+    const passesFilters = (i: number): boolean =>
+      !hasFilters || !filters || pointPassesFilters(data, filters, i);
 
     if (indices && !hasFilters) return indices;
 

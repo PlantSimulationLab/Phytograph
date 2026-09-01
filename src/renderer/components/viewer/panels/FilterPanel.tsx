@@ -1,5 +1,14 @@
-import { Filter, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Filter, Loader2, X } from 'lucide-react';
 import type { FilterRange } from '../../../lib/pointCloudTypes';
+import type { DenoiseStats, NoiseMethod, NoiseParams } from '../../../utils/backendApi';
+import {
+  NOISE_METHOD_OPTIONS,
+  NOISE_PARAM_FIELDS,
+  formatFlaggedSummary,
+  formatResolvedParams,
+  type NoiseParamKey,
+} from '../../../lib/noiseFilter';
+import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { SelectAllHeader } from '../../SelectAllHeader';
 
 interface FieldOption {
@@ -47,6 +56,25 @@ interface FilterPanelProps {
   // is in flight. Disables the commit button so an impatient re-click can't
   // queue a second full filter; the cancellable StatusPill carries the progress.
   isApplying?: boolean;
+
+  // ---- Noise section --------------------------------------------------
+  // Detect does NOT remove anything: it classifies points into a `noise_class`
+  // column and pre-selects that field above, so the commit runs through the same
+  // Remove / Segment buttons as every other filter.
+  noiseExpanded: boolean;
+  noiseMethod: NoiseMethod;
+  noiseAutoParams: boolean;
+  noiseParams: NoiseParams;
+  noiseBusy: boolean;
+  noiseResult: DenoiseStats | null;
+  noiseError: string | null;
+  onToggleNoiseExpanded: () => void;
+  onNoiseMethodChange: (method: NoiseMethod) => void;
+  onNoiseAutoParamsChange: (auto: boolean) => void;
+  onNoiseParamChange: (key: NoiseParamKey, value: number) => void;
+  onDetectNoise: () => void;
+  onCancelDetectNoise: () => void;
+  onClearNoise: () => void;
 }
 
 export function FilterPanel({
@@ -71,7 +99,22 @@ export function FilterPanel({
   onApplyFilter,
   onSegmentFilter,
   isApplying = false,
+  noiseExpanded,
+  noiseMethod,
+  noiseAutoParams,
+  noiseParams,
+  noiseBusy,
+  noiseResult,
+  noiseError,
+  onToggleNoiseExpanded,
+  onNoiseMethodChange,
+  onNoiseAutoParamsChange,
+  onNoiseParamChange,
+  onDetectNoise,
+  onCancelDetectNoise,
+  onClearNoise,
 }: FilterPanelProps) {
+  const methodOption = NOISE_METHOD_OPTIONS.find(o => o.value === noiseMethod);
   return (
     <div className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
       <div className="flex items-center justify-between mb-3">
@@ -85,6 +128,136 @@ export function FilterPanel({
         >
           <X className="w-3 h-3 text-neutral-400" />
         </button>
+      </div>
+
+      {/* Noise: classify stray/flyer points into a `noise_class` column. It is a
+          section of THIS panel rather than its own tool because the removal is
+          the Filter tool's — Detect only arms the buttons at the bottom. */}
+      <div className="mb-3 border-b border-neutral-700 pb-3">
+        <button
+          data-testid="filter-noise-toggle"
+          onClick={onToggleNoiseExpanded}
+          className="w-full flex items-center gap-1 text-[11px] text-neutral-300 hover:text-neutral-100"
+        >
+          {noiseExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          <span className="font-medium">Noise</span>
+          {!noiseExpanded && noiseResult && (
+            <span
+              className={`ml-auto text-[10px] ${noiseResult.over_removal ? 'text-red-400' : 'text-neutral-500'}`}
+            >
+              {noiseResult.flagged.toLocaleString()} flagged
+            </span>
+          )}
+        </button>
+
+        {noiseExpanded && (
+          <div className="mt-2 space-y-2">
+            <div>
+              <label className="text-[10px] text-neutral-400 block mb-1">Method</label>
+              <select
+                data-testid="filter-noise-method"
+                value={noiseMethod}
+                onChange={(e) => onNoiseMethodChange(e.target.value as NoiseMethod)}
+                className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
+              >
+                {NOISE_METHOD_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {methodOption && (
+                <p className="text-[10px] text-neutral-500 mt-1 leading-snug">{methodOption.blurb}</p>
+              )}
+            </div>
+
+            <label className="flex items-center gap-2 text-[11px] text-neutral-300 cursor-pointer">
+              <input
+                data-testid="filter-noise-auto"
+                type="checkbox"
+                checked={noiseAutoParams}
+                onChange={(e) => onNoiseAutoParamsChange(e.target.checked)}
+              />
+              Auto parameters
+            </label>
+
+            {/* Auto FILLS and greys these rather than hiding them: the user has
+                to be able to see what the auto rule picked to judge whether it
+                is sane for their scan. */}
+            {NOISE_PARAM_FIELDS[noiseMethod].map(field => (
+              <div key={field.key}>
+                <label className="text-[10px] text-neutral-400 block mb-1">{field.label}</label>
+                <DebouncedNumberInput
+                  data-testid={`filter-noise-${field.key}`}
+                  // NaN renders as an empty box (DebouncedNumberInput's default
+                  // format), which is what an unset parameter should look like.
+                  value={noiseParams[field.key] ?? NaN}
+                  onCommit={(v) => onNoiseParamChange(field.key, v)}
+                  disabled={noiseAutoParams || noiseBusy}
+                  min={field.min}
+                  step={field.step}
+                  debounceMs={0}
+                  parse={field.integer ? (s) => parseInt(s, 10) : undefined}
+                  className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600 disabled:opacity-50"
+                />
+              </div>
+            ))}
+
+            {noiseBusy ? (
+              <button
+                data-testid="filter-noise-cancel"
+                onClick={onCancelDetectNoise}
+                className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded flex items-center justify-center gap-2"
+              >
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Cancel
+              </button>
+            ) : (
+              <button
+                data-testid="filter-noise-detect"
+                onClick={onDetectNoise}
+                className="w-full px-2 py-1.5 text-xs bg-neutral-600 hover:bg-neutral-500 rounded text-white"
+              >
+                Detect noise
+              </button>
+            )}
+
+            {noiseError && (
+              <div data-testid="filter-noise-error" className="text-[10px] text-red-400 leading-snug">
+                {noiseError}
+              </div>
+            )}
+
+            {noiseResult && (
+              <div
+                data-testid="filter-noise-result"
+                data-flagged={noiseResult.flagged}
+                data-fraction={noiseResult.fraction.toFixed(4)}
+                data-over-removal={noiseResult.over_removal ? 'true' : 'false'}
+                className={`rounded px-2 py-1.5 text-[10px] leading-snug border ${
+                  noiseResult.over_removal
+                    ? 'bg-red-950/40 border-red-800 text-red-200'
+                    : 'bg-neutral-900/50 border-neutral-700 text-neutral-300'
+                }`}
+              >
+                <div className="font-medium">{formatFlaggedSummary(noiseResult)}</div>
+                <div className="text-neutral-500">{formatResolvedParams(noiseResult)}</div>
+                <div className="mt-1">Flagged points are shown in red in the viewport.</div>
+                {noiseResult.warnings.map((w, i) => (
+                  <div key={i} className="mt-1 text-amber-300">{w}</div>
+                ))}
+              </div>
+            )}
+
+            {noiseResult && (
+              <button
+                data-testid="filter-noise-clear"
+                onClick={onClearNoise}
+                className="w-full px-2 py-1 text-[10px] bg-neutral-700 hover:bg-neutral-600 rounded"
+              >
+                Clear detection
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Field Dropdown */}

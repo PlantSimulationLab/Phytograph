@@ -22,6 +22,10 @@ import struct
 # Aliased: `warnings` is used as a local variable name in several converters.
 import warnings as warnings_module
 from pathlib import Path
+# Noise-filter criteria (SOR / ROR / voxel-count) + the noise_class
+# constants. Also the single implementation `_reject_sparse_voxels` and
+# `qsm.preprocess` both defer to.
+import denoise
 from pytexit import py2tex
 
 # ==================== PyHelios source submodule ====================
@@ -240,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.77.0"
+BACKEND_VERSION = "0.78.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -4234,9 +4238,121 @@ class GroundSegmentationResponse(BaseModel):
     class_threshold_method: Optional[str] = None
 
 
-def _resolve_segmentation_points(request: GroundSegmentationRequest) -> np.ndarray:
-    """Resolve a GroundSegmentationRequest to an Nx3 float64 array, reading from
-    the source file (full resolution) when `source` is set."""
+class DenoiseRequest(BaseModel):
+    """Noise classification for a FLAT (in-RAM) cloud. Provide inline `points`
+    (the renderer sends `ps.hits.points` — hits only, misses already excluded at
+    the `buildPointSource` chokepoint) or a `source` descriptor.
+
+    Session/octree clouds use `/api/cloud/session/{id}/denoise` instead, which
+    persists the result as a column. This route only classifies and returns.
+
+    Parameters default to None = derive from the cloud's own point spacing."""
+    points: Optional[List[List[float]]] = None
+    source: Optional[PointSource] = None
+    method: str = "ror"
+    radius: Optional[float] = None
+    nb_points: Optional[int] = None
+    voxel: Optional[float] = None
+    min_points: Optional[int] = None
+    nb_neighbors: Optional[int] = None
+    std_ratio: Optional[float] = None
+    previously_denoised: bool = False
+
+    def criterion_params(self) -> dict:
+        """See SessionDenoiseRequest.criterion_params."""
+        by_method = {
+            "ror": ("radius", "nb_points"),
+            "voxel_count": ("voxel", "min_points"),
+            "sor": ("nb_neighbors", "std_ratio"),
+        }
+        return {k: getattr(self, k) for k in by_method.get(self.method, ())
+                if getattr(self, k) is not None}
+
+
+class DenoiseResponse(BaseModel):
+    """Per-point noise labels aligned 1:1 with the resolved point order."""
+    success: bool
+    labels: List[int] = []          # 1=clean, 2=noise
+    num_points: int = 0
+    flagged: int = 0
+    kept: int = 0
+    fraction: float = 0.0
+    non_finite: int = 0
+    over_removal: bool = False
+    warnings: List[str] = []
+    method: str = "ror"
+    # What auto mode actually resolved, so the panel can show it in the (greyed)
+    # parameter fields rather than leaving the user guessing.
+    params_used: Dict[str, float] = {}
+    spacing_m: Optional[float] = None
+    elapsed_s: Optional[float] = None
+    error: Optional[str] = None
+
+
+@app.post("/api/pointcloud/denoise", response_model=DenoiseResponse)
+async def denoise_points(request: DenoiseRequest, http_request: Request):
+    """Classify a point cloud into clean (1) and noise (2) points. Returns
+    per-point labels aligned to input order; persisting the result onto an
+    octree-backed cloud is done by `/api/cloud/session/{session_id}/denoise`.
+
+    Runs in a KILLABLE subprocess so the panel's Cancel can stop it mid-run."""
+    try:
+        # Reuses the ground resolver: the two requests share the
+        # points-or-source shape and the same "never downsample, labels must
+        # align 1:1" contract.
+        points = await run_in_threadpool(_resolve_segmentation_points, request)
+
+        if len(points) < denoise.MIN_POINTS:
+            return DenoiseResponse(
+                success=False, num_points=len(points), method=request.method,
+                error=(f"Need at least {denoise.MIN_POINTS:,} points to estimate "
+                       f"density reliably; got {len(points):,}."))
+
+        params = request.criterion_params()
+        params["method"] = request.method
+        params["previously_denoised"] = request.previously_denoised
+        try:
+            labels, dmeta = await _run_killable("denoise", points, params,
+                                                http_request=http_request)
+        except ClientDisconnected:
+            return DenoiseResponse(success=False, num_points=len(points),
+                                   method=request.method,
+                                   error="Noise detection was cancelled.")
+        except RuntimeError as e:
+            # denoise_mask raises ValueError for a bad method or a too-small
+            # cloud; the worker surfaces it as a traceback string.
+            return DenoiseResponse(success=False, num_points=len(points),
+                                   method=request.method,
+                                   error=str(e).strip().splitlines()[-1])
+
+        return DenoiseResponse(
+            success=True,
+            labels=[int(v) for v in np.asarray(labels).tolist()],
+            num_points=len(points),
+            flagged=int(dmeta.get("flagged", 0)),
+            kept=int(dmeta.get("kept", 0)),
+            fraction=float(dmeta.get("fraction", 0.0)),
+            non_finite=int(dmeta.get("non_finite", 0)),
+            over_removal=bool(dmeta.get("over_removal", False)),
+            warnings=list(dmeta.get("warnings", [])),
+            method=str(dmeta.get("method", request.method)),
+            params_used={k: float(v) for k, v in dmeta.get("params_used", {}).items()},
+            spacing_m=dmeta.get("spacing_m"),
+            elapsed_s=dmeta.get("elapsed_s"))
+    except HTTPException:
+        raise
+    except Exception as e:
+        return DenoiseResponse(success=False, method=request.method, error=str(e))
+
+
+def _resolve_segmentation_points(
+        request: "Union[GroundSegmentationRequest, DenoiseRequest]") -> np.ndarray:
+    """Resolve a points-or-source request to an Nx3 float64 array, reading from
+    the source file (full resolution) when `source` is set.
+
+    Shared by `/api/segment/ground` and `/api/pointcloud/denoise`: both must
+    return labels that align 1:1 with the resolved order, so both force
+    `max_points=None`."""
     if request.source is not None:
         # Force full resolution: labels must align 1:1 with the cloud's points.
         src = request.source.model_copy(update={"max_points": None})
@@ -21494,13 +21610,14 @@ async def _run_killable(
     seeds: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
 ):
-    """Run one segmentation compute (`tool` ∈ ground|wood|trees|skeleton) in a
-    KILLABLE child process and return its result.
+    """Run one segmentation compute (`tool` ∈ ground|wood|trees|denoise|skeleton)
+    in a KILLABLE child process and return its result.
 
     Returns, by tool:
       - trees       → np.ndarray of labels
       - ground      → (np.ndarray labels, dict {"class_threshold": float, ...})
       - wood        → (np.ndarray labels, dict {"warnings": [...]})
+      - denoise     → (np.ndarray labels, dict {"flagged": int, "params_used": {...}, ...})
       - skeleton    → dict (the SkeletonResponse fields)
 
     The child is polled off the event loop; if `http_request` disconnects (the
@@ -21590,7 +21707,7 @@ async def _run_killable(
             return labels, feats
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
-        if tool == "ground":
+        if tool in ("ground", "denoise"):
             return labels, (result_dict or {})
         return labels
 
@@ -29630,6 +29747,113 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
             "class_threshold_method": gmeta.get("method")}
 
 
+class SessionDenoiseRequest(BaseModel):
+    """Classify noise on the session's in-RAM points and append a `noise_class`
+    scalar column (1=clean, 2=noise). No source file read, nothing deleted — the
+    user commits with the Filter tool's existing Remove / Segment buttons, which
+    is what makes an aggressive result recoverable.
+
+    Every parameter defaults to None = "derive it from this cloud's own point
+    spacing"; an explicit value always wins. See `denoise.resolve_params`."""
+    method: str = "ror"
+    # ror
+    radius: Optional[float] = None
+    nb_points: Optional[int] = None
+    # voxel_count
+    voxel: Optional[float] = None
+    min_points: Optional[int] = None
+    # sor  (std_ratio defaults to 4.0, NOT open3d's 2.0 — see denoise.py)
+    nb_neighbors: Optional[int] = None
+    std_ratio: Optional[float] = None
+
+    def criterion_params(self) -> dict:
+        """Only the keys `method` actually consumes, and only when set. Sending
+        an unrelated method's parameter would make `resolve_params` report a
+        `params_used` the panel then displays as though it had been applied."""
+        by_method = {
+            "ror": ("radius", "nb_points"),
+            "voxel_count": ("voxel", "min_points"),
+            "sor": ("nb_neighbors", "std_ratio"),
+        }
+        keys = by_method.get(self.method, ())
+        return {k: getattr(self, k) for k in keys if getattr(self, k) is not None}
+
+
+@app.post("/api/cloud/session/{session_id}/denoise")
+async def session_denoise(session_id: str, request: SessionDenoiseRequest,
+                          http_request: Request):
+    """Noise classification on the in-RAM survivors → append `noise_class` →
+    rebuild the octree from the arrays. No source file read, no deletion.
+
+    The compute runs in a KILLABLE subprocess (see `_run_killable`) so the
+    panel's Cancel actually stops it: a single `cKDTree.query` is a monolithic C
+    call that cannot poll a cancel flag. The column write + octree rebuild happen
+    in the parent AFTER the compute returns, so cancelling mid-compute leaves the
+    session pristine."""
+    sess = _get_cloud_session(session_id)
+    if request.method not in denoise.METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown noise method {request.method!r}; expected one of "
+                   f"{', '.join(denoise.METHODS)}.")
+    with _cloud_session_lock:
+        # Compute on HIT survivors only. A miss is a ray that hit nothing,
+        # projected ~1 km out along its beam: it would blow up the KD-tree's
+        # extent AND poison the nearest-neighbour spacing the auto parameters are
+        # derived from (measured elsewhere in this file at ~2,500x). See
+        # _session_survivor_hit_mask.
+        hit = _session_survivor_hit_mask(sess)
+        pts = sess.positions[~sess.deleted][hit].copy()
+        already_denoised = denoise.NOISE_CLASS_SLUG in sess.extras
+    if int(hit.sum()) < denoise.MIN_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least {denoise.MIN_POINTS:,} points to estimate "
+                   f"density reliably; this cloud has {int(hit.sum()):,}.")
+
+    params = request.criterion_params()
+    params["method"] = request.method
+    params["previously_denoised"] = already_denoised
+    try:
+        hit_labels, dmeta = await _run_killable("denoise", pts, params,
+                                                http_request=http_request)
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Noise detection was cancelled.")
+    except RuntimeError as e:
+        # denoise_mask raises ValueError for a bad method / too-small cloud; the
+        # worker reports it as a non-zero exit with the traceback in the message.
+        raise HTTPException(status_code=400, detail=str(e).strip().splitlines()[-1])
+
+    # Scatter hit-labels back over ALL survivors. Misses default to NOISE_CLEAN,
+    # NOT the house-convention 0: `session_split` already forces misses onto the
+    # kept side, but labelling them "clean" means no future refactor of that
+    # guard can move a miss into a noise cloud and silently cost the parent its
+    # Beer's-law transmission denominator for LAD.
+    labels = np.full(len(hit), denoise.NOISE_CLEAN, dtype=np.int64)
+    labels[hit] = np.asarray(hit_labels)
+    with _cloud_session_lock:
+        _session_add_extra_column(sess, denoise.NOISE_CLASS_SLUG,
+                                  denoise.NOISE_CLASS_LABEL, labels)
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
+    # `**meta` supplies `point_count` — the REBUILT OCTREE's count, which is what
+    # `buildSessionOctreeData` consumes. The number of points actually analysed
+    # (survivors, hits only) is reported separately rather than as a
+    # `point_count` that `**meta` would silently overwrite.
+    return {"session_id": session_id,
+            "cache_id": cache_key, "cache_dir": str(cache_dir), **meta,
+            "analyzed_points": int(len(pts)),
+            "method": dmeta.get("method", request.method),
+            "params_used": dmeta.get("params_used", {}),
+            "spacing_m": dmeta.get("spacing_m"),
+            "flagged": dmeta.get("flagged", 0),
+            "kept": dmeta.get("kept", 0),
+            "fraction": dmeta.get("fraction", 0.0),
+            "non_finite": dmeta.get("non_finite", 0),
+            "over_removal": dmeta.get("over_removal", False),
+            "warnings": dmeta.get("warnings", []),
+            "elapsed_s": dmeta.get("elapsed_s")}
+
+
 class SessionDemRequest(BaseModel):
     """Generate a DEM from a session's in-RAM survivors. Ground-aware: a prior
     `ground_class` column restricts gridding to ground points; else CSF is run
@@ -32204,10 +32428,13 @@ def _reject_sparse_voxels(points: np.ndarray,
     """
     if len(points) < 1000 or voxel <= 0:
         return points
-    key = np.floor((points - points.min(axis=0)) / voxel).astype(np.int64)
-    _, inverse, counts = np.unique(key, axis=0, return_inverse=True,
-                                   return_counts=True)
-    keep = counts[inverse] >= min_points
+    # The rule itself lives in `denoise.voxel_count_mask`, shared with the
+    # Filter tool's "Sparse voxels" noise method so the two can't drift. The
+    # size floor and the "would discard most of the cloud" bail-out below stay
+    # HERE: they are this caller's policy (a registration input must degrade to
+    # unfiltered rather than be emptied), not part of the criterion.
+    from denoise import voxel_count_mask
+    keep = voxel_count_mask(points, voxel, min_points)
     if keep.sum() < max(1000, int(0.25 * len(points))):
         return points
     return points[keep]

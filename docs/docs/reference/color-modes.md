@@ -134,6 +134,13 @@ The **Wood Class** attribute produced by
 (1 = wood, 2 = leaf) is categorical the same way: wood renders in dark brown
 and leaf in green, each with its own legend entry.
 
+The **Noise Class** attribute produced by
+[Remove noise](../workflows/clean-point-cloud.md#remove-noise-stray-points)
+(1 = clean, 2 = noise) is categorical too. It renders clean points in muted
+grey and flagged points in **red** — deliberately the loudest colouring in the
+app, because reviewing the flagged points before removing them is the whole
+point of the two-step workflow.
+
 The **`tree_instance`** attribute produced by
 [Segment individual trees](../workflows/segment-trees.md) (`0` = unassigned,
 `1..N` = individual trees) is also categorical, but its class count isn't fixed:

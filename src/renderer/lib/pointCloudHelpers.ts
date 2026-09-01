@@ -1,13 +1,88 @@
 // Pure, stateless helpers extracted from PointCloudViewer.tsx. No React, no
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
-import type { AlignedArrays, HitPoints, MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
+import type { AlignedArrays, CloudFilters, HitPoints, MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
 import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire, shiftPoseStream } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
 import { applyTriangleFilter } from './triangleFilter';
 import { MISS_ATTRIBUTE } from './classification';
+
+// Does point `i` of a FLAT cloud pass every enabled filter? The single
+// definition of the filter predicate, shared by the live viewport preview
+// (`PointCloud.tsx`'s drawIndices) and the destructive commit
+// (`PointCloudViewer.tsx`'s buildFlatKeepPredicate).
+//
+// They were two copies, and they had drifted: the preview compared only
+// `min`/`max` and ignored `selectedClasses` entirely, so a categorical filter
+// (ground_class, wood_class, noise_class) previewed as "nothing removed" — its
+// min/max span the whole class range — and then deleted points on commit. One
+// predicate means the preview cannot disagree with what Filter/Segment do.
+//
+// Erased points are NOT handled here: only the commit path knows about them,
+// and the preview draws them via a separate index list.
+export function pointPassesFilters(
+  data: PointCloudData,
+  filters: CloudFilters,
+  i: number,
+): boolean {
+  const x = data.positions[i * 3];
+  const y = data.positions[i * 3 + 1];
+  const z = data.positions[i * 3 + 2];
+  if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) return false;
+  if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) return false;
+  if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) return false;
+  if (filters.intensity?.enabled && data.intensities) {
+    const v = data.intensities[i];
+    if (v < filters.intensity.min || v > filters.intensity.max) return false;
+  }
+  for (const name in filters.scalarFields) {
+    const sf = filters.scalarFields[name];
+    if (sf.enabled && data.scalarFields?.[name]) {
+      const v = data.scalarFields[name].values[i];
+      // Categorical: keep iff the rounded value is a selected class. The values
+      // are float32, so a class id of 2 can read back as 1.9999999, and a bare
+      // `includes(v)` would drop every point of that class.
+      if (sf.selectedClasses) {
+        if (!sf.selectedClasses.includes(Math.round(v))) return false;
+      } else if (v < sf.min || v > sf.max) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// A cloud's filter set with every filter present but disabled: axis ranges
+// spanning its bounds, intensity when it has any, and one entry per scalar
+// field. Shared by the Filter panel (which seeds its editing state from this)
+// and the Noise section (which needs a base to add `noise_class` onto when the
+// user has not touched the panel yet).
+export function defaultCloudFilters(data: PointCloudData): CloudFilters {
+  return {
+    x: { min: data.bounds.min.x, max: data.bounds.max.x, enabled: false },
+    y: { min: data.bounds.min.y, max: data.bounds.max.y, enabled: false },
+    z: { min: data.bounds.min.z, max: data.bounds.max.z, enabled: false },
+    intensity: data.intensities ? { min: 0, max: 1, enabled: false } : undefined,
+    scalarFields: Object.fromEntries(
+      Object.entries(data.scalarFields || {}).map(([name, field]) => [
+        name,
+        { min: field.min, max: field.max, enabled: false },
+      ]),
+    ),
+  };
+}
+
+// Is any filter on `filters` actually enabled? Shared so the preview, the two
+// commit handlers and the panel's button gating can't disagree about what
+// "has a filter" means.
+export function hasEnabledFilter(filters: CloudFilters | undefined | null): boolean {
+  if (!filters) return false;
+  return !!(filters.x.enabled || filters.y.enabled || filters.z.enabled ||
+    filters.intensity?.enabled ||
+    Object.values(filters.scalarFields).some(f => f.enabled));
+}
 
 // Format a numeric range tick so the colorbar labels stay readable across
 // many orders of magnitude.

@@ -89,30 +89,21 @@ def _avg_nn_distance(points: np.ndarray, sample: int = 2000) -> float:
     return float(np.median(nn)) if nn.size else 0.01
 
 
-def statistical_outlier_mask(
-    points: np.ndarray, nb_neighbors: int = 20, std_ratio: float = 2.0
-) -> np.ndarray:
-    """Boolean keep-mask (True = inlier). Index-preserving SOR using a KD-tree --
-    same criterion as open3d's remove_statistical_outlier but returns a mask."""
-    n = len(points)
-    if n <= nb_neighbors:
-        return np.ones(n, dtype=bool)
-    tree = cKDTree(points)
-    d, _ = tree.query(points, k=nb_neighbors + 1)
-    mean_d = d[:, 1:].mean(axis=1)  # exclude self
-    thresh = mean_d.mean() + std_ratio * mean_d.std()
-    return mean_d <= thresh
+# SOR and ROR live in ``denoise`` (the module the Filter tool's Noise section
+# uses) so there is exactly ONE implementation of each criterion in the tree.
+# Re-exported here because this module's pipeline and its tests import them by
+# name. The denoise versions are the same criteria, chunked so they survive a
+# real scan rather than a fixture.
+#
+# NOTE: ``denoise.DEFAULT_SOR_STD_RATIO`` is 4.0, not the 2.0 in
+# ``PreprocessOptions`` below -- see the "Why the default method is ror" section
+# of that module's docstring before reusing this pipeline's default.
+from denoise import (  # noqa: E402  (kept next to the other mask helpers)
+    radius_outlier_mask,
+    statistical_outlier_mask,
+)
 
-
-def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float) -> np.ndarray:
-    """Keep points having >= ``nb_points`` neighbors within ``radius``."""
-    n = len(points)
-    if n == 0:
-        return np.zeros(0, dtype=bool)
-    tree = cKDTree(points)
-    counts = tree.query_ball_point(points, radius, return_length=True)
-    # query_ball_point counts include the point itself.
-    return counts >= (nb_points + 1)
+__all_masks__ = ("statistical_outlier_mask", "radius_outlier_mask")
 
 
 def largest_connected_component_mask(points: np.ndarray, radius: float) -> np.ndarray:

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   formatColorbarTick,
+  pointPassesFilters,
+  hasEnabledFilter,
   computeBoundsFromPositions,
   fuzzyMatch,
   generateShapeMesh,
@@ -42,7 +44,7 @@ import {
   scatterToFullLength,
 } from './pointCloudHelpers';
 import { projectWorldToCanvasPixel } from './cropGeometry';
-import type { MeshData, PointCloudData } from './pointCloudTypes';
+import type { CloudFilters, MeshData, PointCloudData } from './pointCloudTypes';
 import type { Scan } from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
 import { parsePoseStreamCsv } from './poseStream';
@@ -1822,5 +1824,103 @@ describe('extentForParameterSeeding', () => {
       // The call sites guard on `diag > 0`, so an unknown extent must read 0.
       expect(eraseDiagonal({ pointCount: 0 } as unknown as PointCloudData)).toBe(0);
     });
+  });
+});
+
+
+describe('pointPassesFilters', () => {
+  // One predicate now backs BOTH the viewport preview (PointCloud.tsx) and the
+  // destructive commit (buildFlatKeepPredicate). They used to be two copies and
+  // had drifted: the preview ignored `selectedClasses` entirely, so a
+  // categorical filter previewed as a no-op and then deleted points on commit.
+  const off = { min: 0, max: 0, enabled: false };
+  const makeData = (positions: number[], scalars?: Record<string, number[]>) => ({
+    positions: new Float32Array(positions),
+    pointCount: positions.length / 3,
+    bounds: {
+      min: new THREE.Vector3(), max: new THREE.Vector3(),
+      center: new THREE.Vector3(), size: new THREE.Vector3(),
+    },
+    ...(scalars
+      ? {
+        scalarFields: Object.fromEntries(
+          Object.entries(scalars).map(([k, v]) => [
+            k, { values: new Float32Array(v), min: Math.min(...v), max: Math.max(...v) },
+          ]),
+        ),
+      }
+      : {}),
+  }) as unknown as PointCloudData;
+
+  const filters = (over: Partial<CloudFilters>): CloudFilters => ({
+    x: { ...off }, y: { ...off }, z: { ...off }, scalarFields: {}, ...over,
+  });
+
+  it('applies a continuous range per axis', () => {
+    const data = makeData([0, 0, 0, 5, 0, 0, 10, 0, 0]);
+    const f = filters({ x: { min: 1, max: 6, enabled: true } });
+    expect([0, 1, 2].map(i => pointPassesFilters(data, f, i))).toEqual([false, true, false]);
+  });
+
+  it('honours selectedClasses on a categorical field', () => {
+    const data = makeData([0, 0, 0, 1, 0, 0, 2, 0, 0], { noise_class: [1, 2, 1] });
+    const f = filters({
+      // min/max deliberately span the whole class range, exactly as the panel
+      // commits them. The OLD preview compared only these and so kept
+      // everything — this is the regression this test exists for.
+      scalarFields: { noise_class: { min: 1, max: 2, enabled: true, selectedClasses: [1] } },
+    });
+    expect([0, 1, 2].map(i => pointPassesFilters(data, f, i))).toEqual([true, false, true]);
+  });
+
+  it('rounds float32 class values before matching', () => {
+    // A class id of 2 stored as float32 can read back as 1.9999999; a bare
+    // includes() would drop every point of that class.
+    const data = makeData([0, 0, 0, 1, 0, 0], { c: [1.9999999, 3.0000001] });
+    const f = filters({ scalarFields: { c: { min: 1, max: 3, enabled: true, selectedClasses: [2] } } });
+    expect([0, 1].map(i => pointPassesFilters(data, f, i))).toEqual([true, false]);
+  });
+
+  it('keeps nothing when no class is selected', () => {
+    const data = makeData([0, 0, 0, 1, 0, 0], { c: [1, 2] });
+    const f = filters({ scalarFields: { c: { min: 1, max: 2, enabled: true, selectedClasses: [] } } });
+    expect([0, 1].map(i => pointPassesFilters(data, f, i))).toEqual([false, false]);
+  });
+
+  it('AND-combines an axis range with a class filter', () => {
+    const data = makeData([0, 0, 0, 5, 0, 0, 10, 0, 0], { c: [1, 1, 1] });
+    const f = filters({
+      x: { min: 0, max: 6, enabled: true },
+      scalarFields: { c: { min: 1, max: 2, enabled: true, selectedClasses: [1] } },
+    });
+    expect([0, 1, 2].map(i => pointPassesFilters(data, f, i))).toEqual([true, true, false]);
+  });
+
+  it('ignores a disabled filter and a field the cloud does not carry', () => {
+    const data = makeData([0, 0, 0, 99, 0, 0]);
+    const f = filters({
+      x: { min: 0, max: 1, enabled: false },
+      scalarFields: { absent: { min: 0, max: 0, enabled: true, selectedClasses: [7] } },
+    });
+    expect([0, 1].map(i => pointPassesFilters(data, f, i))).toEqual([true, true]);
+  });
+});
+
+describe('hasEnabledFilter', () => {
+  const off = { min: 0, max: 0, enabled: false };
+  const base = { x: { ...off }, y: { ...off }, z: { ...off }, scalarFields: {} } as CloudFilters;
+
+  it('is false for no filters and for an all-disabled set', () => {
+    expect(hasEnabledFilter(undefined)).toBe(false);
+    expect(hasEnabledFilter(null)).toBe(false);
+    expect(hasEnabledFilter(base)).toBe(false);
+  });
+
+  it('is true for an enabled axis, intensity, or scalar filter', () => {
+    expect(hasEnabledFilter({ ...base, z: { min: 0, max: 1, enabled: true } })).toBe(true);
+    expect(hasEnabledFilter({ ...base, intensity: { min: 0, max: 1, enabled: true } })).toBe(true);
+    expect(hasEnabledFilter({
+      ...base, scalarFields: { c: { min: 0, max: 1, enabled: true } },
+    })).toBe(true);
   });
 });

@@ -193,14 +193,19 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
   // (Raced deliberately: on this small fixture the rebuild can beat the poll,
   // so a missing pill is only a failure if the work is still running.)
   const pill = page.getByTestId('filter-running');
-  const commitButton = page.getByTestId('filter-remove');
   await expect(async () => {
     const n = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
     expect(n).toBe(600);
   }).toPass({ timeout: 60_000 });
-  // The pill and the disabled state must both be gone once the work is done.
+  // Nothing may be left in a stuck "working" state once the filter finishes.
+  // On SUCCESS that means the pill is gone and the panel has closed
+  // (`clearFilterStateForCloud` — the filters just applied no longer describe
+  // this cloud, so leaving the panel up would show stale ranges). The commit
+  // button therefore does not exist to be re-enabled here; the path where it
+  // does persist and must un-disable is the empty-result one, asserted in
+  // octree-scalar-filter.spec.ts.
   await expect(pill).toHaveCount(0);
-  await expect(commitButton).toBeEnabled();
+  await expect(page.getByTestId('filter-field-select')).toHaveCount(0);
 
   // NOTE: ground_class is a REGISTERED scheme (a fixed Ground/Non-ground
   // vocabulary), so its class list is deliberately NOT narrowed to the values

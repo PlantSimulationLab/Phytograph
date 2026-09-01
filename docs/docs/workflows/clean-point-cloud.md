@@ -452,6 +452,81 @@ point, you're offered the chance to delete the cloud instead.
     still contains — filter to Tree 3 and Tree 3 is the only class listed.
     So an unchanged list is a genuine signal that nothing was removed.
 
+### Remove noise (stray points)
+
+Scans pick up returns that aren't surface: dust, rain, insects, a bird
+through the beam, or a pulse that clipped an edge and landed in mid-air.
+The **Noise** section at the top of the Filter panel finds them.
+
+It works in two steps, and the first one deletes nothing:
+
+1. Click **Detect noise**. The cloud is classified into `noise_class`
+   (Clean / Noise), recoloured so the flagged points stand out in **red**,
+   and the panel reports how many were flagged and what share of the cloud
+   that is.
+2. Look at the red points. If they're where you expect stray points to be,
+   commit with the panel's usual buttons: **Filter (remove points)** to
+   delete them, or **Segment (split into two clouds)** to move them into a
+   `<name> (filtered out)` cloud you can inspect and delete later.
+
+Detect only writes a label, so re-running it with different settings simply
+overwrites the previous result — there's nothing to undo.
+
+#### Choosing a method
+
+| Method | What it flags | Use it when |
+| --- | --- | --- |
+| **Isolated points** (default) | Points with fewer than *N* other returns within *r* metres | Almost always. It asks a local, physical question, so it's safe on fine twigs and gives the same answer however often you run it. |
+| **Sparse voxels** | Points in a grid cell holding too few returns | The cloud is too large for the other two to be quick. It's coarser — it can clip the last point of a thin branch. |
+| **Statistical (SOR)** | Points whose mean distance to their *k* nearest neighbours is unusually large | You need to catch a tight *clump* of stray points that the other methods leave alone, because the clump's members support each other. |
+
+!!! warning "Statistical (SOR) gets more aggressive each time you run it"
+    SOR's threshold is computed from the whole cloud, so it's set by whatever
+    the most extreme points in it happen to be. While obvious flyers are
+    present they hold the threshold high and fine structure is safe; once
+    you've removed them, the threshold collapses onto the next most unusual
+    points — which on a plant is the twigs and leaf tips.
+
+    Measured on our test tree: a first SOR pass took only the 25 stray points,
+    but a second pass over the cleaned cloud took **264 of its 360 twig
+    points** and reported it as noise removed. This is why the default is
+    *Isolated points* and why SOR is marked advanced. If you use it, run it
+    once, and check the red points before removing them.
+
+#### Parameters
+
+Leave **Auto parameters** ticked and the settings are derived from the
+cloud's own point spacing; after a detection run the boxes show what it
+chose, so you can see whether the number is sensible for your scan. Untick
+it to set them yourself — for *Isolated points*, the radius is a real
+distance you can compare against your scan resolution ("my twigs have
+returns every centimetre, so 5 cm is generous").
+
+If a run flags more than 20% of the cloud the result box turns red and
+**Filter (remove points)** asks for confirmation first, since real scanner
+noise is typically 0.1–3%. That threshold is a backstop, not a guarantee —
+a bad radius can lose fine structure while staying under it, which is what
+the red preview is for.
+
+!!! info "What it doesn't do"
+    - **Sky/miss points** (from a structured scan) are never flagged and never
+      removed — they're rays that hit nothing, and
+      [Leaf Area Density](estimate-leaf-area-density.md) needs them.
+    - **Mixed/edge returns** — the faint veil hanging off every leaf edge,
+      where the beam straddled a boundary — aren't isolated, so no density
+      method catches them. If your scanner records a `deviation` or
+      `reflectance` column, filter on *that* field instead (it's in the
+      field dropdown above): those attributes measure the return's quality
+      directly. Note a deviation cut preferentially removes small-object
+      returns, which helps for branch modelling but hurts leaf-area work.
+    - **Registration error** — doubled surfaces from a bad alignment aren't
+      noise. Fix the [registration](register-compare.md).
+
+!!! tip "Denoise before you merge, not after"
+    Point density varies between scan positions, and every method here reads
+    density. Running it per scan before [stitching](register-compare.md)
+    gives a cleaner answer than running it once on the merged result.
+
 ## Resample
 
 Use **Resample Point Cloud** (scatter icon) when a cloud is too large
@@ -470,15 +545,21 @@ when you want a uniformly sparser version for export.
 Both buttons are disabled at a fraction of `1.0`, since keeping everything is a
 no-op.
 
-Resampling is uniform-random, not voxel-based. For voxel downsampling,
-export to `.ply` and use a tool like CloudCompare.
+Resampling is uniform-random, not voxel-based. For voxel *downsampling*
+(one point per occupied cell), export to `.ply` and use a tool like
+CloudCompare. Note that voxel downsampling is not a way to clean a cloud —
+it keeps one point per occupied cell, so it preserves isolated stray points
+at full weight while thinning dense structure. To remove noise, use
+[Remove noise](#remove-noise-stray-points) above.
 
 ## A typical cleaning order
 
 1. **Transform** — translate and rotate the cloud level and centered.
 2. **Crop** — remove the ground and far-field noise with a single box.
-3. **Filter** — drop low-intensity returns if intensity is reliable.
-4. **Erase** — clean up stragglers a box couldn't reach.
-5. **Resample** — only if needed for performance.
+3. **Remove noise** — take out the stray points a box can't isolate. Do this
+   per scan, before registering or stitching.
+4. **Filter** — drop low-intensity returns if intensity is reliable.
+5. **Erase** — clean up stragglers a box couldn't reach.
+6. **Resample** — only if needed for performance.
 
 Save (`Export → .ply`) at each milestone if you want backup checkpoints.

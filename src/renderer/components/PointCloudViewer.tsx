@@ -149,8 +149,10 @@ import {
   extractReuseMeshPayload,
   collectHitPoints,
   collectHitPointsCapped,
+  defaultCloudFilters,
   extentForParameterSeeding,
   eraseDiagonal,
+  pointPassesFilters,
   scatterToFullLength,
   type Vec3Like,
   type ReuseMeshPayload,
@@ -168,8 +170,10 @@ import {
   type ChannelDescriptor,
   type LegendEntry,
 } from '../lib/colorChannel';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE } from '../lib/classification';
+import { buildNoiseParams, formatFlaggedSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
+import { denoisePoints, sessionDenoise, type DenoiseStats, type NoiseMethod, type NoiseParams } from '../utils/backendApi';
 import { CURATED_BARK_TEXTURES, getBarkTextures, getBarkTexture } from '../utils/backendApi';
 import { DEFAULT_TEXTURE_TILE_SIZE } from '../lib/qsmTube';
 import { mergeTrees, splitTreeByGaps } from '../lib/treeEdit';
@@ -833,6 +837,20 @@ export default function PointCloudViewer({
   const [selectedFilterField, setSelectedFilterField] = useState<string | null>(null);
   const [pendingFilterMin, setPendingFilterMin] = useState<string>('');
   const [pendingFilterMax, setPendingFilterMax] = useState<string>('');
+  // ---- Filter panel: Noise section ------------------------------------
+  // Detect classifies points into a `noise_class` column and pre-selects that
+  // field; the removal itself is the panel's existing Remove / Segment buttons,
+  // so there is no commit state here.
+  const [noiseExpanded, setNoiseExpanded] = useState(false);
+  const [noiseMethod, setNoiseMethod] = useState<NoiseMethod>('ror');
+  const [noiseAutoParams, setNoiseAutoParams] = useState(true);
+  const [noiseParams, setNoiseParams] = useState<NoiseParams>({});
+  const [noiseBusy, setNoiseBusy] = useState(false);
+  const [noiseError, setNoiseError] = useState<string | null>(null);
+  // Keyed by cloud id: a detection belongs to the cloud it ran on, so selecting
+  // a different cloud must not show its neighbour's result.
+  const [noiseResults, setNoiseResults] = useState<Map<string, DenoiseStats>>(new Map());
+  const noiseAbortRef = useRef<AbortController | null>(null);
   const [showGrid, setShowGrid] = useState(true);
   const [gridPlane, setGridPlane] = useState<GridPlane>('z-up');
   const [showAxes, setShowAxes] = useState(true);
@@ -1115,6 +1133,13 @@ export default function PointCloudViewer({
     ids: string[];
     label: string;
   } | null>(null);
+
+  // "Remove flagged points" confirmation for the noise filter. Held as the
+  // message rather than a boolean so the dialog can name BOTH reasons it can
+  // fire: an implausible flagged fraction, and the fact that Remove applies
+  // every OTHER active filter at the same time ("I only wanted the noise gone"
+  // is a real way to lose half a cloud).
+  const [noiseRemoveConfirm, setNoiseRemoveConfirm] = useState<string | null>(null);
 
   // "Reset Registration" confirmation. Held as the list of scans that WOULD be
   // moved rather than a bare boolean, so the prompt can name them: the command
@@ -3143,6 +3168,38 @@ export default function PointCloudViewer({
     if (!cloud || !octreeInfo) return;
     const fileName = cloud.data.fileName ?? cloud.id;
     if (octreeInfo.divergedFromSource) {
+      // An edited cloud cannot be rebuilt from its SOURCE FILE — that is the
+      // refusal below. It usually can be rebuilt from its SESSION: the backend's
+      // in-RAM arrays are the actual source of truth for a cloud (every edit
+      // lives there and nowhere else; the octree is a derived render cache), and
+      // `rebuild_octree` reconverts straight from them without reading any file.
+      // So the honest question is not "is this cloud edited?" but "do the points
+      // still exist anywhere?", and while the session is alive they do.
+      //
+      // Skipping this cost a user their work: a concurrent Electron instance
+      // wiped the octree cache mid-session, and because the cloud was flagged
+      // edited we reported unrecoverable data loss while the backend was still
+      // holding every one of those points in RAM.
+      //
+      // `buildSessionOctreeData` keeps `divergedFromSource` sticky, so the
+      // recovered cloud stays correctly marked as edited.
+      if (octreeInfo.sessionId) {
+        try {
+          const rebuilt = await rebuildSessionOctree(octreeInfo.sessionId);
+          const newData = buildSessionOctreeData(rebuilt, octreeInfo, fileName);
+          onRebuildScanOctree(cloud.id, newData);
+          setOctreePaintGen(prev => ({
+            ...prev,
+            [rebuilt.cache_id]: (prev[rebuilt.cache_id] ?? 0) + 1,
+          }));
+          return;
+        } catch (err) {
+          // Session gone (backend restart, idle/over-cap eviction) or the
+          // reconvert failed. Fall through to the refusal — rebuilding from the
+          // stale source file is still the one thing we must not do.
+          console.error('Session rebuild of an edited cloud failed', err);
+        }
+      }
       showToast({
         title: 'Edited point cloud unavailable',
         message:
@@ -5236,6 +5293,17 @@ export default function PointCloudViewer({
       next.delete(cloudId);
       return next;
     });
+    // A detection describes the cloud as it was BEFORE the commit, so once
+    // filter/segment has rewritten it the reported counts are about points that
+    // no longer exist. Leaving the box up made the panel claim "25 points
+    // flagged" immediately after those 25 were removed.
+    setNoiseResults(prev => {
+      if (!prev.has(cloudId)) return prev;
+      const next = new Map(prev);
+      next.delete(cloudId);
+      return next;
+    });
+    setNoiseError(null);
     // Destructive boundary: filter/segment rewrote this cloud's data.
     scene.boundary([cloudId]);
     setShowFilterPanel(false);
@@ -5325,37 +5393,17 @@ export default function PointCloudViewer({
   // Build the keep-predicate for a flat cloud from its active filters.
   const buildFlatKeepPredicate = useCallback((cloud: PointCloudEntry, filters: CloudFilters, erased: Set<number>) => {
     const src = cloud.data;
-    return (i: number): boolean => {
-      if (erased.has(i)) return false;
-      const x = src.positions[i * 3];
-      const y = src.positions[i * 3 + 1];
-      const z = src.positions[i * 3 + 2];
-      if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) return false;
-      if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) return false;
-      if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) return false;
-      if (filters.intensity?.enabled && src.intensities) {
-        const v = src.intensities[i];
-        if (v < filters.intensity.min || v > filters.intensity.max) return false;
-      }
-      for (const name in filters.scalarFields) {
-        const sf = filters.scalarFields[name];
-        if (sf.enabled && src.scalarFields?.[name]) {
-          const v = src.scalarFields[name].values[i];
-          // Categorical: keep iff the rounded value is a selected class.
-          // Continuous: keep iff within [min, max].
-          if (sf.selectedClasses) {
-            if (!sf.selectedClasses.includes(Math.round(v))) return false;
-          } else if (v < sf.min || v > sf.max) {
-            return false;
-          }
-        }
-      }
-      return true;
-    };
+    // The range/class test itself is `pointPassesFilters`, shared with the
+    // viewport preview (PointCloud.tsx) so the two cannot drift — they had,
+    // and the preview silently ignored categorical class selections.
+    // Erasure is this path's alone: the preview draws erased points via a
+    // separate index list rather than through the filter.
+    return (i: number): boolean =>
+      !erased.has(i) && pointPassesFilters(src, filters, i);
   }, []);
 
   // Apply filter permanently - removes filtered out points from the point cloud
-  const handleApplyFilterPermanently = useCallback(async () => {
+  const handleApplyFilterPermanently = useCallback(async (confirmed = false) => {
     if (selectedIds.size !== 1) return;
     // Re-entry guard. The octree rebuild takes long enough that the button reads
     // as unresponsive; without this, every impatient click fired ANOTHER full
@@ -5367,6 +5415,29 @@ export default function PointCloudViewer({
     const filters = cloudFilters.get(cloudId);
 
     if (!cloud || !filters) return;
+
+    // Removal is the one irreversible step in the noise workflow, so it is the
+    // one place worth a confirmation. Two reasons, both about removing more than
+    // the user meant: the detection flagged an implausible share of the cloud,
+    // or another filter is enabled and Remove applies them ALL at once.
+    // Segment is deliberately NOT gated — splitting is how you inspect a result
+    // you are unsure about.
+    if (!confirmed && filters.scalarFields[NOISE_CLASS_ATTRIBUTE]?.enabled) {
+      const others = [
+        ...Object.entries(filters.scalarFields)
+          .filter(([slug, f]) => f.enabled && slug !== NOISE_CLASS_ATTRIBUTE)
+          .map(([slug]) => slug),
+        ...(filters.x.enabled ? ['X'] : []),
+        ...(filters.y.enabled ? ['Y'] : []),
+        ...(filters.z.enabled ? ['Z'] : []),
+        ...(filters.intensity?.enabled ? ['Intensity'] : []),
+      ];
+      const stats = noiseResults.get(cloudId) ?? null;
+      if (noiseRemovalNeedsConfirmation(stats, others)) {
+        setNoiseRemoveConfirm(noiseRemovalConfirmMessage(stats, others));
+        return;
+      }
+    }
 
     // Check if any filter is active
     const hasAnyFilter = filters.x.enabled || filters.y.enabled || filters.z.enabled ||
@@ -5435,7 +5506,7 @@ export default function PointCloudViewer({
     }
     onUpdateCloud(cloud.id, newData);
     clearFilterStateForCloud(cloud.id);
-  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData, isFilterRunning]);
+  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData, isFilterRunning, noiseResults]);
 
   // Cancel an in-flight permanent filter. Kills the BACKEND work first (the
   // PotreeConverter child polls this run's cancel event and is hard-killed), then
@@ -6732,7 +6803,7 @@ export default function PointCloudViewer({
       { id: 'pick-point', name: 'Pick Point', keywords: ['point', 'inspect', 'identify', 'query', 'coordinates', 'attribute', 'scalar', 'label', 'probe'], action: () => { const open = showPointPickerPanel; closeAllToolPanels('point-pick'); setShowPointPickerPanel(!open); setPointPickMode(!open); }, category: 'View', requires: null, icon: MousePointerClick, testId: 'tool-point-pick', isActive: () => showPointPickerPanel },
       { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
-      { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
+      { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
       { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
       { id: 'cloud-backfill-misses', name: 'Backfill Misses', keywords: ['sky', 'miss', 'gapfill', 'lad', 'leaf area', 'transmission', 'recover', 'beam'], action: () => { closeAllToolPanels(); setShowBackfillPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'preprocess', icon: CloudFog, testId: 'tool-backfill-misses', multiInput: true },
@@ -10115,6 +10186,153 @@ export default function PointCloudViewer({
   // into scalarFields directly. Optionally splits into ground/plant clouds: for
   // session clouds via sessionExtract (parent untouched), for flat clouds in
   // memory.
+  // Detect noise on the selected cloud: classify every point into a
+  // `noise_class` column (1 = clean, 2 = noise), colour by it, and pre-select it
+  // in the field dropdown with only "Clean" kept.
+  //
+  // That last step is the whole design: it arms the panel's EXISTING Remove /
+  // Segment buttons, so this handler owns no destructive code and the user gets
+  // both "delete the noise" and "split it into its own cloud for inspection"
+  // for free, composable with any other filter.
+  //
+  // Nothing is deleted here, so a bad parameter choice costs a re-run, not data.
+  const handleDetectNoise = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+
+    const params = buildNoiseParams(noiseMethod, noiseAutoParams, noiseParams);
+    setNoiseBusy(true);
+    setNoiseError(null);
+    const abort = new AbortController();
+    noiseAbortRef.current = abort;
+
+    // Shared by both branches: show the result, paint the cloud by noise_class,
+    // and arm Remove/Segment with "keep Clean".
+    const armFilter = (stats: DenoiseStats) => {
+      setNoiseResults(prev => new Map(prev).set(id, stats));
+      setCloudColorMode(id, { mode: 'scalar', field: NOISE_CLASS_ATTRIBUTE });
+      setSelectedFilterField(`scalar:${NOISE_CLASS_ATTRIBUTE}`);
+      setCloudFilters(prev => {
+        const next = new Map(prev);
+        const existing = next.get(id) ?? defaultCloudFilters(cloud.data);
+        next.set(id, {
+          ...existing,
+          scalarFields: {
+            ...existing.scalarFields,
+            [NOISE_CLASS_ATTRIBUTE]: {
+              min: NOISE_CLEAN, max: NOISE_NOISE, enabled: true,
+              selectedClasses: [NOISE_CLEAN],
+            },
+          },
+        });
+        return next;
+      });
+      // Auto mode fills the (greyed) inputs with what the backend resolved, so
+      // the user can see the numbers and switch to manual from there rather
+      // than starting blank.
+      if (noiseAutoParams && stats.params_used) {
+        setNoiseParams(prev => ({ ...prev, ...stats.params_used }));
+      }
+      showToast({
+        type: stats.over_removal ? 'warning' : 'success',
+        title: stats.over_removal ? 'Noise detection — check before removing' : 'Noise Detected',
+        message: `${formatFlaggedSummary(stats)}. Flagged points are shown in red.`,
+      });
+    };
+
+    try {
+      const ps = await buildPointSource(cloud);
+
+      // --- Session-backed octree cloud: classify on the in-RAM array, append
+      // noise_class, rebuild from arrays. The rebuild IS the preview: the
+      // octree redraws with the flagged points red, which is the only preview
+      // octree clouds can have (the panel's live preview is flat-cloud only). ---
+      if (ps.kind === 'source') {
+        const octreeInfo = cloud.data.octree;
+        if (!octreeInfo?.sessionId) {
+          throw new Error('Octree cloud is missing its editable session.');
+        }
+        const meta = await sessionDenoise(octreeInfo.sessionId, params, abort.signal);
+        // No `{diverged: true}` — classifying is not a destructive edit.
+        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, cloud.data.fileName ?? id));
+        armFilter(meta);
+        return;
+      }
+
+      // --- Flat cloud: classify in memory, write the scalar field. ---
+      // Hit points only. A miss sits ~1 km out along its beam, so including
+      // them would both blow up the KD-tree extent and poison the
+      // nearest-neighbour spacing every auto parameter is derived from.
+      const displayData = ps.data;
+      const count = displayData.pointCount;
+      const { points, hitIndices, droppedMisses } = ps.hits;
+      if (droppedMisses > 0) {
+        console.log(`Noise detection: excluded ${droppedMisses} sky/miss points`);
+      }
+
+      // Parity with the session route, which reads this off the session's
+      // columns: a second SOR pass over an already-cleaned cloud is the one
+      // case that needs a warning (see backend-api/denoise.py).
+      const response = await denoisePoints({
+        points,
+        ...params,
+        previously_denoised: !!displayData.scalarFields?.[NOISE_CLASS_ATTRIBUTE],
+      }, abort.signal);
+      if (!response.success) throw new Error(response.error || 'Noise detection failed');
+
+      // The backend labelled the HIT subset, so its result is indexed against
+      // `points`, not the cloud — writing it directly would mislabel every
+      // point after the first miss.
+      //
+      // Fill NOISE_CLEAN, not the usual 0: a miss is a ray that hit nothing,
+      // not a bad return, and labelling it "clean" means no commit path can
+      // ever sweep it into a noise cloud and cost this cloud its Beer's-law
+      // transmission denominator for LAD.
+      const labels = scatterToFullLength(response.labels, hitIndices, count, NOISE_CLEAN);
+      onUpdateCloud(id, {
+        ...displayData,
+        scalarFields: {
+          ...(displayData.scalarFields ?? {}),
+          [NOISE_CLASS_ATTRIBUTE]: { values: labels, min: NOISE_CLEAN, max: NOISE_NOISE },
+        },
+      });
+      armFilter(response);
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') return;   // user cancelled
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[handleDetectNoise] failed:', err);
+      setNoiseError(message);
+      showToast({ type: 'error', title: 'Noise detection failed', message });
+    } finally {
+      setNoiseBusy(false);
+      noiseAbortRef.current = null;
+    }
+  }, [selectedIds, clouds, noiseMethod, noiseAutoParams, noiseParams,
+      buildPointSource, onUpdateCloud, setCloudColorMode]);
+
+  // Drop the detection for a cloud: clears the result box, the noise_class
+  // filter and the noise colouring. The `noise_class` COLUMN stays on the cloud
+  // (harmless, and re-running overwrites it) — this only undoes the UI arming.
+  const clearNoiseDetection = useCallback((cloudId: string) => {
+    setNoiseResults(prev => {
+      const next = new Map(prev);
+      next.delete(cloudId);
+      return next;
+    });
+    setNoiseError(null);
+    setCloudFilters(prev => {
+      const existing = prev.get(cloudId);
+      if (!existing?.scalarFields[NOISE_CLASS_ATTRIBUTE]) return prev;
+      const { [NOISE_CLASS_ATTRIBUTE]: _dropped, ...rest } = existing.scalarFields;
+      return new Map(prev).set(cloudId, { ...existing, scalarFields: rest });
+    });
+    setSelectedFilterField(prev =>
+      prev === `scalar:${NOISE_CLASS_ATTRIBUTE}` ? null : prev);
+    setCloudColorMode(cloudId, { mode: 'height' });
+  }, [setCloudColorMode]);
+
   const handleGroundSegment = useCallback(async () => {
     if (selectedIds.size !== 1) return;
     const id = Array.from(selectedIds)[0];
@@ -20334,19 +20552,9 @@ export default function PointCloudViewer({
         const data = cloud.data;
         const currentFilters = cloudFilters.get(cloud.id);
 
-        // Get or create default filters based on cloud data
-        const getDefaultFilters = (): CloudFilters => ({
-          x: { min: data.bounds.min.x, max: data.bounds.max.x, enabled: false },
-          y: { min: data.bounds.min.y, max: data.bounds.max.y, enabled: false },
-          z: { min: data.bounds.min.z, max: data.bounds.max.z, enabled: false },
-          intensity: data.intensities ? { min: 0, max: 1, enabled: false } : undefined,
-          scalarFields: Object.fromEntries(
-            Object.entries(data.scalarFields || {}).map(([name, field]) => [
-              name,
-              { min: field.min, max: field.max, enabled: false }
-            ])
-          )
-        });
+        // Shared with handleDetectNoise, which needs the same base to add
+        // `noise_class` onto when the panel has not been touched yet.
+        const getDefaultFilters = (): CloudFilters => defaultCloudFilters(data);
 
         const filters = currentFilters || getDefaultFilters();
 
@@ -20585,9 +20793,32 @@ export default function PointCloudViewer({
             onPendingMaxChange={(value) => { setPendingFilterMax(value); commitFilter(pendingFilterMin, value); }}
             onRemoveFilter={removeFilter}
             onClearAllFilters={clearAllFilters}
-            onApplyFilter={handleApplyFilterPermanently}
+            // Wrapped, not passed directly: FilterPanel's onClick would hand
+            // the click event through as `confirmed` and skip the guard.
+            onApplyFilter={() => { void handleApplyFilterPermanently(); }}
             onSegmentFilter={handleSegmentFilter}
             isApplying={isFilterRunning}
+            noiseExpanded={noiseExpanded}
+            noiseMethod={noiseMethod}
+            noiseAutoParams={noiseAutoParams}
+            noiseParams={noiseParams}
+            noiseBusy={noiseBusy}
+            noiseResult={noiseResults.get(cloud.id) ?? null}
+            noiseError={noiseError}
+            onToggleNoiseExpanded={() => setNoiseExpanded(v => !v)}
+            onNoiseMethodChange={(m) => {
+              setNoiseMethod(m);
+              // Each method's parameters mean different things, so carrying the
+              // previous method's resolved numbers over would be nonsense. Drop
+              // back to auto on every method change.
+              setNoiseParams({});
+              setNoiseAutoParams(true);
+            }}
+            onNoiseAutoParamsChange={setNoiseAutoParams}
+            onNoiseParamChange={(key, value) => setNoiseParams(prev => ({ ...prev, [key]: value }))}
+            onDetectNoise={handleDetectNoise}
+            onCancelDetectNoise={() => noiseAbortRef.current?.abort()}
+            onClearNoise={() => clearNoiseDetection(cloud.id)}
           />
         );
       })()}
@@ -21759,6 +21990,37 @@ export default function PointCloudViewer({
                 className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
               >
                 Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Noise removal confirmation. Only the DESTRUCTIVE commit is gated —
+          Segment stays one click away, because splitting the flagged points
+          into their own cloud is how you check a result you don't trust. */}
+      {noiseRemoveConfirm && (
+        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-neutral-800 rounded-lg p-4 shadow-xl max-w-sm mx-4" data-testid="noise-remove-confirm">
+            <div className="text-sm font-medium text-neutral-200 mb-2">
+              Remove flagged points?
+            </div>
+            <div className="text-xs text-neutral-400 mb-4 whitespace-pre-line">
+              {noiseRemoveConfirm}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setNoiseRemoveConfirm(null)}
+                className="px-3 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                data-testid="confirm-noise-remove"
+                onClick={() => { setNoiseRemoveConfirm(null); void handleApplyFilterPermanently(true); }}
+                className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
+              >
+                Remove
               </button>
             </div>
           </div>

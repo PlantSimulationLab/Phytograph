@@ -178,4 +178,12 @@ test('offers to delete when a scalar filter excludes every point', async () => {
   await expect(page.getByTestId('confirm-delete')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText('Delete cloud?')).toBeVisible();
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
+
+  // This is the one commit path that leaves the panel OPEN (it returns before
+  // `clearFilterStateForCloud`), so it is where the anti-double-click affordance
+  // has to be checked: the run is over, so the progress pill must be gone and the
+  // commit button must be usable again rather than stuck reading "Filtering…".
+  // A button left disabled here would strand the user behind the dialog.
+  await expect(page.getByTestId('filter-running')).toHaveCount(0);
+  await expect(page.getByTestId('filter-remove')).toBeEnabled();
 });

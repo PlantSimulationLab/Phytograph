@@ -758,6 +758,85 @@ export async function segmentGround(
   return postSegment<GroundSegmentationResponse>('/api/segment/ground', request, signal);
 }
 
+// ==================== NOISE FILTER API ====================
+
+// The three noise criteria the Filter panel's Noise section offers.
+//   'ror'         — isolated points: fewer than N other returns within r metres.
+//                   The DEFAULT. Local, physical, density-invariant, idempotent.
+//   'voxel_count' — sparse voxels: O(N), no KD-tree, for clouds too large for
+//                   the others. Coarser at branch ends.
+//   'sor'         — statistical, the conventional field method. ADVANCED: its
+//                   threshold is set by the extremes still in the cloud, so it
+//                   gets more aggressive on every pass. See backend-api/denoise.py.
+export type NoiseMethod = 'ror' | 'voxel_count' | 'sor';
+
+// Every parameter is optional: omitted means "derive it from this cloud's own
+// point spacing" (the backend's `resolve_params`), and what it resolved to comes
+// back in `params_used` so the panel can show it.
+export interface NoiseParams {
+  method?: NoiseMethod;
+  radius?: number;        // ror
+  nb_points?: number;     // ror
+  voxel?: number;         // voxel_count
+  min_points?: number;    // voxel_count
+  nb_neighbors?: number;  // sor
+  std_ratio?: number;     // sor
+}
+
+export interface DenoiseStats {
+  flagged: number;
+  kept: number;
+  fraction: number;          // flagged / total, 0..1
+  non_finite: number;
+  // True above the backend's OVER_REMOVAL_FRACTION. Real TLS noise is 0.1–3%,
+  // so this means the parameters are almost certainly wrong — the panel makes
+  // the user confirm before the destructive commit.
+  over_removal: boolean;
+  warnings: string[];
+  method: NoiseMethod;
+  params_used: Record<string, number>;
+  spacing_m?: number | null;   // null when the cloud was too small to measure
+  elapsed_s?: number | null;
+}
+
+export interface DenoiseRequest extends NoiseParams {
+  // Hits only — the renderer sends `ps.hits.points`. Omit when `source` is set.
+  points?: number[][];
+  source?: BackendPointSource;
+  previously_denoised?: boolean;
+}
+
+export interface DenoiseResponse extends DenoiseStats {
+  success: boolean;
+  labels: number[];    // 1=clean, 2=noise, aligned to the resolved point order
+  num_points: number;
+  error?: string;
+}
+
+/** Classify noise on a FLAT (in-RAM) cloud. Returns per-point labels; nothing is
+ * persisted or removed — the caller writes them onto the cloud as a
+ * `noise_class` scalar and the Filter tool's existing Remove / Segment buttons
+ * do the commit. */
+export async function denoisePoints(
+  request: DenoiseRequest,
+  signal?: AbortSignal,
+): Promise<DenoiseResponse> {
+  return postSegment<DenoiseResponse>('/api/pointcloud/denoise', request, signal, 600000);
+}
+
+/** Classify noise on a session's in-RAM points, append a `noise_class` column
+ * (1=clean, 2=noise), and rebuild the octree so the flagged points RENDER in the
+ * noise colour — that redraw is the preview the user judges before committing.
+ * No file read, nothing deleted. */
+export async function sessionDenoise(
+  sessionId: string,
+  params: NoiseParams,
+  signal?: AbortSignal,
+): Promise<CloudSessionBakeResult & DenoiseStats & { analyzed_points: number }> {
+  return postSegment<CloudSessionBakeResult & DenoiseStats & { analyzed_points: number }>(
+    `/api/cloud/session/${sessionId}/denoise`, params, signal, 600000);
+}
+
 // ==================== DEM (DIGITAL ELEVATION MODEL) API ====================
 
 export type DemInterpMethod = 'tin' | 'idw' | 'nearest';
