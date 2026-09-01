@@ -803,6 +803,12 @@ export interface LADVoxel {
   ciValid?: boolean;
   leafAreaCiLower?: number;       // m²
   leafAreaCiUpper?: number;       // m²
+  // Whether Beer's law actually SOLVED here. Helios returns NaN for an unsolved
+  // (occluded) voxel and the backend squashes it to 0, so `lad === 0` alone can't
+  // tell "no beam ever reached this" from "genuinely empty air". Export gates on
+  // this: unsolved voxels become NoData rather than zeros, which would otherwise
+  // bias any mean LAD / LAI computed downstream. Absent on legacy results.
+  solved?: boolean;
 }
 
 // A leaf-area-density result: a 3D grid of voxels each carrying an LAD scalar.
@@ -848,6 +854,31 @@ export interface LADResultEntry {
     groupLadCiLower?: number;   // m²/m³
     groupLadCiUpper?: number;   // m²/m³
   };
+  // ---- Export support ----------------------------------------------------
+  // These exist so a result can be written out faithfully; nothing renders them.
+  //
+  // THE FRAME TRAP: `voxels[].center`, `bounds` and `gridCenter` above are all in
+  // the STORED frame, because buildLADRequest deliberately sends scan origins,
+  // the grid and the DEM with worldShift SUBTRACTED so they agree with the
+  // session's stored points. World = stored + worldShift. Any export writing
+  // georeferenced coordinates MUST add it back (as the DEM raster export does);
+  // forgetting puts the raster hundreds of km from the scan.
+  worldShift?: [number, number, number];
+  // EPSG of the source scans when they all agree, else null. From the backend
+  // (CloudSession.crs_epsg), not re-derived here.
+  crsEpsg?: number | null;
+  // Full grid extents [x, y, z] in metres. Needed for the .vox header and to
+  // recover the cell size (grid_size / (nx, ny, nz)) — the response has no
+  // explicit cell-size field.
+  gridSize?: [number, number, number];
+  // A snapped ("follow terrain") grid has per-column z offsets, so its voxels are
+  // NOT a regular lattice and cannot be written as a raster. Together with
+  // gridRotationDeg this gates the GeoTIFF option.
+  terrainFollow?: boolean;
+  droppedColumns?: number;
+  totalLeafArea?: number;     // m², summed over solved voxels
+  // Resolved G(theta) per z-level when a vertical-profile override was used.
+  gthetaProfile?: number[];
 }
 
 // Color mapping modes

@@ -995,6 +995,93 @@ export async function exportDemRaster(
   }
 }
 
+// ==================== GRIDDED LAD EXPORT API ====================
+// Writes a computed LAD voxel grid as a multi-band GeoTIFF (one band per vertical
+// level), a per-voxel CSV, AMAPVox .vox, or a plain-text summary carrying LAI.
+// See /api/lad/export.
+//
+// COORDINATES ON THIS WIRE ARE WORLD-FRAME. LADResultEntry holds voxel centers in
+// the STORED frame (world = stored + worldShift); the caller adds the shift back
+// before building this request. Get that wrong and the raster georeferences
+// hundreds of km from the scan.
+
+export interface LADExportCell {
+  center: [number, number, number];   // world
+  size: [number, number, number];
+  lad: number;
+  leaf_area: number;
+  gtheta: number;
+  hit_count: number;
+  beam_count?: number | null;
+  relative_density_index?: number | null;
+  mean_path_length?: number | null;
+  lad_variance?: number | null;
+  lad_std?: number | null;
+  ci_valid?: boolean | null;
+  leaf_area_ci_lower?: number | null;
+  leaf_area_ci_upper?: number | null;
+  // false => occluded. Written as NoData rather than 0 (see the backend's
+  // "THE NODATA RULE"): counting occluded voxels as zeros biases LAD/LAI low.
+  solved?: boolean;
+}
+
+export interface LADExportRequest {
+  format: 'tif' | 'csv' | 'vox' | 'txt';
+  cells: LADExportCell[];
+  nx: number;
+  ny: number;
+  nz: number;
+  origin: [number, number, number];   // world lower-left-bottom corner
+  cell_size: [number, number, number];
+  // Which per-voxel variables to write as rasters — one FILE each, every file
+  // carrying nz bands. Ignored by the text formats, which carry every field.
+  variables?: string[];
+  grid_rotation?: number;             // deg; non-zero => raster rejected
+  terrain_follow?: boolean;           // snapped grid => raster rejected
+  nodata?: number;
+  crs_epsg?: number | null;
+  // Write server-side into this directory instead of returning base64. Required
+  // past the inline cap — a large grid can't survive base64 in a JSON string.
+  dest_dir?: string | null;
+}
+
+export interface LADExportResponse {
+  success: boolean;
+  format: string;
+  files: {
+    name: string;
+    // Exactly one of these is set: base64 for the inline path, path when the
+    // backend wrote the file itself via dest_dir.
+    data_base64: string | null;
+    path: string | null;
+    bytes: number;
+  }[];
+}
+
+export async function exportLAD(request: LADExportRequest): Promise<LADExportResponse> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 300000, '/api/lad/export');
+  try {
+    const response = await fetch(`${baseUrl}/api/lad/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.error('LAD export failed:', error);
+    throw error;
+  }
+}
+
 // ==================== TRAJECTORY PARSE API ====================
 // Parse a binary trajectory file (SBET .sbet/.out) server-side into the canonical
 // PoseStream wire shape. Binary parsing lives on the backend (it needs pyproj for
@@ -1454,6 +1541,10 @@ export interface LADVoxelResult {
   ci_valid?: boolean | null;
   leaf_area_ci_lower?: number | null; // m² (only when ci_valid)
   leaf_area_ci_upper?: number | null; // m² (only when ci_valid)
+  // Whether Beer's law solved for this voxel. Unsolved (occluded) cells have
+  // their NaN squashed to 0 for JSON, so this is the only way to tell them from
+  // genuinely empty air. null/absent on results predating the flag.
+  lad_solved?: boolean | null;
 }
 
 export interface LADResponse {
@@ -1484,6 +1575,13 @@ export interface LADResponse {
   // Resolved G(theta) per z-level when a vertical-profile override was used
   // (index 0 = lowest band). null/absent otherwise.
   gtheta_profile?: number[] | null;
+  // Terrain following: when true the voxel columns ride the DEM, so the grid is
+  // NOT a regular lattice and cannot be written as a raster. dropped_columns
+  // counts (x,y) columns whose footprint fell outside the DEM and were excluded.
+  terrain_follow?: boolean;
+  dropped_columns?: number;
+  // EPSG shared by every source scan, else null. Drives raster georeferencing.
+  crs_epsg?: number | null;
   warnings: string[];
   error?: string;
 }

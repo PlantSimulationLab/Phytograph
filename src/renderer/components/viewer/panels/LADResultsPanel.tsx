@@ -1,7 +1,113 @@
-import { Grid3x3, Eye, EyeOff, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import { Grid3x3, Eye, EyeOff, Trash2, Download } from 'lucide-react';
 import type { LADResultEntry } from '../../../lib/pointCloudTypes';
 import { ladRange } from '../../../lib/pointCloudHelpers';
 import { ColormapName, COLORMAP_NAMES, COLORMAP_LABELS } from '../../../lib/colormaps';
+import {
+  LAD_EXPORT_VARIABLES, rasterBlockedReason, type LadExportFormat,
+} from '../../../lib/ladExport';
+
+// Export controls for one LAD result. Four formats, because the canopy-structure
+// community reads four different things:
+//   GeoTIFF   one band per vertical level — the GIS convention (canopyLazR's
+//             lad.array.to.raster.stack, AMAPVox's toRaster); opens in QGIS.
+//   CSV       one row per voxel, every field. The lossless option, and the only
+//             one that survives a rotated or terrain-following grid.
+//   .vox      AMAPVox voxel space — the TLS/PAD interchange format.
+//   Summary   plain text: occlusion counts, total leaf area, and LAI — the
+//             headline canopy number, which no other format carries.
+// The variable picker applies to rasters only (one file each). It stays visible
+// for the text formats — which always carry every field — with a note saying so,
+// rather than appearing and disappearing as the user eyes different buttons.
+function LadExportControls({
+  result,
+  onExport,
+}: {
+  result: LADResultEntry;
+  onExport: (id: string, format: LadExportFormat, variables: string[]) => void;
+}) {
+  const [checked, setChecked] = useState<Set<string>>(() => new Set(['lad']));
+  const toggle = (key: string, on: boolean) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(key); else next.delete(key);
+      return next;
+    });
+  const selected = LAD_EXPORT_VARIABLES.filter((v) => checked.has(v.key)).map((v) => v.key);
+  // Non-null when this grid has no axis-aligned lattice, i.e. a raster would be
+  // confidently mis-georeferenced. Disables GeoTIFF and explains why.
+  const rasterBlocked = rasterBlockedReason(result);
+
+  return (
+    <div className="space-y-1" data-testid="lad-export">
+      <div className="text-[10px] text-neutral-400 flex items-center gap-1">
+        <Download className="w-3 h-3" />
+        Export
+      </div>
+      <div className="space-y-0.5" data-testid="lad-export-variables">
+        {LAD_EXPORT_VARIABLES.map((v) => (
+          <label
+            key={v.key}
+            className="flex items-center gap-1.5 text-[10px] text-neutral-300 cursor-pointer"
+          >
+            <input
+              type="checkbox"
+              data-testid={`lad-export-var-${v.key}`}
+              checked={checked.has(v.key)}
+              onChange={(e) => toggle(v.key, e.target.checked)}
+              className="rounded bg-neutral-700 border-neutral-600 accent-green-500"
+            />
+            {v.label}
+          </label>
+        ))}
+        <div className="text-[9px] text-neutral-500 pt-0.5">
+          Raster only — one file per variable. CSV, .vox and .asc always carry every field.
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-1">
+        <button
+          data-testid="lad-export-tif"
+          disabled={!!rasterBlocked || selected.length === 0}
+          onClick={(e) => { e.stopPropagation(); onExport(result.id, 'tif', selected); }}
+          title={rasterBlocked
+            ?? 'Multi-band GeoTIFF — one band per vertical level, georeferenced when the source CRS is known'}
+          className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-200 rounded"
+        >
+          GeoTIFF
+        </button>
+        <button
+          data-testid="lad-export-csv"
+          onClick={(e) => { e.stopPropagation(); onExport(result.id, 'csv', selected); }}
+          title="One row per voxel with every field — lossless, and the only format that carries a rotated or terrain-following grid"
+          className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
+        >
+          Voxel CSV
+        </button>
+        <button
+          data-testid="lad-export-vox"
+          onClick={(e) => { e.stopPropagation(); onExport(result.id, 'vox', selected); }}
+          title="AMAPVox voxel space (.vox) — read by the R AMAPVox package and DART/pytools4dart"
+          className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
+        >
+          AMAPVox
+        </button>
+        <button
+          data-testid="lad-export-txt"
+          onClick={(e) => { e.stopPropagation(); onExport(result.id, 'txt', selected); }}
+          title="Plain-text summary — voxel and occlusion counts, total leaf area, and LAI"
+          className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
+        >
+          Summary
+        </button>
+      </div>
+      {rasterBlocked && (
+        <div className="text-[9px] text-amber-300" data-testid="lad-export-raster-blocked">
+          {rasterBlocked}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Presentational right-side list of Leaf Area Density results. Each row expands
 // when selected to show opacity / hide-empty / colormap controls. State and the
@@ -21,6 +127,8 @@ interface LADResultsPanelProps {
   onUpdate: (id: string, patch: Partial<LADResultEntry>) => void;
   // Sets this result's override; `undefined` clears it back to inheriting.
   onColormapChange: (id: string, name: ColormapName | undefined) => void;
+  // Writes the result out; `variables` applies to the raster format only.
+  onExport: (id: string, format: LadExportFormat, variables: string[]) => void;
 }
 
 export function LADResultsPanel({
@@ -33,6 +141,7 @@ export function LADResultsPanel({
   onRemove,
   onUpdate,
   onColormapChange,
+  onExport,
 }: LADResultsPanelProps) {
   return (
     <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col shrink-0">
@@ -185,6 +294,9 @@ export function LADResultsPanel({
                         <option key={name} value={name}>{COLORMAP_LABELS[name]}</option>
                       ))}
                     </select>
+                  </div>
+                  <div className="pt-1 border-t border-neutral-700/50">
+                    <LadExportControls result={result} onExport={onExport} />
                   </div>
                 </div>
               )}

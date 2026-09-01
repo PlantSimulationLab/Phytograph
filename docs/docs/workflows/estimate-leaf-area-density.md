@@ -156,6 +156,42 @@ surface.
   (foliage no beam ever reached). If the interval falls outside the
   method's validity range, it is not reported.
 
+## Exporting the result
+
+Select a LAD result and use **Export** in its row. Tick the variables you want
+(leaf area density, leaf area, G(θ), hit count, beam count, relative density
+index, mean path length, LAD std), then choose a format:
+
+| Format | What you get | Use it for |
+| --- | --- | --- |
+| **GeoTIFF** | One file per variable, each with **one band per vertical level** (band 1 = lowest), georeferenced when the source CRS is known | QGIS / ArcGIS / R `terra`; the same shape `canopyLazR` and AMAPVox's `toRaster()` produce |
+| **Voxel CSV** | One row per voxel with *every* field, including the lattice indices and the per-voxel Pimont uncertainty | Analysis in R / Python / Excel. The lossless option |
+| **AMAPVox** | `.vox` voxel space — `#min_corner` / `#max_corner` / `#split` / `#res` header, then `i j k PadBVTotal …` rows | The R `AMAPVox` package, DART / `pytools4dart` |
+| **Summary** | A small `.txt`: voxel and occlusion counts, total leaf area, and **LAI** | Reading the headline canopy numbers — LAI is not carried by any other format |
+
+Exporting several raster variables at once asks for a **folder**; a single file
+asks for a save location.
+
+!!! note "Occluded voxels are not zeros"
+
+    A voxel no beam ever reached is **unsampled**, not empty — and if it is
+    exported as `0` it silently drags down any mean LAD or LAI computed from
+    the file. Phytograph keeps the two apart everywhere: occluded voxels are
+    written as **NoData** (`-9999`) in rasters, as a **blank** `lad` with
+    `solved=false` in CSV, and are **omitted** from `.vox`. A voxel that was
+    genuinely solved as empty air keeps a real `0.0`. The summary counts
+    occluded voxels separately, so the reported LAI never absorbs them.
+
+!!! warning "Rotated and terrain-following grids can't be rasters"
+
+    A GeoTIFF is a regular, north-up lattice by definition. A
+    [rotated](triangulate.md) voxel box doesn't lie on one, and a
+    [terrain-following](#terrain-following--snap-the-grid-to-the-ground) grid
+    gives every column its own starting height — so writing either as a raster
+    would produce a confidently *mis-georeferenced* file. The GeoTIFF button is
+    disabled for those grids; export **CSV** or **.vox** instead, which store
+    each voxel's own position and carry them exactly.
+
 ## Terrain following — snap the grid to the ground
 
 A flat voxel grid assumes level ground: voxel layer *k* is at the same absolute

@@ -65,6 +65,21 @@ one-click **Backfill Misses** button. See
   — at crop time and again in the LAD result — to **re-run Backfill Misses**
   on the cropped cloud before estimating leaf-area density. (A crop never
   deletes sky/miss points themselves; it only removes hits.)
+- **No editing tool ever discards sky/miss points.** Crop, erase, filter,
+  segment and split all act on hits alone: a miss sits about a kilometre out
+  along its beam, so it falls outside any region you draw around the canopy,
+  and deleting it on that basis would quietly destroy the transmission
+  denominator LAD depends on. Splitting a cloud keeps the misses with the
+  retained side, and extracting a sub-cloud copies them onto the new cloud, so
+  either result can still be used for LAD.
+- **A very fine scan grid can exceed the gap-fill memory budget.** The
+  row/column reconstruction creates one sky point for every *empty* cell of the
+  scan's angular grid, so the cost is set by the grid resolution — not by how
+  many returns came back. A scan declared at a resolution far finer than its
+  returns actually populate can ask for tens of GB, so Phytograph refuses up
+  front with a message naming the grid size and the estimated memory rather than
+  running the machine out of RAM part-way through. Lower the scan's
+  **Ntheta/Nphi** to match the data and re-run.
 - For [moving-platform scans](../concepts/scans.md#moving-platform-scans),
   each return's timestamp is joined to the platform **trajectory** to
   reconstruct a per-beam emission origin, so the recovered misses follow the

@@ -8,7 +8,7 @@ import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ,
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -155,6 +155,10 @@ import {
   type Vec3Like,
   type ReuseMeshPayload,
 } from '../lib/pointCloudHelpers';
+import {
+  buildLadExportRequest, rasterBlockedReason, base64ToBytes,
+  type LadExportFormat,
+} from '../lib/ladExport';
 import { applyTriangleFilter, computeTriangleMetrics, triangleFilterCounts } from '../lib/triangleFilter';
 import type { TriangleFilterEstimate } from '../lib/triangleFilter';
 import { LegendStack } from './viewer/LegendStack';
@@ -3562,10 +3566,12 @@ export default function PointCloudViewer({
                 r.extracted, octreeInfo, src.fileName ?? cloud.id,
                 r.extracted.session_id, { diverged: true },
               );
-              // buildSessionOctreeData carries hasMisses/missOctreeCacheId
-              // forward from the parent, but that miss octree describes the
-              // PRE-crop extent. Drop it rather than offer a stale overlay —
-              // the user re-runs Backfill Misses on the new cloud.
+              // The child DOES carry the interleaved is_miss rows (extract
+              // force-selects them, so LAD on the new cloud keeps its
+              // transmission denominator), but it does NOT inherit the parent's
+              // prebuilt miss OCTREE — that cache describes the pre-crop extent.
+              // Drop the overlay pointer rather than render a stale shell; the
+              // data is intact and the overlay rebuilds on demand.
               if (data.octree && octreeInfo.hasMisses) {
                 data.octree.hasMisses = false;
                 data.octree.missOctreeCacheId = null;
@@ -3636,12 +3642,22 @@ export default function PointCloudViewer({
               if (result.leftover) {
                 const segmentId = crypto.randomUUID();
                 suppressFrameCloudIdsRef.current.add(segmentId);
+                const leftoverData = buildSessionOctreeData(
+                  result.leftover, octreeInfo, `${src.fileName ?? cloud.id} (segment)`,
+                  result.leftover.session_id, { diverged: true },
+                );
+                // Split force-keeps every sky/miss point on the KEPT side (the
+                // parent needs them for LAD's transmission denominator), so the
+                // leftover is always hits-only. buildSessionOctreeData inherits
+                // hasMisses from the parent, which would advertise a "Show
+                // misses" toggle over an empty set — clear it.
+                if (leftoverData.octree) {
+                  leftoverData.octree.hasMisses = false;
+                  leftoverData.octree.missOctreeCacheId = null;
+                }
                 onAddCloud({
                   id: segmentId,
-                  data: buildSessionOctreeData(
-                    result.leftover, octreeInfo, `${src.fileName ?? cloud.id} (segment)`,
-                    result.leftover.session_id, { diverged: true },
-                  ),
+                  data: leftoverData,
                   visible: true,
                   color: cloud.color,
                 });
@@ -5477,9 +5493,17 @@ export default function PointCloudViewer({
         if (result.leftover) {
           // The leftover is its OWN session — carry its new sessionId (not the
           // parent's) so its later edits route correctly.
+          const leftoverData = buildSessionOctreeData(
+            result.leftover, octreeInfo, leftoverName, result.leftover.session_id, { diverged: true });
+          // Split force-keeps sky/miss points on the KEPT side, so the leftover
+          // is hits-only; don't inherit the parent's "Show misses" affordance.
+          if (leftoverData.octree) {
+            leftoverData.octree.hasMisses = false;
+            leftoverData.octree.missOctreeCacheId = null;
+          }
           onAddCloud({
             id: crypto.randomUUID(),
-            data: buildSessionOctreeData(result.leftover, octreeInfo, leftoverName, result.leftover.session_id, { diverged: true }),
+            data: leftoverData,
             visible: true,
             color: cloud.color,
           });
@@ -8932,6 +8956,103 @@ export default function PointCloudViewer({
     }
     setShowExportPanel(false);
   }, [meshes, clouds]);
+
+  // Export a gridded LAD result as a multi-band GeoTIFF (one band per vertical
+  // level), a per-voxel CSV, AMAPVox .vox, or VoxLAD .asc. Mirrors
+  // handleExportDEMRaster: the backend writes the bytes, and they land on disk
+  // via the main-process fs bridge. buildLadExportRequest shifts every voxel
+  // center STORED -> world, so the raster georeferences where the scan actually is.
+  const handleExportLAD = useCallback(async (
+    ladId: string,
+    format: LadExportFormat,
+    variables: string[],
+  ) => {
+    const result = ladResults.find(r => r.id === ladId);
+    if (!result || !result.voxels.length) return;
+
+    // Refuse a raster the same way the backend does, so the user sees the reason
+    // here rather than a 400 — a rotated / terrain-following grid has no
+    // axis-aligned lattice and would georeference wrongly.
+    if (format === 'tif') {
+      const blocked = rasterBlockedReason(result);
+      if (blocked) {
+        showToast({ title: 'Cannot Export Raster', type: 'error', message: blocked });
+        return;
+      }
+      // The button is disabled with an empty selection, so this is belt-and-braces
+      // — but a zero file count would otherwise fall through to the folder branch
+      // and prompt for a destination that nothing gets written to.
+      if (!variables.length) {
+        showToast({ title: 'Cannot Export Raster', type: 'error',
+          message: 'Select at least one variable to export.' });
+        return;
+      }
+    }
+
+    const scanName = clouds.find(c => c.id === result.sourceScanIds[0])
+      ?.data.fileName?.replace(/\.[^.]+$/, '');
+    const base = scanName || 'lad';
+    // Rasters write one file per variable; every text format writes exactly one.
+    const fileCount = format === 'tif' ? variables.length : 1;
+    const ext = format === 'tif' ? 'tif' : format === 'csv' ? 'csv' : format === 'vox' ? 'vox' : 'txt';
+
+    try {
+      let files: LADExportResponse['files'];
+      let writtenPaths: string[];
+
+      if (fileCount === 1) {
+        const savePath = await window.electronAPI?.dialog.save({
+          defaultPath: `${base}_${format === 'csv' ? 'lad_voxels'
+            : format === 'txt' ? 'lad_summary' : 'lad'}.${ext}`,
+          title: format === 'csv' ? 'Export LAD voxels (CSV)'
+            : format === 'vox' ? 'Export LAD (AMAPVox .vox)'
+              : format === 'txt' ? 'Export LAD summary'
+                : 'Export LAD raster (GeoTIFF)',
+          filters: [{
+            name: format === 'csv' ? 'CSV'
+              : format === 'vox' ? 'AMAPVox voxel space'
+                : format === 'txt' ? 'Text' : 'GeoTIFF',
+            extensions: [ext],
+          }],
+        });
+        if (!savePath) return;
+        const resp = await exportLAD(buildLadExportRequest(result, format, variables));
+        files = resp.files;
+        const bytes = base64ToBytes(files[0].data_base64!);
+        await window.electronAPI?.fs.writeBinary(savePath, bytes.buffer.slice(0) as ArrayBuffer);
+        writtenPaths = [savePath];
+      } else {
+        // Several files → pick a folder once (which also authorizes writing its
+        // direct children; a path we synthesize is otherwise denied by the
+        // main-process fs allowlist).
+        const picked = await window.electronAPI?.dialog.open({
+          directory: true, title: 'Choose a folder for the LAD export',
+        });
+        const dir = Array.isArray(picked) ? picked[0] : picked;
+        if (!dir) return;
+        const resp = await exportLAD(buildLadExportRequest(result, format, variables));
+        files = resp.files;
+        writtenPaths = [];
+        for (const file of files) {
+          const path = `${dir}/${base}_${file.name}`;
+          const bytes = base64ToBytes(file.data_base64!);
+          await window.electronAPI?.fs.writeBinary(path, bytes.buffer.slice(0) as ArrayBuffer);
+          writtenPaths.push(path);
+        }
+      }
+
+      showToast({
+        title: 'LAD Exported', type: 'success',
+        message: `Wrote ${writtenPaths.length} file${writtenPaths.length > 1 ? 's' : ''}`
+          + ` (${ext.toUpperCase()}).`,
+      });
+    } catch (error) {
+      showToast({
+        title: 'Export Failed', type: 'error',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }, [ladResults, clouds]);
 
   // Whether a mesh was produced by triangulating a point cloud (standard or
   // Helios) — as opposed to a procedural plant, a shape/voxel primitive, or an
@@ -14923,6 +15044,9 @@ export default function PointCloudViewer({
     gridMeshId?: string,
     reuseMesh: ReuseMeshPayload | null = null,
     newTri?: { scans: Scan[]; grid: HeliosGrid; gridMeshId: string; lmax?: number; maxAspectRatio: number } | null,
+    // Source scans in request order — provenance, and where the export gets the
+    // worldShift it must add back to the STORED voxel centers.
+    sourceScans: Scan[] = [],
   ) => {
     if (isLadRunning) return;
 
@@ -15029,11 +15153,14 @@ export default function PointCloudViewer({
         ...(c.ci_valid != null ? { ciValid: c.ci_valid } : {}),
         ...(c.leaf_area_ci_lower != null ? { leafAreaCiLower: c.leaf_area_ci_lower } : {}),
         ...(c.leaf_area_ci_upper != null ? { leafAreaCiUpper: c.leaf_area_ci_upper } : {}),
+        // Occluded-vs-empty. Only carried when the backend actually said false,
+        // so a legacy response (no flag) leaves it absent and reads as solved.
+        ...(c.lad_solved != null ? { solved: c.lad_solved } : {}),
       }));
 
       const entry: LADResultEntry = {
         id: crypto.randomUUID(),
-        sourceScanIds: [],
+        sourceScanIds: sourceScans.map(s => s.id),
         voxels,
         nx: response.nx,
         ny: response.ny,
@@ -15047,6 +15174,22 @@ export default function PointCloudViewer({
           ? (response.grid_center as [number, number, number])
           : undefined),
         returnMode: response.return_mode === 'multi' ? 'multi' : 'single',
+        // ---- Export support ----
+        // The voxel centers/bounds above are in the STORED frame (buildLADRequest
+        // subtracts worldShift so origins, beams, points and grid all agree), so
+        // the export has to add this back to georeference. All source scans share
+        // one cloud, hence one shift — same assumption extractReuseMeshPayload makes.
+        worldShift: (sourceScans[0]?.data?.octree?.worldShift ?? undefined) as
+          [number, number, number] | undefined,
+        crsEpsg: response.crs_epsg ?? null,
+        gridSize: (response.grid_size && response.grid_size.length === 3
+          ? (response.grid_size as [number, number, number])
+          : undefined),
+        // Gates the raster formats: a snapped grid is not a regular lattice.
+        terrainFollow: response.terrain_follow ?? false,
+        droppedColumns: response.dropped_columns ?? 0,
+        totalLeafArea: response.total_leaf_area,
+        ...(response.gtheta_profile ? { gthetaProfile: response.gtheta_profile } : {}),
         visible: true,
         color: '#22c55e',
         hideEmpty: true,
@@ -19869,6 +20012,7 @@ export default function PointCloudViewer({
             onRemove={removeLadResult}
             onUpdate={updateLadResult}
             onColormapChange={setColormapOverride}
+            onExport={handleExportLAD}
           />
         )}
 

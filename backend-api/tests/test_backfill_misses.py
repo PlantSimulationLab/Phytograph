@@ -181,7 +181,7 @@ def _drain(resp):
 def _call(session_id, **body):
     """Run the endpoint and return the result dict (progress markers discarded)."""
     req = main.BackfillMissesRequest(**body)
-    resp = main.backfill_cloud_misses(session_id, req)
+    resp = main.backfill_cloud_misses(session_id, req, http_request=None)
     result, _markers = _drain(resp)
     return result
 
@@ -361,7 +361,7 @@ def test_streams_progress_markers_then_json_tail(stub_pyhelios):
     _register(sess)
 
     req = main.BackfillMissesRequest(origin=[0, 0, 5])
-    resp = main.backfill_cloud_misses(sess.session_id, req)
+    resp = main.backfill_cloud_misses(sess.session_id, req, http_request=None)
     result, markers = _drain(resp)
 
     assert result["backfilled"] == _FakeCloud.SYNTH

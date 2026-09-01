@@ -91,7 +91,12 @@ interface LADPopupProps {
                newTri?: { scans: Scan[]; grid: HeliosGrid; gridMeshId: string;
                           // Undefined Lmax = Auto (Otsu estimate seeds the mesh);
                           // a value forces that edge length.
-                          lmax?: number; maxAspectRatio: number } | null) => void;
+                          lmax?: number; maxAspectRatio: number } | null,
+               // The scans this inversion runs on, in request order. Provenance
+               // for the result row, and the source of the worldShift the export
+               // needs to turn STORED voxel centers back into world coordinates.
+               // Passed on EVERY path, unlike newTri which is static-mode only.
+               sourceScans?: Scan[]) => void;
   scans: Scan[];
   initialSelectedIds?: Set<string>;
   // Voxel boxes available as the LAD grid. LAD REQUIRES one — when empty (and no
@@ -474,7 +479,7 @@ export function LADPopup({
       ? { scans: selectedScans, grid, gridMeshId, lmax: explicitLmax, maxAspectRatio }
       : null;
 
-    onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh, newTri);
+    onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh, newTri, selectedScans);
     onClose();
   }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, useSuppliedGtheta, gthetaSpatial, nz, gthetaProfileRows, gthetaMethod, gthetaConstStr, gthetaDewit, gthetaBetaMuStr, gthetaBetaNuStr, buildValueSpec, onStartLAD, onClose]);
 

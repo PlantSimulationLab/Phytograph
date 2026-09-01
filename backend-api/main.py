@@ -240,7 +240,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.75.0"
+BACKEND_VERSION = "0.77.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5190,21 +5190,56 @@ def _dem_asc_bytes(grid: np.ndarray, minx: float, miny: float, cell: float, noda
     return (out + "\n".join(rows) + "\n").encode("utf-8")
 
 
+def _gdal_band_metadata_xml(band_names: "List[str]") -> str:
+    """GDAL metadata XML naming each band, for ImageDescription (tag 42112).
+
+    GDAL/QGIS read band DESCRIPTIONS from this blob, so a multi-band raster shows
+    "z=0.50-1.00m" in the band picker instead of "Band 1". Written only when there
+    is more than one band (a single-band file has nothing to disambiguate)."""
+    from xml.sax.saxutils import escape
+    items = "".join(
+        f'<Item name="DESCRIPTION" sample="{i}" role="description">{escape(name)}</Item>'
+        for i, name in enumerate(band_names)
+    )
+    return f"<GDALMetadata>{items}</GDALMetadata>"
+
+
 def _dem_geotiff_bytes(grid: np.ndarray, minx: float, miny: float, cell: float,
-                       nodata: float, crs_epsg: Optional[int]) -> bytes:
+                       nodata: float, crs_epsg: Optional[int],
+                       band_names: "Optional[List[str]]" = None) -> bytes:
     """GeoTIFF via tifffile (no GDAL). Writes the raster north-up with
-    ModelPixelScale + ModelTiepoint, plus a GeoKeyDirectory when an EPSG is given."""
+    ModelPixelScale + ModelTiepoint, plus a GeoKeyDirectory when an EPSG is given.
+
+    `grid` is (ny, nx) for a single band or (nbands, ny, nx) for a multi-band
+    raster — the LAD exporter uses the latter with one band per vertical level.
+    The 2-D path is byte-identical to what it always wrote; multi-band adds
+    planarconfig='separate' plus optional per-band names in GDAL's metadata XML.
+    """
     import io
     import tifffile
-    ny, nx = grid.shape
+    if grid.ndim == 2:
+        grid = grid[np.newaxis, ...]
+        multiband = False
+    else:
+        # A (1, ny, nx) stack is a SINGLE band — a one-level LAD grid is exactly
+        # that. It must take the 2-D path: tifffile rejects planarconfig
+        # 'separate' when there is only one sample per pixel ("does not match
+        # storedshape … separate_samples=1"), so treating band count rather than
+        # array rank as the test is what keeps a 1-level grid exportable.
+        multiband = grid.shape[0] > 1
+    nbands, ny, nx = grid.shape
     data = np.where(np.isfinite(grid), grid, nodata).astype(np.float32)
-    data = data[::-1]                  # raster row 0 = north (max y)
+    data = data[:, ::-1, :]            # raster row 0 = north (max y)
+    if not multiband:
+        data = data[0]
     maxy = miny + ny * cell
     extratags = [
         (33550, 12, 3, (float(cell), float(cell), 0.0), True),                 # ModelPixelScale
         (33922, 12, 6, (0.0, 0.0, 0.0, float(minx), float(maxy), 0.0), True),  # ModelTiepoint
         (42113, 2, 0, str(nodata), True),                                      # GDAL_NODATA
     ]
+    if multiband and band_names:
+        extratags.append((42112, 2, 0, _gdal_band_metadata_xml(band_names), True))  # ImageDescription
     if crs_epsg:
         try:
             import pyproj
@@ -5217,7 +5252,14 @@ def _dem_geotiff_bytes(grid: np.ndarray, minx: float, miny: float, cell: float,
             geokeys = (1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, int(crs_epsg))
         extratags.append((34735, 3, len(geokeys), geokeys, True))              # GeoKeyDirectory
     buf = io.BytesIO()
-    tifffile.imwrite(buf, data, extratags=extratags)
+    if multiband:
+        # planarconfig='separate' keeps each band contiguous (band-sequential), which
+        # is what GDAL expects for a stack of unrelated scalar bands; 'minisblack'
+        # stops readers treating bands 1-3 as RGB.
+        tifffile.imwrite(buf, data, extratags=extratags,
+                         photometric="minisblack", planarconfig="separate")
+    else:
+        tifffile.imwrite(buf, data, extratags=extratags)
     return buf.getvalue()
 
 
@@ -5243,6 +5285,390 @@ def export_dem_raster(request: DemRasterExportRequest):
     except ImportError:
         raise HTTPException(status_code=500, detail="tifffile not installed (required for GeoTIFF export).")
     return {"success": True, "format": ext, "data_base64": base64.b64encode(data).decode("ascii")}
+
+
+# ==================== GRIDDED LAD EXPORT ====================
+# Writes a computed LAD voxel grid out in the four formats the canopy-structure
+# community actually reads:
+#
+#   tif  multi-band GeoTIFF, one BAND per vertical level (band 1 = lowest). The
+#        mainstream GIS convention — canopyLazR's lad.array.to.raster.stack() and
+#        AMAPVox's toRaster() both produce this shape, and QGIS/ArcGIS/terra open
+#        it directly. Reuses _dem_geotiff_bytes' georeferencing tags.
+#   csv  one row per voxel, every field carried. The lossless format: it is the
+#        only one that survives a ROTATED or TERRAIN-FOLLOWING grid, since it
+#        stores each voxel's own center rather than assuming a regular lattice.
+#   vox  AMAPVox text (VOXEL SPACE header + i/j/k/PadBVTotal rows) — the de-facto
+#        interchange format for TLS/PAD work, read by the R AMAPVox package and
+#        pytools4dart/DART.
+#   txt  a plain-text summary: voxel/occlusion counts, total leaf area, and LAI.
+#        LAI is the headline number and is not carried by any of the above, nor
+#        shown in the UI, so it gets its own tiny export.
+#
+# A VoxLAD-flavoured `.asc` writer lived here too and was deliberately removed:
+# it was one tool's undocumented output (spec reverse-engineered from its MATLAB
+# source, single reader, and a `g_code` leaf-angle class we could only ever
+# approximate as 1), so it promised a fidelity we could not honour. GeoTIFF is
+# the interoperable option and .vox the community one.
+#
+# THE NODATA RULE, which is the whole point of the `solved` flag: a voxel no beam
+# ever reached (occluded) is NOT a voxel with zero leaf area. Helios returns NaN
+# for the former and _do_lad_computation squashes it to 0.0, so the two are
+# indistinguishable in `lad` alone — which is why every cell now carries
+# `lad_solved`. Counting occluded voxels as zeros biases mean LAD and LAI low,
+# the single most-repeated caution in the voxel-LAD literature. Here: unsolved =>
+# NoData in the raster, an EMPTY field with solved=false in CSV, omitted entirely
+# from .vox, and counted separately (never folded into LAI) in the summary.
+#
+# COORDINATES ARE WORLD-FRAME. The renderer holds voxel centers in the STORED
+# frame (world = stored + worldShift) because buildLADRequest subtracts the shift
+# on the way in; it adds it back before calling here. Everything below therefore
+# treats `center` as true world coordinates and never shifts again.
+
+# Per-voxel variables offered for raster export, in a fixed order. `label` is the
+# band-name stem written into the GeoTIFF's GDAL metadata; `key` is the wire field.
+_LAD_EXPORT_VARIABLES = {
+    "lad": "Leaf area density (m2/m3)",
+    "leaf_area": "Leaf area (m2)",
+    "gtheta": "G(theta)",
+    "hit_count": "Hit count",
+    "beam_count": "Beam count",
+    "relative_density_index": "Relative density index",
+    "mean_path_length": "Mean path length (m)",
+    "lad_std": "LAD std (1/m)",
+}
+
+# Frozen column order for the voxel CSV. This is the contract with anyone parsing
+# the file — APPEND, NEVER REORDER (same rule as CROWN_CSV_HEADER).
+_LAD_CSV_HEADER = [
+    "i", "j", "k", "x", "y", "z",
+    "size_x", "size_y", "size_z",
+    "lad", "leaf_area", "gtheta", "hit_count",
+    "beam_count", "relative_density_index", "mean_path_length",
+    "lad_variance", "lad_std", "ci_valid",
+    "leaf_area_ci_lower", "leaf_area_ci_upper",
+    "solved",
+]
+
+
+class LADExportCell(BaseModel):
+    """One voxel on the export wire.
+
+    Mirrors LADCell but coordinates are WORLD-frame (the renderer has already
+    added worldShift back) and the optional Pimont fields may be absent."""
+    center: List[float]                 # [x, y, z] world
+    size: List[float]                   # [x, y, z]
+    lad: float = 0.0
+    leaf_area: float = 0.0
+    gtheta: float = 0.0
+    hit_count: int = 0
+    beam_count: Optional[int] = None
+    relative_density_index: Optional[float] = None
+    mean_path_length: Optional[float] = None
+    lad_variance: Optional[float] = None
+    lad_std: Optional[float] = None
+    ci_valid: Optional[bool] = None
+    leaf_area_ci_lower: Optional[float] = None
+    leaf_area_ci_upper: Optional[float] = None
+    # False => Beer's law never solved here (occluded). See THE NODATA RULE above.
+    # None (legacy result computed before the flag existed) is treated as solved,
+    # which preserves the old behaviour rather than silently voiding a whole grid.
+    solved: Optional[bool] = None
+
+
+class LADExportRequest(BaseModel):
+    """Export a computed LAD voxel grid.
+
+    `cells` are WORLD-frame. `origin` is the grid's lower-left-bottom corner, also
+    world. Rasters additionally require an axis-aligned, regular lattice — see
+    `grid_rotation` / `terrain_follow`, which the endpoint rejects for "tif"."""
+    format: str = "csv"                 # "tif" | "csv" | "vox" | "asc"
+    cells: List[LADExportCell]
+    nx: int
+    ny: int
+    nz: int
+    origin: List[float]                 # [minx, miny, minz] world lower-left-bottom
+    cell_size: List[float]              # [dx, dy, dz]
+    # Variables to write as rasters. One FILE per variable (each with nz bands);
+    # ignored by the text formats, which always carry every field.
+    variables: List[str] = ["lad"]
+    grid_rotation: float = 0.0          # deg about +z; non-zero => no raster
+    terrain_follow: bool = False        # snapped grid => no raster
+    nodata: float = -9999.0
+    crs_epsg: Optional[int] = None
+    # When set, write files here server-side (returning paths) instead of base64.
+    # Required past _LAD_MAX_INLINE_CELLS — a large grid cannot survive base64 in a
+    # JSON string, the same wall /api/scan/export-xml hit.
+    dest_dir: Optional[str] = None
+
+
+# A voxel grid past this size can't go back as base64 inside JSON; the caller must
+# supply dest_dir so the backend writes the files itself.
+_LAD_MAX_INLINE_CELLS = 2_000_000
+
+
+def _lad_cell_ijk(cell: "LADExportCell", origin, cell_size, nx: int, ny: int, nz: int):
+    """Lattice index of a voxel from its world center.
+
+    Derived from geometry, NOT from the response's `index`: that index is k-major
+    AND sparse (terrain-follow drops whole columns), so it cannot be inverted by
+    formula — _do_lad_computation builds an explicit LUT for the same reason.
+
+    Clamped, so a float-boundary center can't index out of the grid. On a
+    TERRAIN-FOLLOWING grid the clamp does real work: a lifted column sits above
+    the nominal lattice, so its k saturates at nz-1 and the index becomes
+    approximate. That is why such grids are barred from raster export — for the
+    CSV, which is the format that carries them, the authoritative position is the
+    x/y/z columns (always exact), not i/j/k."""
+    out = []
+    for a in range(3):
+        step = cell_size[a]
+        n = (nx, ny, nz)[a]
+        if step <= 0:
+            out.append(0)
+            continue
+        idx = int(math.floor((cell.center[a] - origin[a]) / step))
+        out.append(max(0, min(n - 1, idx)))
+    return out[0], out[1], out[2]
+
+
+def _lad_is_solved(cell: "LADExportCell") -> bool:
+    """Whether Beer's law solved for this voxel. A legacy cell with no flag counts
+    as solved (see LADExportCell.solved)."""
+    return cell.solved is not False
+
+
+def _lad_variable_value(cell: "LADExportCell", name: str) -> Optional[float]:
+    """One variable off a voxel, or None when it is undefined for that cell."""
+    v = getattr(cell, name, None)
+    if v is None:
+        return None
+    return float(v)
+
+
+def _lad_raster_bands(request: "LADExportRequest", variable: str) -> np.ndarray:
+    """Scatter one variable into an (nz, ny, nx) band stack.
+
+    Every cell starts as NaN, which _dem_geotiff_bytes then writes as NoData — so
+    a voxel that is missing from `cells` (a dropped terrain column) and one that
+    is present-but-unsolved both come out as NoData rather than a misleading 0."""
+    grid = np.full((request.nz, request.ny, request.nx), np.nan, dtype=np.float64)
+    for cell in request.cells:
+        if not _lad_is_solved(cell):
+            continue                     # occluded -> stays NoData
+        val = _lad_variable_value(cell, variable)
+        if val is None:
+            continue
+        i, j, k = _lad_cell_ijk(cell, request.origin, request.cell_size,
+                                request.nx, request.ny, request.nz)
+        grid[k, j, i] = val
+    return grid
+
+
+def _lad_band_names(request: "LADExportRequest", variable: str) -> "List[str]":
+    """Band labels naming each level's z range, e.g. "lad z=0.50-1.00m"."""
+    z0, dz = float(request.origin[2]), float(request.cell_size[2])
+    return [f"{variable} z={z0 + k * dz:.2f}-{z0 + (k + 1) * dz:.2f}m"
+            for k in range(request.nz)]
+
+
+def _lad_geotiff_bytes(request: "LADExportRequest", variable: str) -> bytes:
+    """One variable as a multi-band GeoTIFF, band k = vertical level k."""
+    return _dem_geotiff_bytes(
+        _lad_raster_bands(request, variable),
+        float(request.origin[0]), float(request.origin[1]),
+        float(request.cell_size[0]), request.nodata, request.crs_epsg,
+        band_names=_lad_band_names(request, variable),
+    )
+
+
+def _lad_csv_bytes(request: "LADExportRequest") -> bytes:
+    """One row per voxel, every field. The lossless format.
+
+    Unsolved voxels write EMPTY lad/leaf_area/gtheta with solved=false — never 0,
+    which a reader would otherwise average in as real zero density."""
+    def num(v, places=6):
+        if v is None:
+            return ""
+        v = float(v)
+        return "" if v != v else f"{v:.{places}f}".rstrip("0").rstrip(".") or "0"
+
+    rows = [",".join(_LAD_CSV_HEADER)]
+    for cell in request.cells:
+        i, j, k = _lad_cell_ijk(cell, request.origin, request.cell_size,
+                                request.nx, request.ny, request.nz)
+        solved = _lad_is_solved(cell)
+        rows.append(",".join([
+            str(i), str(j), str(k),
+            num(cell.center[0], 4), num(cell.center[1], 4), num(cell.center[2], 4),
+            num(cell.size[0], 4), num(cell.size[1], 4), num(cell.size[2], 4),
+            num(cell.lad) if solved else "",
+            num(cell.leaf_area) if solved else "",
+            num(cell.gtheta) if solved else "",
+            str(int(cell.hit_count)),
+            "" if cell.beam_count is None else str(int(cell.beam_count)),
+            num(cell.relative_density_index),
+            num(cell.mean_path_length),
+            num(cell.lad_variance),
+            num(cell.lad_std),
+            "" if cell.ci_valid is None else ("true" if cell.ci_valid else "false"),
+            num(cell.leaf_area_ci_lower),
+            num(cell.leaf_area_ci_upper),
+            "true" if solved else "false",
+        ]))
+    return ("\n".join(rows) + "\n").encode("utf-8")
+
+
+def _lad_vox_bytes(request: "LADExportRequest") -> bytes:
+    """AMAPVox voxel-space text.
+
+    Header of `#key: value` lines then a column-header row and whitespace-delimited
+    `i j k` rows. PadBVTotal is AMAPVox's plant area density (m2/m3) — our `lad`;
+    nbSampling/nbEchos are its beam/echo counters, which map onto beam_count and
+    hit_count. Unsolved voxels are omitted (AMAPVox's own convention for a voxel
+    with no sampling)."""
+    ox, oy, oz = (float(v) for v in request.origin)
+    dx, dy, dz = (float(v) for v in request.cell_size)
+    lines = [
+        "VOXEL SPACE",
+        f"#min_corner: {ox:.4f} {oy:.4f} {oz:.4f}",
+        f"#max_corner: {ox + dx * request.nx:.4f} {oy + dy * request.ny:.4f} {oz + dz * request.nz:.4f}",
+        f"#split: {request.nx} {request.ny} {request.nz}",
+        f"#res: {dx:.4f}",
+        "#type: LAD",
+        "i j k PadBVTotal nbSampling nbEchos lMeanTotal angleMean",
+    ]
+    for cell in request.cells:
+        if not _lad_is_solved(cell):
+            continue
+        i, j, k = _lad_cell_ijk(cell, request.origin, request.cell_size,
+                                request.nx, request.ny, request.nz)
+        beams = -1 if cell.beam_count is None else int(cell.beam_count)
+        mpl = 0.0 if cell.mean_path_length is None else float(cell.mean_path_length)
+        lines.append(f"{i} {j} {k} {cell.lad:.6f} {beams} {int(cell.hit_count)} "
+                     f"{mpl:.4f} {cell.gtheta:.4f}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _lad_statistics_bytes(request: "LADExportRequest") -> bytes:
+    """Plain-text grid summary — the one place LAI is reported.
+
+    LAI is the vertically-integrated leaf area over the grid footprint (total leaf
+    area / ground area). It is the headline number for a canopy and no other
+    export format carries it, so it gets its own tiny file.
+
+    Occlusion is REPORTED, never folded in: the leaf-area total sums only solved
+    voxels, and the occluded count sits beside it so a reader can judge how much
+    canopy the beams never reached. An LAI computed with occluded voxels silently
+    counted as zero density is biased low, which is the failure this whole
+    export path is built to avoid."""
+    dx, dy, dz = (float(v) for v in request.cell_size)
+    total = len(request.cells)
+    occluded = sum(1 for c in request.cells if not _lad_is_solved(c))
+    with_material = sum(1 for c in request.cells if _lad_is_solved(c) and c.lad > 0.0)
+    leaf_area = sum(float(c.leaf_area) for c in request.cells if _lad_is_solved(c))
+    ground = dx * request.nx * dy * request.ny
+    lai = (leaf_area / ground) if ground > 0 else 0.0
+    lines = [
+        f"voxel size: {dx:.3f} {dy:.3f} {dz:.3f}",
+        f"grid size: {request.nx} {request.ny} {request.nz}",
+        f"number of voxels reported {total}",
+        f"number of occluded voxels {occluded}",
+        f"proportion of occlusion {(occluded / total if total else 0.0):.4f}",
+        f"number of voxels containing material (detected) {with_material}",
+        f"total leaf area {leaf_area:.1f}",
+        f"LAI {lai:.3f}",
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+@app.post("/api/lad/export")
+def export_lad(request: LADExportRequest):
+    """Write a LAD voxel grid as GeoTIFF / CSV / AMAPVox .vox / summary .txt.
+
+    Declared `def`, not `async def`: this is blocking CPU work over a potentially
+    million-voxel grid, so it belongs in anyio's threadpool rather than owning the
+    event loop (see the module docstring on blocking endpoints).
+
+    Returns `{success, format, files: [{name, data_base64|null, path|null}]}`.
+    With `dest_dir` the backend writes each file itself and reports its path;
+    without it the bytes ride back as base64, which is capped at
+    _LAD_MAX_INLINE_CELLS."""
+    import base64
+
+    if not request.cells:
+        raise HTTPException(status_code=400, detail="No voxels to export.")
+    if request.nx <= 0 or request.ny <= 0 or request.nz <= 0:
+        raise HTTPException(status_code=400, detail="Grid dimensions must be positive.")
+    if len(request.origin) != 3 or len(request.cell_size) != 3:
+        raise HTTPException(status_code=400,
+                            detail="origin and cell_size must each have 3 components.")
+
+    fmt = request.format.lower()
+    if fmt in ("tiff", "geotiff"):
+        fmt = "tif"
+    if fmt not in ("tif", "csv", "vox", "txt"):
+        raise HTTPException(status_code=400, detail=f"Unknown LAD export format {request.format!r}.")
+
+    # A raster is a regular north-up lattice by construction. A rotated grid's
+    # voxels don't sit on one, and a terrain-following grid's columns each start at
+    # a different z — so writing either as a GeoTIFF would produce a confidently
+    # WRONG georeferenced file. Refuse, and name the formats that carry it losslessly.
+    if fmt == "tif":
+        if abs(float(request.grid_rotation)) > 1e-9:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"This LAD grid is rotated {request.grid_rotation:g}°, so it has no "
+                        "axis-aligned raster lattice. Export CSV or .vox instead — both "
+                        "carry the true per-voxel positions."))
+        if request.terrain_follow:
+            raise HTTPException(
+                status_code=400,
+                detail=("This LAD grid follows the terrain, so its voxel columns are not a "
+                        "regular raster lattice. Export CSV or .vox instead — both carry "
+                        "the true per-voxel positions."))
+        unknown = [v for v in request.variables if v not in _LAD_EXPORT_VARIABLES]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"Unknown LAD variable(s): {', '.join(unknown)}.")
+        if not request.variables:
+            raise HTTPException(status_code=400, detail="Select at least one variable to export.")
+
+    dest = _resolve_export_dest_dir(request.dest_dir) if request.dest_dir else None
+    if dest is None and len(request.cells) > _LAD_MAX_INLINE_CELLS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"This grid has {len(request.cells):,} voxels, past the "
+                    f"{_LAD_MAX_INLINE_CELLS:,} that can be returned inline. "
+                    "Choose a destination folder so the backend writes the files."))
+
+    # Build (filename, bytes) pairs — one per raster variable, one for each of the
+    # text formats.
+    outputs: "List[tuple[str, bytes]]" = []
+    if fmt == "tif":
+        for variable in request.variables:
+            outputs.append((f"lad_{variable}.tif", _lad_geotiff_bytes(request, variable)))
+    elif fmt == "csv":
+        outputs.append(("lad_voxels.csv", _lad_csv_bytes(request)))
+    elif fmt == "vox":
+        outputs.append(("lad.vox", _lad_vox_bytes(request)))
+    else:
+        outputs.append(("lad_summary.txt", _lad_statistics_bytes(request)))
+
+    files = []
+    for name, data in outputs:
+        if dest is not None:
+            target = dest / name
+            tmp = target.with_suffix(target.suffix + ".part")
+            tmp.write_bytes(data)
+            os.replace(tmp, target)      # atomic: no reader ever sees a partial file
+            files.append({"name": name, "path": str(target), "data_base64": None,
+                          "bytes": len(data)})
+        else:
+            files.append({"name": name, "path": None,
+                          "data_base64": base64.b64encode(data).decode("ascii"),
+                          "bytes": len(data)})
+    return {"success": True, "format": fmt, "files": files}
 
 
 # ==================== WOOD/LEAF SEGMENTATION ====================
@@ -6376,6 +6802,14 @@ class LADCell(BaseModel):
     ci_valid: Optional[bool] = None              # single-voxel Pimont validity gate
     leaf_area_ci_lower: Optional[float] = None   # m^2 (only when ci_valid)
     leaf_area_ci_upper: Optional[float] = None   # m^2 (only when ci_valid)
+    # Whether Beer's law actually SOLVED for this voxel. Helios returns NaN for an
+    # unsolved cell and we squash it to 0.0 above so the UI/JSON stay finite — which
+    # makes an OCCLUDED voxel (no beam ever reached it) indistinguishable from one
+    # that is genuinely empty air. Both read `lad == 0`. That difference is the
+    # whole ballgame for anything aggregating the grid: counting occluded voxels as
+    # zeros biases mean LAD and LAI low. Consumers (the exporters especially) must
+    # gate on this flag, writing NoData for False and a real 0.0 for True.
+    lad_solved: Optional[bool] = None
 
 class LADComputeResponse(BaseModel):
     """Response model for leaf area density computation."""
@@ -6410,6 +6844,15 @@ class LADComputeResponse(BaseModel):
     # G(theta) per z-level (index 0 = lowest band), so the UI can show what was applied.
     # None for the triangulation, scalar-override, and constant-override paths.
     gtheta_profile: Optional[List[float]] = None
+    # Echoed by the endpoint but historically missing from this model. LAD no longer
+    # gapfills, so gapfilled_misses is always 0; had_miss_points reports whether the
+    # input cloud carried miss points (the Beer's-law transmission denominator).
+    gapfilled_misses: int = 0
+    had_miss_points: bool = False
+    # CRS of the source scans, when every one of them agrees (same union rule as
+    # _merge_sessions). Carried so a raster export can georeference without the
+    # renderer having to re-derive it. None => unknown / mixed.
+    crs_epsg: Optional[int] = None
     warnings: List[str] = []
     error: Optional[str] = None
 
@@ -8745,6 +9188,23 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 _s = _cloud_sessions.get(s.session_id)
             return getattr(_s, "beam_origins", None) if _s is not None else None
 
+        # CRS of the inputs, for a georeferenced raster export downstream. Same union
+        # rule as _merge_sessions: keep it only if EVERY scan names a session and they
+        # all agree, otherwise the grid has no single CRS to write. A scan fed from
+        # inline points or a bare file path contributes no session, hence no CRS.
+        def _scan_crs(s):
+            if not s.session_id:
+                return None
+            with _cloud_session_lock:
+                _s = _cloud_sessions.get(s.session_id)
+            return getattr(_s, "crs_epsg", None) if _s is not None else None
+
+        scan_epsgs = [_scan_crs(s) for s in request.scans]
+        result_crs_epsg = (int(scan_epsgs[0])
+                           if scan_epsgs and all(e is not None and e == scan_epsgs[0]
+                                                 for e in scan_epsgs)
+                           else None)
+
         scan_origin_mins = []
         for s in request.scans:
             bo = _scan_beam_origins(s)
@@ -9347,6 +9807,9 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 "ci_valid": bool(ci_valid),
                 "leaf_area_ci_lower": _clean(float(ci_lo)) if ci_valid else None,
                 "leaf_area_ci_upper": _clean(float(ci_hi)) if ci_valid else None,
+                # Captured BEFORE the NaN->0 squash above, so consumers can tell an
+                # occluded voxel from genuinely empty air (both read lad == 0).
+                "lad_solved": lad_solved,
             }
             if lad_solved and var >= 0:
                 solved_indices.append(i)
@@ -9413,6 +9876,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "gtheta_profile": gtheta_profile_out,
             "gapfilled_misses": 0,  # LAD no longer gapfills; misses come from Backfill Misses / source
             "had_miss_points": any_has_misses,
+            # None unless every source scan agreed on a CRS; drives raster georeferencing.
+            "crs_epsg": result_crs_epsg,
             "method_used": "helios",
             "warnings": warnings,
         }
@@ -22753,7 +23218,14 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
                 trans = np.zeros(3)
             scan_origins.append(trans.tolist())
 
-            raw = e.read_scan_raw(si)
+            # Skip vendor-namespaced extension fields rather than refusing the file.
+            # pye57 raises on ANY field outside its supported set, and RIEGL exports
+            # carry `rlms:amplitude` / `rlms:reflectance` — so a stock RiSCAN PRO E57
+            # failed to import at all, even though every field we actually read
+            # (cartesian/spherical, intensity, color*, row/columnIndex,
+            # *InvalidState) is standard. The extras are ballast for us; dropping
+            # them costs nothing and makes the import succeed.
+            raw = e.read_scan_raw(si, ignore_unsupported_fields=True)
             keys = set(raw.keys())
 
             # Local-frame cartesian for every cell (misses may be zeroed).
@@ -27705,7 +28177,8 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
 
 
 @app.post("/api/cloud/session/{session_id}/backfill-misses")
-def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest):
+def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
+                          http_request: Request):
     """Explicitly recover sky/miss points for a session and persist them.
 
     LAD needs miss points (beams that returned nothing) for the Beer's-law
@@ -27757,11 +28230,18 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest):
                     "(E57 / structured PLY) or one of those columns."),
         )
 
-    # Stream the heavy build/gapfill/extract with per-stage progress markers.
+    # Stream the heavy build/gapfill/extract with per-stage progress markers, and
+    # register a cancel token so the user can abandon a long run. The gapfill itself
+    # is ONE opaque C++ call that cannot be interrupted mid-flight, so cancelling
+    # frees the client rather than the worker thread — but that is the difference
+    # between a dismissable dialog and an app that looks hung, and the streaming
+    # wrapper also sets the event on client disconnect.
+    run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
             _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags,
-                                progress=progress)).encode("utf-8"))
+                                progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 @app.post("/api/cloud/session/{session_id}/delete_region")
@@ -28535,11 +29015,27 @@ def session_split(session_id: str, request: SessionSplitRequest):
             lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
             keep &= _scalar_filter_mask(sess.extras[f.slug][surv], lo, hi, value_set)
 
+        # NEVER move sky/miss points to the leftover side. A split region is drawn
+        # around hits, but a miss sits ~1 km out along its beam, so it falls
+        # outside any hit-shaped box and would be swept wholesale into the
+        # leftover cloud; a scalar filter fares no better (misses default to 0 on
+        # class columns and so match nothing). Either way the parent loses its
+        # Beer's-law transmission denominator and LAD silently under-reads.
+        # Force misses onto the kept side, exactly as `_do_session_filter` does.
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        hits_kept = int(keep.sum())
+        if miss_arr is not None:
+            # Measure emptiness on HITS ONLY, before the force-keep: otherwise a
+            # split that keeps nothing the user can see would report a non-zero
+            # `kept` (the sky) and skip the renderer's delete-confirmation.
+            hits_kept = int((keep & (miss_arr[surv] == 0)).sum())
+            keep = keep | (miss_arr[surv] != 0)
+
         kept_count = int(keep.sum())
         # Kept side empty → the filter would leave nothing on the parent. Don't
         # commit or rebuild (0-point PotreeConverter would 500); report empty so
         # the renderer raises a delete-confirmation. The session is untouched.
-        if kept_count == 0:
+        if hits_kept == 0:
             return {
                 "session_id": session_id,
                 "kept": {"point_count": 0, "cache_id": None, "cache_dir": None},
@@ -28603,7 +29099,21 @@ def session_extract(session_id: str, request: SessionExtractRequest):
             lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
             sel &= _scalar_filter_mask(sess.extras[f.slug][surv], lo, hi, value_set)
 
-    if not bool(sel.any()):
+        # Carry sky/miss points into the child. They sit ~1 km out along their
+        # beams, so a hit-shaped region never selects them (and misses default to
+        # 0 on class columns, so scalar filters miss them too) — the child would
+        # be hits-only and LAD on it would have no transmission denominator. The
+        # parent is untouched by extract, so this duplicates the miss set onto the
+        # child rather than moving it, which is what both clouds need for LAD.
+        # `hits_selected` below keeps a miss-only selection from counting as a
+        # real extraction.
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        hits_selected = bool(sel.any())
+        if miss_arr is not None:
+            hits_selected = bool((sel & (miss_arr[surv] == 0)).any())
+            sel = sel | (miss_arr[surv] != 0)
+
+    if not hits_selected:
         return {"session_id": session_id, "extracted": None}
     child = _session_subset(sess, sel)
     ck, ccd, cmeta = _session_rebuild(child)

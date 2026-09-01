@@ -124,7 +124,10 @@ dimensions.
 `.e57` clouds carry **intensity** and **RGB colour** when the file records them
 (both are surfaced in the import wizard and become color-mappable in the viewer);
 colour on the recovered sky/miss points is set to black. Other E57 per-point
-fields beyond position, intensity, and colour are not yet preserved.
+fields beyond position, intensity, and colour are not yet preserved — including
+vendor extension fields such as RIEGL's `rlms:amplitude` / `rlms:reflectance`,
+which are skipped rather than treated as an error, so a stock RiSCAN PRO export
+imports normally.
 
 ### Large / projected coordinates
 
@@ -232,6 +235,46 @@ elevation grid (from the **GIS raster** row in the mesh export panel):
 
 The raster is written in the cloud's own coordinates; voids (cells with no
 nearby ground) are written as the `NODATA_value`.
+
+### Gridded LAD
+
+A [leaf area density](../workflows/estimate-leaf-area-density.md#exporting-the-result)
+result is a 3D voxel grid, and exports in four formats (all export-only):
+
+| Format | Notes |
+|---|---|
+| `.tif` (GeoTIFF) | **Multi-band**: one band per vertical level, band 1 = lowest, `float32`. One file per selected variable. Carries pixel scale + tiepoint, a CRS when known, `GDAL_NODATA = -9999`, and per-band descriptions naming each band's height range (`lad z=0.50-1.00m`). The band-per-level shape matches `canopyLazR::lad.array.to.raster.stack()` and AMAPVox's `toRaster()`. |
+| `.csv` (voxel table) | One row per voxel, every field. The lossless format, and the only one that carries a rotated or terrain-following grid. |
+| `.vox` (AMAPVox) | `VOXEL SPACE` line, a `#min_corner` / `#max_corner` / `#split` / `#res` / `#type` header, a column-name line, then whitespace-delimited rows keyed by `i j k`. `PadBVTotal` is the plant area density (m²/m³); `nbSampling` / `nbEchos` are the beam and echo counts. Read by the R `AMAPVox` package and DART / `pytools4dart`. |
+| `.txt` (summary) | A short plain-text report: voxel size and grid dimensions, voxel/occlusion counts, total leaf area, and **LAI**. The only export carrying LAI. |
+
+Coordinates are always written in true world coordinates, so a raster
+georeferences correctly even for a cloud imported with a
+[global shift](#large--projected-coordinates).
+
+The voxel CSV's column order is a stable contract — new fields are only ever
+appended:
+
+```csv
+i,j,k,x,y,z,size_x,size_y,size_z,lad,leaf_area,gtheta,hit_count,beam_count,
+relative_density_index,mean_path_length,lad_variance,lad_std,ci_valid,
+leaf_area_ci_lower,leaf_area_ci_upper,solved
+```
+
+On a **terrain-following** grid the lattice indices `i,j,k` are approximate —
+lifted columns rise above the nominal grid, so `k` saturates at the top level.
+The `x,y,z` columns are always exact and are the authoritative position.
+
+**Occluded voxels are never written as zeros.** A voxel no beam reached is
+unsampled rather than empty, and treating it as `0` biases any mean LAD or LAI
+computed downstream. Such voxels are written as `NODATA` (`-9999`) in rasters,
+as a blank `lad` with `solved=false` in CSV, and are omitted from `.vox`. A voxel
+genuinely solved as empty air keeps a real `0.0`. The summary counts occluded
+voxels separately from the leaf-area total, so its LAI never absorbs them.
+
+Rasters require a regular, north-up lattice, so the GeoTIFF option is
+unavailable for a **rotated** or **terrain-following** grid — use CSV or `.vox`,
+which store each voxel's own position.
 
 ### PLY: point cloud or mesh?
 

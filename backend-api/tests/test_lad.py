@@ -1045,7 +1045,8 @@ class TestMultiReturnImportColumnMapping:
                 "testmr01",
                 main.BackfillMissesRequest(
                     origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
-                    theta_min=0, theta_max=180, phi_min=0, phi_max=360))
+                    theta_min=0, theta_max=180, phi_min=0, phi_max=360),
+                http_request=None)
 
             async def _collect():
                 return b"".join([c if isinstance(c, (bytes, bytearray)) else c.encode()
