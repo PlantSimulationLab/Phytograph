@@ -39,6 +39,9 @@ export interface LaunchedApp {
   // a spec can locate/delete a cloud's cache dir to exercise the missing-octree
   // recovery path. Removed by close().
   octreeCacheRoot: string;
+  // The per-launch Electron userData dir (--user-data-dir). Exposed so a spec
+  // can inspect the persisted store it writes. Removed by close().
+  userDataDir: string;
   // Use this instead of app.close() — it awaits the Electron process exit,
   // not just the window close. Prevents spec-N+1 from racing spec-N's
   // teardown (which on macOS can briefly surface a window).
@@ -85,7 +88,7 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
   const backendPort = await findFreePort();
 
   // Isolate the on-disk octree cache per launch. The cache is otherwise a single
-  // per-user dir (~/Library/Application Support/Phytograph/cache/octrees) shared
+  // per-user dir (~/Library/Caches/Phytograph/octrees on macOS) shared
   // by every instance — a concurrent dev app or parallel spec writing/evicting
   // there can corrupt the entry another instance is streaming. Both the backend
   // (_octree_cache_root) and the Electron protocol handler (octreeCacheRoot in
@@ -94,6 +97,30 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
   // points both at this run's private dir. Mirrors the pytest cache-isolation
   // fixtures. Removed in close().
   const octreeCacheRoot = await mkdtemp(join(tmpdir(), 'phyto-octree-'));
+
+  // Isolate the ELECTRON PROFILE per launch, for the same reason as the octree
+  // cache but with sharper teeth. `electron .` derives userData from the app
+  // name, which is the same name the packaged app uses — so a test run, a
+  // developer's `npm run dev`, and the installed Phytograph.app all shared ONE
+  // directory: ~/Library/Application Support/phytograph. That directory holds
+  // the user's real preferences (`phytograph-store.json`: theme, point size,
+  // class palettes, rivlib path, synthetic-scan defaults) AND Chromium's
+  // profile. Two concrete failures came out of it:
+  //
+  //   - Any spec that changes a setting through the UI overwrote the
+  //     developer's actual preferences, permanently and silently.
+  //   - Chromium EMPTIES <userData>/Cache when it initialises its disk cache,
+  //     so every launch here wiped whatever the running desktop app had in
+  //     there. That is how the octree cache (once <userData>/cache/octrees, the
+  //     same directory on case-insensitive APFS) was destroyed mid-session,
+  //     costing a user the edits on a cloud that had diverged from its file.
+  //
+  // --user-data-dir is a Chromium switch Electron honours before any JS runs,
+  // and app.getPath('userData') follows it, so electron-store lands here too.
+  // Per-launch rather than stable: specs must not inherit each other's settings.
+  // Note this makes every launch a "first run" (ipc.ts probes for the store
+  // file), which only changes splash wording — no spec asserts on it.
+  const userDataDir = await mkdtemp(join(tmpdir(), 'phyto-userdata-'));
 
   // Launch a Dock-less clone of the Electron bundle instead of the one in
   // node_modules. main.ts's app.setActivationPolicy('accessory') can only
@@ -109,7 +136,7 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
 
   const app = await _electron.launch({
     ...(headlessElectron ? { executablePath: headlessElectron } : {}),
-    args: ['.'],
+    args: ['.', `--user-data-dir=${userDataDir}`],
     cwd: repoRoot,
     timeout: 60_000,
     env: {
@@ -160,10 +187,11 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
       exited,
       new Promise<void>((r) => setTimeout(r, 5_000)),
     ]);
-    // Drop this run's private octree cache. Best-effort — a cleanup failure must
-    // never fail the test.
+    // Drop this run's private octree cache and Electron profile. Best-effort —
+    // a cleanup failure must never fail the test.
     await rm(octreeCacheRoot, { recursive: true, force: true }).catch(() => {});
+    await rm(userDataDir, { recursive: true, force: true }).catch(() => {});
   };
 
-  return { app, page, backendVersion: version, octreeCacheRoot, close };
+  return { app, page, backendVersion: version, octreeCacheRoot, userDataDir, close };
 }

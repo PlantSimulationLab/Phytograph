@@ -34,6 +34,25 @@
 // and ~/.cache is the correct XDG location on Linux. It also means octrees
 // existing users already paid to build become readable instead of orphaned.
 
+// SECOND failure, macOS-only, same "one path, two owners" shape. macOS used to
+// be ~/Library/Application Support/Phytograph/cache/octrees — i.e. inside
+// `<userData>`, whose `Cache` subdirectory is CHROMIUM'S HTTP cache. The
+// default APFS volume is case-insensitive, so `cache` and `Cache` are one
+// directory, and Chromium empties that directory when it initializes its disk
+// cache. Every launch therefore deleted the entire octree cache; a second
+// concurrent instance (a dev or E2E app alongside the packaged one) deleted it
+// out from under the running app mid-session. It read as a cache that "kept
+// getting cleared", and for a cloud EDITED since import — whose octree is the
+// only copy of those edits — as "Edited point cloud unavailable".
+//
+// macOS now mirrors Linux: the OS cache directory, not the user-data
+// directory. Nothing was migrated because there was never anything to migrate
+// — the old location could not survive a single relaunch.
+//
+// The invariant to preserve: this path must never land inside a directory
+// Chromium manages. On darwin that means never under Application Support with
+// a segment that case-folds to "cache"; pinned by octreeCacheRoot.test.ts.
+
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -53,7 +72,7 @@ export function resolveOctreeCacheRoot(
   if (override) return override;
 
   if (platform === 'darwin') {
-    return join(home, 'Library', 'Application Support', 'Phytograph', 'cache', 'octrees');
+    return join(home, 'Library', 'Caches', 'Phytograph', 'octrees');
   }
   if (platform === 'win32') {
     const base = env.LOCALAPPDATA || join(home, 'AppData', 'Local');

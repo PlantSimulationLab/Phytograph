@@ -31,6 +31,24 @@ const root = join(__dirname, '..');
 const devOctreeCacheRoot =
   process.env.PHYTOGRAPH_OCTREE_CACHE_ROOT || join(tmpdir(), 'phytograph-dev-octrees');
 
+// Give the dev session its own ELECTRON PROFILE too, for the same reason and
+// with more at stake. `electron .` derives userData from the app name — the SAME
+// name the installed Phytograph.app uses — so a dev run and the desktop app
+// shared one directory (~/Library/Application Support/phytograph). That holds
+// the user's real `phytograph-store.json` (theme, point size, class palettes,
+// rivlib path, synthetic-scan defaults) and Chromium's profile, so a dev session
+// could overwrite the desktop app's settings, and — because Chromium EMPTIES
+// <userData>/Cache on startup — launching dev wiped whatever the running desktop
+// app had cached there. That is how a dev launch destroyed a live desktop
+// session's octrees mid-edit.
+//
+// STABLE (not per-run) so dev settings survive a restart, which is the opposite
+// choice from E2E (tests/e2e/helpers/launchApp.ts uses a fresh temp dir per
+// launch — specs must not inherit each other's settings). Override with
+// PHYTOGRAPH_DEV_USER_DATA_DIR to point dev at a specific profile.
+const devUserDataDir =
+  process.env.PHYTOGRAPH_DEV_USER_DATA_DIR || join(tmpdir(), 'phytograph-dev-userdata');
+
 // Ask the OS for a free TCP port (bind :0, read the assignment). Each
 // `npm run dev` picks its own backend + renderer ports so concurrent dev
 // sessions — or another co-developed app — never collide. The chosen ports are
@@ -78,6 +96,7 @@ async function runOnce(cmd, args) {
   await runOnce('npx', ['vite', 'build', '--config', 'vite.main.config.ts']);
 
   console.log(`[dev] octree cache root: ${devOctreeCacheRoot}`);
+  console.log(`[dev] electron user data:  ${devUserDataDir}`);
 
   let uvicorn = null;
   const electronEnv = {
@@ -188,7 +207,7 @@ async function runOnce(cmd, args) {
   // the default cap, enabling an Allocation-sampling memory profile. Passing
   // --js-flags as an Electron launch arg applies it to the renderer isolates
   // (app.commandLine in main.ts does not). REMOVE once the OOM is fixed.
-  const electron = spawn(electronBin, ['--js-flags=--max-old-space-size=8192', '.'], { stdio: 'inherit', cwd: root, shell: isWin, env: electronEnv });
+  const electron = spawn(electronBin, ['--js-flags=--max-old-space-size=8192', `--user-data-dir=${devUserDataDir}`, '.'], { stdio: 'inherit', cwd: root, shell: isWin, env: electronEnv });
 
   const shutdown = () => {
     try { electron.kill('SIGTERM'); } catch {}

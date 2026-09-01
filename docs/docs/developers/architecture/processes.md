@@ -99,7 +99,7 @@ two must resolve the same directory:
 
 | Platform | Cache root |
 | --- | --- |
-| macOS | `~/Library/Application Support/Phytograph/cache/octrees` |
+| macOS | `~/Library/Caches/Phytograph/octrees` |
 | Windows | `%LOCALAPPDATA%\Phytograph\cache\octrees` |
 | Linux | `$XDG_CACHE_HOME/Phytograph/octrees` (or `~/.cache/...`) |
 
@@ -126,12 +126,104 @@ same variable to per-session temp dirs.
     profile, which is why the fix moved the reader to the backend's location
     rather than the reverse.
 
+!!! warning "Never put it under `<userData>` on macOS either"
+
+    The macOS row used to read
+    `~/Library/Application Support/Phytograph/cache/octrees`, and that is a
+    *different* bug with the same shape. `<userData>/Cache` is **Chromium's**
+    HTTP cache, and the default APFS volume is case-insensitive — so `cache`
+    and `Cache` were one and the same directory. Chromium empties that
+    directory when it initialises its disk cache, which means **every app
+    launch deleted the entire octree cache**, and a second concurrent instance
+    (a dev or E2E app running alongside the packaged one) deleted it out from
+    under the running app mid-session.
+
+    Most of the time this was invisible — a missing octree is rebuilt from the
+    source file on demand. It surfaced only for a cloud **edited since import**,
+    whose cached octree is the *only* copy of those edits: recovery correctly
+    refuses to rebuild from source (that would silently undo the edits), so the
+    user got *"Edited point cloud unavailable"* and lost the work.
+
+    macOS now mirrors Linux and uses the OS cache directory. Nothing needed
+    migrating, because the old location could not survive a single relaunch.
+
 The layout is pinned from both sides against a single written contract,
 `src/shared/octreeCacheRoot.contract.json` — `src/main/octreeCacheRoot.test.ts`
 (Vitest) and `backend-api/tests/test_octree_cache_root.py` (pytest) each assert
 their own implementation against it, and a source-level chokepoint test asserts
 the supervisor still passes the environment pin. Change one implementation
 without the other and its test fails.
+
+## Electron profile isolation (dev / E2E vs the desktop app)
+
+`electron .` derives `app.getPath('userData')` from the app **name** — the same
+name the installed `Phytograph.app` uses. So `npm run dev`, every E2E launch, and
+the user's desktop app all resolved to one directory
+(`~/Library/Application Support/phytograph`).
+
+!!! danger "A dev or test launch could corrupt a live desktop session"
+
+    Two things in that directory must not be shared:
+
+    - **`phytograph-store.json`** — the user's real preferences (theme, point
+      size, class palettes, rivlib path, synthetic-scan defaults). Any spec or
+      dev session that changed a setting through the UI overwrote them for good.
+    - **Chromium's profile**, including `<userData>/Cache`, which Chromium
+      **empties** when it initialises its disk cache. Every dev/E2E launch wiped
+      whatever the running desktop app had there — and since the octree cache
+      used to live at `<userData>/cache/octrees` (the same directory on a
+      case-insensitive volume), starting a dev session destroyed a live desktop
+      session's octrees *while it was open*.
+
+Both are fixed by passing Chromium's `--user-data-dir` at spawn, with
+deliberately opposite lifetimes:
+
+| | Directory | Why |
+| --- | --- | --- |
+| E2E (`launchApp.ts`) | fresh `mkdtemp` per launch, removed in `close()` | specs must not inherit each other's settings; the suite runs 2 workers |
+| Dev (`scripts/dev.mjs`) | stable `tmpdir()/phytograph-dev-userdata` | dev settings should survive a restart. Override with `PHYTOGRAPH_DEV_USER_DATA_DIR` |
+
+A fresh profile makes every E2E launch a "first run" (`ipc.ts` probes for the
+store file), which only changes splash wording — no spec asserts on it.
+
+`scripts/user-data-isolation.test.mjs` guards both at the source, because
+dropping either switch reopens the collision **silently**: E2E on the shared
+profile still passes every assertion, and the damage lands on whatever the
+developer happens to have open.
+
+## Octree cache eviction (and what must never be evicted)
+
+The on-disk cache is trimmed to `PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES` (default
+20 GB) by `_evict_octree_cache`, oldest access time first. Callers pass `keep`
+so a conversion never drops the dir it just wrote.
+
+!!! danger "An edited cloud's octree is not a cache"
+
+    A cloud's source file is read exactly **once**, at import. Every edit after
+    that — bake, crop, erase, filter, split, segment — mutates the in-RAM
+    session arrays, and nothing ever rewrites the file. The cloud has
+    **diverged**, and octree recovery (`handleOctreeMissing`) correctly refuses
+    to rebuild it from that stale file, because doing so would silently restore
+    deleted points and undo baked transforms.
+
+    So for a diverged cloud, deleting the octree dir is not reclaiming a cache —
+    it is deleting rendered work that exists nowhere else. `keep` never covered
+    this: it only names the dirs the *current* operation wrote, so baking cloud B
+    was free to evict edited cloud A's octree sitting beside it in the scene.
+
+    `_evict_octree_cache` now pins the octrees (hits **and** miss shell) of every
+    live cloud session, snapshotted by `_live_session_octree_ids()` under
+    `_cloud_session_lock` and released before the filesystem walk. The deliberate
+    consequence: when the pinned set alone exceeds the cap, the cache stays over
+    it and logs a warning. Overshooting a cap on regenerable disk is
+    recoverable; deleting the only copy of an edit is not.
+
+    Recovery closes the other half. A diverged cloud whose octree goes missing is
+    rebuilt from its **session** (`POST /api/cloud/session/{id}/rebuild_octree`,
+    which reconverts from the in-RAM arrays and reads no file). Only when there
+    is no live session left does the user see *"Edited point cloud
+    unavailable"* — and that remains a genuine dead end, so the session bound
+    below is what ultimately limits how long an edited cloud survives.
 
 ## In-RAM session eviction
 

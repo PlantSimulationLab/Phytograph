@@ -100,6 +100,15 @@ The app stores its preferences and recent files list in:
 - **Windows**: `%APPDATA%\Phytograph\`
 - **Linux**: `~/.config/Phytograph/`
 
+Imported point clouds are also cached on disk in a streaming format, so
+reopening a scan is fast. That cache is separate, and safe to delete when
+you need the space — anything still reachable from its original file is
+rebuilt on demand:
+
+- **macOS**: `~/Library/Caches/Phytograph/octrees/`
+- **Windows**: `%LOCALAPPDATA%\Phytograph\cache\octrees\`
+- **Linux**: `~/.cache/Phytograph/octrees/`
+
 ## What's next
 
 Open the app and continue to **[Your first import](first-import.md)**.

@@ -89,6 +89,42 @@ describe('resolveOctreeCacheRoot', () => {
     expect(root).toContain(join('AppData', 'Local'));
     expect(root).not.toContain(join('AppData', 'Roaming'));
   });
+
+  // The macOS regression, in its own terms. The root used to be
+  // <userData>/cache/octrees, and on a case-insensitive APFS volume that
+  // `cache` IS Chromium's HTTP-cache dir `<userData>/Cache`, which Chromium
+  // empties on startup — so every launch deleted the whole octree cache and a
+  // concurrent instance deleted it mid-session. Asserting "not under
+  // Application Support" rather than "equals the new string" is deliberate:
+  // the bug is about WHO OWNS the directory, and a case-insensitive filesystem
+  // means an exact-string check would still pass for `.../Cache/octrees`.
+  it('keeps the macOS cache out of the Electron user-data dir', () => {
+    const root = resolveOctreeCacheRoot('darwin', {}, HOME);
+    const userData = join(HOME, 'Library', 'Application Support');
+    expect(root.startsWith(userData)).toBe(false);
+    expect(root.startsWith(join(HOME, 'Library', 'Caches'))).toBe(true);
+  });
+
+  // Generalised form of both regressions: no platform may resolve into a
+  // directory Chromium owns. Chromium's disk cache lives at <userData>/Cache
+  // and it wipes stray entries there; on a case-insensitive volume any segment
+  // that case-folds to "cache" under the user-data dir lands inside it.
+  it('never resolves inside a Chromium-managed cache directory', () => {
+    const userDataRoots: Record<string, string> = {
+      // Electron's app.getPath('userData') per platform.
+      darwin: join(HOME, 'Library', 'Application Support'),
+      win32: join(HOME, 'AppData', 'Roaming'),
+      linux: join(HOME, '.config'),
+    };
+    for (const platform of Object.keys(contract.platforms)) {
+      const root = resolveOctreeCacheRoot(platform as NodeJS.Platform, {}, HOME);
+      expect(
+        root.toLowerCase().startsWith(userDataRoots[platform].toLowerCase()),
+        `${platform} octree root ${root} is inside the Electron user-data dir, ` +
+          `where Chromium owns (and periodically empties) the Cache subtree`,
+      ).toBe(false);
+    }
+  });
 });
 
 // The parity above only matters if the two processes actually resolve the root

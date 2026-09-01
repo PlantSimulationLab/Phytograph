@@ -7,6 +7,15 @@
     "silently disagreed on Windows and Linux, so every import produced an octree",
     "the renderer could never fetch and nothing rendered (GitHub issue #4).",
     "",
+    "The macOS entry then hit a SECOND, different failure: it used to be",
+    "~/Library/Application Support/Phytograph/cache/octrees, and the default APFS",
+    "volume is case-insensitive, so `cache` IS Chromium's own HTTP-cache dir",
+    "`<userData>/Cache`. Chromium empties that directory on startup, so every app",
+    "launch destroyed the whole octree cache. macOS therefore now mirrors Linux:",
+    "the OS cache dir, not the user-data dir. Keep it that way - any darwin path",
+    "under Application Support/Phytograph whose next segment case-folds to",
+    "\"cache\" reopens this.",
+    "",
     "This file is the single written-down truth both sides are tested against:",
     "  - src/main/octreeCacheRoot.test.ts   (vitest)",
     "  - backend-api/tests/test_octree_cache_root.py  (pytest)",
@@ -24,8 +33,8 @@
   "platforms": {
     "darwin": {
       "baseEnv": null,
-      "baseHomeSegments": ["Library", "Application Support"],
-      "segments": ["Phytograph", "cache", "octrees"]
+      "baseHomeSegments": ["Library", "Caches"],
+      "segments": ["Phytograph", "octrees"]
     },
     "win32": {
       "baseEnv": "LOCALAPPDATA",

@@ -122,3 +122,50 @@ def test_windows_cache_is_not_in_the_roaming_profile(clean_env, tmp_path):
     parts = _octree_cache_root().parts
     assert "Local" in parts
     assert "Roaming" not in parts
+
+
+def test_macos_cache_is_not_in_the_electron_user_data_dir(clean_env, tmp_path):
+    """The macOS regression, in its own terms.
+
+    The root used to be ~/Library/Application Support/Phytograph/cache/octrees.
+    `<userData>/Cache` is Chromium's HTTP cache, and the default APFS volume is
+    case-insensitive, so `cache` and `Cache` were one directory — Chromium
+    empties it when it initialises its disk cache, so every app launch deleted
+    the entire octree cache (and a second concurrent instance deleted it out
+    from under a running app). Asserted as "not under Application Support"
+    rather than as an exact string because the bug is about who OWNS the
+    directory: on a case-insensitive filesystem an exact-string check would
+    happily pass for a path that is really inside Chromium's Cache.
+    """
+    home = tmp_path / "home"
+    _pin(clean_env, "darwin", home)
+
+    root = _octree_cache_root()
+
+    assert home / "Library" / "Application Support" not in root.parents
+    assert str(root).startswith(str(home / "Library" / "Caches"))
+
+
+# Electron's app.getPath('userData') per platform. Chromium's disk cache lives
+# at <userData>/Cache and it wipes stray entries there, so no platform's octree
+# root may resolve inside the user-data dir.
+_USER_DATA_ROOTS = {
+    "darwin": ("Library", "Application Support"),
+    "win32": ("AppData", "Roaming"),
+    "linux": (".config",),
+}
+
+
+@pytest.mark.parametrize("platform", sorted(PLATFORM_IDS))
+def test_never_resolves_inside_a_chromium_managed_cache_dir(clean_env, platform, tmp_path):
+    """Generalised form of both cache-root regressions."""
+    home = tmp_path / "home"
+    _pin(clean_env, PLATFORM_IDS[platform], home)
+
+    root = _octree_cache_root()
+    user_data = home.joinpath(*_USER_DATA_ROOTS[platform])
+
+    assert not str(root).lower().startswith(str(user_data).lower()), (
+        f"{platform} octree root {root} is inside the Electron user-data dir, "
+        "where Chromium owns (and periodically empties) the Cache subtree"
+    )

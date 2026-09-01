@@ -22370,17 +22370,27 @@ def _octree_cache_max_bytes() -> int:
 
 
 def _octree_cache_root() -> _Path:
-    """OS-appropriate user-data directory for cached octrees.
+    """OS-appropriate cache directory for cached octrees.
 
-    macOS: ~/Library/Application Support/Phytograph/cache/octrees
+    macOS: ~/Library/Caches/Phytograph/octrees
     Linux: $XDG_CACHE_HOME/Phytograph/octrees (or ~/.cache/Phytograph/octrees)
     Windows: %LOCALAPPDATA%/Phytograph/cache/octrees
-    Overridable via PHYTOGRAPH_OCTREE_CACHE_ROOT for tests."""
+    Overridable via PHYTOGRAPH_OCTREE_CACHE_ROOT for tests.
+
+    The macOS entry is deliberately the OS CACHE dir, not the Electron user-data
+    dir. It used to be ~/Library/Application Support/Phytograph/cache/octrees,
+    and on a (default, case-insensitive) APFS volume that `cache` is the very
+    same directory as `<userData>/Cache` — Chromium's HTTP cache, which Chromium
+    empties when it initialises its disk cache. Every app launch therefore
+    deleted the whole octree cache, and a second concurrent instance deleted it
+    mid-session. Mirrored on the Electron side by resolveOctreeCacheRoot in
+    src/main/octreeCacheRoot.ts and pinned by the shared contract in
+    src/shared/octreeCacheRoot.contract.json."""
     override = _os.environ.get("PHYTOGRAPH_OCTREE_CACHE_ROOT")
     if override:
         return _Path(override)
     if _sys.platform == "darwin":
-        base = _Path.home() / "Library" / "Application Support" / "Phytograph" / "cache"
+        base = _Path.home() / "Library" / "Caches" / "Phytograph"
     elif _sys.platform.startswith("win"):
         base = _Path(_os.environ.get("LOCALAPPDATA", _Path.home() / "AppData" / "Local")) / "Phytograph" / "cache"
     else:
@@ -24714,6 +24724,24 @@ def _dir_total_size(p: _Path) -> int:
     return total
 
 
+def _live_session_octree_ids() -> "set[str]":
+    """The octree cache ids every live cloud session is currently rendering from.
+
+    Read under `_cloud_session_lock` and returned as a detached set so callers do
+    their filesystem work with the lock released. `_cloud_sessions` is genuinely
+    concurrent (blocking endpoints run in anyio's worker threadpool), so it must
+    not be iterated unlocked.
+    """
+    ids: "set[str]" = set()
+    with _cloud_session_lock:
+        for sess in _cloud_sessions.values():
+            for cid in (getattr(sess, "octree_cache_id", None),
+                        getattr(sess, "miss_octree_cache_id", None)):
+                if cid:
+                    ids.add(cid)
+    return ids
+
+
 def _evict_octree_cache(max_bytes: int,
                         keep: "Optional[Union[_Path, Iterable[_Path]]]" = None) -> List[str]:
     """Trim the octree cache to at most `max_bytes` of regular file content,
@@ -24724,6 +24752,23 @@ def _evict_octree_cache(max_bytes: int,
     evicted — pass the cache dir(s) we just wrote (e.g. a hits octree AND its
     sibling miss octree) so a fresh convert doesn't immediately drop itself when
     the cache is at the limit.
+
+    The octrees of every LIVE cloud session are pinned on top of `keep`,
+    unconditionally, because for an EDITED cloud the octree is not a cache at
+    all — it is the only rendered copy of work that exists nowhere on disk. A
+    cloud diverges from its source file on the first bake/crop/filter/split, and
+    nothing rewrites that file, so recovery (`handleOctreeMissing` in the
+    renderer) correctly REFUSES to rebuild a diverged cloud from source rather
+    than silently reverting the edits. Dropping such a dir to satisfy a size cap
+    therefore destroys user work and surfaces as "Edited point cloud
+    unavailable". `keep` alone did not cover this: it only ever names the dirs
+    the CURRENT operation just wrote, so bake-ing cloud B was free to evict the
+    octree of edited cloud A sitting right beside it in the scene.
+
+    Consequence, and it is the intended trade: when the pinned set alone exceeds
+    `max_bytes` the cache stays over its cap. Overshooting a cap on regenerable
+    disk is recoverable; deleting the only copy of an edit is not. The overshoot
+    is bounded (at most `_MAX_CLOUD_SESSIONS` sessions x 2 octrees) and logged.
     """
     root = _octree_cache_root()
     if not root.is_dir():
@@ -24737,6 +24782,15 @@ def _evict_octree_cache(max_bytes: int,
         keep_set = {keep.resolve()}
     else:
         keep_set = {p.resolve() for p in keep}
+
+    # Pin every live session's octree(s). Snapshotted under the session lock and
+    # released immediately: the walk/rmtree below is slow filesystem work and
+    # holding `_cloud_session_lock` across it would stall every concurrent
+    # session request (endpoints are threadpooled `def`s, so this genuinely runs
+    # alongside them). A session that dies right after the snapshot only means we
+    # skipped one eviction candidate this round; the next call collects it.
+    for _cid in _live_session_octree_ids():
+        keep_set.add((root / _cid).resolve())
 
     # Skip the .staging dirs and any non-sha1 entries (defensive against
     # files dropped in here by other tools).
@@ -24774,6 +24828,15 @@ def _evict_octree_cache(max_bytes: int,
             continue
         evicted.append(candidate.name)
         total -= size
+
+    if total > max_bytes:
+        logger.warning(
+            "Octree cache is %.1f GB, over its %.1f GB cap: every remaining entry is "
+            "pinned by a live cloud session (evicting one would destroy an edited "
+            "cloud's only copy). Raise PHYTOGRAPH_OCTREE_CACHE_MAX_BYTES or close "
+            "some clouds.",
+            total / 1e9, max_bytes / 1e9,
+        )
 
     return evicted
 
