@@ -163,7 +163,9 @@ def test_bake_rebuilds_octree_from_survivors(client, cache_root, grid_xyz, grid_
     client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": BOX})
     res = client.post(f"/api/cloud/session/{sid}/bake")
     assert res.status_code == 200, res.text
-    body = res.json()
+    # Bake streams PHP1 progress markers ahead of its JSON tail (it is one full
+    # PotreeConverter run), so the body is a stream, not bare JSON.
+    body = decode_streamed_json(res.content)
     assert body["baked"] is True
     assert body["point_count"] == expected_remaining
     # Baked octree reports the reduced count, and the mask is cleared.
@@ -186,9 +188,67 @@ def test_bake_with_everything_deleted_returns_empty_no_crash(client, cache_root,
     client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": whole})
     res = client.post(f"/api/cloud/session/{sid}/bake")
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
     assert body["point_count"] == 0
     assert body["baked"] is False
+
+
+def test_bake_streams_progress_and_a_cancel_leaves_the_session_pristine(
+        client, cache_root, grid_xyz, monkeypatch):
+    """Bake is one full PotreeConverter run — the deliberately-slow step — so it
+    must stream progress and be cancellable.
+
+    Regression: it used to be a silent POST with no progress, no run id and no
+    cancel, and the renderer set no busy state at all, so the Erase panel's
+    button stayed live for the whole run and invited concurrent rebuilds.
+
+    The cancel guarantee is the important half: bake performs EVERY session
+    mutation (array compaction, mask clear, history clear) AFTER the octree
+    build returns, so a cancel mid-build must leave the pending deletions
+    exactly as they were rather than half-applying them."""
+    from tests.binframe import decode_progress_markers
+
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": BOX})
+    sess = main._cloud_sessions[sid]
+    deleted_before = int(sess.deleted.sum())
+    points_before = len(sess.positions)
+    assert deleted_before > 0
+
+    # --- 1) A normal bake streams real progress ahead of its JSON tail.
+    res = client.post(f"/api/cloud/session/{sid}/bake")
+    assert res.status_code == 200, res.text
+    assert decode_streamed_json(res.content)["baked"] is True
+    assert decode_progress_markers(res.content), "bake reported no progress markers"
+
+    # --- 2) A cancel during the build leaves the session untouched.
+    sid2 = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    client.post(f"/api/cloud/session/{sid2}/delete_region", json={"region": BOX})
+    sess2 = main._cloud_sessions[sid2]
+    deleted2 = int(sess2.deleted.sum())
+    points2 = len(sess2.positions)
+
+    real_build = main._build_octree_from_las
+
+    def cancel_then_build(*a, **kw):
+        for _run_id, ev in list(main._CANCEL_REGISTRY.items()):
+            ev.set()
+        return real_build(*a, **kw)
+
+    monkeypatch.setattr(main, "_build_octree_from_las", cancel_then_build)
+    client.post(f"/api/cloud/session/{sid2}/bake")
+
+    # Pristine: the deletions are still pending and nothing was compacted.
+    assert int(sess2.deleted.sum()) == deleted2
+    assert len(sess2.positions) == points2
+    # And the first session's successful bake really did compact.
+    assert len(main._cloud_sessions[sid].positions) == points_before - deleted_before
 
 
 def test_reset_edits_partial_undo_restores_intermediate_snapshot(client, cache_root, grid_xyz):
@@ -568,6 +628,59 @@ def test_session_segment_ground_appends_class_no_file_read(client, cache_root, t
     assert called["loaded"] is False  # no source file read during segment
 
 
+def test_segment_ground_defer_octree_skips_the_rebuild_and_returns_no_octree(
+        client, cache_root, tmp_path):
+    """`defer_octree` skips the parent rebuild and returns NO octree fields.
+
+    The caller that sets it is about to POST `extract_by_column` with
+    `rebuild_parent`, which rebuilds this octree alongside the split's children
+    instead of ahead of them (15.8 s -> 11.7 s on 1.2 M points).
+
+    Returning the PRE-column octree with its `cache_id`/`bounds` would be the
+    stale-octree bug `bake` already guards against — the renderer would treat it
+    as current. So the fields are omitted entirely and `octree_deferred` says so.
+    The session's column IS written either way; only the rebuild is deferred."""
+    rows = []
+    for i in range(30):
+        for j in range(30):
+            rows.append(f"{i * 0.05} {j * 0.05} 0.0")
+    for i in range(12):
+        rows.append(f"{0.5 + i * 0.01} 0.5 {0.3 + i * 0.01}")
+    f = tmp_path / "defer_ground.xyz"
+    f.write_text("\n".join(rows) + "\n")
+
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(f), "ascii_format": "x y z"},
+    ).content)["session_id"]
+    before_cache = main._cloud_sessions[sid].octree_cache_id
+
+    res = client.post(f"/api/cloud/session/{sid}/segment_ground",
+                      json={"cloth_resolution": 0.1, "defer_octree": True})
+    assert res.status_code == 200, res.text
+    body = res.json()
+
+    assert body["octree_deferred"] is True
+    # No octree fields at all — nothing the renderer could mistake for current.
+    for k in ("cache_id", "cache_dir", "attributes", "bounds"):
+        assert k not in body, f"deferred response leaked {k!r}"
+    # The measurement the panel reports back still comes through.
+    assert "class_threshold_used" in body
+    # The column was written; only the REBUILD was skipped.
+    sess = main._cloud_sessions[sid]
+    assert "ground_class" in sess.extras
+    assert len(sess.extras["ground_class"]) == len(sess.positions)
+    assert sess.octree_cache_id == before_cache, "octree was rebuilt despite defer_octree"
+
+    # Without the flag the octree is rebuilt and reported, as before.
+    res2 = client.post(f"/api/cloud/session/{sid}/segment_ground",
+                       json={"cloth_resolution": 0.1})
+    body2 = res2.json()
+    assert "octree_deferred" not in body2
+    assert body2["cache_id"] != before_cache
+    assert "ground_class" in {a["name"] for a in body2.get("attributes", [])}
+
+
 def test_session_split_partitions_into_kept_and_leftover(client, cache_root, grid_xyz, monkeypatch):
     """Split keeps the box-passing points on the session and moves the excluded
     points to a NEW leftover session — entirely on the in-RAM arrays (no file
@@ -652,6 +765,247 @@ def test_extract_by_column_partitions_and_streams_progress(client, cache_root, g
     fractions = [m["progress"] for m in markers if m.get("progress") is not None]
     assert fractions and fractions[-1] == pytest.approx(1.0)
     assert any("3 clouds" in (m.get("message") or "") for m in markers)
+
+
+def test_extract_by_column_include_misses_duplicates_the_miss_shell(client, cache_root, grid_xyz):
+    """`include_misses` puts the parent's sky/miss rows on EVERY child, matching
+    what single-shot `extract` always does — the ground/plant split needs them as
+    LAD's Beer's-law transmission denominator. Off (the default, used by the
+    per-tree split) the children are hits-only, so ~100 tree clouds don't each
+    carry a full copy of the miss shell.
+
+    Misses carry class 0 on every class column, so no value group ever selects
+    them: without this flag they simply vanish from the split."""
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+
+    # 500 ground + 400 non-ground + 100 misses (class 0, as segment_ground writes).
+    labels = np.zeros(1000, dtype=np.float32)
+    labels[0:500] = 1
+    labels[500:900] = 2
+    miss = np.zeros(1000, dtype=np.float32)
+    miss[900:1000] = 1
+    with main._cloud_session_lock:
+        sess = main._cloud_sessions[sid]
+        main._session_add_extra_column(sess, "ground_class", "Ground Class", labels)
+        main._session_add_extra_column(sess, main._MISS_SLUG, "Is Miss", miss)
+    parent_positions = _session_positions(sid).copy()
+
+    with_misses = decode_streamed_json(client.post(
+        f"/api/cloud/session/{sid}/extract_by_column",
+        json={"slug": "ground_class", "include_misses": True},
+    ).content)["children"]
+    assert [c["value"] for c in with_misses] == [1, 2]
+    # The child SESSIONS carry their class block plus the shared miss block. The
+    # reported `point_count` is the OCTREE's, which is hits-only by construction
+    # (`_session_rebuild` excludes misses), so it stays 500/400 — exactly what the
+    # single-shot `extract` this replaces also reported.
+    assert [c["point_count"] for c in with_misses] == [500, 400]
+    # The gather still reads the parent in ascending row order: each child is its
+    # own class block followed by the shared miss block, not an interleaved mess.
+    for child, (lo, hi) in zip(with_misses, [(0, 500), (500, 900)]):
+        child_sess = main._cloud_sessions[child["session_id"]]
+        expected = np.concatenate([parent_positions[lo:hi], parent_positions[900:1000]])
+        assert len(child_sess.positions) == (hi - lo) + 100
+        assert np.array_equal(child_sess.positions, expected)
+        assert np.count_nonzero(child_sess.extras[main._MISS_SLUG]) == 100
+
+    # Default (per-tree split) is unchanged: hits only, no miss shell.
+    without = decode_streamed_json(client.post(
+        f"/api/cloud/session/{sid}/extract_by_column",
+        json={"slug": "ground_class"},
+    ).content)["children"]
+    assert [c["point_count"] for c in without] == [500, 400]
+    for child, n in zip(without, [500, 400]):
+        child_sess = main._cloud_sessions[child["session_id"]]
+        assert len(child_sess.positions) == n
+        assert np.count_nonzero(child_sess.extras[main._MISS_SLUG]) == 0
+
+    # Parent untouched by either call.
+    assert len(main._cloud_sessions[sid].positions) == 1000
+    assert int(main._cloud_sessions[sid].deleted.sum()) == 0
+
+
+def test_extract_by_column_cancel_stops_builds_and_leaks_no_child_sessions(
+        client, cache_root, grid_xyz, monkeypatch):
+    """A cancel mid-split must stop the remaining octree builds AND drop every
+    child session it had already registered.
+
+    Regression: the only cancel checkpoint used to be at the START of each
+    build. `_EXTRACT_BUILD_POOL` is >= 2, so whenever K <= the pool size — and
+    the ground split's K=2 ALWAYS is — every build had already passed that
+    checkpoint before a user could click Cancel. `progress(...)` merely enqueues
+    a marker and never raises, so nothing else observed the cancel: the worker
+    ran to completion and its children stayed in `_cloud_sessions`, pinned
+    against the octree LRU by `_live_session_octree_ids`."""
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    labels = np.zeros(1000, dtype=np.float32)
+    labels[0:500] = 1
+    labels[500:1000] = 2
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid], "ground_class",
+                                       "Ground Class", labels)
+    before = set(main._cloud_sessions)
+
+    # Fire the cancel once EVERY build has entered `_session_rebuild`, i.e. once
+    # all of them are past the start-of-build checkpoint. That is the window the
+    # old code could not observe. (Cancelling earlier proves nothing: the
+    # start-of-build checkpoint has always caught that case, which is why K > the
+    # pool size never leaked.)
+    import threading as _threading
+    real_rebuild = main._session_rebuild
+    entered = _threading.Semaphore(0)
+    started = {"n": 0}
+    lock = _threading.Lock()
+
+    def rebuild_then_cancel(sess, *a, **kw):
+        with lock:
+            started["n"] += 1
+            n = started["n"]
+        entered.release()
+        if n == 1:
+            # Wait for the sibling build to enter too, then cancel. Bounded so a
+            # regression in pool sizing fails the test rather than hanging it.
+            assert entered.acquire(timeout=30) and entered.acquire(timeout=30)
+            for _run_id, ev in list(main._CANCEL_REGISTRY.items()):
+                ev.set()
+        return real_rebuild(sess, *a, **kw)
+
+    monkeypatch.setattr(main, "_session_rebuild", rebuild_then_cancel)
+
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "ground_class"})
+    assert res.status_code == 200, res.text
+
+    # Nothing survives the cancel: no child sessions, and the parent is intact.
+    assert set(main._cloud_sessions) == before
+    assert len(main._cloud_sessions[sid].positions) == 1000
+    assert int(main._cloud_sessions[sid].deleted.sum()) == 0
+
+
+def test_extract_by_column_child_las_write_does_not_hold_the_session_lock(
+        client, cache_root, grid_xyz, monkeypatch):
+    """A split child's LAS write must NOT hold `_cloud_session_lock`.
+
+    The write is the longest lock hold in the process — the writer streams
+    `positions[block]` out of the session in chunks, so the lock spanned the
+    whole laspy encode + disk write. Holding it there blocked every unrelated
+    session request (preview, filter, export) for the children's combined write
+    time. A freshly-sliced child is registered under an id the client has not
+    been told, so nothing can mutate it and the lock buys nothing.
+
+    The writes are still serialised — on `_las_write_lock`, not the global one.
+    That throttle is deliberate: letting them run concurrently measured ~20%
+    SLOWER end to end, because serialised writes let one child's PotreeConverter
+    overlap the next child's write."""
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    labels = np.zeros(1000, dtype=np.float32)
+    labels[0:400] = 1
+    labels[400:1000] = 2
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid], "ground_class",
+                                       "Ground Class", labels)
+
+    observed = []
+    real_to_las = main._session_to_las
+
+    def watched(sess, out_las, **kw):
+        # A plain Lock reports False from acquire(blocking=False) when ANY thread
+        # holds it, including this one — so this reads "was the global session
+        # lock held while we wrote?".
+        free = main._cloud_session_lock.acquire(blocking=False)
+        if free:
+            main._cloud_session_lock.release()
+        observed.append(free)
+        # The private throttle must be held instead.
+        held_write_lock = not main._las_write_lock.acquire(blocking=False)
+        if not held_write_lock:
+            main._las_write_lock.release()
+        observed.append(("write_lock_held", held_write_lock))
+        return real_to_las(sess, out_las, **kw)
+
+    monkeypatch.setattr(main, "_session_to_las", watched)
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "ground_class"})
+    assert res.status_code == 200, res.text
+    assert len(decode_streamed_json(res.content)["children"]) == 2
+
+    session_lock_free = [o for o in observed if o is True or o is False]
+    write_lock_held = [held for tag, held in
+                       (o for o in observed if isinstance(o, tuple))]
+    assert session_lock_free == [True, True], (
+        "a child's LAS write held _cloud_session_lock")
+    assert write_lock_held == [True, True], (
+        "a child's LAS write did not take _las_write_lock — the throttle is gone")
+
+
+def test_extract_by_column_rebuild_parent_builds_the_parent_in_the_same_pool(
+        client, cache_root, grid_xyz):
+    """`rebuild_parent` folds the PARENT's octree build into the same concurrent
+    pool as the children, and returns it as `parent`.
+
+    It exists because the parent rebuild is the single biggest cost of a
+    classify-then-split run — measured 11.5 s on 1.2 M points against 4.4 s for
+    the whole 2-way split — and it used to run ALONE and to completion before the
+    children started. Overlapping them measured 15.8 s -> 11.7 s (~27%).
+
+    The parent counts toward the progress denominator too, or the pill would
+    reach 100% with a build still running."""
+    from tests.binframe import decode_progress_markers
+
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    labels = np.zeros(1000, dtype=np.float32)
+    labels[0:400] = 1
+    labels[400:1000] = 2
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid], "ground_class",
+                                       "Ground Class", labels)
+    before_cache = main._cloud_sessions[sid].octree_cache_id
+
+    res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                      json={"slug": "ground_class", "rebuild_parent": True})
+    assert res.status_code == 200, res.text
+    body = decode_streamed_json(res.content)
+
+    assert [c["point_count"] for c in body["children"]] == [400, 600]
+    parent = body["parent"]
+    assert parent is not None
+    assert parent["session_id"] == sid
+    assert parent["point_count"] == 1000
+    # A REAL rebuild: the session adopted a new octree carrying the new column.
+    assert parent["cache_id"] != before_cache
+    assert main._cloud_sessions[sid].octree_cache_id == parent["cache_id"]
+    assert (cache_root / parent["cache_id"] / "metadata.json").is_file()
+
+    # 3 builds, not 2 — the denominator includes the parent.
+    markers = decode_progress_markers(res.content)
+    assert any("3 clouds" in (m.get("message") or "") for m in markers)
+
+    # Omitting the flag leaves the parent alone and reports no `parent` block.
+    sid2 = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(grid_xyz), "ascii_format": GRID_FORMAT},
+    ).content)["session_id"]
+    with main._cloud_session_lock:
+        main._session_add_extra_column(main._cloud_sessions[sid2], "ground_class",
+                                       "Ground Class", labels)
+    untouched = main._cloud_sessions[sid2].octree_cache_id
+    body2 = decode_streamed_json(client.post(
+        f"/api/cloud/session/{sid2}/extract_by_column",
+        json={"slug": "ground_class"}).content)
+    assert "parent" not in body2
+    assert main._cloud_sessions[sid2].octree_cache_id == untouched
 
 
 def test_extract_by_column_on_empty_selection_returns_no_children(client, cache_root, grid_xyz):

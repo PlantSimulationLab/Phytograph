@@ -75,6 +75,13 @@ test('segments wood vs leaf and colours by the wood_class attribute', async () =
   expect(woodN).toBeGreaterThan(700);
   expect(woodN).toBeLessThan(2000);
   expect(leafN).toBeGreaterThan(woodN);
+
+  // Splitting auto-hides the classified original: it still holds all 4240
+  // points, so leaving it visible would draw the whole cloud on top of the two
+  // halves just extracted from it. The children stay visible.
+  await expect(cloudRow).toHaveAttribute('data-visible', 'false');
+  await expect(woodRow).toHaveAttribute('data-visible', 'true');
+  await expect(leafRow).toHaveAttribute('data-visible', 'true');
 });
 
 test('removes wood, leaving a leaf-only cloud', async () => {

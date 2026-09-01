@@ -296,6 +296,23 @@ import { plantResponseToMeshData } from '../lib/plantMeshData';
 import { serializeQsm, sanitizeQsmFilename, qsmExtForFormat, type QSMExportFormat } from '../lib/qsmExport';
 import { serializeMeshObj, serializeMeshPly, serializeMeshStl, sanitizeMeshName } from '../lib/meshExport';
 
+// Child-cloud name suffix for a `ground_class` value, shared by the octree and
+// flat ground-split paths so the two can't drift apart. The fallback keeps an
+// unexpected class distinguishable instead of producing duplicate row names.
+function groundClassSuffix(value: number): string {
+  if (value === 1) return 'ground';
+  if (value === 2) return 'non-ground';
+  return `class ${value}`;
+}
+
+// Child-cloud name suffix for a `wood_class` value — the wood/leaf twin of
+// groundClassSuffix, shared by the octree and flat split paths.
+function woodClassSuffix(value: number): string {
+  if (value === 1) return 'wood';
+  if (value === 2) return 'leaf';
+  return `class ${value}`;
+}
+
 // Grid plane options
 type GridPlane = 'z-up' | 'y-up';
 type EditMode = 'none' | 'translate' | 'crop' | 'rotate' | 'erase' | 'label';
@@ -942,6 +959,14 @@ export default function PointCloudViewer({
   const [groundRigidness, setGroundRigidness] = useState(3);
   const [groundSlopeSmooth, setGroundSlopeSmooth] = useState(false);
   const [groundSplitClouds, setGroundSplitClouds] = useState(false);
+  // "Split into ground + plant clouds" runs AFTER the panel (and its inline
+  // spinner) has closed and the recoloured parent is already on screen, so
+  // without this the user watches a finished-looking viewport for the 10-15 s
+  // the backend spends building the two child octrees. Mirrors
+  // treeSplitProgress; drives the top-center StatusPill.
+  const [groundSplitProgress, setGroundSplitProgress] =
+    useState<{ label: string; value: number | null } | null>(null);
+  const groundSplitRunIdRef = useRef<string | null>(null);
   // Seed CSF cloth-resolution / class-threshold / rigidness / slope-smooth from
   // the selected cloud's horizontal extent AND vertical relief each time the
   // ground panel OPENS. CSF's params are absolute distances, so a fixed default
@@ -1760,7 +1785,23 @@ export default function PointCloudViewer({
   // its worker subprocess (true kill — see backend `_run_killable`). These are
   // non-streaming (no run_id), so the cancel handler is just `abort()`.
   const groundSegmentAbortRef = useRef<AbortController | null>(null);
+  // Bake ("permanently apply deletions") is one full PotreeConverter run. It
+  // used to set NO busy state at all — no pill, no spinner, no disabled button —
+  // so the viewport and the Erase panel both looked idle for its whole duration
+  // and the button invited re-clicking into concurrent rebuilds.
+  const [bakingCloudId, setBakingCloudId] = useState<string | null>(null);
+  const [bakeProgress, setBakeProgress] =
+    useState<{ label: string; value: number | null } | null>(null);
+  const bakeAbortRef = useRef<AbortController | null>(null);
+  const bakeRunIdRef = useRef<string | null>(null);
   const woodSegmentAbortRef = useRef<AbortController | null>(null);
+  // Wood/leaf progress for the StatusPill. Covers BOTH slow stretches the panel
+  // spinner can't describe: which scan a multi-scan run is on, and the per-child
+  // octree builds of a "split into wood + leaf clouds" run. Mirrors
+  // treeSplitProgress / groundSplitProgress.
+  const [woodProgress, setWoodProgress] =
+    useState<{ label: string; value: number | null } | null>(null);
+  const woodSplitRunIdRef = useRef<string | null>(null);
   const treeSegmentAbortRef = useRef<AbortController | null>(null);
   const skeletonAbortRef = useRef<AbortController | null>(null);
   // The LAD voxel currently under the cursor (for the value readout tooltip).
@@ -1771,6 +1812,17 @@ export default function PointCloudViewer({
   // crop preview (hidden to-be-cropped points) alive after editMode flips to
   // 'none' and drives the "Cropping…" badge.
   const [isApplyingCrop, setIsApplyingCrop] = useState(false);
+  // Per-scan crop progress. The loop is deliberately SERIAL (each iteration
+  // needs the previous one's buffers collected), and one octree re-conversion is
+  // ~15-20 s, so cropping a multi-scan selection is a minutes-long job that used
+  // to sit behind an unchanging "Cropping…". Null on a single-cloud crop, where
+  // the bare label is already accurate.
+  const [cropProgress, setCropProgress] =
+    useState<{ label: string; value: number | null } | null>(null);
+  // Set per iteration by the crop loop, read by processOne's bake call (which is
+  // defined above the loop). A ref, not a closure, so each scan's octree rebuild
+  // reports into its own slice of the bar.
+  const cropBakeProgressRef = useRef<((fraction: number) => void) | null>(null);
   // Synthetic LiDAR scan state
   const [isScanning, setIsScanning] = useState(false);
   // Per-stage progress for the synthetic scan (mirrors triProgress/ladProgress).
@@ -3504,6 +3556,8 @@ export default function PointCloudViewer({
       // cropped cloud data has already been swapped in via onUpdateCloud — so
       // the points never flash back into view.
       setIsApplyingCrop(false);
+      setCropProgress(null);
+      cropBakeProgressRef.current = null;
       setCropBox(null);
       setCropPolygon(null);
       setPolygonInProgress([]);
@@ -3745,7 +3799,11 @@ export default function PointCloudViewer({
                   + 'Re-run Backfill Misses on the cropped cloud before estimating leaf-area density.',
               });
             }
-            const baked = await bakeCloudSession(sessionId);
+            const baked = await bakeCloudSession(sessionId, {
+              onProgress: (value) => {
+                if (value != null) cropBakeProgressRef.current?.(value);
+              },
+            });
             onUpdateCloud(cloud.id, buildSessionOctreeData(baked, octreeInfo, src.fileName ?? cloud.id, undefined, { diverged: true }));
             touchedCloudIds.push(cloud.id);
             keptCounts.push(result.remaining_count);
@@ -3911,13 +3969,33 @@ export default function PointCloudViewer({
       keptCounts.push(keptData.pointCount);
     };
 
+    const total = cloudIdsToProcess.length;
     let i = 0;
+    // processOne is defined above this loop, so the per-scan reporter reaches it
+    // through a ref rather than a closure over `i`.
+
     const next = async (): Promise<void> => {
-      if (i >= cloudIdsToProcess.length) {
+      if (i >= total) {
         finishUp();
         return;
       }
       const cloudId = cloudIdsToProcess[i];
+      const scanName = cloudsRef.current.find(c => c.id === cloudId)?.data.fileName;
+      if (total > 1) {
+        setCropProgress({
+          label: `Cropping ${scanName ?? 'scan'} (${i + 1} of ${total})…`,
+          value: i / total,
+        });
+      }
+      // Sub-progress within THIS scan's slice of the bar: the octree rebuild
+      // reports a 0..1 fraction, which maps onto [i/total, (i+1)/total] so the
+      // bar advances smoothly and stays monotonic across scans.
+      cropBakeProgressRef.current = total > 1
+        ? (frac) => setCropProgress({
+            label: `Cropping ${scanName ?? 'scan'} (${i + 1} of ${total})…`,
+            value: (i + Math.min(Math.max(frac, 0), 1)) / total,
+          })
+        : (frac) => setCropProgress({ label: 'Cropping…', value: frac });
       i++;
       // Await processOne — backend round-trips need to complete before
       // the next iteration starts, otherwise we'd fire all crop requests
@@ -4958,9 +5036,24 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => c.id === cloudId);
     const octreeInfo = cloud?.data.octree;
     if (!cloud || !octreeInfo?.sessionId) return;
+    // Re-entry guard: the button is disabled while this runs, but a keyboard or
+    // command-palette route must not slip a second full rebuild past it.
+    if (bakingCloudId) return;
     const sessionId = octreeInfo.sessionId;
+    const abort = new AbortController();
+    bakeAbortRef.current = abort;
+    bakeRunIdRef.current = null;
+    setBakingCloudId(cloud.id);
+    setBakeProgress({ label: 'Applying deletions…', value: null });
     try {
-      const baked = await bakeCloudSession(sessionId);
+      const baked = await bakeCloudSession(sessionId, {
+        signal: abort.signal,
+        onProgress: (value, message) => setBakeProgress({
+          label: message || 'Applying deletions…',
+          value: value ?? null,
+        }),
+        onRunId: (runId) => { bakeRunIdRef.current = runId; },
+      });
       const newData = buildPointCloudFromOctree(
         {
           cache_id: baked.cache_id,
@@ -5000,12 +5093,33 @@ export default function PointCloudViewer({
       scene.boundary([cloud.id]);
       showToast({ title: `Applied deletions — ${baked.point_count.toLocaleString()} points remain`, type: 'success' });
     } catch (err) {
+      // User cancelled — not a failure. The session is untouched: bake does
+      // every mutation AFTER the octree build returns, so a cancel mid-build
+      // leaves the pending deletions exactly as they were.
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      if (err instanceof ScanCancelledError) return;
       showToast({
         title: `Apply deletions failed: ${err instanceof Error ? err.message : String(err)}`,
         type: 'error',
       });
+    } finally {
+      setBakingCloudId(null);
+      setBakeProgress(null);
+      bakeAbortRef.current = null;
+      bakeRunIdRef.current = null;
     }
-  }, [clouds, onUpdateCloud]);
+  }, [clouds, onUpdateCloud, bakingCloudId]);
+
+  const cancelBake = useCallback(() => {
+    // Kill the PotreeConverter child first; aborting the fetch alone would only
+    // detach the client and let the rebuild run to completion.
+    if (bakeRunIdRef.current) void cancelRun(bakeRunIdRef.current);
+    bakeAbortRef.current?.abort();
+    bakeAbortRef.current = null;
+    bakeRunIdRef.current = null;
+    setBakingCloudId(null);
+    setBakeProgress(null);
+  }, []);
 
   // Recover sky/miss points (beams that returned nothing) for the selected
   // session-backed scans and persist them in the backend session, so they can be
@@ -10372,42 +10486,85 @@ export default function PointCloudViewer({
         }
         const baseName = cloud.data.fileName ?? id;
         const sessionId = octreeInfo.sessionId;
-        const meta = await sessionSegmentGround(sessionId, csfParams, abort.signal);
+        // When we're about to split, DEFER the parent's octree rebuild: it is the
+        // single biggest cost of the whole run (measured 11.5 s on 1.2 M points,
+        // against 4.4 s for the entire 2-way split) and it used to run alone, to
+        // completion, before the children even started. `rebuild_parent` below
+        // folds it into the same concurrent pool.
+        const willSplit = groundSplitClouds && !!onAddCloud;
+        const meta = await sessionSegmentGround(
+          sessionId, { ...csfParams, defer_octree: willSplit }, abort.signal);
         // The parent keeps ALL points, classified + coloured by ground_class.
-        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
+        // A deferred run carries no octree fields — adopting them would hand the
+        // renderer a pre-column octree it would treat as current — so the update
+        // waits for the `parent` block the split returns.
+        if (!meta.octree_deferred) {
+          onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
+        }
         setCloudColorMode(id, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
         setShowGroundSegmentPanel(false);
+        // Record what auto mode measured NOW, not in the toast below: the split
+        // is cancellable, and a cancel returns from the catch — which would
+        // throw away a tolerance the backend has already measured and returned.
+        const autoNote = noteAutoThreshold(meta.class_threshold_used);
 
-        // Optional split: extract each class into its own child session (parent
-        // untouched). Pure array operation — no source file read.
-        if (groundSplitClouds && onAddCloud) {
-          const addClassCloud = async (cls: number, suffix: string, color: string) => {
-            const r = await sessionExtract(sessionId, {
-              scalarFilters: [{ slug: 'ground_class', min: cls, max: cls, values: [cls] }],
+        // Optional split: fan `ground_class` out into one child session per class
+        // in a SINGLE backend call (parent untouched). This used to be two serial
+        // `sessionExtract` round-trips, i.e. two serial octree builds with no
+        // progress signal — the server now slices both subsets under one lock and
+        // builds their octrees concurrently, streaming per-child progress into
+        // the StatusPill. `includeMisses` keeps the old per-extract behaviour of
+        // duplicating the sky/miss shell onto each child (LAD's denominator).
+        if (willSplit) {
+          setGroundSplitProgress({ label: 'Splitting into ground + plant clouds…', value: null });
+          groundSplitRunIdRef.current = null;
+          const { children, parent } = await sessionExtractByColumn(sessionId, GROUND_CLASS_ATTRIBUTE, {
+            includeMisses: true,
+            rebuildParent: true,
+            signal: abort.signal,
+            onProgress: (value, message) => setGroundSplitProgress({
+              label: message || 'Splitting into ground + plant clouds…',
+              value: value ?? null,
+            }),
+            onRunId: (runId) => { groundSplitRunIdRef.current = runId; },
+          });
+          for (const c of children) {
+            const childId = crypto.randomUUID();
+            onAddCloud({
+              id: childId,
+              data: buildSessionOctreeData(
+                c, octreeInfo, `${baseName} (${groundClassSuffix(c.value)})`, c.session_id,
+                { diverged: true },
+              ),
+              visible: true,
+              // Swatch colours come from the ground_class scheme itself, so a
+              // child cloud reads as the class the viewer paints and the two
+              // can't drift.
+              color: classColorHex(GROUND_CLASS_ATTRIBUTE, c.value) ?? '#4caf50',
             });
-            if (r.extracted) {
-              onAddCloud({
-                id: crypto.randomUUID(),
-                data: buildSessionOctreeData(
-                  r.extracted, octreeInfo, `${baseName} (${suffix})`, r.extracted.session_id,
-                  { diverged: true },
-                ),
-                visible: true,
-                color,
-              });
-            }
-          };
-          // Swatch colours come from the ground_class scheme itself, so a child
-          // cloud reads as the class the viewer paints and the two can't drift.
-          await addClassCloud(1, 'ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 1) ?? '#8c6643');
-          await addClassCloud(2, 'non-ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 2) ?? '#4caf50');
+            // Each child carries the ground_class column, so colour it by that
+            // rather than leaving it on the scene default. Two reasons: the
+            // class legend is built ONLY from VISIBLE clouds, so hiding the
+            // parent below would otherwise take the Ground / Non-ground legend
+            // with it; and the children would fall back to whatever the scene
+            // default happens to be, which on a height/scalar scene is two
+            // indistinguishable gradients rather than the classes they are.
+            setCloudColorMode(childId, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
+          }
+          // Adopt the parent's octree now that it has been rebuilt alongside the
+          // children (this is the update the deferred branch above skipped).
+          if (parent) onUpdateCloud(id, buildSessionOctreeData(parent, octreeInfo, baseName));
+          // The parent still holds every point, so leaving it visible draws the
+          // whole cloud on top of the children that were just split out of it —
+          // z-fighting mush instead of a visible separation.
+          if (children.length > 0) onHideScan(id);
         }
 
         showToast({
           type: 'success',
           title: 'Ground Segmentation Complete',
           message: `Classified ${meta.point_count.toLocaleString()} points (ground vs plant).`
-            + noteAutoThreshold(meta.class_threshold_used),
+            + autoNote,
         });
         return;
       }
@@ -10446,6 +10603,7 @@ export default function PointCloudViewer({
 
       // Optional split into ground / plant child clouds.
       if (groundSplitClouds && onAddCloud) {
+        let splitChildren = 0;
         const makeChild = (classValue: number, suffix: string, color: string) => {
           const idxs: number[] = [];
           for (let i = 0; i < count; i++) {
@@ -10491,10 +10649,14 @@ export default function PointCloudViewer({
             visible: true,
             color,
           });
+          splitChildren++;
         };
         // Scheme-derived swatches — see the session path above.
-        makeChild(1, 'ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 1) ?? '#8c6643');
-        makeChild(2, 'non-ground', classColorHex(GROUND_CLASS_ATTRIBUTE, 2) ?? '#4caf50');
+        makeChild(1, groundClassSuffix(1), classColorHex(GROUND_CLASS_ATTRIBUTE, 1) ?? '#8c6643');
+        makeChild(2, groundClassSuffix(2), classColorHex(GROUND_CLASS_ATTRIBUTE, 2) ?? '#4caf50');
+        // Hide the parent — it still holds every point, so leaving it visible
+        // draws the whole cloud on top of the children just split out of it.
+        if (splitChildren > 0) onHideScan(id);
       }
 
       showToast({
@@ -10504,17 +10666,23 @@ export default function PointCloudViewer({
           + noteAutoThreshold(response.class_threshold_used),
       });
     } catch (error) {
-      // User cancelled (Cancel button aborted the fetch) — not a failure.
+      // User cancelled — not a failure. Two shapes: the Cancel button aborted
+      // the fetch, or (split path) the backend acknowledged the cancel with a
+      // `cancelled` marker before the abort landed. The tree twin catches both;
+      // missing the second turned a user-initiated cancel into a red toast.
       if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof ScanCancelledError) return;
       console.error('Ground segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Ground segmentation failed';
       setGroundSegmentError(errorMessage);
       showToast({ type: 'error', title: 'Ground Segmentation Failed', message: errorMessage });
     } finally {
       setGroundSegmentInProgress(false);
+      setGroundSplitProgress(null);
       groundSegmentAbortRef.current = null;
+      groundSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds, groundAutoClassThreshold]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, groundClothResolution, groundRigidness, groundClassThreshold, groundSlopeSmooth, groundSplitClouds, groundAutoClassThreshold]);
 
   // Generate a DEM (Digital Elevation Model) from the selected cloud's ground
   // points. The bare-earth surface comes back as a heightmap mesh (stored as a
@@ -11006,10 +11174,20 @@ export default function PointCloudViewer({
       // independently, in sequence. Call through the ref so the LATEST worker
       // (capturing the current woodMode) is used — handleWoodSegment is memoised
       // and would otherwise close over a stale worker. ===
-      for (const cloud of targets) {
+      for (let k = 0; k < targets.length; k++) {
+        const cloud = targets[k];
         // Stop the sequential loop the instant the user cancels (the in-flight
         // call also throws AbortError out of the loop; this skips any remainder).
         if (abort.signal.aborted) break;
+        // Name the scan being worked on. The worker overwrites this with its own
+        // per-child build progress during a split, then the next iteration
+        // reclaims it — so the pill always describes the current stage.
+        if (targets.length > 1) {
+          setWoodProgress({
+            label: `Segmenting scan ${k + 1} of ${targets.length}…`,
+            value: k / targets.length,
+          });
+        }
         await segmentOneWoodCloudRef.current(cloud, WOOD, LEAF, woodParams, abort.signal);
       }
       setShowWoodSegmentPanel(false);
@@ -11022,7 +11200,9 @@ export default function PointCloudViewer({
       showToast({ type: 'error', title: 'Wood/Leaf Segmentation Failed', message: errorMessage });
     } finally {
       setWoodSegmentInProgress(false);
+      setWoodProgress(null);
       woodSegmentAbortRef.current = null;
+      woodSplitRunIdRef.current = null;
     }
   }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodUseReflectance, inlineReflectance]);
 
@@ -11048,7 +11228,10 @@ export default function PointCloudViewer({
         }
         const baseName = cloud.data.fileName ?? id;
         const sessionId = octreeInfo.sessionId;
-        const meta = await sessionSegmentWood(sessionId, woodParams, signal);
+        // Same deferral as the ground split — see handleGroundSegment.
+        const willSplit = woodMode === 'split' && !!onAddCloud;
+        const meta = await sessionSegmentWood(
+          sessionId, { ...woodParams, defer_octree: willSplit }, signal);
         if (meta.warnings && meta.warnings.length > 0) {
           showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: meta.warnings.join(' ') });
         }
@@ -11062,33 +11245,63 @@ export default function PointCloudViewer({
           onUpdateCloud(id, buildSessionOctreeData(r, octreeInfo, baseName, undefined, { diverged: true }));
         } else {
           // Label in place; the parent keeps ALL points, coloured by wood_class.
-          onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
+          // A deferred run carries no octree fields — the split's `parent` block
+          // supplies them below.
+          if (!meta.octree_deferred) {
+            onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
+          }
           setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         }
-        setShowWoodSegmentPanel(false);
+        // NOTE: the panel is NOT closed here. This worker runs once per selected
+        // cloud, so closing on cloud 1 left every later cloud segmenting and
+        // splitting behind an idle-looking viewport. The dispatcher closes it
+        // after the whole loop; the StatusPill carries the detail meanwhile.
 
-        // Optional split: extract each class into its own child session.
-        if (woodMode === 'split' && onAddCloud) {
-          const addClassCloud = async (cls: number, suffix: string, color: string) => {
-            const r = await sessionExtract(sessionId, {
-              scalarFilters: [{ slug: WOOD_CLASS_ATTRIBUTE, min: cls, max: cls, values: [cls] }],
+        // Optional split: fan `wood_class` out into one child session per class
+        // in a SINGLE backend call (parent untouched). Was two serial
+        // `sessionExtract` round-trips — two serial octree builds, no progress,
+        // and not abortable at all (`sessionExtract` takes no signal). The
+        // server now slices both subsets under one lock and builds their octrees
+        // concurrently, streaming progress. `includeMisses` reproduces what the
+        // per-extract path always did: each half keeps the sky/miss shell.
+        if (willSplit) {
+          setWoodProgress({ label: 'Splitting into wood + leaf clouds…', value: null });
+          woodSplitRunIdRef.current = null;
+          const { children, parent } = await sessionExtractByColumn(sessionId, WOOD_CLASS_ATTRIBUTE, {
+            includeMisses: true,
+            rebuildParent: true,
+            signal,
+            onProgress: (value, message) => setWoodProgress({
+              label: message || 'Splitting into wood + leaf clouds…',
+              value: value ?? null,
+            }),
+            onRunId: (runId) => { woodSplitRunIdRef.current = runId; },
+          });
+          for (const c of children) {
+            const childId = crypto.randomUUID();
+            onAddCloud({
+              id: childId,
+              data: buildSessionOctreeData(
+                c, octreeInfo, `${baseName} (${woodClassSuffix(c.value)})`, c.session_id,
+                { diverged: true },
+              ),
+              visible: true,
+              // Swatch colours come from the wood_class scheme itself, so a
+              // child cloud reads as the class the viewer paints and the two
+              // can't drift.
+              color: classColorHex(WOOD_CLASS_ATTRIBUTE, c.value) ?? '#4caf50',
             });
-            if (r.extracted) {
-              onAddCloud({
-                id: crypto.randomUUID(),
-                data: buildSessionOctreeData(
-                  r.extracted, octreeInfo, `${baseName} (${suffix})`, r.extracted.session_id,
-                  { diverged: true },
-                ),
-                visible: true,
-                color,
-              });
-            }
-          };
-          // Swatch colours come from the wood_class scheme itself, so a child
-          // cloud reads as the class the viewer paints and the two can't drift.
-          await addClassCloud(WOOD, 'wood', classColorHex(WOOD_CLASS_ATTRIBUTE, WOOD) ?? '#67421f');
-          await addClassCloud(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50');
+            // Colour each child BY wood_class rather than leaving it on the
+            // scene default — same reasoning as the ground split: the class
+            // legend is built only from VISIBLE clouds, so hiding the parent
+            // below would otherwise take the Wood / Leaf legend with it.
+            setCloudColorMode(childId, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
+          }
+          // Adopt the parent's octree, rebuilt alongside the children.
+          if (parent) onUpdateCloud(id, buildSessionOctreeData(parent, octreeInfo, baseName));
+          // The parent still holds every point, so leaving it visible draws the
+          // whole cloud on top of the two halves just split out of it.
+          if (children.length > 0) onHideScan(id);
         }
 
         showToast({
@@ -11138,6 +11351,7 @@ export default function PointCloudViewer({
 
       // Build a child cloud holding only the points of `classValue` (used by
       // both split and remove modes — remove keeps just the leaf class).
+      let splitChildren = 0;
       const makeChild = (classValue: number, suffix: string, color: string, replaceParent: boolean) => {
         const idxs: number[] = [];
         for (let i = 0; i < count; i++) {
@@ -11179,6 +11393,7 @@ export default function PointCloudViewer({
           onUpdateCloud(id, childData);
         } else if (onAddCloud) {
           onAddCloud({ id: crypto.randomUUID(), data: childData, visible: true, color });
+          splitChildren++;
         }
       };
 
@@ -11196,8 +11411,11 @@ export default function PointCloudViewer({
         setCloudColorMode(id, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
         if (woodMode === 'split') {
           // Scheme-derived swatches — see the session path above.
-          makeChild(WOOD, 'wood', classColorHex(WOOD_CLASS_ATTRIBUTE, WOOD) ?? '#67421f', false);
-          makeChild(LEAF, 'leaf', classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', false);
+          makeChild(WOOD, woodClassSuffix(WOOD), classColorHex(WOOD_CLASS_ATTRIBUTE, WOOD) ?? '#67421f', false);
+          makeChild(LEAF, woodClassSuffix(LEAF), classColorHex(WOOD_CLASS_ATTRIBUTE, LEAF) ?? '#4caf50', false);
+          // Hide the parent — it still holds every point, so leaving it visible
+          // draws the whole cloud on top of the children just split out of it.
+          if (splitChildren > 0) onHideScan(id);
         }
       }
 
@@ -11207,7 +11425,7 @@ export default function PointCloudViewer({
         message: `${response.num_wood.toLocaleString()} wood, ${response.num_leaf.toLocaleString()} leaf`,
       });
     }
-  }, [buildPointSource, onUpdateCloud, onAddCloud, woodMode, inlineReflectance]);
+  }, [buildPointSource, onUpdateCloud, onAddCloud, onHideScan, woodMode, inlineReflectance]);
   // Keep a ref to the latest worker so the memoised handleWoodSegment dispatcher
   // (which excludes it from deps to avoid a use-before-declaration cycle) always
   // invokes the current-woodMode version.
@@ -15748,15 +15966,27 @@ export default function PointCloudViewer({
   // mechanism. `setXxxInProgress(false)` flips the panel back to its run button;
   // the handler's AbortError early-return suppresses an error toast.
   const cancelGroundSegment = useCallback(() => {
+    // Stop the backend worker first when a run-id arrived (the ground/plant split
+    // streams one); it drops the child sessions it had already registered, so a
+    // cancelled split doesn't strand a second copy of the cloud in the sidecar.
+    if (groundSplitRunIdRef.current) void cancelRun(groundSplitRunIdRef.current);
     groundSegmentAbortRef.current?.abort();
     groundSegmentAbortRef.current = null;
+    groundSplitRunIdRef.current = null;
     setGroundSegmentInProgress(false);
+    setGroundSplitProgress(null);
   }, []);
 
   const cancelWoodSegment = useCallback(() => {
+    // Stop the backend worker first when a run-id arrived (the wood/leaf split
+    // streams one); it drops the child sessions it had already registered, so a
+    // cancelled split doesn't strand a second copy of the cloud in the sidecar.
+    if (woodSplitRunIdRef.current) void cancelRun(woodSplitRunIdRef.current);
     woodSegmentAbortRef.current?.abort();
     woodSegmentAbortRef.current = null;
+    woodSplitRunIdRef.current = null;
     setWoodSegmentInProgress(false);
+    setWoodProgress(null);
   }, []);
 
   const cancelTreeSegment = useCallback(() => {
@@ -18768,7 +18998,13 @@ export default function PointCloudViewer({
           cancel button — the crop apply isn't cancelable today. Shown while
           the backend crop round-trip runs (octree re-conversion is ~15-20s);
           the to-be-cropped points stay hidden via isApplyingCrop. */}
-      {isApplyingCrop && <StatusPill label="Cropping…" />}
+      {isApplyingCrop && (
+        <StatusPill
+          testId="crop-running"
+          label={cropProgress?.label ?? 'Cropping…'}
+          progress={cropProgress?.value ?? null}
+        />
+      )}
 
       {isExportingScan && (
         <StatusPill
@@ -18867,6 +19103,43 @@ export default function PointCloudViewer({
           label={backfillProgress?.label ?? 'Backfilling misses…'}
           progress={backfillProgress?.value ?? null}
           onCancel={cancelBackfill}
+        />
+      )}
+
+      {/* Bake ("permanently apply deletions") — one full PotreeConverter run
+          with no other on-screen signal. Cancelling leaves the session pristine
+          because every mutation happens after the build returns. */}
+      {bakeProgress && (
+        <StatusPill
+          testId="bake-running"
+          label={bakeProgress.label}
+          progress={bakeProgress.value}
+          onCancel={cancelBake}
+        />
+      )}
+
+      {/* Wood/leaf status. Covers the two stretches the panel's inline spinner
+          can't describe: which scan a multi-scan run is on, and the per-child
+          octree builds of a wood+leaf split. */}
+      {woodProgress && (
+        <StatusPill
+          testId="wood-progress-running"
+          label={woodProgress.label}
+          progress={woodProgress.value}
+          onCancel={cancelWoodSegment}
+        />
+      )}
+
+      {/* Ground/plant split status. The Ground Segmentation panel (and its
+          inline spinner) closes as soon as the recoloured parent lands, so this
+          pill is the only signal that the backend is still building the two
+          child octrees — 10-15 s on a large cloud. */}
+      {groundSplitProgress && (
+        <StatusPill
+          testId="ground-split-running"
+          label={groundSplitProgress.label}
+          progress={groundSplitProgress.value}
+          onCancel={cancelGroundSegment}
         />
       )}
 
@@ -20516,6 +20789,7 @@ export default function PointCloudViewer({
                 setTimeout(saveToHistory, 0);
               }
             }}
+            baking={bakingCloudId === cloud.id}
             onBake={() => handleBakeEdits(cloud.id)}
             onUndoPending={async () => {
               const oct = cloud.data.octree;

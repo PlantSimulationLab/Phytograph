@@ -190,7 +190,7 @@ def test_bake_compaction_keeps_timestamps_aligned(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_build_octree_from_las",
                         lambda *a, **k: ("cache_key", pathlib.Path(cache_dir), {}))
     try:
-        main.bake_cloud_session(sess.session_id)
+        main._do_bake_cloud_session(sess.session_id)
 
         assert sess.timestamps is not None
         assert sess.timestamps.shape[0] == sess.positions.shape[0] == 4

@@ -53,7 +53,10 @@ There are three methods (see **Method** below):
     - **Label in place** — keep every point, add a **Wood Class** attribute,
       and recolour by it.
     - **Split into wood + leaf clouds** — additionally emit two new clouds,
-      `… (wood)` and `… (leaf)`, alongside the classified original.
+      `… (wood)` and `… (leaf)`, alongside the classified original. The two
+      child clouds are built after the classification lands, so a progress pill
+      appears at the top of the viewer while they're prepared (with its own
+      Cancel).
     - **Remove wood (keep leaves only)** — drop the wood points, leaving a
       leaf-only cloud (the classic "wood removal" result).
 6. Click **Segment Wood / Leaf**. While it runs, the button shows a spinner and
@@ -86,9 +89,11 @@ The classification is stored as a scalar attribute named **Wood Class**. Switch
 back to it any time from the **Color by** picker in the Display panel — it shows
 discrete colours, not a continuous gradient.
 
-If you chose **Split**, run skeleton extraction or QSM building on the
-`… (wood)` cloud alone; if you chose **Remove wood**, the surviving cloud is the
-leaves, ready for leaf-area analysis.
+If you chose **Split**, the classified original is hidden automatically — it
+still holds every point, so you'd otherwise see all three clouds drawn on top of
+each other. Tick its eye icon in the scan list to bring it back. Run skeleton
+extraction or QSM building on the `… (wood)` cloud alone; if you chose **Remove
+wood**, the surviving cloud is the leaves, ready for leaf-area analysis.
 
 !!! note "How accurate is it?"
     On manually-labelled terrestrial-laser scans of real trees (oak, beech,

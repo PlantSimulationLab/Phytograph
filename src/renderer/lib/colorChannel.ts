@@ -239,7 +239,14 @@ function channelIdentity(
     d.channel.colormap,
     d.channel.reversed ? 'rev' : '',
     d.variableLabel,
-    range ? quantizeRange(range.min, range.max) : '',
+    // The data range separates CONTINUOUS entries only, because it is what
+    // their colorbar renders. A categorical entry renders its SCHEME's class
+    // list and never a range (see `min`/`max` below, set for 'continuous'
+    // only) — so including the range here split entries that draw identically.
+    // Concretely: a ground/plant split gives one child ground_class 1:1 and the
+    // other 2:2, which produced two identical "Ground Class · Ground /
+    // Non-ground" cards instead of one covering both clouds.
+    kind === 'continuous' && range ? quantizeRange(range.min, range.max) : '',
     // Categorical schemes with different class lists must not merge even when
     // they share an attribute name (tree schemes are generated per max-id).
     scheme ? scheme.classes.map(c => c.value).join(',') : '',

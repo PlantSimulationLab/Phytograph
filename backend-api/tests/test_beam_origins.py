@@ -172,7 +172,7 @@ def test_bake_compacts_beam_origins_so_lad_still_works(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_build_octree_from_las",
                         lambda *a, **k: ("cache_key", pathlib.Path(cache_dir), {}))
     try:
-        main.bake_cloud_session(sess.session_id)
+        main._do_bake_cloud_session(sess.session_id)
 
         assert sess.beam_origins is not None
         assert sess.beam_origins.shape[0] == sess.positions.shape[0] == 4

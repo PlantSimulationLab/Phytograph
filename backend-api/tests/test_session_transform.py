@@ -663,7 +663,7 @@ def test_bake_refuses_to_return_a_stale_octree_as_current(tmp_path, monkeypatch)
     stale_id = sess.octree_cache_id
     assert not sess.deleted.any(), "fixture must have no deletions (the fast path)"
 
-    res = main.bake_cloud_session(sid)
+    res = main._do_bake_cloud_session(sid)
 
     assert res["cache_id"] != stale_id, "bake returned the stale octree as current"
     assert sess.octree_pose is None

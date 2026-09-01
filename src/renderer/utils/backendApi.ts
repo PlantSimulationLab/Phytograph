@@ -4531,23 +4531,24 @@ export async function commitCloudLabels(
  */
 export async function bakeCloudSession(
   sessionId: string,
+  options?: {
+    signal?: AbortSignal;
+    // PotreeConverter progress for a status pill. Bake is the deliberately-slow
+    // step (a full octree rebuild), so the caller needs one.
+    onProgress?: BinaryFrameProgress;
+    onRunId?: (runId: string) => void;
+  },
 ): Promise<CloudSessionBakeResult> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/bake');
   try {
-    const response = await fetch(
-      `${baseUrl}/api/cloud/session/${sessionId}/bake`,
-      { method: 'POST', signal: controller.signal },
+    return await fetchJsonWithProgress<CloudSessionBakeResult>(
+      `/api/cloud/session/${sessionId}/bake`,
+      {},
+      options?.signal,
+      600000,
+      options?.onProgress,
+      options?.onRunId,
     );
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return (await response.json()) as CloudSessionBakeResult;
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('bake_cloud_session failed:', error);
     throw error;
   }
@@ -4759,25 +4760,39 @@ export type SessionExtractChild = OctreeMetadata & {
  * lock and builds their octrees concurrently. This is the batch form of
  * {@link sessionExtract}: for a per-tree split of ~100 trees it replaces ~100
  * serial round-trips (one octree build each) with one call whose builds run in
- * parallel. `excludeValues` defaults to [0] (ground/miss/unassigned). */
+ * parallel. `excludeValues` defaults to [0] (ground/miss/unassigned).
+ * `includeMisses` duplicates the parent's sky/miss points onto every child, the
+ * way single-shot {@link sessionExtract} always does — needed for a two-way
+ * ground/plant split (LAD's transmission denominator), deliberately off for a
+ * per-tree split where it would copy the miss shell onto every tree. */
 export async function sessionExtractByColumn(
   sessionId: string,
   slug: string,
   options?: {
     excludeValues?: number[];
+    includeMisses?: boolean;
+    // Rebuild the PARENT's octree in the same concurrent pool as the children.
+    // Pairs with `defer_octree` on the segmentation call, so the parent's
+    // rebuild — the biggest single cost of classify-then-split — overlaps the
+    // children's instead of running alone to completion first.
+    rebuildParent?: boolean;
     signal?: AbortSignal;
     // Per-child build progress ("Building 7 of 42 clouds…"). The split is a
     // minute-scale op on a large plot, so the caller needs a status pill.
     onProgress?: BinaryFrameProgress;
     onRunId?: (runId: string) => void;
   },
-): Promise<{ session_id: string; children: SessionExtractChild[] }> {
+): Promise<{ session_id: string; children: SessionExtractChild[]; parent?: OctreeMetadata & { session_id: string; point_count: number; cache_id: string } }> {
   try {
     const result = await fetchJsonWithProgress<
-      { session_id: string; children: SessionExtractChild[]; error?: string }
+      { session_id: string; children: SessionExtractChild[];
+        parent?: OctreeMetadata & { session_id: string; point_count: number; cache_id: string };
+        error?: string }
     >(
       `/api/cloud/session/${sessionId}/extract_by_column`,
-      { slug, exclude_values: options?.excludeValues ?? null },
+      { slug, exclude_values: options?.excludeValues ?? null,
+        include_misses: options?.includeMisses ?? false,
+        rebuild_parent: options?.rebuildParent ?? false },
       options?.signal,
       600000,
       options?.onProgress,
@@ -4858,10 +4873,10 @@ export async function sessionMerge(
  * `ground_class` column, and rebuild the octree from the arrays (no file read). */
 export async function sessionSegmentGround(
   sessionId: string,
-  params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean; auto_class_threshold?: boolean },
+  params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean; auto_class_threshold?: boolean; defer_octree?: boolean },
   signal?: AbortSignal,
-): Promise<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string }> {
-  return postSegment<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string }>(
+): Promise<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string; octree_deferred?: boolean }> {
+  return postSegment<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string; octree_deferred?: boolean }>(
     `/api/cloud/session/${sessionId}/segment_ground`, params, signal);
 }
 
@@ -4870,10 +4885,10 @@ export async function sessionSegmentGround(
  * (no file read). Pass segment_wood tuning params. */
 export async function sessionSegmentWood(
   sessionId: string,
-  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: 'sota' | 'connectivity' | 'geometric'; backbone_support?: number; reflectance_weight_max?: number; scalar_slug?: string },
+  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: 'sota' | 'connectivity' | 'geometric'; backbone_support?: number; reflectance_weight_max?: number; scalar_slug?: string; defer_octree?: boolean },
   signal?: AbortSignal,
-): Promise<CloudSessionBakeResult> {
-  return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_wood`, params, signal, 600000);
+): Promise<CloudSessionBakeResult & { octree_deferred?: boolean }> {
+  return postSegment<CloudSessionBakeResult & { octree_deferred?: boolean }>(`/api/cloud/session/${sessionId}/segment_wood`, params, signal, 600000);
 }
 
 /** Run TreeIso on the session's in-RAM points, append a `tree_instance` column,

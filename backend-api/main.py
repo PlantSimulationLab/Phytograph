@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.78.0"
+BACKEND_VERSION = "0.78.3"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -21322,6 +21322,12 @@ class ScanCancelled(Exception):
     """Raised inside a streaming worker when its run has been cancelled."""
 
 
+# Serialises the LAS writes of PRIVATE (not-yet-reachable) sessions — see
+# `_session_rebuild(private=True)`. It exists to keep the write throttle the
+# global `_cloud_session_lock` was providing by accident, WITHOUT blocking every
+# unrelated session request for the writes' combined duration.
+_las_write_lock = threading.Lock()
+
 _CANCEL_REGISTRY: "dict[str, threading.Event]" = {}
 _CANCEL_REGISTRY_LOCK = threading.Lock()
 
@@ -28785,17 +28791,15 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
     }
 
 
-@app.post("/api/cloud/session/{session_id}/bake")
-def bake_cloud_session(session_id: str):
-    """Permanently apply deletions by rebuilding the octree FROM THE IN-RAM
-    ARRAYS — the survivors (positions[~deleted] + colours + intensity + every
-    scalar extra-dim) are written to a LAS via `_session_to_las` and fed to
-    PotreeConverter. The source file is NOT read. Then the in-RAM arrays are
-    compacted to the survivors and the mask cleared. Returns the new octree
-    metadata. The deliberately-slow step (the PotreeConverter run).
+def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
+    """Worker for POST .../bake — see the endpoint docstring.
 
-    No deletions → returns the current octree without rebuilding.
-    """
+    Runs off the event loop (via `_bin_frame_streaming_response`) so the
+    PotreeConverter run can report progress and be cancelled. EVERY mutation of
+    the session happens AFTER the build returns, so a cancel mid-build unwinds
+    out of here leaving the session pristine — the same guarantee
+    `session_segment_ground` gives for its killable compute."""
+    cancel_event = getattr(progress, "cancel_event", None)
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
         has_deletions = bool(sess.deleted.any())
@@ -28834,7 +28838,17 @@ def bake_cloud_session(session_id: str):
             # Octree is hits-only (misses stay in the session for LAD/overlay).
             _session_to_las(sess, las_path, exclude_misses=True)
             extra_dims_meta = list(sess.extra_dims_meta)
-        cache_key, cache_dir, meta = _build_octree_from_las(las_path, extra_dims_meta)
+        cache_key, cache_dir, meta = _build_octree_from_las(
+            las_path, extra_dims_meta, progress=progress, cancel_event=cancel_event,
+        )
+
+    # The build is the only interruptible stretch, and everything below MUTATES
+    # the session irreversibly (compaction invalidates every index the undo and
+    # label histories hold). A cancel that lands while the converter is finishing
+    # would otherwise be observed by nobody — the converter returns normally and
+    # we compact anyway — so the user's cancel would silently apply the very
+    # deletions they just cancelled. Check here, before the first mutation.
+    _cancel_checkpoint(progress)
 
     # Compact the in-RAM arrays to the survivors and clear the mask + history, so
     # the session's source of truth matches the baked octree and further edits
@@ -28897,6 +28911,35 @@ def bake_cloud_session(session_id: str):
         "miss_octree_cache_id": miss_cache_id,
         **meta,
     }
+
+
+@app.post("/api/cloud/session/{session_id}/bake")
+def bake_cloud_session(session_id: str, http_request: Request):
+    """Permanently apply deletions by rebuilding the octree FROM THE IN-RAM
+    ARRAYS — the survivors (positions[~deleted] + colours + intensity + every
+    scalar extra-dim) are written to a LAS via `_session_to_las` and fed to
+    PotreeConverter. The source file is NOT read. Then the in-RAM arrays are
+    compacted to the survivors and the mask cleared. Returns the new octree
+    metadata. The deliberately-slow step (the PotreeConverter run).
+
+    No deletions → returns the current octree without rebuilding.
+
+    Streams PHP1 progress markers ahead of the JSON tail and is **cancellable**
+    via `/api/cancel/{run_id}` (the cancel SIGKILLs the PotreeConverter child).
+    Before this it was a silent 300 s-timeout POST with no busy state in the
+    renderer at all: the Erase panel's button stayed live throughout, so an
+    impatient user could fire several concurrent full rebuilds of the same
+    session. A cancel leaves the session pristine — see `_do_bake_cloud_session`.
+    """
+    # Resolve before the stream opens: once the 200 + first chunk is out, an
+    # HTTPException can only reach the client as a truncated body.
+    _get_cloud_session(session_id)
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_bake_cloud_session(session_id, progress)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 def _session_survivor_hit_mask(sess: "CloudSession") -> np.ndarray:
@@ -29049,6 +29092,7 @@ def _session_rebuild(
     progress=None,
     cancel_event: "Optional[threading.Event]" = None,
     span: "Tuple[float, float]" = (0.0, 1.0),
+    private: bool = False,
 ) -> tuple[str, _Path, dict]:
     """Rebuild the session's derived octree FROM THE IN-RAM ARRAYS (survivors +
     all attributes), update octree_cache_id, and return (cache_key, dir, meta).
@@ -29059,11 +29103,38 @@ def _session_rebuild(
     `_build_octree_from_las`, so a streaming caller gets real PotreeConverter
     progress and a cancel that HARD-KILLS the converter child rather than merely
     detaching the client's fetch. Every non-streaming caller omits them and is
-    unaffected."""
+    unaffected.
+
+    `private=True` declares that `sess` is NOT YET REACHABLE by any other
+    request, which lets the LAS write skip `_cloud_session_lock`. Only the
+    freshly-sliced children of a K-way split qualify: they are registered under
+    ids the client has not been told yet, so no endpoint can name them and
+    nothing can mutate their arrays before this call returns. It matters because
+    the write is the longest lock hold in the process — the writer streams
+    `positions[block]` out of the session in chunks (deliberately: gathering the
+    whole survivor set up front would be a multi-GB transient on a large cloud),
+    so the lock spans the entire laspy encode + disk write. Holding it there made
+    a K-way split's K writes strictly SERIAL and blocked every other session
+    request — preview, filter, export — for their combined duration, even though
+    the octree builds after them run concurrently.
+
+    A non-private session keeps the lock: `sess.deleted` is mutated in place
+    (`|=`) and label columns are written in place, so a lock-free chunked read of
+    a live session could tear.
+
+    A private write still takes `_las_write_lock`, so the K writes stay SERIAL
+    with respect to each other while no longer blocking anything else. That is
+    deliberate and measured: letting them run concurrently was ~20% SLOWER
+    end-to-end on a 1.2 M-point 2-way split, because serialised writes let one
+    child's PotreeConverter overlap the next child's write, and running every
+    write at once then every convert at once destroys that pipelining while the
+    writers contend for memory bandwidth and the same temp dir. The global lock
+    had been providing that admission control by accident; this keeps the
+    throttle and drops only the collateral damage to unrelated requests."""
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "rebuilt.las"
-        with _cloud_session_lock:
+        with (_las_write_lock if private else _cloud_session_lock):
             # Octree is hits-only (misses stay in the session for LAD/overlay).
             _session_to_las(sess, las_path, exclude_misses=True)
             extra_dims_meta = list(sess.extra_dims_meta)
@@ -29313,6 +29384,20 @@ class SessionExtractByColumnRequest(BaseModel):
     single lock and builds their octrees CONCURRENTLY."""
     slug: str
     exclude_values: Optional[List[int]] = None  # ids to skip (default: [0] = ground/miss/unassigned)
+    # Duplicate the parent's sky/miss points onto EVERY child, matching what
+    # single-shot `extract` always does. Misses sit ~1 km out and carry class 0,
+    # so no value group ever selects them -- but LAD needs them as its Beer's-law
+    # transmission denominator, so a ground/plant split must keep them. Off by
+    # default: a per-tree split of a plot would otherwise hand every one of ~100
+    # tree clouds a full copy of the miss shell.
+    include_misses: bool = False
+    # Also rebuild the PARENT's octree, in the same concurrent pool as the
+    # children. Pairs with `defer_octree` on the segmentation endpoints: the
+    # parent rebuild is the single biggest cost of a "classify then split" run
+    # (measured 11.5 s on 1.2 M points, against 4.4 s for the whole 2-way split),
+    # and it used to run ALONE and to completion before the children even
+    # started. Moving it here overlaps all three builds.
+    rebuild_parent: bool = False
 
 
 # Concurrency cap for the batch octree builds. PotreeConverter is itself
@@ -29321,10 +29406,14 @@ class SessionExtractByColumnRequest(BaseModel):
 _EXTRACT_BUILD_POOL = min(8, max(2, (_os.cpu_count() or 4)))
 
 
-def _slice_children_by_column(sess: "CloudSession", slug: str,
-                              exclude: set) -> "list[tuple[int, CloudSession]]":
+def _slice_children_by_column(sess: "CloudSession", slug: str, exclude: set,
+                              include_misses: bool = False) -> "list[tuple[int, CloudSession]]":
     """Register one child session per distinct integer value of `slug`, in value
     order. Takes `_cloud_session_lock` itself; builds NO octrees.
+
+    With `include_misses`, each child additionally gets the parent's sky/miss
+    rows (see the request model) -- unioned into its index array so the gather
+    still reads the parent in ascending order.
 
     Grouped by ONE stable argsort of the column rather than a `col == v` pass per
     value: the per-value scan is O(values x survivors) of boolean work, which on
@@ -29344,12 +29433,32 @@ def _slice_children_by_column(sess: "CloudSession", slug: str,
         # Start offset of each run of equal values in the sorted column.
         starts = np.flatnonzero(np.concatenate(([True], ordered[1:] != ordered[:-1])))
         ends = np.concatenate((starts[1:], [ordered.size]))
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        miss_abs = None
+        if include_misses and miss_arr is not None:
+            miss_abs = surv_idx[miss_arr[surv_idx] != 0]
+            if miss_abs.size == 0:
+                miss_abs = None
         children: "list[tuple[int, CloudSession]]" = []
         for value, start, end in zip(ordered[starts], starts, ends):
             v = int(value)
             if v in exclude:
                 continue
-            children.append((v, _session_subset_by_indices_locked(sess, surv_idx[order[start:end]])))
+            hits = surv_idx[order[start:end]]
+            # A group that is ENTIRELY misses would build a 0-point octree:
+            # `_session_rebuild` writes the LAS with exclude_misses=True, so
+            # PotreeConverter would be handed an empty file. Can't happen for
+            # today's class columns (misses always carry 0, which `exclude`
+            # drops), but `extract`'s `hits_selected` guard exists for exactly
+            # this and the batch form needs the same one.
+            if miss_arr is not None and not np.any(miss_arr[hits] == 0):
+                continue
+            take = hits
+            # union1d sorts and de-duplicates, which is exactly the ascending,
+            # overlap-free index array the gather wants.
+            if miss_abs is not None:
+                take = np.union1d(take, miss_abs)
+            children.append((v, _session_subset_by_indices_locked(sess, take)))
     return children
 
 
@@ -29367,33 +29476,67 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
     exclude = set(int(v) for v in (request.exclude_values if request.exclude_values is not None else [0]))
     if progress is not None:
         progress(None, "Slicing clouds…")
-    children = _slice_children_by_column(sess, request.slug, exclude)
+    children = _slice_children_by_column(sess, request.slug, exclude, request.include_misses)
     if not children:
         return {"session_id": session_id, "children": []}
 
-    total = len(children)
+    # The parent counts toward the progress denominator when we rebuild it, so
+    # the fraction stays honest rather than hitting 100% with a build still running.
+    total = len(children) + (1 if request.rebuild_parent else 0)
     built: List[dict] = []
+    parent_meta: "Optional[dict]" = None
+    done = 0
     try:
         _cancel_checkpoint(progress)
         if progress is not None:
             progress(0.0, f"Building 0 of {total} clouds…")
 
+        # Hand each build the run's cancel Event so `_run_potree_converter`
+        # SIGKILLs its child. Without it a cancel could only be observed at the
+        # queued/started checkpoint below — and when K <= the pool size (the
+        # ground split's K=2 always is) EVERY build has already passed that
+        # checkpoint before the user can click Cancel, so the cancel did
+        # nothing and the finished children leaked into `_cloud_sessions`.
+        cancel_event = getattr(progress, "cancel_event", None)
+
         def _build(item):
             value, child = item
             # A cancel that lands while this item is still queued skips its build.
             _cancel_checkpoint(progress)
-            ck, ccd, cmeta = _session_rebuild(child)
+            # `private`: this child was sliced moments ago and its id has not
+            # left the process, so nothing can mutate it — its LAS write needs
+            # no lock, which is what lets the K writes actually overlap.
+            ck, ccd, cmeta = _session_rebuild(child, cancel_event=cancel_event, private=True)
             return {"value": value, "session_id": child.session_id,
                     "point_count": int(len(child.positions)), "cache_id": ck,
                     "cache_dir": str(ccd), **cmeta}
 
+        def _build_parent():
+            # NOT private: the parent is live and reachable, so its own LAS write
+            # keeps `_cloud_session_lock`.
+            _cancel_checkpoint(progress)
+            ck, ccd, cmeta = _session_rebuild(sess, cancel_event=cancel_event)
+            with _cloud_session_lock:
+                remaining = int((~sess.deleted).sum())
+            return {"session_id": session_id, "point_count": remaining,
+                    "cache_id": ck, "cache_dir": str(ccd), **cmeta}
+
         with ThreadPoolExecutor(max_workers=_EXTRACT_BUILD_POOL) as pool:
-            futures = [pool.submit(_build, item) for item in children]
+            futures = {pool.submit(_build, item): None for item in children}
+            if request.rebuild_parent:
+                futures[pool.submit(_build_parent)] = "parent"
             try:
-                for future in as_completed(futures):
-                    built.append(future.result())
+                for future in as_completed(list(futures)):
+                    if futures[future] == "parent":
+                        parent_meta = future.result()
+                    else:
+                        built.append(future.result())
+                    done += 1
                     if progress is not None:
-                        progress(len(built) / total, f"Building {len(built)} of {total} clouds…")
+                        progress(done / total, f"Building {done} of {total} clouds…")
+                    # `progress(...)` only ENQUEUES a marker — it never raises —
+                    # so this is the loop's only cancel observation point.
+                    _cancel_checkpoint(progress)
             except BaseException:
                 for future in futures:
                     future.cancel()
@@ -29413,7 +29556,10 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
         return {"session_id": session_id, "children": [], "error": str(detail)}
 
     built.sort(key=lambda r: r["value"])
-    return {"session_id": session_id, "children": built}
+    out: dict = {"session_id": session_id, "children": built}
+    if request.rebuild_parent:
+        out["parent"] = parent_meta
+    return out
 
 
 @app.post("/api/cloud/session/{session_id}/extract_by_column")
@@ -29694,6 +29840,18 @@ class SessionGroundSegmentRequest(BaseModel):
     slope_smooth: bool = False
     # See GroundSegmentationRequest.auto_class_threshold.
     auto_class_threshold: bool = False
+    # Skip the octree rebuild and return NO octree metadata. Set by a caller
+    # that is about to POST `extract_by_column` with `rebuild_parent`, so the
+    # parent's rebuild runs CONCURRENTLY with the children's instead of alone and
+    # to completion first (measured 11.5 s vs 4.4 s for the whole 2-way split on
+    # 1.2 M points). The response omits `cache_id`/`bounds`/... entirely rather
+    # than returning the pre-column octree with them: handing back an octree the
+    # renderer would treat as current is the exact shape of the stale-octree bug
+    # `bake` guards against. If the follow-up split is cancelled the session
+    # keeps its new column while its octree predates it — harmless (the column is
+    # simply unused until the next rebuild, and the renderer never adopted any
+    # new data), and re-running the tool recomputes and rebuilds normally.
+    defer_octree: bool = False
 
 
 @app.post("/api/cloud/session/{session_id}/segment_ground")
@@ -29740,11 +29898,15 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
+    common = {"session_id": session_id, "point_count": int(len(pts)),
+              "class_threshold_used": gmeta.get("class_threshold"),
+              "class_threshold_method": gmeta.get("method")}
+    # Deferred: the caller is about to rebuild this octree alongside the split's
+    # children. Return NO octree fields — see `defer_octree`.
+    if request.defer_octree:
+        return {**common, "octree_deferred": True}
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key,
-            "cache_dir": str(cache_dir), **meta,
-            "class_threshold_used": gmeta.get("class_threshold"),
-            "class_threshold_method": gmeta.get("method")}
+    return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 
 
 class SessionDenoiseRequest(BaseModel):
@@ -30046,7 +30208,18 @@ class SessionWoodSegmentRequest(WoodSegmentationRequest):
     `wood_class` column (1=wood, 2=leaf). Inherits the segment_wood tuning
     fields; `points`/`source` are ignored (the session's arrays are the source
     of truth)."""
-    pass
+    # Skip the octree rebuild and return NO octree metadata. Set by a caller
+    # that is about to POST `extract_by_column` with `rebuild_parent`, so the
+    # parent's rebuild runs CONCURRENTLY with the children's instead of alone and
+    # to completion first (measured 11.5 s vs 4.4 s for the whole 2-way split on
+    # 1.2 M points). The response omits `cache_id`/`bounds`/... entirely rather
+    # than returning the pre-column octree with them: handing back an octree the
+    # renderer would treat as current is the exact shape of the stale-octree bug
+    # `bake` guards against. If the follow-up split is cancelled the session
+    # keeps its new column while its octree predates it — harmless (the column is
+    # simply unused until the next rebuild, and the renderer never adopted any
+    # new data), and re-running the tool recomputes and rebuilds normally.
+    defer_octree: bool = False
 
 
 def _session_reflectance_scalar(sess, scalar_slug, keep):
@@ -30120,8 +30293,13 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
+    common = {"session_id": session_id, "point_count": int(len(pts)), "warnings": warns}
+    # Deferred: see `defer_octree` — the caller rebuilds this octree alongside
+    # the split's children.
+    if request.defer_octree:
+        return {**common, "octree_deferred": True}
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "warnings": warns, **meta}
+    return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 
 
 class SessionTreeSegmentRequest(TreeSegmentationRequest):

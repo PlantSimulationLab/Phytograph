@@ -23,6 +23,10 @@ interface ErasePanelProps {
   eraseProjectionKind: 'orthographic' | 'perspective' | '';
   // Octree-only: whether the selected cloud has unbaked committed deletes.
   hasPendingDeletes: boolean;
+  // Bake is a full octree rebuild. Without this the button stayed live for its
+  // whole run, so an impatient user could fire several concurrent rebuilds of
+  // the same session.
+  baking: boolean;
   onToggleEraseActive: () => void;
   onBrushPxChange: (px: number) => void;
   onBrushSizeChange: (size: number) => void;
@@ -46,6 +50,7 @@ export function ErasePanel({
   flatStep,
   eraseProjectionKind,
   hasPendingDeletes,
+  baking,
   onToggleEraseActive,
   onBrushPxChange,
   onBrushSizeChange,
@@ -176,10 +181,11 @@ export function ErasePanel({
           <button
             data-testid="erase-bake"
             onClick={onBake}
-            className="w-full px-2 py-1.5 text-xs bg-emerald-700 hover:bg-emerald-600 rounded text-white font-medium"
+            disabled={baking}
+            className="w-full px-2 py-1.5 text-xs bg-emerald-700 hover:bg-emerald-600 rounded text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             title="Rebuild the octree from the surviving points (permanent, not undoable)"
           >
-            Permanently apply deletions
+            {baking ? 'Applying deletions…' : 'Permanently apply deletions'}
           </button>
           <button
             data-testid="erase-undo-pending"

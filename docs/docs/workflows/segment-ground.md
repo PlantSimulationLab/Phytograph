@@ -59,7 +59,10 @@ labels the points the cloth settles onto as ground.
       large relative to its footprint — but not when it's so large that the
       height clearly comes from vegetation rather than terrain.
 4. (Optional) Tick **Split into ground + plant clouds** to also produce two
-   new clouds — ground and non-ground — alongside the classified original.
+   new clouds — ground and non-ground — alongside the classified original. The
+   two child clouds are built after the classification lands, so a progress
+   pill appears at the top of the viewer while they're prepared (with its own
+   Cancel).
 5. Click **Segment Ground**. While it runs, the button shows a spinner and a
    **Cancel** button appears beside it — click Cancel to stop a long or stuck run
    immediately (the computation is killed and the cloud is left unchanged).
@@ -85,8 +88,11 @@ Display panel — it shows discrete colours (brown for ground, green for
 non-ground), not a continuous gradient.
 
 If you ticked **Split**, two extra clouds appear in the scan list —
-`… (ground)` and `… (non-ground)`. Hide or delete the ground cloud, or run
-skeleton extraction / triangulation on the non-ground cloud alone.
+`… (ground)` and `… (non-ground)` — and the classified original is hidden
+automatically, so you see the two halves rather than all three clouds drawn on
+top of each other. Tick its eye icon in the scan list to bring it back. Delete
+the ground cloud, or run skeleton extraction / triangulation on the non-ground
+cloud alone.
 
 !!! note "Large clouds"
     Large clouds stream to the viewer as an octree, but the *data* lives in

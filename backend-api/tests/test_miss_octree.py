@@ -233,7 +233,7 @@ def test_bake_rebuilds_miss_octree_for_survivors(client, cache_root):
               "invert": False}
     client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": region})
 
-    bake = client.post(f"/api/cloud/session/{sid}/bake").json()
+    bake = decode_streamed_json(client.post(f"/api/cloud/session/{sid}/bake").content)
     assert bake["baked"] is True
     mid_after = bake["miss_octree_cache_id"]
     assert mid_after and len(mid_after) == 40

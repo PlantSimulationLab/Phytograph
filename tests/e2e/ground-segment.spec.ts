@@ -80,6 +80,13 @@ test('segments ground vs plant and colours by the ground_class attribute', async
   await expect(plantRow).toBeVisible({ timeout: 60_000 });
   expect(parseInt((await groundRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(1600);
   expect(parseInt((await plantRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(600);
+
+  // Splitting auto-hides the classified original: it still holds all 2200
+  // points, so leaving it visible would draw the whole cloud on top of the two
+  // halves just extracted from it. The children stay visible.
+  await expect(cloudRow).toHaveAttribute('data-visible', 'false');
+  await expect(groundRow).toHaveAttribute('data-visible', 'true');
+  await expect(plantRow).toHaveAttribute('data-visible', 'true');
 });
 
 // "Measure from the scan" derives the ground tolerance from the settled cloth

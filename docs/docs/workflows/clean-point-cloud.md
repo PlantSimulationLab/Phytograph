@@ -175,7 +175,11 @@ applies to every scan you have selected.
    without applying.
 
 When more than one scan is selected, the panel shows "Applies to N scans"
-and each scan gets its own cropped result — identities are preserved.
+and each scan gets its own cropped result — identities are preserved. The
+scans are cropped one after another (each octree is rebuilt in turn), so the
+indicator names the scan it is on and shows overall progress — *Cropping
+plot_north.laz (3 of 8)…* — rather than a bare **Cropping…** for the whole
+run.
 
 !!! note "Preview detail while cropping"
     For large (LOD-streamed) scans, the live crop preview renders at reduced
@@ -378,7 +382,9 @@ octree), they're cheap and reversible:
 - **Undo last deletion** restores the most recent erase.
 - **Permanently apply deletions** bakes the survivors into a fresh octree —
   the one slower step, and the point at which the deletions become permanent
-  (no longer undoable). You only need this before exporting, or to free the
+  (no longer undoable). While it runs the button reads *Applying deletions…*
+  and a progress pill appears at the top of the viewer; cancelling it leaves
+  your pending deletions exactly as they were. You only need this before exporting, or to free the
   deleted points' memory; until then the masked result is already what every
   other operation (triangulate, skeleton, segment, export) sees.
 

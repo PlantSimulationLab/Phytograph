@@ -237,6 +237,52 @@ describe('buildLegendEntries', () => {
     expect(entries[0].scheme?.classes.map(c => c.label)).toEqual(['Ground', 'Non-ground']);
   });
 
+  it('folds categorical entries that differ only in data range', () => {
+    // A ground/plant split leaves one child holding only class 1 and the other
+    // only class 2, so their data ranges are 1:1 and 2:2. Both render the SAME
+    // legend — the ground_class scheme's full Ground / Non-ground list, with no
+    // colorbar — so they must fold into one card covering both clouds. They
+    // used to produce two identical cards because the range was in the fold key
+    // even though a categorical entry never draws it.
+    const entries = buildLegendEntries([
+      descriptor({
+        objectId: 'ground',
+        channel: { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE, colormap: 'viridis' },
+        variableLabel: 'Ground Class',
+        dataRange: { min: 1, max: 1 },
+      }),
+      descriptor({
+        objectId: 'non-ground',
+        channel: { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE, colormap: 'viridis' },
+        variableLabel: 'Ground Class',
+        dataRange: { min: 2, max: 2 },
+      }),
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].objectIds).toEqual(['ground', 'non-ground']);
+    expect(entries[0].scheme?.classes.map(c => c.label)).toEqual(['Ground', 'Non-ground']);
+  });
+
+  it('still separates CONTINUOUS entries by data range', () => {
+    // The counterpart guard: a colorbar DOES render its range, so 0-10 and
+    // 0-99 must stay two entries.
+    const entries = buildLegendEntries([
+      descriptor({
+        objectId: 'a',
+        channel: { mode: 'height', colormap: 'viridis' },
+        variableLabel: 'Z (Height)',
+        dataRange: { min: 0, max: 10 },
+      }),
+      descriptor({
+        objectId: 'b',
+        channel: { mode: 'height', colormap: 'viridis' },
+        variableLabel: 'Z (Height)',
+        dataRange: { min: 0, max: 99 },
+      }),
+    ]);
+    expect(entries).toHaveLength(2);
+  });
+
   it('returns nothing for an empty scene', () => {
     expect(buildLegendEntries([])).toEqual([]);
   });

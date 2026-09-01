@@ -94,13 +94,24 @@ test('erase masks instantly (count drops with no rebuild), then bake applies', a
   // The "Permanently apply deletions" (bake) button is now offered.
   const bakeBtn = page.getByTestId('erase-bake');
   await expect(bakeBtn).toBeVisible();
+  // Bake is one full octree rebuild, so it must not look idle and must not be
+  // re-clickable while it runs. Before this the button stayed live throughout,
+  // so an impatient user could fire several concurrent rebuilds of the same
+  // session. Assert the button locks out; the run itself is short on this
+  // fixture, so the pill is not raced for here (the backend test pins the
+  // streaming + cancel semantics).
+  await expect(bakeBtn).toBeEnabled();
   await bakeBtn.click();
+  await expect(bakeBtn).toBeDisabled();
 
   // After bake the octree is rebuilt from the survivors; the count holds at
   // the post-erase value (now real on disk, not just masked).
   await expect
     .poll(async () => Number(await row.getAttribute('data-point-count')), { timeout: 60_000 })
     .toBe(afterErase);
+  // ...and the button is usable again once the rebuild lands (or gone, since it
+  // only shows while deletions are pending).
+  await expect(bakeBtn).toHaveCount(0);
 });
 
 // Undo: a committed (unbaked) erase can be undone, restoring the point count —
