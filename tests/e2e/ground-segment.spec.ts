@@ -200,7 +200,19 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
   }).toPass({ timeout: 60_000 });
   // The pill and the disabled state must both be gone once the work is done.
   await expect(pill).toHaveCount(0);
-  await expect(commitButton).toBeEnabled();
+  // A successful remove CLEARS the cloud's filter state (the excluded points no
+  // longer exist, so there is nothing left to filter), and the commit buttons
+  // are gated on `hasAnyFilter` — so the correct end state is the button being
+  // GONE, not present-and-enabled. `toBeEnabled()` therefore could not hold once
+  // the filter actually removed points (measured: the locator resolves to 0
+  // elements here), and it failed on exactly the runs where the backend rebuild
+  // finished before the 15s expect timeout. What actually matters to the user is
+  // that they are never left with a button stuck disabled reading "Filtering…" —
+  // true whether it unmounted or re-enabled, so assert THAT rather than presence.
+  // Verified falsifiable: injecting a disabled `filter-remove` into the DOM here
+  // fails this assertion.
+  expect(await commitButton.evaluateAll((els) =>
+    els.some((el) => (el as HTMLButtonElement).disabled))).toBe(false);
 
   // NOTE: ground_class is a REGISTERED scheme (a fixed Ground/Non-ground
   // vocabulary), so its class list is deliberately NOT narrowed to the values
