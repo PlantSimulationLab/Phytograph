@@ -10,12 +10,12 @@ before importing uvicorn so the frozen PyInstaller binary can re-enter as a
 worker. NOT imported by the FastAPI server — it only runs in the child.
 
 Protocol (all files live in `workdir`):
-  IN   request.json     {"tool": "ground|wood|trees|skeleton|poisson", "params": {...}}
+  IN   request.json     {"tool": "ground|wood|trees|denoise|skeleton|poisson", "params": {...}}
        input.npy        (N, 3) float64 points
        reflectance.npy  optional (N,) float64           (wood only)
        seeds.npy        optional (S, 3) float64          (trees only)
        normals.npy      optional (N, 3) float64          (poisson only)
-  OUT  output.npy       (N,) int labels                  (ground/wood/trees)
+  OUT  output.npy       (N,) int labels                  (ground/wood/trees/denoise)
        result.json      skeleton's structured result dict (skeleton only)
        vertices.npy     (V, 3) float64                   (poisson only)
        triangles.npy    (T, 3) int32                     (poisson only)
@@ -31,8 +31,8 @@ the parent that SIGSEGV kills the whole backend; in a child it is just a
 non-zero exit the endpoint reports as a normal triangulation failure.
 
 The worker imports the EXISTING compute functions from main (segment_ground,
-segment_wood, segment_trees, compute_skeleton) so there is exactly one
-implementation per tool. Importing main is cheap here: it only defines the
+segment_wood, segment_trees, compute_skeleton) and from denoise (denoise_labels)
+so there is exactly one implementation per tool. Importing main is cheap here: it only defines the
 FastAPI app + functions (no server bind), and its pyhelios import-time guard is
 a no-op once the parent backend has already built libhelios.
 """
@@ -114,6 +114,22 @@ def run(workdir: str) -> int:
             np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
             with open(os.path.join(workdir, "result.json"), "w") as f:
                 json.dump({"warnings": warns}, f)
+
+        elif tool == "denoise":
+            # Noise classification (SOR / ROR / voxel-count). Runs here for the
+            # same reason as the segmentations: a single cKDTree.query is a
+            # monolithic C call that can't poll a cancel flag, so the only way to
+            # stop it is to kill the process running it.
+            #
+            # `meta` carries back the resolved auto parameters, the flagged
+            # fraction and any warnings, all of which the panel displays before
+            # the user commits a destructive removal.
+            import denoise as _denoise
+            dmeta: dict = {}
+            labels = _denoise.denoise_labels(points, meta=dmeta, **params)
+            np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
+            with open(os.path.join(workdir, "result.json"), "w") as f:
+                json.dump(dmeta, f, default=_json_default)
 
         elif tool == "trees":
             seeds_path = os.path.join(workdir, "seeds.npy")

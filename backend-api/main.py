@@ -21494,13 +21494,14 @@ async def _run_killable(
     seeds: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
 ):
-    """Run one segmentation compute (`tool` ∈ ground|wood|trees|skeleton) in a
-    KILLABLE child process and return its result.
+    """Run one segmentation compute (`tool` ∈ ground|wood|trees|denoise|skeleton)
+    in a KILLABLE child process and return its result.
 
     Returns, by tool:
       - trees       → np.ndarray of labels
       - ground      → (np.ndarray labels, dict {"class_threshold": float, ...})
       - wood        → (np.ndarray labels, dict {"warnings": [...]})
+      - denoise     → (np.ndarray labels, dict {"flagged": int, "params_used": {...}, ...})
       - skeleton    → dict (the SkeletonResponse fields)
 
     The child is polled off the event loop; if `http_request` disconnects (the
@@ -21590,7 +21591,7 @@ async def _run_killable(
             return labels, feats
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
-        if tool == "ground":
+        if tool in ("ground", "denoise"):
             return labels, (result_dict or {})
         return labels
 
@@ -32141,10 +32142,13 @@ def _reject_sparse_voxels(points: np.ndarray,
     """
     if len(points) < 1000 or voxel <= 0:
         return points
-    key = np.floor((points - points.min(axis=0)) / voxel).astype(np.int64)
-    _, inverse, counts = np.unique(key, axis=0, return_inverse=True,
-                                   return_counts=True)
-    keep = counts[inverse] >= min_points
+    # The rule itself lives in `denoise.voxel_count_mask`, shared with the
+    # Filter tool's "Sparse voxels" noise method so the two can't drift. The
+    # size floor and the "would discard most of the cloud" bail-out below stay
+    # HERE: they are this caller's policy (a registration input must degrade to
+    # unfiltered rather than be emptied), not part of the criterion.
+    from denoise import voxel_count_mask
+    keep = voxel_count_mask(points, voxel, min_points)
     if keep.sum() < max(1000, int(0.25 * len(points))):
         return points
     return points[keep]
