@@ -5,8 +5,9 @@
 //
 // WHY A CONTAINER: RiVLib ships for Windows and Linux only. There is no macOS
 // build and the .rxp format has no public spec, so on a Mac this is the only
-// way to read raw scanner data at all. Verified: 13,083,685 points in 5.7 s
-// under Rosetta, so emulation is not a practical cost.
+// way to read raw scanner data at all. Verified under Rosetta at roughly
+// 1 M pts/s, so emulation is not a practical cost. See docker/riegl/Dockerfile
+// for where the rest of an import's time actually goes.
 //
 // RIVLIB IS USER-SUPPLIED. Its licence forbids redistribution ("You may NOT
 // distribute or modify the software..."), so it is never baked into the image

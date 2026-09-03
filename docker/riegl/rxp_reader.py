@@ -88,6 +88,23 @@ _READ_CHUNK = 200_000
 HK_SELECTOR_STATUS = b"status protocol"
 HK_SELECTOR_ALL = b"all"
 
+# How many points to decode from a position that is only being probed for its
+# GNSS fix -- an UNSELECTED position during a `stream`, which contributes to the
+# project's ENU anchor and nothing else.
+#
+# Housekeeping records ride the point stream (RiVLib exposes no way to read them
+# on their own), so a fix costs some decoding no matter what; the only question
+# is how much. Measured on all six positions of a VZ-1000 project, both
+# `hk_gps_hr` and `scanner_pose_hr` are present after 50k points, in ~0.25 s
+# each. 250k is therefore a 5x margin over the observed requirement and still
+# ~0.45 s -- cheap enough that anchoring a single-scan import against the whole
+# project stays imperceptible.
+#
+# A position whose receiver never locked yields no fix at any prefix length, and
+# that is handled the same way it always was: `parse_hk_gps` returns None and
+# `gnss_to_enu` anchors on whatever fixes did resolve.
+_ANCHOR_PROBE_POINTS = 250_000
+
 # Points whose range is below this are the scanner seeing itself (mount, tripod
 # collar). RiVLib reports them as ordinary returns.
 _MIN_RANGE_M = 0.15
@@ -579,12 +596,30 @@ def sensor_level_matrix(
     ROLL AND PITCH ONLY — the heading is deliberately not applied. See
     "WHY NO YAW" below; this is a measured decision, not an oversight.
 
-    DIRECTION. roll/pitch describe how the INSTRUMENT is oriented, so levelling
-    the cloud applies the INVERSE of that attitude. The attitude is the same
-    intrinsic Z-Y-X decompose_sop reads back, so with yaw held at zero the
-    attitude is Ry(pitch) @ Rx(roll) and this returns its transpose. Get the
-    direction backwards and the tilt doubles instead of cancelling — which is
-    exactly what test_sensor_level_matrix_inverts_the_attitude pins down.
+    DIRECTION — AND WHICH FRAME THE POINTS ARE IN, which is the whole trap.
+    The attitude Ry(pitch) @ Rx(roll) (the same intrinsic Z-Y-X decompose_sop
+    reads back, with yaw held at zero) maps the INSTRUMENT's body frame to the
+    world. The points arrive in SOCS, i.e. the body frame, so expressing them
+    level in the world is `attitude @ p` — the attitude itself, NOT its
+    transpose. Saying "levelling applies the inverse of the attitude" is true
+    only of a vector already in world coordinates, which no point here is.
+
+    An earlier revision returned the transpose on exactly that reasoning, and
+    it shipped: measured on 2018-02-23.002, the ground plane went from 2.90 deg
+    off level to 6.15 deg for ScanPos002 and 1.91 -> 3.42 for ScanPos001 —
+    doubled, the signature of applying a rotation the wrong way round. With the
+    attitude applied both positions land at 0.41 deg, and agreeing to 0.001 deg
+    from two different tripod attitudes is what says the residual is the
+    orchard's real slope rather than leftover sensor error.
+
+    The unit test missed it by making the same transpose twice: it built its
+    probe vector as `attitude @ [0,0,1]` (a WORLD-frame up) and asked the
+    matrix to bring it back, which any exact inverse satisfies regardless of
+    which direction the points need.
+    test_sensor_level_matrix_levels_a_body_frame_ground_plane now samples a
+    level plane in the body frame instead, which is what a point actually is,
+    and test_sensor_level_matrix_transpose_would_double_the_tilt pins the
+    doubling signature by name.
 
     WHY NO YAW. The same record carries a compass heading, and it is not good
     enough to apply. Measured against RiSCAN PRO's own SOPs:
@@ -610,7 +645,9 @@ def sensor_level_matrix(
     attitude = ry @ rx
 
     out = np.eye(4, dtype=np.float64)
-    out[:3, :3] = attitude.T
+    # The attitude itself, not its transpose — the points are body-frame. See
+    # DIRECTION above; this was `.T` and doubled every scan's tilt.
+    out[:3, :3] = attitude
     if origin is not None and len(origin) == 3:
         out[:3, 3] = [float(v) for v in origin]
     return out
@@ -1527,9 +1564,17 @@ def extract_scan(
                 "min": [float(v) for v in xyz.min(axis=0)],
                 "max": [float(v) for v in xyz.max(axis=0)],
             },
-            "has_misses": bool(n_miss),
-            "hit_count": n_hits,
-            "miss_count": n_miss,
+            # This LAS path writes RETURNS ONLY — `is_miss` is zeroed a few
+            # lines up, because recovering no-return shots happens in the
+            # streaming path (which is what the app uses) and not here. So the
+            # counts are stated as the constants they are, rather than read
+            # from the miss-recovery variables that only exist over there:
+            # naming those was a NameError that killed `extract` after the
+            # .las had already been written, making a complete file look like
+            # a failed run.
+            "has_misses": False,
+            "hit_count": total,
+            "miss_count": 0,
             "max_returns_per_pulse": max_returns,
             "extra_dims": [
                 {"slug": slug, "label": label} for slug, label in _EXTRA_DIMS
@@ -1928,8 +1973,17 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
     elif frame == FRAME_SENSOR and pose is not None:
         origin = entry.get("origin_prior") or [0.0, 0.0, 0.0]
         params["origin"] = origin
-        params["tilt_roll_deg"] = float(pose["roll_deg"])
-        params["tilt_pitch_deg"] = float(pose["pitch_deg"])
+        # LEVEL, BY CONSTRUCTION. These fields state the instrument's residual
+        # tilt away from plumb *in the frame the points are now in*, and that is
+        # exactly the tilt levelling just removed — so the honest value here is
+        # zero, not the raw reading. Emitting the reading instead tilts the
+        # marker mesh (and a Helios re-export) by the very angle the cloud no
+        # longer has, which is the "angle the points did not get" failure the
+        # note above this function warns about. The measurement itself is not
+        # lost: it stays in `sensor_pose`, where it describes the tripod rather
+        # than the delivered cloud.
+        params["tilt_roll_deg"] = 0.0
+        params["tilt_pitch_deg"] = 0.0
         # The 4x4 the backend applies to the points. Emitted here, beside the
         # angles that describe it, so the two can never disagree.
         entry["sensor_matrix"] = [
@@ -2278,7 +2332,15 @@ def cmd_stream(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        positions = [p for p in positions if p["name"] in wanted]
+
+    # NOTE: `positions` is deliberately NOT filtered here. The ENU anchor is the
+    # centroid of the fixes in pass 1, so filtering first would anchor a
+    # single-position import at ITS OWN fix and place that scan at (0,0,0) --
+    # discarding the GNSS offset the user selected it for, and putting two
+    # separately-imported positions on top of each other instead of metres
+    # apart. The anchor must be a property of the PROJECT, not of the selection,
+    # or the same scan lands somewhere different depending on what it was
+    # imported alongside. Pass 2 filters instead (see `selected` below).
 
     hk_dir = args.hk_dir or "/tmp"
     os.makedirs(hk_dir, exist_ok=True)
@@ -2287,12 +2349,21 @@ def cmd_stream(args: argparse.Namespace) -> int:
     # position, so the header is complete before any bytes of payload go out.
     # For a .riproject this costs a bounded prefix read per position, which is
     # what `inspect` already does; for a .PROJ it is pure JSON sidecar reads.
+    #
+    # It runs over EVERY position, including unselected ones, because the ENU
+    # anchor is a project-level quantity (see the note by the `wanted` check).
+    # An unselected position contributes its GNSS fix to that anchor and nothing
+    # else, so it is probed with a much smaller prefix -- enough to flush a
+    # housekeeping record, but none of the work that only a decoded position
+    # needs. On the six-position VZ-1000 project that keeps the added cost of
+    # anchoring correctly to well under a second in total.
     frame = getattr(args, "frame", FRAME_LOCAL)
     header_scans: list[dict] = []
     fixes: list[dict | None] = []
     proj_instrument = _proj_instrument(args.project) if layout == LAYOUT_PROJ else {}
     for pos in positions:
         entry: dict = {"name": pos["name"], "registration": pos["registration"]}
+        chosen = wanted is None or pos["name"] in wanted
         if pos.get("sop") is not None:
             entry["sop"] = [[float(v) for v in row] for row in pos["sop"]]
         if layout == LAYOUT_PROJ:
@@ -2304,10 +2375,15 @@ def cmd_stream(args: argparse.Namespace) -> int:
             try:
                 info = read_scan(
                     ifc, pos["rxp_path"], hk_path,
-                    count_points=False, max_points=args.probe_points,
+                    count_points=False,
+                    max_points=(
+                        args.probe_points if chosen else _ANCHOR_PROBE_POINTS
+                    ),
                 )
                 entry["instrument"] = info.get("instrument", {})
             except RxpError as exc:
+                # An unreadable position must not sink an import that did not
+                # ask for it: record the error, contribute no fix, carry on.
                 entry["error"] = str(exc)
             fix = parse_hk_gps(hk_path)
             attach_sensor_pose(entry, hk_path)
@@ -2323,6 +2399,13 @@ def cmd_stream(args: argparse.Namespace) -> int:
         if enu is not None:
             entry["origin_prior"] = [enu["east_m"], enu["north_m"], enu["up_m"]]
         _attach_scan_params_extras(entry, frame)
+
+    # The header describes only what is being imported. The unselected
+    # positions have done their job -- they are in `fixes`, which is what
+    # anchored the ENU frame -- and the host builds one session per header
+    # entry, so leaving them in would fabricate scans nobody asked for.
+    if wanted is not None:
+        header_scans = [e for e in header_scans if e["name"] in wanted]
 
     header = {
         "project": args.project,
@@ -2349,9 +2432,13 @@ def cmd_stream(args: argparse.Namespace) -> int:
     out.flush()
     os.makedirs(args.out, exist_ok=True)
 
-    # Pass 2: decode and stream each position's points in header order.
+    # Pass 2: decode and stream each SELECTED position's points in header
+    # order. `positions` still holds the whole project (pass 1 needed it for the
+    # anchor), so re-pair it with the filtered header here rather than zipping
+    # the two lists, which no longer line up.
+    selected = [p for p in positions if wanted is None or p["name"] in wanted]
     trailer: list[dict] = []
-    for index, (pos, entry) in enumerate(zip(positions, header_scans), start=1):
+    for index, (pos, entry) in enumerate(zip(selected, header_scans), start=1):
         if entry.get("error"):
             # No arrays and no marker: the host treats a missing done.json as
             # "this position produced nothing", which is exactly right.
@@ -2362,7 +2449,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
             print(
                 json.dumps({"progress": {
                     "scan": _name, "index": _i,
-                    "total": len(positions), "points": done,
+                    "total": len(selected), "points": done,
                 }}),
                 file=sys.stderr, flush=True,
             )
@@ -2414,9 +2501,10 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument(
         "--probe-points",
         type=int,
-        default=2_000_000,
+        default=_ANCHOR_PROBE_POINTS,
         help="Points to read per scan when not counting exactly. Must be enough "
-        "to flush at least one GNSS housekeeping record (default: 2000000).",
+        f"to flush at least one GNSS housekeeping record "
+        f"(default: {_ANCHOR_PROBE_POINTS}).",
     )
     inspect.add_argument(
         "--hk-dir", default=None, help="Directory for demultiplexed housekeeping files."
@@ -2458,7 +2546,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Scan position names to stream (default: all).",
     )
     stream.add_argument(
-        "--probe-points", type=int, default=2_000_000,
+        "--probe-points", type=int, default=_ANCHOR_PROBE_POINTS,
         help="Points read per position in the metadata pass (must be enough to "
              "flush a GNSS housekeeping record).",
     )

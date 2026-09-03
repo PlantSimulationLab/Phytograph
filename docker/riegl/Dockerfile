@@ -5,8 +5,15 @@
 # WHY A CONTAINER AT ALL: RiVLib ships for Windows and Linux only — there is no
 # macOS/Darwin build, and the .rxp format has no public specification. This image
 # is how a Mac reads raw scanner data at all. Verified working under Rosetta on
-# Apple silicon: 13,083,685 points in 5.7 s (2.31 M pts/s), so emulation cost is
-# not a practical concern.
+# Apple silicon: the RiVLib decode runs at roughly 1 M pts/s emulated, so
+# emulation is not the bottleneck it looks like.
+#
+# A full import costs about twice the decode, and that is expected rather than
+# overhead to hunt: recovering no-return shots (the sky/miss shell) means a
+# SECOND pass over the .rxp through the C++ shim, since the C API only ever
+# yields returns. Measured on an M2 Pro, one 13.1 M-hit / 7.5 M-miss VZ-1000
+# position takes ~50 s end to end -- ~4 s metadata, ~14 s decode, the rest miss
+# recovery and writing ~1.2 GB of columns to the transport directory.
 #
 # RIVLIB IS NEVER BAKED IN. Its licence reads:
 #

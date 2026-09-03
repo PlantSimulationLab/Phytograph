@@ -520,25 +520,112 @@ def test_the_two_inclinometer_sources_agree(tmp_path):
     assert pose["pitch_deg"] == pytest.approx(ref["pitch_deg"], abs=0.2)
 
 
-def test_sensor_level_matrix_cancels_the_tilt_rather_than_doubling_it():
-    """The matrix must INVERT the instrument attitude, not repeat it.
+def _plane_tilt_deg(points):
+    """Angle between a point set's best-fit plane and horizontal, in degrees.
 
-    Getting the direction backwards is the one error that still produces a
-    plausible-looking cloud — it just tilts twice as far.
+    The same quantity measured on the real orchard clouds that exposed the
+    sign error, so the unit test and the field check speak in one unit.
+    """
+    P = np.asarray(points, dtype=np.float64)
+    coef, *_ = np.linalg.lstsq(
+        np.c_[P[:, 0], P[:, 1], np.ones(len(P))], P[:, 2], rcond=None
+    )
+    normal = np.array([-coef[0], -coef[1], 1.0])
+    normal /= np.linalg.norm(normal)
+    return math.degrees(math.acos(min(1.0, abs(normal[2]))))
+
+
+def _attitude(roll_deg, pitch_deg):
+    """Ry(pitch) @ Rx(roll) — the body->world attitude the reading describes."""
+    roll, pitch = math.radians(roll_deg), math.radians(pitch_deg)
+    rx = np.array([[1, 0, 0],
+                   [0, math.cos(roll), -math.sin(roll)],
+                   [0, math.sin(roll), math.cos(roll)]])
+    ry = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                   [0, 1, 0],
+                   [-math.sin(pitch), 0, math.cos(pitch)]])
+    return ry @ rx
+
+
+def test_sensor_level_matrix_levels_a_body_frame_ground_plane():
+    """Level a plane that is FLAT IN THE WORLD, sampled in the scanner's frame.
+
+    This is the geometry the feature exists for, and the reason it is written
+    this way is that the previous test could not fail. It built its probe as
+    `attitude @ [0,0,1]` — a vector already in WORLD coordinates — and asked
+    the matrix to bring it back to vertical, which any exact inverse satisfies
+    no matter which direction the points actually need. The matrix was the
+    transpose of the correct one and the test passed anyway, while real imports
+    came out with DOUBLE their original tilt (measured on 2018-02-23.002:
+    2.90 deg -> 6.15 deg).
+
+    A point arrives in SOCS, the body frame. Level ground seen from a tilted
+    instrument is therefore `attitude.T @ p_world`, and levelling must undo
+    exactly that. Feeding body-frame input is what makes the direction
+    observable, so a transposed matrix now doubles the tilt here too.
     """
     roll, pitch = 1.526, 0.134
-    rx = np.array([[1, 0, 0],
-                   [0, math.cos(math.radians(roll)), -math.sin(math.radians(roll))],
-                   [0, math.sin(math.radians(roll)), math.cos(math.radians(roll))]])
-    ry = np.array([[math.cos(math.radians(pitch)), 0, math.sin(math.radians(pitch))],
-                   [0, 1, 0],
-                   [-math.sin(math.radians(pitch)), 0, math.cos(math.radians(pitch))]])
-    attitude = ry @ rx
-    tilted_up = attitude @ np.array([0.0, 0.0, 1.0])
-    assert math.degrees(math.acos(tilted_up[2])) == pytest.approx(1.532, abs=0.01)
+    attitude = _attitude(roll, pitch)
+    matrix = R.sensor_level_matrix(roll, pitch)[:3, :3]
 
-    levelled = R.sensor_level_matrix(roll, pitch)[:3, :3] @ tilted_up
-    assert levelled[2] == pytest.approx(1.0, abs=1e-12)
+    # A patch of genuinely level ground, expressed in the tilted body frame.
+    world = np.array([[x, y, 0.0] for x in (-20.0, 0.0, 20.0)
+                      for y in (-20.0, 0.0, 20.0)])
+    body = world @ attitude  # == (attitude.T @ p) for each row
+
+    # The instrument really is tilted: the ground is off-level as it sees it.
+    assert _plane_tilt_deg(body) == pytest.approx(1.532, abs=0.01)
+
+    # Levelling brings it back to horizontal — and the transpose would take it
+    # to ~3.06 deg, so this assertion is what distinguishes the two.
+    assert _plane_tilt_deg(body @ matrix.T) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_sensor_level_matrix_transpose_would_double_the_tilt():
+    """Pin the failure signature itself, so the sign can never drift back.
+
+    Stated separately because "doubles the tilt" is the observable that named
+    the bug in the field, and a future refactor that reintroduces the transpose
+    should fail on a test that says so in those words.
+    """
+    roll, pitch = 1.315766, 2.972155  # ScanPos002 of 2018-02-23.002
+    attitude = _attitude(roll, pitch)
+    world = np.array([[x, y, 0.0] for x in (-20.0, 0.0, 20.0)
+                      for y in (-20.0, 0.0, 20.0)])
+    body = world @ attitude
+    raw = _plane_tilt_deg(body)
+
+    correct = R.sensor_level_matrix(roll, pitch)[:3, :3]
+    assert _plane_tilt_deg(body @ correct.T) == pytest.approx(0.0, abs=1e-9)
+    assert _plane_tilt_deg(body @ correct.T.T) == pytest.approx(2 * raw, abs=0.02)
+
+
+def test_sensor_frame_reports_no_residual_tilt():
+    """scan_params must describe the cloud as DELIVERED, which is plumb.
+
+    tilt_roll/tilt_pitch orient the scanner marker and a Helios re-export, so
+    emitting the raw inclinometer reading here would tilt both by the very
+    angle levelling just removed — points and marker disagreeing. The reading
+    is not lost; it stays in `sensor_pose`.
+    """
+    entry = {
+        "name": "ScanPos001",
+        "origin_prior": [1.0, 2.0, 3.0],
+        "sensor_pose": {"roll_deg": 1.526, "pitch_deg": 0.134,
+                        "source": "scanner_pose_hr"},
+        "scan_params": {"phi_min": 0.0, "phi_max": 360.0},
+    }
+    R._attach_scan_params_extras(entry, R.FRAME_SENSOR)
+
+    assert entry["scan_params"]["tilt_roll_deg"] == 0.0
+    assert entry["scan_params"]["tilt_pitch_deg"] == 0.0
+    # The measurement survives where it belongs.
+    assert entry["sensor_pose"]["roll_deg"] == pytest.approx(1.526)
+    # And the matrix that justifies the zeros is the one the backend applies.
+    assert np.allclose(
+        np.asarray(entry["sensor_matrix"])[:3, :3],
+        _attitude(1.526, 0.134),
+    )
 
 
 def test_sensor_level_matrix_applies_no_heading():
@@ -622,8 +709,12 @@ def test_sensor_frame_emits_tilt_but_never_a_heading():
     R._attach_scan_params_extras(entry, R.FRAME_SENSOR)
     sp = entry["scan_params"]
     assert sp["origin"] == [1.0, 2.0, 3.0]
-    assert sp["tilt_roll_deg"] == pytest.approx(1.5)
-    assert sp["tilt_pitch_deg"] == pytest.approx(-0.5)
+    # The tilt was REMOVED from the points, so the delivered cloud has none —
+    # see test_sensor_frame_reports_no_residual_tilt. The reading stays in
+    # `sensor_pose`.
+    assert sp["tilt_roll_deg"] == 0.0
+    assert sp["tilt_pitch_deg"] == 0.0
+    assert entry["sensor_pose"]["roll_deg"] == pytest.approx(1.5)
     # No heading was applied to the points, so none is reported and the sweep
     # still describes the scanner's own frame.
     assert "azimuth_offset_deg" not in sp
@@ -661,3 +752,129 @@ def test_attach_sensor_pose_prefers_the_fused_pose_then_falls_back(tmp_path):
     neither = {}
     R.attach_sensor_pose(neither, _write_hk(tmp_path / "none.txt", ["hk_time (40.0), 1"]))
     assert "sensor_pose" not in neither
+
+
+# ---------------------------------------------------------------------------
+# The ENU anchor is a property of the PROJECT, not of the selection
+# ---------------------------------------------------------------------------
+#
+# gnss_to_enu anchors at the CENTROID of the fixes it is handed, so whichever
+# positions reach it define the origin. cmd_stream used to filter `positions`
+# down to --scans before the metadata pass, which made the anchor a function of
+# the user's selection: importing one position anchored on its own fix and
+# placed it at exactly (0,0,0), throwing away the GNSS offset -- and importing
+# the same position a second time alongside others put it somewhere else
+# entirely. Two separately-imported scans landed on top of each other instead of
+# metres apart, which is the opposite of what the prior is for.
+#
+# These drive the REAL cmd_stream (not a reimplementation of its selection
+# logic) over a .PROJ, whose GNSS comes from JSON sidecars -- so the anchor
+# arithmetic is exercised end to end with no RiVLib and no point data. Only the
+# two things that genuinely need the library are stubbed: the ctypes handle and
+# the per-position decode.
+
+# Metres apart, so a collapsed anchor is unmistakable rather than a rounding
+# difference. Latitude ~38.3 matches the peach/pear project these came from.
+_GNSS_FIXTURE = {
+    "ScanPos001": (38.325394, -121.5778907, -26.732),
+    "ScanPos002": (38.325346, -121.5779133, -25.818),
+    "ScanPos003": (38.3253674, -121.5779651, -25.486),
+}
+
+
+def _build_proj_with_gnss(root: Path) -> Path:
+    proj = _build_proj(
+        root, [(name, "pose", True) for name in _GNSS_FIXTURE]
+    )
+    for name, (lat, lon, alt) in _GNSS_FIXTURE.items():
+        (proj / f"{name}.SCNPOS" / "final.pose").write_text(
+            json.dumps(
+                {"gnss": {"latitude": lat, "longitude": lon, "altitude": alt}}
+            )
+        )
+    return proj
+
+
+def _run_stream(proj: Path, out: Path, scans, monkeypatch) -> dict:
+    """Run cmd_stream for real and return the header it emitted."""
+    import argparse
+    import io
+    import struct as _struct
+
+    monkeypatch.setattr(R, "_Scanifc", lambda *a, **k: _StubIfc())
+    # Pass 2 needs RiVLib; the anchor under test is settled in pass 1.
+    monkeypatch.setattr(
+        R, "stream_scan",
+        lambda *a, **k: {"point_count": 1, "columns": ["positions.f64"]},
+    )
+    monkeypatch.setattr(R, "_wait_for_consumption", lambda *a, **k: None)
+
+    buf = io.BytesIO()
+
+    class _Out:
+        buffer = buf
+
+    monkeypatch.setattr(sys, "stdout", _Out())
+    args = argparse.Namespace(
+        project=str(proj), out=str(out), scans=scans, hk_dir=str(out / "hk"),
+        probe_points=R._ANCHOR_PROBE_POINTS, frame=R.FRAME_LOCAL,
+    )
+    assert R.cmd_stream(args) == 0
+    raw = buf.getvalue()
+    _ver, size = _struct.unpack("<II", raw[4:12])
+    return json.loads(raw[12 : 12 + size])
+
+
+class _StubIfc:
+    def version(self):
+        return "stub"
+
+
+def _origins(header: dict) -> dict:
+    return {s["name"]: s.get("origin_prior") for s in header["scans"]}
+
+
+def test_one_selected_position_keeps_its_gnss_offset(tmp_path, monkeypatch):
+    proj = _build_proj_with_gnss(tmp_path)
+
+    everything = _run_stream(proj, tmp_path / "a", None, monkeypatch)
+    alone = _run_stream(proj, tmp_path / "b", ["ScanPos001"], monkeypatch)
+
+    # The regression: this was [0, 0, 0].
+    assert alone["scans"][0]["origin_prior"] == pytest.approx(
+        everything["scans"][0]["origin_prior"]
+    )
+    assert np.linalg.norm(alone["scans"][0]["origin_prior"]) > 1.0
+
+
+def test_every_subset_places_a_position_identically(tmp_path, monkeypatch):
+    proj = _build_proj_with_gnss(tmp_path)
+    full = _origins(_run_stream(proj, tmp_path / "full", None, monkeypatch))
+
+    for i, subset in enumerate(
+        [["ScanPos002"], ["ScanPos001", "ScanPos003"],
+         ["ScanPos003", "ScanPos002"]]
+    ):
+        got = _origins(_run_stream(proj, tmp_path / f"s{i}", subset, monkeypatch))
+        assert sorted(got) == sorted(subset)
+        for name in subset:
+            assert got[name] == pytest.approx(full[name]), (
+                f"{name} moved when imported as {subset}"
+            )
+
+
+def test_the_header_carries_only_the_selected_positions(tmp_path, monkeypatch):
+    """Unselected positions anchor the frame and must not become scans.
+
+    They are read in pass 1 purely for their fixes; the host builds one session
+    per header entry, so leaking them here would import scans nobody asked for.
+    """
+    proj = _build_proj_with_gnss(tmp_path)
+    header = _run_stream(proj, tmp_path / "one", ["ScanPos002"], monkeypatch)
+
+    assert header["scan_count"] == 1
+    assert [s["name"] for s in header["scans"]] == ["ScanPos002"]
+    # The anchor still reflects all three fixes, which is why the offset holds.
+    assert header["gnss_anchor"]["latitude"] == pytest.approx(
+        sum(v[0] for v in _GNSS_FIXTURE.values()) / len(_GNSS_FIXTURE)
+    )

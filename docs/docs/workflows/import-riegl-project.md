@@ -97,9 +97,10 @@ visible before you commit to the import.
 
 !!! note "A `.PROJ` opens much faster"
     A `.riproject` hides its GNSS inside the point stream, so previewing one
-    means decoding the start of every position: roughly ten seconds each. A
-    `.PROJ` states everything in small JSON sidecars, so a 24-position project
-    lists in about a second.
+    means decoding the start of every position — under a second each, though
+    the first read of a project that isn't in the operating system's file cache
+    is slower. A `.PROJ` states everything in small JSON sidecars, so a
+    24-position project lists in about a second.
 
 Every readable position is selected already, so untick the ones you don't want
 and click **Import**. The header checkbox toggles them all at once — it reads
@@ -135,6 +136,11 @@ from the project centroid. This is a *starting point*, not a registration: the
 instrument's built-in GNSS is metres-accurate, not survey-grade. Use it to seed
 [ICP registration](register-compare.md), which refines the alignment properly.
 
+The centroid is the whole project's, not just the positions you ticked, so a
+position lands in the same place whether you import it on its own or alongside
+the rest. That means you can import positions in separate batches and they will
+still line up with each other.
+
 Where a position has **no fix**, it imports at the origin — so several such
 positions will sit on top of one another until you register them.
 
@@ -169,6 +175,13 @@ is enough to bend a "ground" surface that should be flat.
 
 Positions that recorded no usable tilt simply import unlevelled; the picker
 says how many, and the rest are still levelled.
+
+A levelled scan reports its **scanner tilt as 0°** in the Scans panel, because
+the tilt has been taken out of the points — the cloud really is plumb, and the
+marker stands upright to match. The measurement itself is not discarded; it is
+what produced the rotation. If you want the angular model to describe the
+instrument as it physically sat on the tripod (which is what
+[LAD](../concepts/leaf-area-density.md) wants — see below), import unlevelled.
 
 #### A `.PROJ` usually is, but only partly
 
