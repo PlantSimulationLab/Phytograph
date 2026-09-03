@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.78.3"
+BACKEND_VERSION = "0.79.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -31459,10 +31459,20 @@ def _robust_cloud_diagonal(points: np.ndarray) -> float:
     return diag if np.isfinite(diag) else 0.0
 
 
-# ICP correspondence window as a multiple of median point spacing. See the
-# derivation note in `_do_c2c_icp`: measured across three real orchards, error
-# grows monotonically with this multiplier, and below ~10x ICP loses the ability
-# to pull in a pose that starts a couple of metres out.
+# ICP correspondence window as a multiple of median point spacing. Measured
+# across three real orchards, error grows monotonically with this multiplier,
+# and below ~10x ICP loses the ability to pull in a pose that starts a couple
+# of metres out -- so it is a compromise between reach and accuracy, and there
+# is no setting that is good at both.
+#
+# For the CLOUD paths that compromise is gone: `fine_registration` walks a
+# ladder, so the wide window is only the FIRST rung and the accuracy comes from
+# the ones below it. What this constant sizes there is the reach alone --
+# `_do_c2c_icp` and `_do_multi_scan_register` pass it as the ladder's `pull_in`
+# so the capture range is exactly what shipped before. The MESH paths
+# (`_do_c2m_icp`, `_do_m2m_icp`) are still single-scale and still live with the
+# compromise; they register sampled surfaces rather than scans, where the
+# density bias that motivated the ladder does not arise.
 _CORR_DIST_SPACING_MULTIPLE = 20.0
 
 
@@ -31491,6 +31501,9 @@ def _median_point_spacing(points: np.ndarray, sample: int = 30000) -> Optional[f
 
 def _auto_correspondence_distance(points: np.ndarray, diagonal: float) -> float:
     """Correspondence window for ICP, from point spacing with an extent cap.
+
+    A window for the mesh paths, and the pull-in RANGE for the cloud ones --
+    see `_CORR_DIST_SPACING_MULTIPLE`.
 
     Falls back to the historical `diagonal * 0.05` when spacing cannot be
     measured (too few points, or scipy missing), so behaviour degrades to the
@@ -31793,12 +31806,16 @@ class CloudToCloudICPRequest(BaseModel):
     # resolved independently, so a flat cloud and an octree cloud can be mixed.
     target_source: Optional[PointSource] = None
     source_source: Optional[PointSource] = None
-    # Maximum correspondence distance threshold
+    # How far the initial pose may be wrong, in metres. Sizes the FIRST rung of
+    # the multi-scale ladder -- the accuracy comes from the rungs below it, so
+    # this is a reach setting rather than a precision one. None => derive it
+    # from the cloud, which is what every in-app caller does.
     max_correspondence_distance: Optional[float] = None
-    # Maximum iterations per ICP round
-    max_iterations: int = 100
-    # RMSE convergence threshold
-    rmse_threshold: float = 1e-6
+    # Per LEVEL of the ladder, not per run: each level is its own registration
+    # problem. None => the module's own defaults, which is what every in-app
+    # caller uses; they exist for a direct API caller with a pathological pair.
+    max_iterations: Optional[int] = None
+    rmse_threshold: Optional[float] = None
     # Optional coarse pose to start from, as a row-major flat 4x4 (16 floats) —
     # the same layout `transformation_matrix` comes back in. This is how
     # /api/c2c/global-register hands its result to the fine stage: ICP refines
@@ -31808,12 +31825,126 @@ class CloudToCloudICPRequest(BaseModel):
     init_transform: Optional[List[float]] = None
 
 
+def _fine_progress(progress):
+    """Adapt `fine_registration.align`'s (level, count, voxel) callback to the
+    streaming pill, and make it the cancellation checkpoint.
+
+    The band is 0.15-0.95, matching what the single-stage loop reported before,
+    so the pill behaves the same; only the message changes, and it now names the
+    scale being worked at, which is the one number that explains why a run is
+    still going.
+    """
+    if progress is None:
+        return None
+
+    def report(index: int, count: int, voxel: float) -> None:
+        _cancel_checkpoint(progress)
+        progress(0.15 + 0.80 * (index / max(count, 1)),
+                 f"Aligning at {voxel * 100:.0f} cm detail")
+
+    return report
+
+
+def _c2c_align(target_points, source_points, init_transform=None,
+               max_correspondence_distance=None, max_iterations=None,
+               rmse_threshold=None, progress=None) -> dict:
+    """Fine registration of two point ARRAYS. The body of /api/c2c/icp-register.
+
+    Separate from the request model so callers that already hold numpy — the
+    coarse global-register stage does — can hand it over directly. Going
+    through `CloudToCloudICPRequest` means `.ravel().tolist()`, and a Python
+    list of floats costs ~32 bytes per coordinate: a 10 M-point pair is
+    gigabytes of temporary list for a function that immediately turns it back
+    into an array.
+
+    The fit itself lives in `fine_registration` -- a voxel pyramid walked
+    coarse to fine with a plane-to-plane estimator. Read that module's
+    docstring before changing anything here: the single-scale ICP this replaced
+    was measured making alignments 3-12x WORSE than the coarse pose it was
+    handed.
+    """
+    import numpy as np
+
+    import fine_registration
+
+    # Scale and capture range are read from a BOUNDED sample; the fit
+    # itself then runs at working resolution. Keeping the old 100k
+    # decimation for these two scalars alone means the pull-in range is
+    # exactly what shipped before, while the fit no longer inherits the
+    # sample's coarseness — that inheritance was the bug: a decimated
+    # cloud's spacing set a 1.36 m correspondence window on a scan whose
+    # real spacing is 6 mm. See fine_registration's module docstring.
+    probe = target_points
+    if len(probe) > 100_000:
+        probe = probe[np.linspace(0, len(probe) - 1, 100_000).astype(int)]
+    diagonal = _robust_cloud_diagonal(probe)
+    if max_correspondence_distance is None:
+        pull_in = _auto_correspondence_distance(probe, diagonal)
+    else:
+        pull_in = float(max_correspondence_distance)
+
+    # STEP 1: the starting pose.
+    #
+    # A caller-supplied `init_transform` is a WORLD-frame pose for the
+    # original source and is used as-is. With none, fall back to matching
+    # centroids, which is the only free information about where the source
+    # belongs. Both are ordinary initial poses for the ladder, so there is
+    # no centre-offset frame to compose out afterwards — the old code had
+    # to rebase a caller's matrix by `M @ inv(T_center)` and applying the
+    # offset twice was a live footgun.
+    if init_transform is None:
+        init_transform = np.eye(4)
+        init_transform[:3, 3] = (np.median(target_points, axis=0)
+                                 - np.median(source_points, axis=0))
+        logger.debug("Center alignment: moved source by [%.4f, %.4f, %.4f]",
+                     *init_transform[:3, 3])
+
+    _cancel_checkpoint(progress)
+
+    # STEP 2: multi-scale plane-to-plane ICP.
+    tuning = {}
+    if max_iterations is not None:
+        tuning["max_iterations"] = max_iterations
+    if rmse_threshold is not None:
+        tuning["rmse_threshold"] = rmse_threshold
+    outcome = fine_registration.refine(
+        target_points, source_points, init=init_transform, pull_in=pull_in,
+        progress=_fine_progress(progress), **tuning)
+
+    combined_transform = outcome["transformation"]
+    translation = [float(combined_transform[0, 3]),
+                   float(combined_transform[1, 3]),
+                   float(combined_transform[2, 3])]
+    transform_flat = combined_transform.flatten().tolist()
+
+    logger.debug("Cloud-to-cloud ICP complete - fitness: %.4f, RMSE: %.6f, levels: %d",
+                 outcome["fitness"], outcome["rmse"], outcome["levels"])
+
+    if progress is not None:
+        progress(1.0, "Done")
+
+    rmse_ratio, quality_warning = _icp_quality(
+        float(outcome["rmse"]), diagonal, float(outcome["fitness"]))
+
+    return dict(
+        success=True,
+        translation=translation,
+        transformation_matrix=transform_flat,
+        fitness=float(outcome["fitness"]),
+        rmse=float(outcome["rmse"]),
+        iterations=outcome["iterations"],
+        rmse_ratio=rmse_ratio,
+        quality_warning=quality_warning,
+    )
+
+
 def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
     """Worker for /api/c2c/icp-register. Returns the ICPRegistrationResponse dict.
 
+    Resolves the request's two sides to arrays and hands them to `_c2c_align`.
+
     See _do_c2m_distance for the streaming/cancel/error contract."""
     try:
-        import open3d as o3d
         import numpy as np
 
         _cancel_checkpoint(progress)
@@ -31834,122 +31965,24 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
 
         if len(target_points) == 0:
             return dict(success=False, error="No target points provided")
-
         if len(source_points) == 0:
             return dict(success=False, error="No source points provided")
 
-        # Create target point cloud (stays fixed)
-        target_pcd = o3d.geometry.PointCloud()
-        target_pcd.points = o3d.utility.Vector3dVector(target_points)
-
-        # Create source point cloud (will be transformed)
-        source_pcd = o3d.geometry.PointCloud()
-        source_pcd.points = o3d.utility.Vector3dVector(source_points)
-
-        # Optionally downsample if clouds are very large (for performance)
-        max_points = 100000
-        if len(target_points) > max_points:
-            target_pcd = target_pcd.uniform_down_sample(every_k_points=max(1, len(target_points) // max_points))
-        if len(source_points) > max_points:
-            source_pcd = source_pcd.uniform_down_sample(every_k_points=max(1, len(source_points) // max_points))
-
-        # --- STEP 1: Center alignment (move source centroid to target centroid) ---
-        target_center = target_pcd.get_center()
-        source_center = source_pcd.get_center()
-        center_offset = target_center - source_center
-
-        # Apply center alignment to source
-        source_pcd.translate(center_offset)
-
-        logger.debug("Center alignment: moved source by [%.4f, %.4f, %.4f]",
-                     center_offset[0], center_offset[1], center_offset[2])
-
-        _cancel_checkpoint(progress)
-        if progress is not None:
-            progress(0.15, "Estimating normals")
-
-        # Estimate normals for point-to-plane ICP (more robust). Robust extent,
-        # not the raw AABB diagonal — see `_robust_cloud_diagonal`.
-        diagonal = _robust_cloud_diagonal(np.asarray(target_pcd.points))
-        normal_radius = diagonal * 0.02
-
-        target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
-        source_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30))
-
-        # Spacing-derived window -- see the note in `_do_c2c_icp`. An extent-based
-        # rule opens the correspondence search to ~100x the point spacing, which
-        # on repetitive planting lets points pair with the WRONG plant row.
-        if request.max_correspondence_distance is None:
-            max_corr_dist = _auto_correspondence_distance(
-                np.asarray(target_pcd.points), diagonal)
-        else:
-            max_corr_dist = request.max_correspondence_distance
-
-        # Create center alignment matrix (built before ICP so a caller-supplied
-        # init pose can be rebased into the frame ICP actually works in).
-        T_center = np.eye(4)
-        T_center[0, 3] = center_offset[0]
-        T_center[1, 3] = center_offset[1]
-        T_center[2, 3] = center_offset[2]
-
-        # --- STEP 2: Run ICP until convergence ---
-        # ICP sees a source that has ALREADY been moved by T_center, and its
-        # result is composed back below as `T_icp @ T_center`. A caller-supplied
-        # `init_transform` M is a WORLD-frame pose for the ORIGINAL source, so it
-        # must be rebased first: we need the starting T_icp that satisfies
-        # `T_icp @ T_center == M`, i.e. `M @ inv(T_center)`. Passing M straight
-        # through would apply the centre offset twice and start ICP in the wrong
-        # place. T_center is a pure translation, so the inverse always exists.
+        init = None
         if request.init_transform:
             if len(request.init_transform) != 16:
                 return dict(success=False,
                             error="init_transform must be 16 floats (a row-major 4x4)")
-            M = np.asarray(request.init_transform, dtype=np.float64).reshape(4, 4)
-            if not np.all(np.isfinite(M)):
+            init = np.asarray(request.init_transform, dtype=np.float64).reshape(4, 4)
+            if not np.all(np.isfinite(init)):
                 return dict(success=False,
                             error="init_transform contains non-finite values")
-            init_transform = M @ np.linalg.inv(T_center)
-        else:
-            init_transform = np.eye(4)
 
-        reg_result, iterations = run_icp_until_convergence(
-            source_pcd, target_pcd, max_corr_dist, init_transform,
-            max_iterations=request.max_iterations, rmse_threshold=request.rmse_threshold,
-            progress=progress
-        )
-
-        # Combine center alignment with ICP transformation using proper matrix composition
-        # The sequence is: first translate source to target center (T_center), then apply ICP (T_icp)
-        # Combined transform = T_icp @ T_center
-        icp_transform = reg_result.transformation
-
-        # Compose transformations: T_icp @ T_center
-        # This correctly handles rotation - ICP transform is applied AFTER center alignment
-        combined_transform = icp_transform @ T_center
-
-        # Extract translation for convenience (this is the total translation to apply to original source)
-        translation = [float(combined_transform[0, 3]), float(combined_transform[1, 3]), float(combined_transform[2, 3])]
-        transform_flat = combined_transform.flatten().tolist()
-
-        logger.debug("Cloud-to-cloud ICP complete - fitness: %.4f, RMSE: %.6f, iterations: %d",
-                     reg_result.fitness, reg_result.inlier_rmse, iterations)
-
-        if progress is not None:
-            progress(1.0, "Done")
-
-        rmse_ratio, quality_warning = _icp_quality(
-            float(reg_result.inlier_rmse), diagonal, float(reg_result.fitness))
-
-        return dict(
-            success=True,
-            translation=translation,
-            transformation_matrix=transform_flat,
-            fitness=float(reg_result.fitness),
-            rmse=float(reg_result.inlier_rmse),
-            iterations=iterations,
-            rmse_ratio=rmse_ratio,
-            quality_warning=quality_warning,
-        )
+        return _c2c_align(
+            target_points, source_points, init_transform=init,
+            max_correspondence_distance=request.max_correspondence_distance,
+            max_iterations=request.max_iterations,
+            rmse_threshold=request.rmse_threshold, progress=progress)
 
     except ScanCancelled:
         raise
@@ -31957,6 +31990,7 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
         import traceback
         traceback.print_exc()
         return dict(success=False, error=f"Cloud-to-cloud ICP registration failed: {str(e)}")
+
 
 
 @app.post("/api/c2c/icp-register")
@@ -32505,13 +32539,12 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             # started from. The numbers that once justified this as the default
             # came from a wrong reconstruction of RiSCAN's transforms. Kept as
             # an escape hatch for clouds already aligned to within ICP's basin.
-            # Deliberately DON'T set a transform here. Handing ICP an explicit
-            # identity would suppress its own centroid pre-alignment (the init
-            # is rebased through inv(T_center)), and that pre-alignment is worth
-            # real accuracy: measured 31.1 degrees from RiSCAN's answer with it
-            # versus 49.8 without. Leaving `transform` as None lets the refine
-            # step below run ICP unseeded, which is exactly the behaviour that
-            # beat the coarse stage.
+            # Deliberately DON'T set a transform here. Handing the fine stage
+            # an explicit identity would suppress its centroid pre-alignment,
+            # and that pre-alignment is worth real accuracy: measured 31.1
+            # degrees from RiSCAN's answer with it versus 49.8 without. Leaving
+            # `transform` as None lets the refine step below start from matched
+            # centroids, which is the behaviour that beat the coarse stage.
             transform = None
             coarse_fitness = 1.0
             coarse_rmse = 0.0
@@ -32596,14 +32629,12 @@ def _do_global_register(request: "GlobalRegisterRequest", progress=None) -> dict
             # Hand the coarse pose to the existing fine stage. Reuse the c2c
             # worker rather than re-implementing ICP so both paths share one
             # convergence loop, quality gate and cancellation behaviour.
-            refined = _do_c2c_icp(CloudToCloudICPRequest(
-                target_points=target_points.ravel().tolist(),
-                source_points=source_points.ravel().tolist(),
-                # None => let ICP centroid-pre-align and start from identity,
-                # which is strictly better than forcing identity through.
-                init_transform=(None if transform is None
-                                else transform.flatten().tolist()),
-            ), progress=None)
+            # Arrays, not a request model: these clouds are full resolution
+            # and `.ravel().tolist()` on a pair of them is gigabytes of
+            # temporary Python list. `transform=None` lets the fine stage
+            # centroid-pre-align, which beats forcing identity through.
+            refined = _c2c_align(target_points, source_points,
+                                 init_transform=transform, progress=None)
             if refined.get("success") and refined.get("transformation_matrix"):
                 refined_m = np.asarray(refined["transformation_matrix"],
                                        dtype=np.float64).reshape(4, 4)
@@ -32860,41 +32891,18 @@ def _reject_sparse_voxels(points: np.ndarray,
     return points[keep]
 
 
-# Points nearer than this to their own scanner are dropped before the fine
-# refinement. They dominate by count and barely constrain YAW.
+# The near-field cut that used to live here is gone. It dropped every return
+# inside 5 m before the fine stage, because a terrestrial scan is 93%
+# near-field by COUNT and ICP weights correspondences equally, so the yaw
+# estimate was set by geometry where a yaw error costs almost no point
+# distance -- an azimuth error invisible at the tripod and growing linearly
+# with range (-0.41 deg measured, 7 cm at 10 m and 43 cm at 60 m).
 #
-# A terrestrial scan is overwhelmingly near-field: measured on a real olive set,
-# 93% of returns sit within 10 m of the scanner. ICP weights every
-# correspondence equally, so the rotation estimate is set by geometry where a
-# yaw error costs almost nothing in point distance -- and the far-field points
-# that would pin it are outnumbered ~14:1. The result is an azimuth error that
-# is invisible at the scan position and grows linearly with range: measured
-# -0.41 deg on one scan, which is 7 cm at 10 m but 43 cm at 60 m, so trunks
-# drift out of line down a row while looking perfect near the origin.
-#
-# Excluding the near field fixes it: the same scan goes to -0.046 deg, a 9x
-# improvement, with translation unchanged (0.064 m against 0.064 m). 5 m rather
-# than 10 m because a 10 m cut buys little more yaw and costs real translation
-# accuracy (0.085 m on that scan).
-_REFINE_MIN_RANGE_M = 5.0
-
-
-def _drop_near_field(points: np.ndarray,
-                     min_range: float = _REFINE_MIN_RANGE_M) -> np.ndarray:
-    """Keep returns beyond `min_range` of the cloud's own centre.
-
-    Returns the input unchanged when too little would survive -- a small or
-    already-cropped cloud must not be emptied by a filter meant to rebalance a
-    full-range scan.
-    """
-    if len(points) < 1000 or min_range <= 0:
-        return points
-    centre = np.median(points[:, :2], axis=0)
-    keep = np.linalg.norm(points[:, :2] - centre, axis=1) > min_range
-    if keep.sum() < max(500, int(0.02 * len(points))):
-        return points
-    return points[keep]
-
+# That was a symptom of stride sampling, not of the near field. Voxelising
+# weights every surface by AREA instead of by return count, so near and far
+# geometry already carry equal weight and there is nothing left to rebalance --
+# and the returns that were being thrown away are the most accurate in the
+# scan. See `fine_registration`.
 
 def _expected_coarse_runs(n_scans: int, select_variant: bool,
                           complete_graph: bool = False,
@@ -32922,6 +32930,7 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
     try:
         import itertools
 
+        import fine_registration
         import plane_patches
         from loop_closure import (check_loops, scan_graph_edges,
                                   select_per_pair_by_loops,
@@ -32955,6 +32964,13 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
 
         clouds: List[np.ndarray] = []
         spans: List[float] = []
+        # Fine working copies: (points, voxel). The coarse raster stage wants a
+        # small representative sample; the fine stage wants METRIC uniformity,
+        # and a stride sample cannot give it that at any size (a scan samples in
+        # angle, so stride preserves the 1/r^2 density bias exactly). Built here,
+        # from the full cloud, so the full array can be dropped immediately --
+        # peak memory stays one scan, not all of them.
+        working: List[tuple] = []
 
         def _ingest(X: np.ndarray) -> None:
             X = X[np.isfinite(X).all(axis=1)]
@@ -32971,6 +32987,13 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                     centre = np.median(kept, axis=0)
                     limit = float(np.max(np.linalg.norm(kept - centre, axis=1)))
                     X = X[np.linalg.norm(X - centre, axis=1) <= limit]
+            # The fine stage's working copy is taken HERE, before the density
+            # filter below: that filter drops sparse voxels, which on a
+            # terrestrial scan means the far field, and the far field is what
+            # the fine stage exists to weigh properly. It is a coarse-raster
+            # aid, not a cleaning step.
+            if request.refine_icp and request.refine_method != "planes":
+                working.append(fine_registration.working_copy(X))
             # Reject sparse voxels, but keep the ORIGINAL footprint for scale.
             #
             # These two steps fight each other if left alone. `auto_cell_size`
@@ -33127,11 +33150,51 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # refinement is seconds of blocking ICP.
             movers = [i for i in transforms if i != ref]
             patch_cache: dict = {}
+            levels = pyramids = None
+            if request.refine_method != "planes" and working:
+                # One ladder for the whole set, from the WIDEST working voxel:
+                # a level the sparsest scan cannot populate helps nobody and
+                # costs the dense ones time. The pull-in follows the same rule
+                # as the pairwise endpoint (measured here on the coarse
+                # sample), so both entry points capture the same starting error
+                # rather than each having its own reach.
+                pull_in = _auto_correspondence_distance(
+                    clouds[ref], _robust_cloud_diagonal(clouds[ref]))
+                levels = fine_registration.plan_levels(
+                    max(v for _, v in working), pull_in)
+                if progress is not None:
+                    progress(0.79, "Preparing the reference scan")
+                # The reference's pyramid is reused by every pair; the others
+                # are built and dropped one at a time, so peak memory is two
+                # pyramids rather than one per scan.
+                pyramids = {ref: fine_registration.Pyramid(working[ref][0], levels)}
+
+            # Each scan gets an equal slice of 0.80-0.99, subdivided by the
+            # ladder. A marker per SCAN was enough when a refinement was a few
+            # seconds; a full-resolution ladder is tens of seconds, and a pill
+            # that does not move for that long reads as a hang -- and, since
+            # this callback is also the cancellation checkpoint, a coarser one
+            # would mean the user could not stop it either.
+            span = 0.19 / max(len(movers), 1)
+
+            def scan_progress(done_n):
+                if progress is None:
+                    return None
+                base = 0.80 + span * done_n
+
+                def report(level, count, voxel):
+                    _cancel_checkpoint(progress)
+                    progress(base + span * (level / max(count, 1)),
+                             f"Aligning scan {done_n + 1} of {len(movers)} "
+                             f"at {voxel * 100:.0f} cm detail")
+
+                return report
+
             for done_n, i in enumerate(movers):
                 M = transforms[i]
                 _cancel_checkpoint(progress)
                 if progress is not None:
-                    progress(0.80 + 0.19 * (done_n / max(len(movers), 1)),
+                    progress(0.80 + span * done_n,
                              f"Aligning scan {done_n + 1} of {len(movers)}")
                 if request.refine_method == "planes":
                     # Plane-to-plane: adjust against ~10^4 oriented patches
@@ -33149,19 +33212,21 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                         transforms[i] = result["transformation"]
                     continue
 
-                # Refine on the far field only -- see `_drop_near_field`. The
-                # coarse pose is already good to ~0.04 deg; letting near-field
-                # points dominate the fine stage made it ten times WORSE.
-                refined = _do_c2c_icp(CloudToCloudICPRequest(
-                    target_points=_drop_near_field(clouds[ref]).ravel().tolist(),
-                    source_points=_drop_near_field(clouds[i]).ravel().tolist(),
-                    init_transform=M.flatten().tolist(),
-                ), progress=None)
-                if (refined.get("success")
-                        and refined.get("transformation_matrix")
-                        and (refined.get("fitness") or 0.0) > 0.0):
-                    transforms[i] = np.asarray(refined["transformation_matrix"],
-                                               dtype=np.float64).reshape(4, 4)
+                if levels is None:
+                    continue
+                # Fine stage on the SPATIALLY UNIFORM copies, not the strided
+                # coarse ones. `_drop_near_field` used to run here, deleting
+                # everything inside 5 m so the far field could still be heard
+                # over 1/r^2 sampling; voxel uniformity removes the reason for
+                # that, so both fields now contribute in proportion to the
+                # surface area they cover. See fine_registration.
+                source = fine_registration.Pyramid(working[i][0], levels)
+                refined = fine_registration.align(
+                    pyramids[ref], source, levels, init=M,
+                    progress=scan_progress(done_n))
+                del source
+                if refined["fitness"] > 0.0:
+                    transforms[i] = refined["transformation"]
 
         if progress is not None:
             progress(1.0, "Done")

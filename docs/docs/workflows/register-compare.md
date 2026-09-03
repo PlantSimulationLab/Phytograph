@@ -325,38 +325,48 @@ Auto-Register again. Reference scans are not listed: they never moved.
 
 ### How accurate is it?
 
-Validated against RiSCAN PRO's automatic registration on a four-position
-terrestrial survey of a real almond orchard (~14 M points per scan, trees to
-~12 m, scanners in a clearing). Registering each scan onto a common reference
-and comparing with RiSCAN's solution:
+Validated against RiSCAN PRO's Multi Station Adjustment on three real
+terrestrial surveys. Each ships the same scans twice, unregistered and
+registered, so RiSCAN's pose for every scan is recoverable exactly and can be
+compared point for point. The figure below is the **median distance a point
+lands from where RiSCAN put it**, across every scan that had to move:
 
-| Scan | Difference from RiSCAN |
-|------|------------------------|
-| ScanPos002 | 0.16° / 4 cm |
-| ScanPos004 | 1.41° / 33 cm |
-| ScanPos005 | 0.64° / 21 cm |
+| Survey | Scans | Typical difference from RiSCAN | Worst scan |
+|--------|-------|--------------------------------|------------|
+| Farm, 6 M pts/scan | 4 | 1.7 cm | 1.7 cm |
+| Olive orchard, 9 M pts/scan | 5 | 0.5 cm | 0.6 cm |
+| Peach orchard, 14 M pts/scan | 6 | 1.0 cm | 5.7 cm |
 
-ScanPos005 is the interesting one: it sits at roughly 170° to the others, and
-Auto-Register recovered it with no starting guess. **Align Clouds (ICP) cannot
-do that** — it needs the clouds to start close together.
+For scale, the scans themselves resolve about 5 mm at 10 m and 100 mm past
+40 m, so on two of the three surveys the difference from RiSCAN is at the level
+of the data.
 
-Two practical notes from that test. More points is not more accurate: the same
-survey registered slightly *better* at 100 k points per scan than at 400 k,
-because tree positions are what matter and those are already resolved at the
-lower density. And the **trunk-bases** method was the least reliable on this
-data, where crowns and canopy peaks both agreed closely with RiSCAN — if a
-result looks wrong, switching method is the first thing to try.
+The peach survey's worst scan is the honest caveat: one position of the six
+kept a **0.65° tilt** that the initial pattern match introduced and the
+refinement could not undo. A tilt is invisible near the scanner and grows with
+range — that scan is within a centimetre close in and roughly 20 cm out at the
+edge of the plot. If a registered scan looks fine near the tripod and drifts
+further out, that is the shape to look for; re-running Auto-Register with a
+different reference scan usually resolves it.
+
+Two other things that test showed. Scans sitting at ~170° to the rest were
+recovered with **no starting guess** — **Align Clouds (ICP) cannot do that**,
+it needs the clouds to start close together. And the **trunk-bases** method was
+the least reliable, where crowns and canopy peaks both agreed closely with
+RiSCAN — if a result looks wrong, switching method is the first thing to try.
 
 !!! tip "Auto-register first, then fine-tune"
-    Auto-Register finishes with an ICP refinement pass, so its output is
-    usually final. If you later crop or clean the clouds, running **Align
-    Clouds (ICP)** afterwards will polish the fit further.
+    Auto-Register finishes with a full-resolution refinement pass, so its
+    output is usually final — running **Align Clouds (ICP)** straight
+    afterwards has nothing left to find. Do run it if you later crop or clean
+    the clouds.
 
 ## Cloud-to-cloud ICP
 
-Align one cloud to another by iteratively minimizing point-to-point
-distance. Use this to **polish** a pair that is already roughly lined up; if
-the clouds start far apart or rotated, use **Auto-Register** above instead.
+Align one cloud to another by matching local surfaces, coarsest detail first
+and then progressively finer. Use this to **polish** a pair that is already
+roughly lined up; if the clouds start far apart or rotated, use
+**Auto-Register** above instead.
 
 1. Open **Align Clouds (ICP)** from the **Pre-processing** toolbar group
    (globe icon) or **Tools → Registration → Align Clouds (ICP)…**.
@@ -455,10 +465,12 @@ percentage. Like the other ICP tools, this is **not undoable**.
 
 !!! note "Progress and cancelling"
     Every registration and the cloud-to-mesh distance run shows a progress pill
-    at the top of the viewport while it works — the ICP tools advance it per
-    iteration batch with the current RMSE. Click the **✕** on the pill to
-    cancel; the alignment stops (within one iteration batch) and nothing is
-    moved, exactly as if it hadn't been run.
+    at the top of the viewport while it works. The cloud alignments name the
+    scale they are working at ("Aligning at 8 cm detail", then 4 cm, then
+    2 cm) — that number shrinking is the run progressing, and the finest
+    passes are the slow ones. Click the **✕** on the pill to cancel; the
+    alignment stops (within one iteration batch) and nothing is moved, exactly
+    as if it hadn't been run.
 
 ## When ICP fails
 

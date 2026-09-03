@@ -11,6 +11,7 @@ import math
 import numpy as np
 import pytest
 
+import fine_registration
 import main
 
 
@@ -212,46 +213,35 @@ def test_the_reported_pair_count_is_exact_not_an_estimate():
         f"progress promises {predicted} searches but {calls['n']} ran")
 
 
-def test_near_field_points_are_excluded_from_the_fine_refinement():
-    """Yaw is set by the far field, so the near field must not outvote it.
+def test_the_fine_stage_keeps_the_near_field_and_equalises_it_instead():
+    """The near-field cut is gone, and must not come back.
 
-    A terrestrial scan is overwhelmingly near-field -- measured 93% of returns
-    within 10 m of the scanner on a real olive set. ICP weights every
-    correspondence equally, so those points decide the rotation even though a
-    yaw error barely moves them. The far-field points that WOULD pin yaw are
-    outnumbered ~14:1.
+    It existed because a terrestrial scan is ~93% near-field BY COUNT and the
+    fine stage sampled by stride, so those returns decided the rotation even
+    though a yaw error barely moves them -- an azimuth error invisible at the
+    tripod and growing with range. Deleting everything inside 5 m fixed the
+    symptom by throwing away the most accurate returns in the scan.
 
-    The result is an azimuth error invisible where the user looks first and
-    growing linearly with range: measured -0.41 deg, which is 7 cm at 10 m but
-    43 cm at 60 m, so trunks drift out of line down a row while looking
-    perfectly aligned near the scanner. Excluding the near field took the same
-    scan to -0.023 deg.
+    The fine stage now voxelises, which weights each surface by AREA rather
+    than by return count, so the near field no longer outvotes anything and
+    there is nothing to cut. This pins the property that matters: the working
+    copy the refinement runs on still CONTAINS close-range geometry, and is no
+    longer dominated by it.
     """
     rng = np.random.default_rng(3)
-    # Dense near field, sparse far field: the ratio that causes the problem.
     near = rng.normal(0, 2.0, size=(20000, 3))
     far = np.column_stack([
         rng.uniform(-60, 60, 1500), rng.uniform(-60, 60, 1500),
         rng.uniform(0, 4, 1500)])
     cloud = np.vstack([near, far])
 
-    kept = main._drop_near_field(cloud, min_range=5.0)
+    assert not hasattr(main, "_drop_near_field"), (
+        "the near-field cut is back; see fine_registration's module docstring "
+        "for why voxelising replaced it")
+
+    kept, _voxel = fine_registration.working_copy(cloud, budget=4000)
     radius = np.linalg.norm(kept[:, :2] - np.median(cloud[:, :2], axis=0), axis=1)
-    assert radius.min() > 5.0, "a near-field point survived the cut"
-    # The far field must dominate what ICP sees, or nothing has changed.
-    assert len(kept) < 0.5 * len(cloud)
-    assert len(kept) > 100, "the cut left too little to register with"
-
-
-def test_the_near_field_cut_never_empties_a_small_cloud():
-    """A cropped or small cloud must come back unchanged, not empty.
-
-    The cut exists to rebalance a full-range scan. Applied to a cloud that is
-    entirely near-field it would delete everything, turning a working
-    registration into a failure.
-    """
-    rng = np.random.default_rng(9)
-    tight = rng.normal(0, 0.5, size=(5000, 3))       # all well inside 5 m
-    kept = main._drop_near_field(tight, min_range=5.0)
-    assert len(kept) == len(tight)
-    assert np.shares_memory(kept, tight) or np.array_equal(kept, tight)
+    assert (radius < 5.0).sum() > 0, "close-range returns were dropped"
+    near_share_before = float(np.mean(
+        np.linalg.norm(cloud[:, :2] - np.median(cloud[:, :2], axis=0), axis=1) < 5.0))
+    assert float(np.mean(radius < 5.0)) < near_share_before

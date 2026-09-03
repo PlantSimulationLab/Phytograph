@@ -3656,8 +3656,13 @@ export interface CloudToCloudICPRequest {
   source_points?: number[];     // Flattened [x, y, z, ...] source (to be moved); omit when source_source is set
   target_source?: BackendPointSource;  // octree-backed target read from disk
   source_source?: BackendPointSource;  // octree-backed source read from disk
-  max_correspondence_distance?: number;  // Optional max correspondence distance
-  max_iterations?: number;     // Optional max iterations (default 50)
+  /** How far the starting pose may be wrong, in metres — it sizes the FIRST
+   *  rung of the backend's multi-scale ladder, not the precision of the fit,
+   *  which comes from the rungs below it. Omit: derived from the cloud. */
+  max_correspondence_distance?: number;
+  /** Per LEVEL of that ladder, not per run. Omit — the backend's defaults are
+   *  what these tools are measured with. */
+  max_iterations?: number;
   /**
    * Optional starting pose as a row-major flat 4x4 (16 numbers) — the same
    * layout `transformation_matrix` comes back in. Pass the result of
