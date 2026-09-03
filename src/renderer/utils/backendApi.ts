@@ -795,7 +795,10 @@ export interface DenoiseStats {
   warnings: string[];
   method: NoiseMethod;
   params_used: Record<string, number>;
-  spacing_m?: number | null;   // null when the cloud was too small to measure
+  // null when the cloud was too small to measure, and when the run needed no
+  // spacing at all — a `voxel_count` with its voxel size pinned skips the
+  // measurement, which is a whole-cloud KD-tree build (see `needs_spacing`).
+  spacing_m?: number | null;
   elapsed_s?: number | null;
 }
 

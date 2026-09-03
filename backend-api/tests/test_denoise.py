@@ -159,6 +159,110 @@ def test_chunked_query_matches_one_shot(tree):
         assert np.array_equal(chunked, whole)
 
 
+def test_ror_matches_query_ball_point_except_on_exact_ties():
+    """ROR is asked as a BOUNDED k-NN query rather than a neighbour count, for
+    speed (measured 32x on a real TLS scan; see `radius_outlier_mask`). This
+    pins it against the count formulation it replaced, and pins the ONE place
+    the two can legitimately differ.
+
+    The boundary is the whole point. scipy's `distance_upper_bound` is strict
+    (`<`) whereas `query_ball_point(r)` is inclusive (`<=`), so a naive swap
+    flips every pair sitting at exactly the radius — routine on lattice and
+    voxel-quantised data, and in the dangerous direction (real structure
+    reported as noise: on the lattice below at the pitch radius it drops the
+    kept count from 184 to 56). Hence the one-ulp bound nudge plus an explicit
+    `<= radius`.
+
+    That still leaves exact ties disagreeing, because the two scipy code paths
+    compute the same pair distance differently — `query_ball_point` against a
+    squared radius, `query` returning a correctly-rounded sqrt. Measured over
+    40 seeds x 3 cloud shapes x 5 radii x 7 nb values, EVERY disagreement is a
+    point whose k-th neighbour is exactly `radius` away (0 ulps) and is one this
+    form KEEPS and the count form drops — never the reverse. So the two
+    assertions here are: agreement is exact away from ties, and where a tie
+    does split the two, the error is in the direction that preserves a point.
+    Reversing that (`got & ~ref` empty, `ref & ~got` non-empty) is precisely the
+    signature of the strict-bound regression.
+    """
+    from scipy.spatial import cKDTree
+
+    rng = np.random.default_rng(1)
+    g = np.arange(6) * 0.01
+    clouds = {
+        "lattice": np.array(np.meshgrid(g, g, g)).reshape(3, -1).T.astype(np.float64),
+        "random": rng.random((4000, 3)) * 0.1,
+        "quantised": np.round(rng.random((4000, 3)) * 0.1, 2),
+    }
+    radii = (0.005, 0.01, np.sqrt(2) * 0.01, np.sqrt(3) * 0.01, 0.02, 0.03, 0.05)
+    seen_a_tie = False
+    for name, points in clouds.items():
+        kd = cKDTree(points)
+        for radius in radii:
+            for nb in (0, 1, 2, 3, 6, 12, 26):
+                where = f"{name} r={radius} nb={nb}"
+                reference = kd.query_ball_point(
+                    points, radius, return_length=True) >= nb + 1
+                keep = radius_outlier_mask(points, nb, radius)
+
+                # Never stricter than the count form. This alone fails loudly
+                # on the strict-`<` bound.
+                assert not (reference & ~keep).any(), f"dropped a kept point: {where}"
+
+                extra = keep & ~reference
+                if not extra.any():
+                    continue
+                seen_a_tie = True
+                # ...and every extra point is sitting EXACTLY on the radius.
+                d, _ = kd.query(points[extra], k=nb + 1)
+                kth = d if d.ndim == 1 else d[:, -1]
+                assert np.array_equal(kth, np.full(kth.shape, radius)), where
+
+    assert seen_a_tie, "fixtures no longer exercise the exact-tie boundary"
+
+
+def test_one_kdtree_is_built_per_run_not_three(tree, monkeypatch):
+    """A single ROR/SOR run used to build THREE full cKDTrees over the same
+    points — one for each spacing percentile plus one for the criterion — which
+    on a measured 45.7 M-point scan was ~16 s each, two thirds of it pure
+    duplication. The tree is now built once in `denoise_mask` and handed down.
+    """
+    from scipy.spatial import cKDTree as _real
+
+    built = []
+
+    def counting(*args, **kwargs):
+        built.append(1)
+        return _real(*args, **kwargs)
+
+    points, _ = tree
+    for method in ("ror", "sor"):
+        built.clear()
+        monkeypatch.setattr(denoise, "cKDTree", counting)
+        denoise_mask(points, method)
+        assert len(built) == 1, f"{method} built {len(built)} trees"
+
+
+def test_voxel_count_needs_no_kdtree_when_its_size_is_pinned(tree):
+    """`voxel_count` exists as the O(N) escape hatch for clouds too large for a
+    KD-tree — but auto-sizing its voxel measures NN spacing, which builds one
+    over the whole cloud. So the escape hatch only escapes when the size is
+    given, and `needs_spacing` is what draws that line."""
+    assert denoise.needs_spacing("voxel_count", None)
+    assert denoise.needs_spacing("voxel_count", {"min_points": 3})
+    assert not denoise.needs_spacing("voxel_count", {"voxel": 0.1})
+
+    from scipy.spatial import cKDTree as _real
+    import unittest.mock as _mock
+
+    points, _ = tree
+    with _mock.patch.object(denoise, "cKDTree", side_effect=_real) as spy:
+        keep, stats = denoise_mask(points, "voxel_count", {"voxel": 0.25, "min_points": 2})
+    assert spy.call_count == 0
+    # No tree means no spacing measurement to report, which is the trade.
+    assert stats["spacing_m"] is None
+    assert np.array_equal(keep, voxel_count_mask(points, 0.25, 2))
+
+
 def test_voxel_count_mask_matches_the_legacy_registration_filter():
     """`main._reject_sparse_voxels` now delegates here. Pins the swap from
     `np.unique(axis=0)` to a packed int64 key against the original behaviour."""

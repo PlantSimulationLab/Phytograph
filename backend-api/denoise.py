@@ -120,6 +120,39 @@ LARGE_CLOUD_HINT = 30_000_000
 _QUERY_CHUNK = 1_000_000
 
 
+def _nn_distances(points: np.ndarray, sample: int = 200_000,
+                  tree: "Optional[cKDTree]" = None) -> np.ndarray:
+    """Nearest-neighbour distances over an evenly-spaced index sample of
+    `points`, which must be finite. `tree` must have been built on exactly
+    `points`; it is built here when not supplied.
+
+    Deterministic: an evenly-spaced index sample, no RNG. Returns the positive
+    finite distances only (possibly empty).
+
+    Separate from `nn_distance_percentile` so that BOTH percentiles the panel
+    reports come out of ONE query against ONE tree. They used to be two calls,
+    i.e. two full cKDTree builds over the whole cloud plus a third for the
+    criterion itself -- 3 x 16 s on a measured 45.7 M-point scan, two thirds of
+    it pure duplication.
+    """
+    if len(points) < 100:
+        return np.empty(0, dtype=np.float64)
+    probe = points[np.linspace(0, len(points) - 1,
+                               min(sample, len(points))).astype(np.int64)]
+    if tree is None:
+        tree = cKDTree(points)
+    dist, _ = tree.query(probe, k=2, workers=-1)
+    nn = dist[:, 1]
+    return nn[np.isfinite(nn) & (nn > 0)]
+
+
+def _percentile_or_none(nn: np.ndarray, q: float) -> Optional[float]:
+    if nn.size == 0:
+        return None
+    value = float(np.percentile(nn, q))
+    return value if np.isfinite(value) and value > 0 else None
+
+
 def nn_distance_percentile(points: np.ndarray, q: float = 95.0,
                            sample: int = 200_000) -> Optional[float]:
     """Percentile of the nearest-neighbour distance, or None if unmeasurable.
@@ -131,24 +164,18 @@ def nn_distance_percentile(points: np.ndarray, q: float = 95.0,
     the wrong statistic for sizing a radius that must not eat twig tips. The
     sparse tail is the population the radius has to accommodate, so the radius is
     derived from the tail.
+
+    Prefer `_nn_distances` + `_percentile_or_none` when you need more than one
+    percentile: each call to THIS function builds its own tree.
     """
     finite = points[np.isfinite(points).all(axis=1)]
-    if len(finite) < 100:
-        return None
-    probe = finite[np.linspace(0, len(finite) - 1,
-                               min(sample, len(finite))).astype(np.int64)]
-    dist, _ = cKDTree(finite).query(probe, k=2, workers=-1)
-    nn = dist[:, 1]
-    nn = nn[np.isfinite(nn) & (nn > 0)]
-    if nn.size == 0:
-        return None
-    value = float(np.percentile(nn, q))
-    return value if np.isfinite(value) and value > 0 else None
+    return _percentile_or_none(_nn_distances(finite, sample), q)
 
 
 def statistical_outlier_mask(points: np.ndarray, nb_neighbors: int = DEFAULT_SOR_NB_NEIGHBORS,
                              std_ratio: float = DEFAULT_SOR_STD_RATIO, *,
-                             workers: int = -1, chunk: int = _QUERY_CHUNK) -> np.ndarray:
+                             workers: int = -1, chunk: int = _QUERY_CHUNK,
+                             tree: "Optional[cKDTree]" = None) -> np.ndarray:
     """Keep-mask for SOR: drop points whose mean distance to their `nb_neighbors`
     nearest neighbours exceeds ``mean + std_ratio * std`` over the whole cloud.
 
@@ -162,7 +189,8 @@ def statistical_outlier_mask(points: np.ndarray, nb_neighbors: int = DEFAULT_SOR
     n = len(points)
     if n <= nb_neighbors:
         return np.ones(n, dtype=bool)
-    tree = cKDTree(points)
+    if tree is None:
+        tree = cKDTree(points)
     mean_d = np.empty(n, dtype=np.float64)
     step = max(1, int(chunk))
     for start in range(0, n, step):
@@ -174,7 +202,8 @@ def statistical_outlier_mask(points: np.ndarray, nb_neighbors: int = DEFAULT_SOR
 
 
 def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
-                        workers: int = -1, chunk: int = _QUERY_CHUNK) -> np.ndarray:
+                        workers: int = -1, chunk: int = _QUERY_CHUNK,
+                        tree: "Optional[cKDTree]" = None) -> np.ndarray:
     """Keep-mask for ROR: keep points with at least `nb_points` OTHER returns
     within `radius`.
 
@@ -182,23 +211,72 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
     scan resolution, which is why this is the default method: unlike SOR's
     ``std_ratio`` it is density- and translation-invariant, and it fails visibly.
 
-    ``return_length=True`` returns only the neighbour COUNT, so nothing
-    proportional to the neighbour lists is ever allocated.
+    Asked as a BOUNDED k-NN query, not a neighbour count
+    ------------------------------------------------------
+    The criterion only needs to know whether the ``nb_points``-th other return
+    falls inside `radius`, so it is answered by the distance to the
+    ``nb_points + 1``-th nearest neighbour (column 0 is the point itself). The
+    obvious spelling -- ``query_ball_point(..., return_length=True)`` -- instead
+    COUNTS every neighbour in the ball, and that count is unbounded: the radius
+    is derived from the SPARSE tail of the spacing distribution (3 x p95, see
+    `nn_distance_percentile`) while the count is paid in the DENSEST region, so
+    the cost of the query is set by exactly the population the radius is not
+    sized for.
+
+    Measured on a real TLS scan (`ScanPos003`, 1.31 M points): p50 spacing
+    5.1 mm, p95 spacing 95.7 mm, auto radius 287 mm = 57x the median spacing,
+    giving a MEDIAN of 1,051 neighbours per query and a max of 28,970 -- all
+    enumerated to answer "are there at least 2". query_ball_point 6.9 s against
+    0.2 s for the bounded k-NN form, a 32x speedup for a bit-identical mask; on
+    a 45.7 M-point scan the same query extrapolated to ~147 s, which is what a
+    user reported as a hang.
+
+    The bound is a PRUNING hint only. ``distance_upper_bound`` is strict
+    (``<``) whereas ``query_ball_point(r)`` is inclusive (``<=``), which flips
+    every exactly-on-the-radius tie -- routine on lattice/voxel-quantised data,
+    and in the dangerous direction (real structure reported as noise). So the
+    bound is nudged one ulp outwards and the inclusive comparison is applied
+    explicitly afterwards: nothing at distance <= radius can be pruned, and
+    anything beyond it is rejected here.
+
+    That leaves exactly one residual difference, and it is benign. The two
+    scipy paths compute the same pair distance differently -- query_ball_point
+    against a squared radius, `query` returning a correctly-rounded sqrt -- so
+    a pair sitting at EXACTLY `radius` can land on opposite sides. Measured
+    over 40 seeds x 3 cloud shapes x 5 radii x 7 nb_points values, every such
+    disagreement is a point this form KEEPS and the count form drops, never the
+    reverse: the residual errs toward preserving structure, which is the
+    direction this whole module is biased. Pinned, in both halves, by
+    `test_ror_matches_query_ball_point_except_on_exact_ties`.
+
+    Nothing proportional to the neighbour lists is ever allocated: the chunked
+    query holds O(chunk * nb_points) distances.
+
+    `tree` may be a cKDTree already built on exactly `points`, to avoid a
+    rebuild; it is built here when omitted.
     """
     n = len(points)
     if n == 0:
         return np.zeros(0, dtype=bool)
     if radius <= 0:
         return np.ones(n, dtype=bool)
-    tree = cKDTree(points)
-    counts = np.empty(n, dtype=np.int64)
+    k = int(nb_points) + 1  # column 0 of the result is the point itself
+    if tree is None:
+        tree = cKDTree(points)
+    # One ulp outwards: see the docstring. Anything at exactly `radius` must
+    # survive the prune so the `<= radius` below can accept it.
+    bound = float(np.nextafter(radius, np.inf))
+    keep = np.empty(n, dtype=bool)
     step = max(1, int(chunk))
     for start in range(0, n, step):
         stop = min(start + step, n)
-        counts[start:stop] = tree.query_ball_point(
-            points[start:stop], radius, return_length=True, workers=workers)
-    # query_ball_point counts include the point itself.
-    return counts >= (nb_points + 1)
+        d, _ = tree.query(points[start:stop], k=k,
+                          distance_upper_bound=bound, workers=workers)
+        # scipy returns (m,) for k == 1 and (m, k) otherwise; the k-th
+        # neighbour is the last column, and is `inf` when it was pruned.
+        kth = d if d.ndim == 1 else d[:, -1]
+        keep[start:stop] = kth <= radius
+    return keep
 
 
 def voxel_count_mask(points: np.ndarray, voxel: float, min_points: int) -> np.ndarray:
@@ -239,18 +317,53 @@ def voxel_count_mask(points: np.ndarray, voxel: float, min_points: int) -> np.nd
     return counts[inverse] >= min_points
 
 
+def needs_spacing(method: str, params: Optional[dict] = None) -> bool:
+    """True when `resolve_params` would have to measure the cloud's spacing.
+
+    False only when the user pinned every auto-fillable parameter for `method`,
+    which is what lets `voxel_count` keep its promise of being the O(N) method
+    with NO KD-tree: measuring spacing means building one over the whole cloud,
+    so an auto-parameter voxel run was silently paying the very cost the method
+    exists to avoid.
+    """
+    params = params or {}
+    auto_keys = {
+        "ror": ("radius",),
+        "voxel_count": ("voxel",),
+        "sor": (),  # SOR's defaults are absolute, not spacing-derived
+    }.get(method, ())
+    return any(params.get(k) is None for k in auto_keys)
+
+
 def resolve_params(points: np.ndarray, method: str,
-                   params: Optional[dict] = None) -> tuple[dict, Optional[float], Optional[float]]:
+                   params: Optional[dict] = None,
+                   tree: "Optional[cKDTree]" = None,
+                   ) -> tuple[dict, Optional[float], Optional[float]]:
     """Fill any unset parameter for `method` from the cloud's own NN spacing.
 
     Returns ``(params_used, spacing_p50, spacing_p95)``. Only keys that are absent
     or None are filled, so an explicit user value always wins. Both spacings are
     reported: p50 is what the panel shows as "point spacing", p95 is what the
     auto radius/voxel are actually derived from.
+
+    Both percentiles come out of ONE k-NN query against ONE tree (`tree`, built
+    here when omitted, and reused by the criterion afterwards). They used to be
+    two independent `nn_distance_percentile` calls, so a single ROR run built
+    three full cKDTrees over the same cloud.
+
+    Spacing is skipped entirely -- and returned as ``(None, None)`` -- only when
+    no parameter depends on it AND no `tree` was handed in. Given a tree the
+    measurement is one 200k-probe query, so it is always taken and reported.
     """
     params = dict(params or {})
-    p50 = nn_distance_percentile(points, 50.0)
-    p95 = nn_distance_percentile(points, 95.0)
+    if tree is None and not needs_spacing(method, params):
+        # No parameter depends on spacing and no tree exists to measure it for
+        # free, so measuring would mean building one purely to fill in a number
+        # the panel displays. Not worth a full-cloud tree build.
+        return params, None, None
+    nn = _nn_distances(points, tree=tree)
+    p50 = _percentile_or_none(nn, 50.0)
+    p95 = _percentile_or_none(nn, 95.0)
 
     def _auto(multiple: float, fallback: float) -> float:
         if p95 is None:
@@ -305,17 +418,29 @@ def denoise_mask(points: np.ndarray, method: str = "ror",
 
     started = time.perf_counter()
     usable = pts[finite]
-    params_used, p50, p95 = resolve_params(usable, method, params)
+
+    # ONE tree for the whole run: the spacing percentiles and the criterion all
+    # query the same points, and a build over a 45.7 M-point scan measured
+    # 15.7 s. Built only when something actually needs it, so a fully-manual
+    # `voxel_count` stays the KD-tree-free path it advertises.
+    tree = None
+    if method in ("ror", "sor") or needs_spacing(method, params):
+        tree = cKDTree(usable)
+    params_used, p50, p95 = resolve_params(usable, method, params, tree=tree)
 
     if method == "ror":
         sub = radius_outlier_mask(usable, int(params_used["nb_points"]),
-                                  float(params_used["radius"]))
+                                  float(params_used["radius"]), tree=tree)
     elif method == "voxel_count":
         sub = voxel_count_mask(usable, float(params_used["voxel"]),
                                int(params_used["min_points"]))
     else:
         sub = statistical_outlier_mask(usable, int(params_used["nb_neighbors"]),
-                                       float(params_used["std_ratio"]))
+                                       float(params_used["std_ratio"]), tree=tree)
+    # Drop the tree before the (cheap) accounting below: on a 45.7 M-point
+    # cloud it is the largest allocation in the worker by a wide margin, and
+    # this runs in a subprocess whose peak RSS is what the parent pays for.
+    del tree
 
     keep = np.zeros(total, dtype=bool)  # non-finite rows stay False = noise
     keep[finite] = sub
