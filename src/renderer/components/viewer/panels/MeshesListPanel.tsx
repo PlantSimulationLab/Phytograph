@@ -8,6 +8,7 @@ import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 import type { TriangleFilterEstimate } from '../../../lib/triangleFilter';
 import { ColormapName, COLORMAP_NAMES } from '../../../lib/colormaps';
+import { stopClickAfterTextSelection } from '../../../lib/textSelection';
 
 // How long to wait after the last keystroke before re-deriving the filtered
 // mesh. Re-filtering walks every candidate triangle, so firing on each
@@ -266,9 +267,16 @@ function SpacingCheck({
         {running ? 'Checking point spacing…' : 'Check point spacing'}
       </button>
       {check && check.status !== 'running' && check.message && (
+        // `select-text` rather than leaning on the global error/warning rule in
+        // App.css: that rule keys on the text colour, so the error (red) and
+        // bridging-warning (amber) verdicts are already selectable and only the
+        // GOOD (green) one would not be. A verdict is a measurement either way,
+        // and the passing case is the one a user is most likely to want to
+        // quote back.
         <div
           data-testid="mesh-tri-spacing-verdict"
-          className={`flex gap-1 rounded px-1.5 py-1 border text-[9px] leading-snug ${verdictClass}`}
+          onClick={stopClickAfterTextSelection}
+          className={`flex gap-1 rounded px-1.5 py-1 border text-[9px] leading-snug select-text ${verdictClass}`}
         >
           {(check.status === 'error' || check.likelyBridging) && (
             <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
@@ -744,7 +752,11 @@ export function MeshesListPanel({
                   const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
                   const g = mesh.gridSubdivisions;
                   return (
-                    <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-grid-info">
+                    <div
+                      className="text-[10px] text-neutral-400 space-y-0.5 select-text"
+                      data-testid="mesh-grid-info"
+                      onClick={stopClickAfterTextSelection}
+                    >
                       <div>Center: {p.x.toFixed(2)}, {p.y.toFixed(2)}, {p.z.toFixed(2)}</div>
                       <div>Size: {s.x.toFixed(2)} × {s.y.toFixed(2)} × {s.z.toFixed(2)} m</div>
                       <div>Resolution: {g.x} × {g.y} × {g.z}</div>
@@ -769,7 +781,11 @@ export function MeshesListPanel({
                   const s = meshScales.get(mesh.id) || { x: 1, y: 1, z: 1 };
                   const r = meshRotations.get(mesh.id) || { x: 0, y: 0, z: 0 };
                   return (
-                    <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-plane-info">
+                    <div
+                      className="text-[10px] text-neutral-400 space-y-0.5 select-text"
+                      data-testid="mesh-plane-info"
+                      onClick={stopClickAfterTextSelection}
+                    >
                       <div>Center: {p.x.toFixed(2)}, {p.y.toFixed(2)}, {p.z.toFixed(2)}</div>
                       <div>Size: {s.x.toFixed(2)} × {s.y.toFixed(2)} m</div>
                       <div>Rotation: {r.x.toFixed(0)}°, {r.y.toFixed(0)}°, {r.z.toFixed(0)}°</div>
@@ -779,7 +795,11 @@ export function MeshesListPanel({
                 {/* Triangulation provenance: how this mesh was reconstructed and
                     with which parameters. Only present on triangulated meshes. */}
                 {mesh.triangulationParams && (
-                  <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-triangulation-info">
+                  <div
+                    className="text-[10px] text-neutral-400 space-y-0.5 select-text"
+                    data-testid="mesh-triangulation-info"
+                    onClick={stopClickAfterTextSelection}
+                  >
                     <div className="text-neutral-300">
                       {TRIANGULATION_METHOD_LABELS[mesh.method] ?? mesh.method} triangulation
                     </div>
@@ -824,7 +844,11 @@ export function MeshesListPanel({
                 {mesh.method === 'crown' && mesh.crownMetrics && (() => {
                   const m = mesh.crownMetrics;
                   return (
-                    <div className="text-[10px] text-neutral-400 space-y-0.5" data-testid="mesh-crown-metrics">
+                    <div
+                      className="text-[10px] text-neutral-400 space-y-0.5 select-text"
+                      data-testid="mesh-crown-metrics"
+                      onClick={stopClickAfterTextSelection}
+                    >
                       <div className="text-neutral-300">
                         {(CROWN_SHAPE_LABELS[mesh.crownShape as CrownShape] ?? mesh.crownShape ?? 'Crown')} crown fit
                         {mesh.crownTreeId ? ` · tree ${mesh.crownTreeId}` : ''}
@@ -847,8 +871,9 @@ export function MeshesListPanel({
                   if (reason) {
                     return (
                       <div
-                        className="flex items-start gap-1 text-[10px] text-amber-300/90"
+                        className="flex items-start gap-1 text-[10px] text-amber-300/90 select-text"
                         data-testid="mesh-lad-ineligible-note"
+                        onClick={stopClickAfterTextSelection}
                       >
                         <AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
                         <span>Can’t be used for leaf-area inversion: {reason}.</span>
@@ -858,8 +883,9 @@ export function MeshesListPanel({
                   if (mesh.data.grid && mesh.data.triangleCellIds) {
                     return (
                       <div
-                        className="text-[10px] text-green-400/80"
+                        className="text-[10px] text-green-400/80 select-text"
                         data-testid="mesh-lad-ready-note"
+                        onClick={stopClickAfterTextSelection}
                       >
                         Pinned to a grid — re-usable for leaf-area inversion.
                       </div>

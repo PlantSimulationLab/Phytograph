@@ -1,5 +1,6 @@
 import { GitBranch, Eye, EyeOff, Trash2 } from 'lucide-react';
 import type { SkeletonEntry, PointCloudEntry } from '../../../lib/pointCloudTypes';
+import { stopClickAfterTextSelection } from '../../../lib/textSelection';
 
 // Presentational right-side list of extracted skeletons plus the global skeleton
 // display settings (cylinder rendering, tube radius, branch-order coloring).
@@ -89,7 +90,15 @@ export function SkeletonsListPanel({
               }`}
             >
               <div className="w-3 h-3 rounded flex-shrink-0" style={{ backgroundColor: skeleton.color }} />
-              <div className="flex-1 min-w-0">
+              {/* The skeleton row has no expandable detail block — this name +
+                  stats pair IS all the text it shows, so it is what opts back
+                  into selection (see `stopClickAfterTextSelection`). The source
+                  cloud's file name is the piece worth copying: it is how a
+                  skeleton is matched back to the scan it came from. */}
+              <div
+                className="flex-1 min-w-0 select-text"
+                onClick={stopClickAfterTextSelection}
+              >
                 <div className="text-xs text-neutral-200 truncate" data-testid="skeleton-row-name">
                   {sourceName}
                 </div>

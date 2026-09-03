@@ -82,6 +82,7 @@ import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
 import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
+import { stopClickAfterTextSelection } from '../lib/textSelection';
 import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
@@ -369,20 +370,6 @@ const TRAJ_SORT_DELAY_MS = 700;
 // glyph flies the whole path smoothly over this many seconds regardless of the
 // trajectory's own time span.
 const PREVIEW_DURATION_S = 5;
-
-// The scan row's expanded detail blocks opt back into text selection (the row
-// itself is `select-none`, so a drag in the panel list can't smear a selection
-// across the UI). Their text — origin coordinates, extent, source file, field
-// names — is exactly what a user wants to paste into a note or a bug report, so
-// it is selectable; this keeps the drag that selects it from also re-toggling
-// the row. The row's own onClick fires on the mouse-up that ENDS a selection
-// drag, which for a solo-selected scan would deselect it out from under the
-// text the user just highlighted. Swallowed only when a selection actually
-// exists, so a plain click on the detail text still selects the scan.
-const stopClickAfterTextSelection = (e: React.MouseEvent) => {
-  const sel = window.getSelection();
-  if (sel && !sel.isCollapsed && sel.toString().length > 0) e.stopPropagation();
-};
 
 // Default opacity for a mesh with no explicit per-mesh override. Kept as a
 // single source of truth so the render path and the meshes-panel slider agree.
