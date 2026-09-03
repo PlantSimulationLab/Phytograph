@@ -279,6 +279,22 @@ import type {
   CloudFilters,
 } from '../lib/pointCloudTypes';
 import { meshDisplayNameFor } from '../lib/pointCloudTypes';
+import {
+  isIntegerFilterField,
+  isNarrowing,
+  projectFilters,
+  seedFilterInput,
+} from '../lib/filterFields';
+
+// One filterable field of a cloud: the dropdown's encoded value, its display
+// label, its full extent, and whether it holds integers. Mirrors FieldOption in
+// FilterPanel.tsx — the panel takes exactly this shape.
+interface FilterFieldOption {
+  value: string;
+  label: string;
+  bounds: { min: number; max: number };
+  integer?: boolean;
+}
 import { eligibleLeafAngleMeshes, meanLeafInclination, qsmAabb } from '../lib/adjustLeafAngles';
 export type {
   ScalarField,
@@ -3109,6 +3125,11 @@ export default function PointCloudViewer({
   scansRef.current = scans;
   const editStatesRef = useRef(editStates);
   editStatesRef.current = editStates;
+  // Same reason again, for the multi-scan filter apply: the loop clears each
+  // cloud's filters as it commits them, so an iteration reading the closure's
+  // `cloudFilters` would see entries the previous iteration already dropped.
+  const cloudFiltersRef = useRef(cloudFilters);
+  cloudFiltersRef.current = cloudFilters;
 
   // ── Deferred transform bakes ───────────────────────────────────────────────
   // A registration/transform is shown IMMEDIATELY as a render pose and written
@@ -5345,6 +5366,109 @@ export default function PointCloudViewer({
     backfillAbortRef.current = null;
   }, []);
 
+  // ── Filter field enumeration ───────────────────────────────────────────────
+  // The filterable fields of one cloud: X/Y/Z always, intensity when present,
+  // and every scalar — flat clouds carry them in `scalarFields`, octree-backed
+  // ones in `octree.attributeRanges` keyed by on-disk slug (mirroring the
+  // Color-by picker via octreeScalarFieldOptions, so builtin LAS dimensions
+  // stay out). `integer` marks the counter/index columns that must render as
+  // whole numbers.
+  //
+  // Extracted from the panel's render IIFE so the panel, the default-filter
+  // builder, and the narrowing test all enumerate fields ONE way. When they
+  // were separate, a field's bounds could differ between where a filter was
+  // committed and where it was judged.
+  const filterFieldsFor = useCallback((cloud: PointCloudEntry): FilterFieldOption[] => {
+    const data = cloud.data;
+    const fields: FilterFieldOption[] = [
+      { value: 'x', label: 'X', bounds: { min: data.bounds.min.x, max: data.bounds.max.x } },
+      { value: 'y', label: 'Y', bounds: { min: data.bounds.min.y, max: data.bounds.max.y } },
+      { value: 'z', label: 'Z', bounds: { min: data.bounds.min.z, max: data.bounds.max.z } },
+    ];
+    if (data.intensities) {
+      fields.push({ value: 'intensity', label: 'Intensity', bounds: { min: 0, max: 1 } });
+    }
+    Object.entries(data.scalarFields || {}).forEach(([name, field]) => {
+      fields.push({ value: `scalar:${name}`, label: name, bounds: { min: field.min, max: field.max } });
+    });
+    if (data.octree?.attributeRanges) {
+      const ranges = data.octree.attributeRanges;
+      for (const { value: slug, label } of octreeScalarFieldOptions(ranges, data.octree.attributeLabels)) {
+        const r = ranges[slug];
+        fields.push({
+          value: `scalar:${slug}`,
+          label,
+          bounds: { min: r?.min?.[0] ?? 0, max: r?.max?.[0] ?? 0 },
+        });
+      }
+    }
+    for (const f of fields) f.integer = isIntegerFilterField(f.value);
+    return fields;
+  }, []);
+
+  // A cloud's filters with every field present at its full extent and disabled.
+  // Used to seed the panel and to give a sibling scan (never opened in the
+  // panel) a shape for `projectFilters` to write onto.
+  const defaultFiltersFor = useCallback((cloud: PointCloudEntry): CloudFilters => {
+    const data = cloud.data;
+    const scalarFields: Record<string, FilterRange> = {};
+    for (const f of filterFieldsFor(cloud)) {
+      if (!f.value.startsWith('scalar:')) continue;
+      scalarFields[f.value.substring(7)] = { min: f.bounds.min, max: f.bounds.max, enabled: false };
+    }
+    return {
+      x: { min: data.bounds.min.x, max: data.bounds.max.x, enabled: false },
+      y: { min: data.bounds.min.y, max: data.bounds.max.y, enabled: false },
+      z: { min: data.bounds.min.z, max: data.bounds.max.z, enabled: false },
+      intensity: data.intensities ? { min: 0, max: 1, enabled: false } : undefined,
+      scalarFields,
+    };
+  }, [filterFieldsFor]);
+
+  // The class count for a categorical field, so `isNarrowing` can tell "all
+  // classes ticked" (a no-op) from "some unticked" (a real filter). Returns
+  // undefined for continuous fields, where the range test applies instead.
+  const classCountFor = useCallback((cloud: PointCloudEntry, field: FilterFieldOption): number | undefined => {
+    if (!field.value.startsWith('scalar:')) return undefined;
+    const slug = field.value.substring(7);
+    if (!isCategoricalAttribute(slug)) return undefined;
+    const scheme = categoricalSchemeForRange(
+      slug,
+      [field.bounds.min, field.bounds.max],
+      cloud.data.octree?.observedClasses?.[slug],
+    );
+    return scheme?.classes.length;
+  }, []);
+
+  // True when a filter on `field` would actually remove points from `cloud`.
+  const fieldNarrowsFor = useCallback((
+    cloud: PointCloudEntry,
+    filters: CloudFilters,
+    field: FilterFieldOption,
+  ): boolean => {
+    const slug = field.value.startsWith('scalar:') ? field.value.substring(7) : null;
+    const filter = slug
+      ? filters.scalarFields[slug]
+      : field.value === 'x' ? filters.x
+      : field.value === 'y' ? filters.y
+      : field.value === 'z' ? filters.z
+      : field.value === 'intensity' ? filters.intensity
+      : undefined;
+    return isNarrowing(filter, field.bounds, classCountFor(cloud, field));
+  }, [classCountFor]);
+
+  // True when ANY field's filter narrows. This — not "any field enabled" — gates
+  // the commit buttons: the panel enables a field on the first keystroke even
+  // when the range is still the full extent, so the old test let a no-op filter
+  // present itself as a real one across every field at once.
+  const anyFilterNarrows = useCallback((
+    cloud: PointCloudEntry | undefined,
+    filters: CloudFilters | undefined,
+  ): boolean => {
+    if (!cloud || !filters) return false;
+    return filterFieldsFor(cloud).some(f => fieldNarrowsFor(cloud, filters, f));
+  }, [filterFieldsFor, fieldNarrowsFor]);
+
   // Build the crop_octree args (region + scalarFilters + translation) for an
   // octree-backed cloud from its active filters. X/Y/Z range filters become a
   // box region (full extent on any disabled axis); enabled scalar filters
@@ -5394,32 +5518,39 @@ export default function PointCloudViewer({
     };
   }, [editStates]);
 
-  // Clear edit state, filters, and history for a cloud after a filter commit,
-  // then close the panel. Shared by Filter and Segment.
-  const clearFilterStateForCloud = useCallback((cloudId: string) => {
+  // Clear edit state, filters, and history for the clouds a filter commit
+  // touched, then close the panel. Shared by Filter and Segment. Takes a LIST
+  // because both commits now run over every selected scan — clearing one at a
+  // time would close the panel on the first iteration and leave the rest of the
+  // selection carrying stale criteria.
+  const clearFilterStateForClouds = useCallback((cloudIds: string[]) => {
+    if (cloudIds.length === 0) return;
     setEditStates(prev => {
       const next = new Map(prev);
-      next.set(cloudId, { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() });
+      for (const id of cloudIds) {
+        next.set(id, { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() });
+      }
       return next;
     });
     setCloudFilters(prev => {
       const next = new Map(prev);
-      next.delete(cloudId);
+      for (const id of cloudIds) next.delete(id);
       return next;
     });
     // A detection describes the cloud as it was BEFORE the commit, so once
     // filter/segment has rewritten it the reported counts are about points that
     // no longer exist. Leaving the box up made the panel claim "25 points
-    // flagged" immediately after those 25 were removed.
+    // flagged" immediately after those 25 were removed. Cleared for EVERY cloud
+    // the commit touched, for the same reason the loops above take a list.
     setNoiseResults(prev => {
-      if (!prev.has(cloudId)) return prev;
+      if (!cloudIds.some(id => prev.has(id))) return prev;
       const next = new Map(prev);
-      next.delete(cloudId);
+      for (const id of cloudIds) next.delete(id);
       return next;
     });
     setNoiseError(null);
-    // Destructive boundary: filter/segment rewrote this cloud's data.
-    scene.boundary([cloudId]);
+    // Destructive boundary: filter/segment rewrote these clouds' data.
+    scene.boundary(cloudIds);
     setShowFilterPanel(false);
   }, []);
 
@@ -5516,111 +5647,213 @@ export default function PointCloudViewer({
       !erased.has(i) && pointPassesFilters(src, filters, i);
   }, []);
 
+  // Resolve the clouds a filter commit should act on, and the criteria to use
+  // for each. Shared by Filter and Segment so the two can never disagree about
+  // what "the selection" means.
+  //
+  // The panel edits ONE cloud's criteria (the primary selection) but both
+  // commits run over EVERY selected scan — `projectFilters` carries the primary's
+  // enabled criteria onto each sibling's own field set, dropping fields the
+  // sibling lacks and leaving its untouched fields at their own extents.
+  // Returns [] when nothing is selected or the primary has no narrowing filter,
+  // which is exactly when the commit buttons must do nothing.
+  const resolveFilterTargets = useCallback((): { cloud: PointCloudEntry; filters: CloudFilters }[] => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return [];
+    const primaryId = ids[0];
+    const primaryFilters = cloudFiltersRef.current.get(primaryId);
+    if (!primaryFilters) return [];
+    const primary = cloudsRef.current.find(c => c.id === primaryId);
+    if (!primary || !anyFilterNarrows(primary, primaryFilters)) return [];
+
+    // Which of the primary's criteria actually remove points from IT. Only
+    // these carry over — an enabled-but-full-extent field is a no-op on the
+    // primary and must not become a real crop on a sibling that sits elsewhere.
+    const primaryFieldsByValue = new Map(filterFieldsFor(primary).map(f => [f.value, f]));
+    const primaryNarrows = (fieldValue: string): boolean => {
+      const field = primaryFieldsByValue.get(fieldValue);
+      return !!field && fieldNarrowsFor(primary, primaryFilters, field);
+    };
+
+    const out: { cloud: PointCloudEntry; filters: CloudFilters }[] = [];
+    for (const id of ids) {
+      const cloud = cloudsRef.current.find(c => c.id === id);
+      if (!cloud) continue;
+      if (id === primaryId) {
+        out.push({ cloud, filters: primaryFilters });
+        continue;
+      }
+      // A sibling may never have been opened in the panel, so it has no filter
+      // entry of its own — build its default (all fields, full extent, disabled)
+      // and project the primary's criteria onto that.
+      const targetFilters = cloudFiltersRef.current.get(id) ?? defaultFiltersFor(cloud);
+      const projected = projectFilters(primaryFilters, targetFilters, primaryNarrows);
+      // A sibling that ends up with nothing enabled would be rewritten to an
+      // identical copy — skip it rather than pay an octree reconversion and
+      // burn its undo history for a no-op.
+      if (!anyFilterNarrows(cloud, projected)) continue;
+      out.push({ cloud, filters: projected });
+    }
+    return out;
+  }, [selectedIds, anyFilterNarrows, defaultFiltersFor, filterFieldsFor, fieldNarrowsFor]);
+
   // Apply filter permanently - removes filtered out points from the point cloud
   const handleApplyFilterPermanently = useCallback(async (confirmed = false) => {
-    if (selectedIds.size !== 1) return;
     // Re-entry guard. The octree rebuild takes long enough that the button reads
     // as unresponsive; without this, every impatient click fired ANOTHER full
     // filter + reconversion against the same session.
     if (isFilterRunning) return;
 
-    const cloudId = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === cloudId);
-    const filters = cloudFilters.get(cloudId);
-
-    if (!cloud || !filters) return;
+    const targets = resolveFilterTargets();
+    if (targets.length === 0) return;
 
     // Removal is the one irreversible step in the noise workflow, so it is the
     // one place worth a confirmation. Two reasons, both about removing more than
     // the user meant: the detection flagged an implausible share of the cloud,
     // or another filter is enabled and Remove applies them ALL at once.
     // Segment is deliberately NOT gated — splitting is how you inspect a result
-    // you are unsure about.
-    if (!confirmed && filters.scalarFields[NOISE_CLASS_ATTRIBUTE]?.enabled) {
-      const others = [
-        ...Object.entries(filters.scalarFields)
-          .filter(([slug, f]) => f.enabled && slug !== NOISE_CLASS_ATTRIBUTE)
-          .map(([slug]) => slug),
-        ...(filters.x.enabled ? ['X'] : []),
-        ...(filters.y.enabled ? ['Y'] : []),
-        ...(filters.z.enabled ? ['Z'] : []),
-        ...(filters.intensity?.enabled ? ['Intensity'] : []),
-      ];
-      const stats = noiseResults.get(cloudId) ?? null;
-      if (noiseRemovalNeedsConfirmation(stats, others)) {
-        setNoiseRemoveConfirm(noiseRemovalConfirmMessage(stats, others));
-        return;
+    // you are unsure about. Asked ONCE for the whole run: the commit now spans
+    // every selected scan, and a modal per scan mid-loop would be worse than
+    // the risk it guards against.
+    if (!confirmed) {
+      for (const { cloud, filters } of targets) {
+        if (!filters.scalarFields[NOISE_CLASS_ATTRIBUTE]?.enabled) continue;
+        const others = [
+          ...Object.entries(filters.scalarFields)
+            .filter(([slug, f]) => f.enabled && slug !== NOISE_CLASS_ATTRIBUTE)
+            .map(([slug]) => slug),
+          ...(filters.x.enabled ? ['X'] : []),
+          ...(filters.y.enabled ? ['Y'] : []),
+          ...(filters.z.enabled ? ['Z'] : []),
+          ...(filters.intensity?.enabled ? ['Intensity'] : []),
+        ];
+        const stats = noiseResults.get(cloud.id) ?? null;
+        if (noiseRemovalNeedsConfirmation(stats, others)) {
+          setNoiseRemoveConfirm(noiseRemovalConfirmMessage(stats, others));
+          return;
+        }
       }
     }
 
-    // Check if any filter is active
-    const hasAnyFilter = filters.x.enabled || filters.y.enabled || filters.z.enabled ||
-      filters.intensity?.enabled ||
-      Object.values(filters.scalarFields).some(f => f.enabled);
+    // One AbortController + one pill for the whole run: cancelling mid-way
+    // stops the loop rather than only the in-flight cloud, so a 6-scan filter
+    // the user changed their mind about does not grind through five more
+    // reconversions.
+    const controller = new AbortController();
+    filterAbortRef.current = controller;
+    filterRunIdRef.current = null;
+    setIsFilterRunning(true);
+    setFilterProgress({ label: 'Filtering points…', value: 0 });
 
-    if (!hasAnyFilter) return;
+    // Clouds whose data we actually rewrote, for the shared post-commit
+    // teardown; clouds the filter emptied, which need a delete confirmation;
+    // and the surviving point totals for the summary toast.
+    const touched: string[] = [];
+    const emptied: { id: string; name: string }[] = [];
+    let keptTotal = 0;
+    let failed = 0;
 
-    // Session-backed octree clouds: apply the filter on the in-RAM arrays
-    // (delete the excluded points + rebuild from the arrays). No file re-read.
-    if (cloud.data.octree?.sessionId) {
-      const octreeInfo = cloud.data.octree;
-      const sessionId = octreeInfo.sessionId!;
-      const args = buildOctreeFilterArgs(cloud, filters);
-      const controller = new AbortController();
-      filterAbortRef.current = controller;
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        if (controller.signal.aborted) break;
+        // IMPORTANT: re-read through the ref. An earlier iteration's
+        // onUpdateCloud has committed by now, so the closure-captured entry
+        // would carry pre-filter data (and, for octree clouds, a session id
+        // whose arrays have already moved on).
+        const cloud = cloudsRef.current.find(c => c.id === targets[i].cloud.id) ?? targets[i].cloud;
+        const filters = targets[i].filters;
+        const name = cloud.data.fileName || 'cloud';
+        // Per-cloud progress is scaled into its slice of the overall bar, so a
+        // multi-scan run reads as one monotonic 0→1 rather than N sawteeth.
+        const base = i / targets.length;
+        const span = 1 / targets.length;
+        const label = targets.length > 1
+          ? `Filtering ${name} (${i + 1}/${targets.length})…`
+          : 'Filtering points…';
+        setFilterProgress({ label, value: base });
+
+        // Session-backed octree clouds: apply the filter on the in-RAM arrays
+        // (delete the excluded points + rebuild from the arrays). No file re-read.
+        if (cloud.data.octree?.sessionId) {
+          const octreeInfo = cloud.data.octree;
+          const sessionId = octreeInfo.sessionId!;
+          const args = buildOctreeFilterArgs(cloud, filters);
+          try {
+            const result = await sessionFilter(sessionId, {
+              region: args.region ?? null,
+              scalarFilters: args.scalarFilters ?? null,
+              rebuild: true,
+              signal: controller.signal,
+              // A null value is an indeterminate stage; hold the bar at this
+              // cloud's slice start rather than snapping it back to 0.
+              onProgress: (value, progressLabel) =>
+                setFilterProgress({
+                  label: progressLabel || label,
+                  value: value == null ? base : base + span * value,
+                }),
+              onRunId: (runId) => { filterRunIdRef.current = runId; },
+            });
+            if (result.point_count === 0) {
+              emptied.push({ id: cloud.id, name });
+              continue;
+            }
+            onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
+            touched.push(cloud.id);
+            keptTotal += result.point_count;
+          } catch (err) {
+            // A user cancel is not a failure — the pill's Cancel already killed
+            // the backend work, so report nothing and leave the remaining
+            // clouds' filter state intact for a retry.
+            if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+              break;
+            }
+            // One cloud failing must not abandon the rest of the selection.
+            console.error('[handleApplyFilterPermanently] session filter failed:', err);
+            showToast({ title: `Filter failed for ${name}`, type: 'error' });
+            failed++;
+          }
+          continue;
+        }
+
+        // Flat clouds: rebuild in-memory from the points that pass the filter.
+        const state = editStatesRef.current.get(cloud.id) || {
+          translation: { x: 0, y: 0, z: 0 },
+          erasedIndices: new Set<number>(),
+        };
+        const keep = buildFlatKeepPredicate(cloud, filters, state.erasedIndices);
+        const newData = rebuildFlatCloudData(cloud, keep, state.translation);
+        if (!newData) {
+          emptied.push({ id: cloud.id, name });
+          continue;
+        }
+        onUpdateCloud(cloud.id, newData);
+        touched.push(cloud.id);
+        keptTotal += newData.pointCount;
+      }
+    } finally {
+      setIsFilterRunning(false);
+      setFilterProgress(null);
+      filterAbortRef.current = null;
       filterRunIdRef.current = null;
-      setIsFilterRunning(true);
-      setFilterProgress({ label: 'Filtering points…', value: 0 });
-      try {
-        const result = await sessionFilter(sessionId, {
-          region: args.region ?? null,
-          scalarFilters: args.scalarFilters ?? null,
-          rebuild: true,
-          signal: controller.signal,
-          onProgress: (value, label) =>
-            setFilterProgress({ label: label || 'Filtering points…', value }),
-          onRunId: (runId) => { filterRunIdRef.current = runId; },
-        });
-        if (result.point_count === 0) {
-          setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
-          return;
-        }
-        onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
-      } catch (err) {
-        // A user cancel is not a failure — the pill's Cancel already killed the
-        // backend work, so report nothing and leave the filter state intact so
-        // the selection survives for a retry.
-        if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
-          return;
-        }
-        console.error('[handleApplyFilterPermanently] session filter failed:', err);
-        showToast({ title: `Filter failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
-        return;
-      } finally {
-        setIsFilterRunning(false);
-        setFilterProgress(null);
-        filterAbortRef.current = null;
-        filterRunIdRef.current = null;
-      }
-      clearFilterStateForCloud(cloud.id);
-      return;
     }
 
-    // Flat clouds: rebuild in-memory from the points that pass the filter.
-    const state = editStates.get(cloudId) || {
-      translation: { x: 0, y: 0, z: 0 },
-      erasedIndices: new Set<number>(),
-    };
-    const keep = buildFlatKeepPredicate(cloud, filters, state.erasedIndices);
-    const newData = rebuildFlatCloudData(cloud, keep, state.translation);
-    if (!newData) {
-      // All points would be removed - trigger delete confirmation.
-      setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
-      return;
+    clearFilterStateForClouds(touched);
+    if (touched.length > 1) {
+      showToast({
+        title: `Filtered ${touched.length} scans to ${keptTotal.toLocaleString()} points`,
+        type: 'success',
+      });
     }
-    onUpdateCloud(cloud.id, newData);
-    clearFilterStateForCloud(cloud.id);
-  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData, isFilterRunning, noiseResults]);
+    // Clouds the filter emptied are offered for deletion once, after the run —
+    // prompting mid-loop would block the remaining scans behind a modal.
+    if (emptied.length > 0 && failed === 0) {
+      setDeleteConfirm({
+        type: 'cloud',
+        ids: emptied.map(e => e.id),
+        label: emptied.length === 1 ? emptied[0].name : `${emptied.length} scans`,
+      });
+    }
+  }, [resolveFilterTargets, onUpdateCloud, buildOctreeFilterArgs, clearFilterStateForClouds, buildFlatKeepPredicate, rebuildFlatCloudData, isFilterRunning, noiseResults]);
 
   // Cancel an in-flight permanent filter. Kills the BACKEND work first (the
   // PotreeConverter child polls this run's cancel event and is hard-killed), then
@@ -5640,87 +5873,123 @@ export default function PointCloudViewer({
   // the out-of-range points as a second cloud. Nothing is discarded — kept +
   // leftover == the original. Mirrors the ground-segment "split into clouds".
   const handleSegmentFilter = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const cloudId = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === cloudId);
-    const filters = cloudFilters.get(cloudId);
-    if (!cloud || !filters) return;
+    if (isFilterRunning) return;
 
-    const hasAnyFilter = filters.x.enabled || filters.y.enabled || filters.z.enabled ||
-      filters.intensity?.enabled ||
-      Object.values(filters.scalarFields).some(f => f.enabled);
-    if (!hasAnyFilter) return;
+    const targets = resolveFilterTargets();
+    if (targets.length === 0) return;
 
     if (!onAddCloud) {
       showToast({ title: 'Cannot segment: add-cloud not available', type: 'error' });
       return;
     }
 
-    const leftoverName = `${cloud.data.fileName ?? 'cloud'} (filtered out)`;
+    // Segment runs over every selected scan, like Filter. It shares the
+    // isFilterRunning flag so the two commits can't overlap on one session and
+    // so both buttons disable while either is working.
+    setIsFilterRunning(true);
+    const touched: string[] = [];
+    const emptied: { id: string; name: string }[] = [];
+    let leftoverCount = 0;
+    let failed = 0;
 
-    // Session-backed octree: split the in-RAM array into kept (this session) +
-    // a NEW leftover session. One backend call, no source file read; the two
-    // sides exactly partition the cloud.
-    if (cloud.data.octree?.sessionId) {
-      const octreeInfo = cloud.data.octree;
-      const sessionId = octreeInfo.sessionId!;
-      const args = buildOctreeFilterArgs(cloud, filters);
-      try {
-        const result = await sessionSplit(sessionId, {
-          region: args.region ?? null,
-          scalarFilters: args.scalarFilters ?? null,
-        });
-        if (result.kept.point_count === 0) {
-          setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
-          return;
-        }
-        onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
-        if (result.leftover) {
-          // The leftover is its OWN session — carry its new sessionId (not the
-          // parent's) so its later edits route correctly.
-          const leftoverData = buildSessionOctreeData(
-            result.leftover, octreeInfo, leftoverName, result.leftover.session_id, { diverged: true });
-          // Split force-keeps sky/miss points on the KEPT side, so the leftover
-          // is hits-only; don't inherit the parent's "Show misses" affordance.
-          if (leftoverData.octree) {
-            leftoverData.octree.hasMisses = false;
-            leftoverData.octree.missOctreeCacheId = null;
+    try {
+      for (const target of targets) {
+        // Re-read through the ref: a previous iteration's onUpdateCloud /
+        // onAddCloud has already committed.
+        const cloud = cloudsRef.current.find(c => c.id === target.cloud.id) ?? target.cloud;
+        const filters = target.filters;
+        const name = cloud.data.fileName || 'cloud';
+        const leftoverName = `${cloud.data.fileName ?? 'cloud'} (filtered out)`;
+
+        // Session-backed octree: split the in-RAM array into kept (this session)
+        // + a NEW leftover session. One backend call, no source file read; the
+        // two sides exactly partition the cloud.
+        if (cloud.data.octree?.sessionId) {
+          const octreeInfo = cloud.data.octree;
+          const sessionId = octreeInfo.sessionId!;
+          const args = buildOctreeFilterArgs(cloud, filters);
+          try {
+            const result = await sessionSplit(sessionId, {
+              region: args.region ?? null,
+              scalarFilters: args.scalarFilters ?? null,
+            });
+            if (result.kept.point_count === 0) {
+              emptied.push({ id: cloud.id, name });
+              continue;
+            }
+            onUpdateCloud(cloud.id, buildSessionOctreeData(result.kept, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
+            touched.push(cloud.id);
+            if (result.leftover) {
+              // The leftover is its OWN session — carry its new sessionId (not
+              // the parent's) so its later edits route correctly.
+              const leftoverData = buildSessionOctreeData(
+                result.leftover, octreeInfo, leftoverName, result.leftover.session_id, { diverged: true });
+              // Split force-keeps sky/miss points on the KEPT side, so the
+              // leftover is hits-only; don't inherit the parent's "Show misses"
+              // affordance.
+              if (leftoverData.octree) {
+                leftoverData.octree.hasMisses = false;
+                leftoverData.octree.missOctreeCacheId = null;
+              }
+              onAddCloud({
+                id: crypto.randomUUID(),
+                data: leftoverData,
+                visible: true,
+                color: cloud.color,
+              });
+              leftoverCount++;
+            }
+          } catch (err) {
+            // One cloud failing must not abandon the rest of the selection.
+            console.error('[handleSegmentFilter] session split failed:', err);
+            showToast({ title: `Segment failed for ${name}`, type: 'error' });
+            failed++;
           }
-          onAddCloud({
-            id: crypto.randomUUID(),
-            data: leftoverData,
-            visible: true,
-            color: cloud.color,
-          });
+          continue;
         }
-      } catch (err) {
-        console.error('[handleSegmentFilter] session split failed:', err);
-        showToast({ title: `Segment failed for ${cloud.data.fileName || 'cloud'}`, type: 'error' });
-        return;
+
+        // Flat: rebuild both halves in-memory from keep / !keep.
+        const state = editStatesRef.current.get(cloud.id)
+          || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+        const keep = buildFlatKeepPredicate(cloud, filters, state.erasedIndices);
+        const keptData = rebuildFlatCloudData(cloud, keep, state.translation);
+        if (!keptData) {
+          emptied.push({ id: cloud.id, name });
+          continue;
+        }
+        // Leftover excludes erased points too (they're gone either way), so the
+        // leftover predicate is "not erased and not kept".
+        const leftover = (i: number) => !state.erasedIndices.has(i) && !keep(i);
+        const leftoverData = rebuildFlatCloudData(cloud, leftover, state.translation);
+        onUpdateCloud(cloud.id, keptData);
+        touched.push(cloud.id);
+        if (leftoverData) {
+          leftoverData.fileName = leftoverName;
+          onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: cloud.color });
+          leftoverCount++;
+        }
       }
-      clearFilterStateForCloud(cloud.id);
-      return;
+    } finally {
+      setIsFilterRunning(false);
     }
 
-    // Flat: rebuild both halves in-memory from keep / !keep.
-    const state = editStates.get(cloudId) || { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
-    const keep = buildFlatKeepPredicate(cloud, filters, state.erasedIndices);
-    const keptData = rebuildFlatCloudData(cloud, keep, state.translation);
-    if (!keptData) {
-      setDeleteConfirm({ type: 'cloud', ids: [cloud.id], label: cloud.data.fileName || 'Unnamed' });
-      return;
+    clearFilterStateForClouds(touched);
+    if (touched.length > 1) {
+      showToast({
+        title: `Segmented ${touched.length} scans`,
+        message: `${leftoverCount} filtered-out ${leftoverCount === 1 ? 'cloud' : 'clouds'} added.`,
+        type: 'success',
+      });
     }
-    // Leftover excludes erased points too (they're gone either way), so the
-    // leftover predicate is "not erased and not kept".
-    const leftover = (i: number) => !state.erasedIndices.has(i) && !keep(i);
-    const leftoverData = rebuildFlatCloudData(cloud, leftover, state.translation);
-    onUpdateCloud(cloud.id, keptData);
-    if (leftoverData) {
-      leftoverData.fileName = leftoverName;
-      onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: cloud.color });
+    // Prompt once, after the run — a mid-loop modal would block the rest.
+    if (emptied.length > 0 && failed === 0) {
+      setDeleteConfirm({
+        type: 'cloud',
+        ids: emptied.map(e => e.id),
+        label: emptied.length === 1 ? emptied[0].name : `${emptied.length} scans`,
+      });
     }
-    clearFilterStateForCloud(cloud.id);
-  }, [selectedIds, clouds, cloudFilters, editStates, onUpdateCloud, onAddCloud, buildOctreeFilterArgs, clearFilterStateForCloud, buildFlatKeepPredicate, rebuildFlatCloudData]);
+  }, [resolveFilterTargets, onUpdateCloud, onAddCloud, buildOctreeFilterArgs, clearFilterStateForClouds, buildFlatKeepPredicate, rebuildFlatCloudData, isFilterRunning]);
   // Close the in-progress lasso into a committed region. Shared by the two ways
   // a user can finish one — Enter, and double-click on the last vertex — so the
   // camera freeze and the region shape can't drift between them.
@@ -16888,6 +17157,17 @@ export default function PointCloudViewer({
     return clouds.find(c => c.id === id);
   }, [selectedIds, clouds]);
 
+  // Every selected cloud, in selection order. The Filter tool acts on ALL of
+  // them (like Crop does) rather than on `firstSelectedCloud` alone: the panel
+  // used to render for the first selection while the commit handlers bailed on
+  // `selectedIds.size !== 1`, so with two scans selected the buttons were
+  // silently dead.
+  const filterTargetClouds = useMemo(() => {
+    return Array.from(selectedIds)
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c);
+  }, [selectedIds, clouds]);
+
   // Auto-size the erase brush to the selected cloud. The brush radius is a
   // world-space value, so a fixed default (e.g. 0.1m) is invisible on a
   // meter-to-tens-of-meters scan and far too big on a centimeter-scale one.
@@ -20821,47 +21101,35 @@ export default function PointCloudViewer({
       })()}
 
       {/* Filter Panel */}
-      {showFilterPanel && firstSelectedCloud && (() => {
-        const cloud = firstSelectedCloud;
+      {showFilterPanel && filterTargetClouds.length > 0 && (() => {
+        // The PRIMARY cloud: the one whose criteria the panel edits. The commit
+        // buttons project those criteria onto every other selected scan (see
+        // resolveFilterTargets), so this is the shape the panel presents, not
+        // the only cloud it acts on.
+        const cloud = filterTargetClouds[0];
         const data = cloud.data;
         const currentFilters = cloudFilters.get(cloud.id);
 
         // Shared with handleDetectNoise, which needs the same base to add
         // `noise_class` onto when the panel has not been touched yet.
-        const getDefaultFilters = (): CloudFilters => defaultCloudFilters(data);
-
+        const getDefaultFilters = (): CloudFilters => defaultFiltersFor(cloud);
         const filters = currentFilters || getDefaultFilters();
 
-        // Build list of available fields for dropdown
-        const availableFields: { value: string; label: string; bounds: { min: number; max: number } }[] = [
-          { value: 'x', label: 'X', bounds: { min: data.bounds.min.x, max: data.bounds.max.x } },
-          { value: 'y', label: 'Y', bounds: { min: data.bounds.min.y, max: data.bounds.max.y } },
-          { value: 'z', label: 'Z', bounds: { min: data.bounds.min.z, max: data.bounds.max.z } },
-        ];
-        if (data.intensities) {
-          availableFields.push({ value: 'intensity', label: 'Intensity', bounds: { min: 0, max: 1 } });
-        }
-        Object.entries(data.scalarFields || {}).forEach(([name, field]) => {
-          availableFields.push({ value: `scalar:${name}`, label: name, bounds: { min: field.min, max: field.max } });
-        });
-        // Octree-backed clouds hold no flat `scalarFields`; their imported
-        // scalar attributes live in `octree.attributeRanges` (keyed by on-disk
-        // slug). Mirror the Color-by dropdown: reuse octreeScalarFieldOptions
-        // so builtin LAS attributes are filtered out, and read each scalar's
-        // range from attributeRanges[slug].{min,max}[0]. The `scalar:<slug>`
-        // value encoding matches the flat path, so getFieldFilter/applyFilter/
-        // removeFilter and the backend slug lookup all work unchanged.
-        if (data.octree?.attributeRanges) {
-          const ranges = data.octree.attributeRanges;
-          for (const { value: slug, label } of octreeScalarFieldOptions(ranges, data.octree.attributeLabels)) {
-            const r = ranges[slug];
-            availableFields.push({
-              value: `scalar:${slug}`,
-              label,
-              bounds: { min: r?.min?.[0] ?? 0, max: r?.max?.[0] ?? 0 },
-            });
-          }
-        }
+        // The fields on offer. With one scan selected that is simply its own
+        // field list; with several it is the INTERSECTION, matched by the
+        // dropdown's encoded value — offering a field only some scans carry
+        // would let a user set a criterion that silently applied to a subset.
+        // The bounds shown are the primary's; a sibling's own extents are what
+        // its projected filter falls back to for fields left unfiltered.
+        const primaryFields = filterFieldsFor(cloud);
+        const availableFields: FilterFieldOption[] = filterTargetClouds.length === 1
+          ? primaryFields
+          : (() => {
+              const shared = filterTargetClouds
+                .slice(1)
+                .map(c => new Set(filterFieldsFor(c).map(f => f.value)));
+              return primaryFields.filter(f => shared.every(s => s.has(f.value)));
+            })();
 
         // Get current filter values for selected field
         const getFieldFilter = (fieldValue: string): FilterRange | undefined => {
@@ -20949,21 +21217,28 @@ export default function PointCloudViewer({
             };
           }
           setCloudFilters(new Map(cloudFilters).set(cloud.id, newFilters));
-          setPendingFilterMin(field.bounds.min.toFixed(4));
-          setPendingFilterMax(field.bounds.max.toFixed(4));
+          setPendingFilterMin(seedFilterInput(field.bounds.min, !!field.integer));
+          setPendingFilterMax(seedFilterInput(field.bounds.max, !!field.integer));
         };
 
-        const hasAnyFilter = filters.x.enabled || filters.y.enabled || filters.z.enabled ||
-          filters.intensity?.enabled ||
-          Object.values(filters.scalarFields).some(f => f.enabled);
+        // Per-field narrowing, over the fields actually on offer. This — not
+        // `enabled` — is what the commit buttons, the "(active)" markers, the
+        // Active Filters list and "Remove this filter" all read, so a field
+        // sitting at its full extent is never presented as doing something.
+        const fieldNarrows = (fieldValue: string): boolean => {
+          const field = availableFields.find(f => f.value === fieldValue);
+          return !!field && fieldNarrowsFor(cloud, filters, field);
+        };
+        const hasAnyFilter = availableFields.some(f => fieldNarrows(f.value));
+        const selectedFieldNarrows = !!selectedFilterField && fieldNarrows(selectedFilterField);
 
         const clearAllFilters = () => {
-          setCloudFilters(new Map(cloudFilters).set(cloud.id, getDefaultFilters()));
+          setCloudFilters(new Map(cloudFilters).set(cloud.id, defaultFiltersFor(cloud)));
           if (selectedFilterField) {
             const field = availableFields.find(f => f.value === selectedFilterField);
             if (field) {
-              setPendingFilterMin(field.bounds.min.toFixed(4));
-              setPendingFilterMax(field.bounds.max.toFixed(4));
+              setPendingFilterMin(seedFilterInput(field.bounds.min, !!field.integer));
+              setPendingFilterMax(seedFilterInput(field.bounds.max, !!field.integer));
             }
           }
         };
@@ -20973,12 +21248,12 @@ export default function PointCloudViewer({
           setSelectedFilterField(fieldValue);
           const field = availableFields.find(f => f.value === fieldValue);
           const currentFilter = getFieldFilter(fieldValue);
-          if (currentFilter) {
-            setPendingFilterMin(currentFilter.min.toFixed(4));
-            setPendingFilterMax(currentFilter.max.toFixed(4));
+          if (currentFilter && field) {
+            setPendingFilterMin(seedFilterInput(currentFilter.min, !!field.integer));
+            setPendingFilterMax(seedFilterInput(currentFilter.max, !!field.integer));
           } else if (field) {
-            setPendingFilterMin(field.bounds.min.toFixed(4));
-            setPendingFilterMax(field.bounds.max.toFixed(4));
+            setPendingFilterMin(seedFilterInput(field.bounds.min, !!field.integer));
+            setPendingFilterMax(seedFilterInput(field.bounds.max, !!field.integer));
           }
           // For a categorical field with no committed filter yet, seed the filter
           // with all classes selected (a visible no-op) so unchecking a class
@@ -21010,11 +21285,10 @@ export default function PointCloudViewer({
           }
         };
 
-        // Get active filters list
-        const activeFilters = availableFields.filter(f => {
-          const filter = getFieldFilter(f.value);
-          return filter?.enabled;
-        });
+        // The summary list: only fields that actually remove points. A field
+        // left at its full extent used to appear here, which is what made a
+        // no-op filter look like a real one.
+        const activeFilters = availableFields.filter(f => fieldNarrows(f.value));
 
         // Get bounds for selected field
         const selectedField = availableFields.find(f => f.value === selectedFilterField);
@@ -21052,14 +21326,16 @@ export default function PointCloudViewer({
             availableFields={availableFields}
             selectedFilterField={selectedFilterField}
             selectedField={selectedField}
-            currentFilter={currentFilter}
             categoricalScheme={categoricalScheme}
             selectedClasses={selectedClasses}
             pendingFilterMin={pendingFilterMin}
             pendingFilterMax={pendingFilterMax}
             activeFilters={activeFilters}
-            hasAnyFilter={!!hasAnyFilter}
+            hasAnyFilter={hasAnyFilter}
+            selectedFieldNarrows={selectedFieldNarrows}
             getFieldFilter={getFieldFilter}
+            fieldNarrows={fieldNarrows}
+            targetCloudCount={filterTargetClouds.length}
             onClose={() => setShowFilterPanel(false)}
             onFieldChange={handleFieldChange}
             onCommitClasses={commitClasses}

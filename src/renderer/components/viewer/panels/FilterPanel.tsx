@@ -8,6 +8,7 @@ import {
   formatResolvedParams,
   type NoiseParamKey,
 } from '../../../lib/noiseFilter';
+import { formatFilterBound } from '../../../lib/filterFields';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { SelectAllHeader } from '../../SelectAllHeader';
 
@@ -15,6 +16,11 @@ interface FieldOption {
   value: string;
   label: string;
   bounds: { min: number; max: number };
+  // True for fields whose values are integer counters/indices (target_index,
+  // target_count, row/column_index). Drives whole-number range labels and a
+  // step=1 input — a fractional n-th return is meaningless. See
+  // `lib/filterFields.ts`; storage stays float32 either way.
+  integer?: boolean;
 }
 
 // A categorical class scheme (ground_class / tree_instance): one entry per class
@@ -26,23 +32,37 @@ interface CategoricalScheme {
 // Presentational point-filter panel. All filter state, the field-encoding logic,
 // and the commit/remove/segment handlers live in PointCloudViewer's wrapping IIFE
 // and are passed in as derived values + callbacks. Parent gates on
-// `showFilterPanel && firstSelectedCloud`.
+// `showFilterPanel && filterTargetClouds.length > 0`.
 interface FilterPanelProps {
   availableFields: FieldOption[];
   selectedFilterField: string | null;
-  // The currently-selected field's option + committed filter (if any).
+  // The currently-selected field's option.
   selectedField: FieldOption | undefined;
-  currentFilter: FilterRange | undefined;
   // Non-null when the selected field is categorical — drives the class-checkbox UI.
   categoricalScheme: CategoricalScheme | null;
   selectedClasses: number[];
   pendingFilterMin: string;
   pendingFilterMax: string;
-  // Fields that currently have an enabled filter (for the summary list).
+  // Fields whose filter actually NARROWS the cloud (see `isNarrowing`), for the
+  // summary list. A field left at its full extent is deliberately absent: it
+  // removes nothing, and listing it read as "a filter is being applied".
   activeFilters: FieldOption[];
   hasAnyFilter: boolean;
-  // Resolves a field value to its committed filter (used to label active fields).
+  // True when the SELECTED field alone narrows anything. Separate from
+  // `hasAnyFilter` so "Remove this filter" is offered per field rather than
+  // whenever any other field happens to be filtered.
+  selectedFieldNarrows: boolean;
+  // Resolves a field value to its committed filter (used to summarise it).
   getFieldFilter: (fieldValue: string) => FilterRange | undefined;
+  // True when this field's committed filter actually removes points. The
+  // dropdown's "(active)" marker reads from THIS, not from `enabled` — an
+  // enabled full-range filter marked every touched field active while removing
+  // nothing.
+  fieldNarrows: (fieldValue: string) => boolean;
+  // Number of clouds this panel will act on. >1 renders the multi-scan notice
+  // and pluralises the commit buttons; the fields shown are those COMMON to
+  // every selected cloud.
+  targetCloudCount: number;
   onClose: () => void;
   onFieldChange: (fieldValue: string) => void;
   onCommitClasses: (classes: number[]) => void;
@@ -81,14 +101,16 @@ export function FilterPanel({
   availableFields,
   selectedFilterField,
   selectedField,
-  currentFilter,
   categoricalScheme,
   selectedClasses,
   pendingFilterMin,
   pendingFilterMax,
   activeFilters,
   hasAnyFilter,
+  selectedFieldNarrows,
   getFieldFilter,
+  fieldNarrows,
+  targetCloudCount,
   onClose,
   onFieldChange,
   onCommitClasses,
@@ -129,6 +151,19 @@ export function FilterPanel({
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+
+      {/* Multi-scan notice. The commit buttons act on every selected scan, so
+          say so up front — and say that the field list is the INTERSECTION,
+          which explains why a field present on one scan may be missing here. */}
+      {targetCloudCount > 1 && (
+        <div
+          data-testid="filter-multi-scan-notice"
+          className="mb-3 text-[10px] text-neutral-300 bg-neutral-900/50 rounded px-2 py-1.5"
+        >
+          Filtering <span className="font-medium">{targetCloudCount} scans</span>. Fields
+          shown are those every selected scan has.
+        </div>
+      )}
 
       {/* Noise: classify stray/flyer points into a `noise_class` column. It is a
           section of THIS panel rather than its own tool because the removal is
@@ -272,7 +307,7 @@ export function FilterPanel({
           <option value="">Select a field...</option>
           {availableFields.map(f => (
             <option key={f.value} value={f.value}>
-              {f.label} {getFieldFilter(f.value)?.enabled ? '(active)' : ''}
+              {f.label} {fieldNarrows(f.value) ? '(active)' : ''}
             </option>
           ))}
         </select>
@@ -325,7 +360,7 @@ export function FilterPanel({
               );
             })}
           </div>
-          {currentFilter?.enabled && (
+          {selectedFieldNarrows && (
             <button
               onClick={onRemoveFilter}
               className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
@@ -341,7 +376,8 @@ export function FilterPanel({
       {selectedFilterField && selectedField && !categoricalScheme && (
         <div className="mb-3">
           <div className="text-[10px] text-neutral-500 mb-1">
-            Range: {selectedField.bounds.min.toFixed(2)} to {selectedField.bounds.max.toFixed(2)}
+            Range: {formatFilterBound(selectedField.bounds.min, !!selectedField.integer)} to{' '}
+            {formatFilterBound(selectedField.bounds.max, !!selectedField.integer)}
           </div>
           <div className="flex gap-2 mb-2">
             <div className="flex-1">
@@ -352,7 +388,7 @@ export function FilterPanel({
                 onWheel={(e) => e.currentTarget.blur()}
                 value={pendingFilterMin}
                 onChange={(e) => onPendingMinChange(e.target.value)}
-                step="any"
+                step={selectedField.integer ? 1 : 'any'}
                 className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
               />
             </div>
@@ -364,12 +400,12 @@ export function FilterPanel({
                 onWheel={(e) => e.currentTarget.blur()}
                 value={pendingFilterMax}
                 onChange={(e) => onPendingMaxChange(e.target.value)}
-                step="any"
+                step={selectedField.integer ? 1 : 'any'}
                 className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1.5 border border-neutral-600"
               />
             </div>
           </div>
-          {currentFilter?.enabled && (
+          {selectedFieldNarrows && (
             <button
               onClick={onRemoveFilter}
               className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded"
@@ -389,7 +425,7 @@ export function FilterPanel({
               const filter = getFieldFilter(f.value);
               const summary = filter?.selectedClasses
                 ? `classes ${filter.selectedClasses.join(', ') || '(none)'}`
-                : `${filter?.min.toFixed(2)} - ${filter?.max.toFixed(2)}`;
+                : `${formatFilterBound(filter?.min ?? 0, !!f.integer)} - ${formatFilterBound(filter?.max ?? 0, !!f.integer)}`;
               return (
                 <div key={f.value} className="text-[10px] text-neutral-300 bg-neutral-900/50 rounded px-2 py-1 flex justify-between items-center">
                   <span>{f.label}: {summary}</span>
@@ -400,13 +436,19 @@ export function FilterPanel({
         </div>
       )}
 
-      {/* Clear All button */}
+      {/* Reset the pending criteria. Deliberately NOT called "Clear All
+          Filters": the old label implied it could undo a committed filter,
+          which it never could — Filter (remove points) permanently deletes the
+          out-of-range points, and nothing in this panel brings them back. It
+          only resets the criteria set up above, so it says exactly that. */}
       {hasAnyFilter && (
         <button
+          data-testid="filter-reset-criteria"
           onClick={onClearAllFilters}
+          title="Resets the criteria above. Points already removed by Filter are gone for good."
           className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded mb-2"
         >
-          Clear All Filters
+          Reset Filter Criteria
         </button>
       )}
 
@@ -420,15 +462,26 @@ export function FilterPanel({
             disabled={isApplying}
             className="w-full px-2 py-1.5 text-xs bg-red-600 hover:bg-red-500 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-600"
           >
-            {isApplying ? 'Filtering…' : 'Filter (remove points)'}
+            {isApplying
+              ? 'Filtering…'
+              : targetCloudCount > 1
+                ? `Filter ${targetCloudCount} scans (remove points)`
+                : 'Filter (remove points)'}
           </button>
           <button
             data-testid="filter-segment"
             onClick={onSegmentFilter}
-            className="w-full px-2 py-1.5 text-xs bg-cyan-600 hover:bg-cyan-500 rounded text-white"
+            disabled={isApplying}
+            className="w-full px-2 py-1.5 text-xs bg-cyan-600 hover:bg-cyan-500 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-cyan-600"
           >
             Segment (split into two clouds)
           </button>
+          {/* Say plainly which button is destructive, so a user reaching for
+              Filter knows the points are not coming back. */}
+          <div className="text-[10px] text-neutral-500 leading-snug">
+            Filter deletes the out-of-range points permanently. Segment keeps
+            them as a second cloud.
+          </div>
         </div>
       )}
     </div>

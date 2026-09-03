@@ -416,6 +416,9 @@ To set a filter:
     - **Continuous fields** (intensity, height, deviation, …) show **min**
       and **max** inputs — points in the inclusive range are "in range".
       The range takes effect immediately.
+    - **Integer fields** (target index, target count, row/column index)
+      are counters, so their range reads as whole numbers and the inputs
+      step by 1.
     - **Class fields** — `ground_class` (from
       [Segment ground](segment-ground.md)) and `tree_instance` (from
       [Segment trees](segment-trees.md)) — are categorical, so instead of
@@ -427,18 +430,35 @@ To set a filter:
 3. Repeat for other fields to stack filters — they compose with **AND**,
    so only points passing every active filter are "in range".
 
+A field only counts as filtered once it actually excludes something. Leave
+a field at its full range — or tick every class — and it stays out of the
+**Active Filters** list, loses its *(active)* marker in the dropdown, and
+contributes nothing to the commit. So if the commit buttons are showing,
+at least one field really will remove points.
+
 Then choose how to commit (there is no separate Apply step):
 
-- **Filter (remove points)** — deletes the out-of-range points, keeping
-  only the in-range ones.
+- **Filter (remove points)** — **permanently deletes** the out-of-range
+  points, keeping only the in-range ones. This cannot be undone, and
+  nothing in the panel brings the points back — **Reset Filter Criteria**
+  only clears the criteria you set up above. Use **Segment** instead if you
+  might want the excluded points later.
 - **Segment (split into two clouds)** — keeps the in-range points on the
   original cloud and adds the out-of-range points as a **second cloud**
   (`<name> (filtered out)`). Nothing is discarded; the two clouds
   together equal the original. Handy for separating, say, a canopy from
   the rest by height without losing the rest.
 
-Use <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> to undo. If a filter excludes every
-point, you're offered the chance to delete the cloud instead.
+If a filter excludes every point, you're offered the chance to delete the
+cloud instead.
+
+!!! tip "Filtering several scans at once"
+    Select more than one scan and both commits act on **all of them**. The
+    panel says how many scans it will filter, and the field list narrows to
+    the fields **every** selected scan has — so a criterion you set can never
+    quietly apply to only some of them. The criteria you enter for the first
+    scan are reused for the rest; a scan the criteria wouldn't change is
+    skipped rather than needlessly rebuilt.
 
 !!! info "Small vs large clouds"
     Small (in-memory) clouds preview the filter live in the viewport as you
@@ -507,6 +527,16 @@ chose, so you can see whether the number is sensible for your scan. Untick
 it to set them yourself — for *Isolated points*, the radius is a real
 distance you can compare against your scan resolution ("my twigs have
 returns every centimetre, so 5 cm is generous").
+
+!!! tip "Auto parameters cost a pass over the cloud"
+    Deriving the settings means measuring the cloud's point spacing, which is
+    the same neighbour search *Isolated points* and *Statistical (SOR)* do
+    anyway — so for those two it's effectively free. For **Sparse voxels** it
+    isn't: that method is the fast one precisely because it does no neighbour
+    search, and auto-sizing its grid puts one back. On a very large cloud —
+    the case you reached for *Sparse voxels* to handle — untick **Auto
+    parameters** and type a cell size, and the run skips the measurement
+    entirely.
 
 If a run flags more than 20% of the cloud the result box turns red and
 **Filter (remove points)** asks for confirmation first, since real scanner
