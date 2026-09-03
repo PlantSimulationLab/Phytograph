@@ -4,6 +4,7 @@ import {
   NOISE_PARAM_FIELDS,
   buildNoiseParams,
   formatFlaggedSummary,
+  formatMultiScanSummary,
   formatResolvedParams,
   noiseRemovalNeedsConfirmation,
   noiseRemovalConfirmMessage,
@@ -70,6 +71,31 @@ describe('formatFlaggedSummary', () => {
     expect(formatFlaggedSummary({ flagged: 5, fraction: 0.00001 }))
       .toBe('5 points (<0.01%) flagged');
     expect(formatFlaggedSummary({ flagged: 0, fraction: 0 })).toBe('0 points (0.00%) flagged');
+  });
+});
+
+describe('formatMultiScanSummary', () => {
+  it('pools the counts and says how many scans they came from', () => {
+    expect(formatMultiScanSummary([
+      { flagged: 25, kept: 3518 },
+      { flagged: 9, kept: 3518 },
+    ])).toBe('34 points (0.48%) flagged across 2 scans');
+  });
+
+  it('weighs the pooled total, not the mean of the per-scan shares', () => {
+    // A tiny scan that was half noise must not drag a huge clean scan's
+    // headline up to ~25% (the mean of 50% and 0%): pooled, it is 50 of
+    // 1,000,100 points.
+    const summary = formatMultiScanSummary([
+      { flagged: 50, kept: 50 },
+      { flagged: 0, kept: 1_000_000 },
+    ]);
+    expect(summary).toBe('50 points (<0.01%) flagged across 2 scans');
+  });
+
+  it('singularises a one-scan run', () => {
+    expect(formatMultiScanSummary([{ flagged: 1, kept: 99 }]))
+      .toBe('1 point (1.00%) flagged across 1 scan');
   });
 });
 

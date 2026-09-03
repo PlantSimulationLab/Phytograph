@@ -15,8 +15,15 @@ three noise methods:
 
 Deterministic: no RNG, everything on a fixed lattice.
 
-Run as a script to (re)generate the E2E fixture:
+Run as a script to (re)generate the E2E fixtures:
     python -m tests.noisy_tree_fixture ../tests/e2e/fixtures/noisy-tree.xyz
+    python -m tests.noisy_tree_fixture ../tests/e2e/fixtures/noisy-tree-b.xyz \
+        --flyer-grid 3 --offset-x 5.0
+
+The second one is the multi-scan companion: the SAME tree (so the methods behave
+identically on it) with a different flyer count, moved clear in X. The counts are
+what make a multi-scan E2E meaningful — with two identical scans, a detection
+that ran on only one of them is indistinguishable from one that ran on both.
 """
 
 from __future__ import annotations
@@ -36,9 +43,17 @@ CLUMP_POINTS = 8
 CLUMP_RADIUS = 0.02
 
 
-def build_noisy_tree() -> tuple[np.ndarray, dict[str, np.ndarray]]:
+def build_noisy_tree(
+    flyer_grid: int = 5,
+    offset_x: float = 0.0,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Return ``(points (N,3), groups)`` where `groups` maps each population name
-    to the row indices it occupies. Row order is trunk, twigs, flyers, clump."""
+    to the row indices it occupies. Row order is trunk, twigs, flyers, clump.
+
+    ``flyer_grid`` is the side of the isolated-flyer lattice (5 -> the default 25
+    flyers); ``offset_x`` shifts the whole cloud, for fixtures that must sit
+    beside another without overlapping. Both default to the original fixture, so
+    every existing caller and the committed noisy-tree.xyz are unchanged."""
     parts: list[np.ndarray] = []
 
     # --- trunk: dense cylinder shell -----------------------------------------
@@ -69,12 +84,12 @@ def build_noisy_tree() -> tuple[np.ndarray, dict[str, np.ndarray]]:
     parts.append(twigs)
 
     # --- flyers: isolated, on a coarse lattice well clear of the tree ---------
-    # 5x5 grid at 1.5 m pitch, lifted above the canopy so nothing is near it.
-    gx, gy = np.meshgrid(np.arange(5) * 1.5 - 3.0, np.arange(5) * 1.5 - 3.0,
-                         indexing="ij")
+    # NxN grid at 1.5 m pitch, lifted above the canopy so nothing is near it.
+    span = np.arange(flyer_grid) * 1.5 - 3.0
+    gx, gy = np.meshgrid(span, span, indexing="ij")
     flyers = np.column_stack([gx.ravel(), gy.ravel(),
                               np.full(gx.size, 4.0) + np.arange(gx.size) * 0.03])
-    assert len(flyers) == N_FLYERS
+    assert len(flyers) == flyer_grid ** 2
     parts.append(flyers)
 
     # --- clump: self-supporting noise -----------------------------------------
@@ -87,6 +102,7 @@ def build_noisy_tree() -> tuple[np.ndarray, dict[str, np.ndarray]]:
     parts.append(clump)
 
     points = np.vstack(parts)
+    points[:, 0] += offset_x
     sizes = [len(p) for p in parts]
     bounds = np.cumsum([0] + sizes)
     groups = {
@@ -99,8 +115,14 @@ def build_noisy_tree() -> tuple[np.ndarray, dict[str, np.ndarray]]:
 if __name__ == "__main__":
     import sys
 
-    pts, grp = build_noisy_tree()
-    out = sys.argv[1] if len(sys.argv) > 1 else "noisy-tree.xyz"
+    argv = sys.argv[1:]
+    out = argv[0] if argv and not argv[0].startswith("--") else "noisy-tree.xyz"
+    def _opt(name: str, default: float) -> float:
+        return float(argv[argv.index(name) + 1]) if name in argv else default
+    pts, grp = build_noisy_tree(
+        flyer_grid=int(_opt("--flyer-grid", 5)),
+        offset_x=_opt("--offset-x", 0.0),
+    )
     # Bare column header only — no comment lines. The import wizard parses the
     # first row as column names, and the composition is documented HERE rather
     # than in a header the parser would have to special-case.

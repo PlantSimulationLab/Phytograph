@@ -61,6 +61,19 @@ def test_ror_flags_exactly_the_isolated_flyers(tree):
         "trunk": 0, "twigs": 0, "flyers": 25, "clump": 0}
 
 
+def test_the_multi_scan_companion_fixture_flags_only_its_own_flyers():
+    """tests/e2e/fixtures/noisy-tree-b.xyz — the same tree with 9 flyers instead
+    of 25, offset in X. The multi-scan E2E tells the two scans apart by exactly
+    these counts, so if this drifts that test starts asserting nothing."""
+    points, groups = build_noisy_tree(flyer_grid=3, offset_x=5.0)
+    assert len(points) == 3527
+    assert points[:, 0].min() > 1.0          # genuinely moved clear of scan A
+    keep, stats = denoise_mask(points, "ror")
+    assert stats["flagged"] == 9
+    assert flagged_per_group(keep, groups) == {
+        "trunk": 0, "twigs": 0, "flyers": 9, "clump": 0}
+
+
 def test_sor_also_catches_the_self_supporting_clump(tree):
     """SOR's one genuine advantage: the 8-point clump is dense enough to satisfy
     a radius rule but its k-th neighbour is still metres away."""

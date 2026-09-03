@@ -86,6 +86,11 @@ interface FilterPanelProps {
   noiseAutoParams: boolean;
   noiseParams: NoiseParams;
   noiseBusy: boolean;
+  // Which scan of a multi-scan run is being classified. null on a single scan.
+  noiseProgress: string | null;
+  // The PRIMARY scan's result only — Detect runs over the whole selection, so
+  // the run total lives in the toast and this box stays about the scan whose
+  // criteria the panel is editing.
   noiseResult: DenoiseStats | null;
   noiseError: string | null;
   onToggleNoiseExpanded: () => void;
@@ -126,6 +131,7 @@ export function FilterPanel({
   noiseAutoParams,
   noiseParams,
   noiseBusy,
+  noiseProgress,
   noiseResult,
   noiseError,
   onToggleNoiseExpanded,
@@ -237,21 +243,35 @@ export function FilterPanel({
             ))}
 
             {noiseBusy ? (
-              <button
-                data-testid="filter-noise-cancel"
-                onClick={onCancelDetectNoise}
-                className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded flex items-center justify-center gap-2"
-              >
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Cancel
-              </button>
+              <div className="space-y-1">
+                <button
+                  data-testid="filter-noise-cancel"
+                  onClick={onCancelDetectNoise}
+                  className="w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded flex items-center justify-center gap-2"
+                >
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Cancel
+                </button>
+                {noiseProgress && (
+                  <div
+                    data-testid="filter-noise-progress"
+                    className="text-[10px] text-neutral-400 text-center truncate"
+                  >
+                    {noiseProgress}
+                  </div>
+                )}
+              </div>
             ) : (
               <button
                 data-testid="filter-noise-detect"
                 onClick={onDetectNoise}
                 className="w-full px-2 py-1.5 text-xs bg-neutral-600 hover:bg-neutral-500 rounded text-white"
               >
-                Detect noise
+                {/* Say the scan count, like the commit buttons below: Detect
+                    acts on the whole selection, and silently classifying five
+                    scans when the panel shows one scan's numbers would be a
+                    surprise. */}
+                {targetCloudCount > 1 ? `Detect noise in ${targetCloudCount} scans` : 'Detect noise'}
               </button>
             )}
 

@@ -104,6 +104,22 @@ export function formatFlaggedSummary(stats: Pick<DenoiseStats, 'flagged' | 'frac
     + `(${pctText}) flagged`;
 }
 
+/** "1,204 points (0.85%) flagged across 4 scans" — the run-level headline for a
+ * multi-scan detection. The panel's result box only ever shows the PRIMARY
+ * scan's numbers (it edits one cloud's criteria), so without this the user gets
+ * no evidence that the other selected scans were touched at all.
+ *
+ * The percentage is over the pooled point total, not the mean of the per-scan
+ * percentages: a 200-point scan and a 20 M-point scan must not weigh the same. */
+export function formatMultiScanSummary(
+  perScan: Pick<DenoiseStats, 'flagged' | 'kept'>[],
+): string {
+  const flagged = perScan.reduce((sum, s) => sum + s.flagged, 0);
+  const total = perScan.reduce((sum, s) => sum + s.flagged + s.kept, 0);
+  const summary = formatFlaggedSummary({ flagged, fraction: total > 0 ? flagged / total : 0 });
+  return `${summary} across ${perScan.length} scan${perScan.length === 1 ? '' : 's'}`;
+}
+
 /** "radius 0.048 m · 3.1 s" — what auto actually resolved, so the run is
  * reproducible and the user can see whether the number is sane for their scan. */
 export function formatResolvedParams(stats: Pick<DenoiseStats, 'params_used' | 'elapsed_s'>): string {

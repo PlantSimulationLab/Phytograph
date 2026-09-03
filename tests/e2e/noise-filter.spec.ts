@@ -6,6 +6,9 @@ import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'noisy-tree.xyz');
+// The same tree, 5 m clear in X, with 9 flyers instead of 25 — so a two-scan
+// detection's per-scan results can be told apart (see the multi-scan test).
+const FIXTURE_B = join(repoRoot, 'tests', 'e2e', 'fixtures', 'noisy-tree-b.xyz');
 
 /**
  * The Filter panel's Noise section: classify stray points, review them, remove
@@ -33,6 +36,8 @@ const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'noisy-tree.xyz');
 
 const TOTAL = 3543;
 const FLYERS = 25;
+const TOTAL_B = 3527;
+const FLYERS_B = 9;
 
 let session: LaunchedApp;
 test.beforeAll(async () => {
@@ -130,6 +135,63 @@ test('removing the flagged points takes exactly those points, and is stable', as
   await openNoiseSection();
   await expect(page.getByTestId('filter-noise-result')).toBeHidden();
   expect((await detect()).flagged).toBe(0);
+});
+
+test('detects noise on every selected scan, not just the first', async () => {
+  // Regression: handleDetectNoise began `if (selectedIds.size !== 1) return`
+  // while the panel rendered for the primary selection, so with two scans
+  // selected the Detect button did nothing at all — no result, no error, no
+  // toast. The Filter/Segment commits had already been fixed for exactly this;
+  // the Noise section landed on a parallel branch and kept the guard.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
+  await completeImportWizard(page);
+
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree.xyz"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree-b.xyz"]');
+  await expect(rowA).toBeVisible({ timeout: 20_000 });
+  await expect(rowB).toBeVisible({ timeout: 20_000 });
+  expect(parseInt((await rowA.getAttribute('data-point-count')) ?? '0', 10)).toBe(TOTAL);
+  expect(parseInt((await rowB.getAttribute('data-point-count')) ?? '0', 10)).toBe(TOTAL_B);
+
+  // The second import is auto-selected; ctrl/cmd-click adds the first, exactly
+  // as a user builds a multi-scan selection.
+  await rowA.click({ modifiers: ['ControlOrMeta'] });
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(rowB).toHaveAttribute('data-selected', 'true');
+
+  await openNoiseSection();
+  // The button says what it will act on, like the commit buttons below it.
+  await expect(page.getByTestId('filter-noise-detect')).toContainText('2 scans');
+  await detect();
+
+  // Each scan carries its OWN detection, not a copy of the primary's. Selecting
+  // one alone re-renders the result box against that cloud's stats, and the two
+  // fixtures differ in flyer count precisely so this can tell them apart.
+  await rowA.click();
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(rowB).toHaveAttribute('data-selected', 'false');
+  await expect(page.getByTestId('filter-noise-result'))
+    .toHaveAttribute('data-flagged', String(FLYERS));
+
+  await rowB.click();
+  await expect(page.getByTestId('filter-noise-result'))
+    .toHaveAttribute('data-flagged', String(FLYERS_B));
+
+  // And the arming is real on both: re-select the pair and Remove, which is the
+  // panel's own button acting through the noise_class criterion Detect set.
+  // Each scan loses exactly its own flyers — nothing else, and nothing from the
+  // scan that was not the primary.
+  await rowA.click({ modifiers: ['ControlOrMeta'] });
+  await expect(page.getByTestId('filter-field-select')).toHaveValue('scalar:noise_class');
+  await page.getByTestId('filter-remove').click();
+  await expect(async () => {
+    const a = parseInt((await rowA.getAttribute('data-point-count')) ?? '0', 10);
+    const b = parseInt((await rowB.getAttribute('data-point-count')) ?? '0', 10);
+    expect({ a, b }).toEqual({ a: TOTAL - FLYERS, b: TOTAL_B - FLYERS_B });
+  }).toPass({ timeout: 60_000 });
 });
 
 test('segmenting splits the noise into its own cloud, losing nothing', async () => {

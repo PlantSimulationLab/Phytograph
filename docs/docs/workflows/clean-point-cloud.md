@@ -498,6 +498,19 @@ It works in two steps, and the first one deletes nothing:
 Detect only writes a label, so re-running it with different settings simply
 overwrites the previous result — there's nothing to undo.
 
+!!! tip "Detecting noise on several scans at once"
+    Like the commit buttons, **Detect noise** acts on **every selected scan** —
+    the button says how many, and each scan gets its own `noise_class` column.
+    In **Auto** mode the parameters are derived from each scan's own point
+    spacing, so scans of differing density are each judged on their own terms.
+    The scans are done one after another, with the current one named beneath
+    the **Cancel** button; cancelling stops the whole run and keeps the results
+    of the scans already finished. The result box reports the **first** selected
+    scan's numbers (it is the scan whose criteria the panel edits) while the
+    notification carries the total across the selection — click a single scan to
+    see its own figures. If one scan fails the rest still run, and the failure
+    names the scan.
+
 #### Choosing a method
 
 | Method | What it flags | Use it when |

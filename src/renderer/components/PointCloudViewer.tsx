@@ -149,7 +149,6 @@ import {
   extractReuseMeshPayload,
   collectHitPoints,
   collectHitPointsCapped,
-  defaultCloudFilters,
   extentForParameterSeeding,
   eraseDiagonal,
   pointPassesFilters,
@@ -171,7 +170,7 @@ import {
   type LegendEntry,
 } from '../lib/colorChannel';
 import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE } from '../lib/classification';
-import { buildNoiseParams, formatFlaggedSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
+import { buildNoiseParams, formatFlaggedSummary, formatMultiScanSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { denoisePoints, sessionDenoise, type DenoiseStats, type NoiseMethod, type NoiseParams } from '../utils/backendApi';
 import { CURATED_BARK_TEXTURES, getBarkTextures, getBarkTexture } from '../utils/backendApi';
@@ -879,6 +878,9 @@ export default function PointCloudViewer({
   const [noiseAutoParams, setNoiseAutoParams] = useState(true);
   const [noiseParams, setNoiseParams] = useState<NoiseParams>({});
   const [noiseBusy, setNoiseBusy] = useState(false);
+  // "Detecting noise — scan-3.laz (2/4)…" while a multi-scan run walks the
+  // selection. null for a single scan, where the spinner alone says everything.
+  const [noiseProgress, setNoiseProgress] = useState<string | null>(null);
   const [noiseError, setNoiseError] = useState<string | null>(null);
   // Keyed by cloud id: a detection belongs to the cloud it ran on, so selecting
   // a different cloud must not show its neighbour's result.
@@ -5405,6 +5407,18 @@ export default function PointCloudViewer({
     for (const f of fields) f.integer = isIntegerFilterField(f.value);
     return fields;
   }, []);
+
+  // Every selected cloud, in selection order. The Filter tool acts on ALL of
+  // them (like Crop does) rather than on `firstSelectedCloud` alone: the panel
+  // used to render for the first selection while the commit handlers bailed on
+  // `selectedIds.size !== 1`, so with two scans selected the buttons were
+  // silently dead. Declared up here rather than beside the other selection
+  // memos because handleDetectNoise — far above them — reads it too.
+  const filterTargetClouds = useMemo(() => {
+    return Array.from(selectedIds)
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c);
+  }, [selectedIds, clouds]);
 
   // A cloud's filters with every field present at its full extent and disabled.
   // Used to seed the panel and to give a sibling scan (never opened in the
@@ -10569,7 +10583,7 @@ export default function PointCloudViewer({
   // into scalarFields directly. Optionally splits into ground/plant clouds: for
   // session clouds via sessionExtract (parent untouched), for flat clouds in
   // memory.
-  // Detect noise on the selected cloud: classify every point into a
+  // Detect noise on EVERY selected cloud: classify every point into a
   // `noise_class` column (1 = clean, 2 = noise), colour by it, and pre-select it
   // in the field dropdown with only "Clean" kept.
   //
@@ -10580,26 +10594,41 @@ export default function PointCloudViewer({
   //
   // Nothing is deleted here, so a bad parameter choice costs a re-run, not data.
   const handleDetectNoise = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    if (!cloud) return;
+    // Re-entry guard, matching handleApplyFilterPermanently: a multi-scan run
+    // takes long enough that the button reads as unresponsive, and a second
+    // click would race two detections onto the same session.
+    if (noiseBusy) return;
+    // EVERY selected scan, not just the primary. This used to bail on
+    // `selectedIds.size !== 1` while the panel still rendered for the first
+    // selection, so with two scans selected the button was silently dead —
+    // the same shape the Filter/Segment commits were fixed for, and the noise
+    // section was missed because it landed on a parallel branch.
+    const targets = filterTargetClouds;
+    if (targets.length === 0) return;
 
     const params = buildNoiseParams(noiseMethod, noiseAutoParams, noiseParams);
     setNoiseBusy(true);
     setNoiseError(null);
+    // One AbortController for the whole run, like the filter commit: Cancel
+    // stops the LOOP, not merely the in-flight scan.
     const abort = new AbortController();
     noiseAbortRef.current = abort;
 
-    // Shared by both branches: show the result, paint the cloud by noise_class,
-    // and arm Remove/Segment with "keep Clean".
-    const armFilter = (stats: DenoiseStats) => {
+    // Paint one cloud by noise_class and arm Remove/Segment on it with
+    // "keep Clean". Per cloud, because every selected scan gets its own
+    // `noise_class` criterion — the commit projects the primary's criteria
+    // onto the siblings by field value, so each needs the column and the
+    // detection result of its own.
+    const armFilter = (cloud: PointCloudEntry, stats: DenoiseStats) => {
+      const id = cloud.id;
       setNoiseResults(prev => new Map(prev).set(id, stats));
       setCloudColorMode(id, { mode: 'scalar', field: NOISE_CLASS_ATTRIBUTE });
-      setSelectedFilterField(`scalar:${NOISE_CLASS_ATTRIBUTE}`);
       setCloudFilters(prev => {
         const next = new Map(prev);
-        const existing = next.get(id) ?? defaultCloudFilters(cloud.data);
+        // A sibling may never have been opened in the panel. `defaultFiltersFor`
+        // (not `defaultCloudFilters`) because it reads an octree cloud's fields
+        // from its meta, where `data.scalarFields` is empty.
+        const existing = next.get(id) ?? defaultFiltersFor(cloud);
         next.set(id, {
           ...existing,
           scalarFields: {
@@ -10612,20 +10641,11 @@ export default function PointCloudViewer({
         });
         return next;
       });
-      // Auto mode fills the (greyed) inputs with what the backend resolved, so
-      // the user can see the numbers and switch to manual from there rather
-      // than starting blank.
-      if (noiseAutoParams && stats.params_used) {
-        setNoiseParams(prev => ({ ...prev, ...stats.params_used }));
-      }
-      showToast({
-        type: stats.over_removal ? 'warning' : 'success',
-        title: stats.over_removal ? 'Noise detection — check before removing' : 'Noise Detected',
-        message: `${formatFlaggedSummary(stats)}. Flagged points are shown in red.`,
-      });
     };
 
-    try {
+    // Classify ONE cloud and write the column onto it. Returns the stats; the
+    // caller owns the UI arming so a failure on one scan can't half-arm it.
+    const detectOne = async (cloud: PointCloudEntry): Promise<DenoiseStats> => {
       const ps = await buildPointSource(cloud);
 
       // --- Session-backed octree cloud: classify on the in-RAM array, append
@@ -10639,9 +10659,8 @@ export default function PointCloudViewer({
         }
         const meta = await sessionDenoise(octreeInfo.sessionId, params, abort.signal);
         // No `{diverged: true}` — classifying is not a destructive edit.
-        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, cloud.data.fileName ?? id));
-        armFilter(meta);
-        return;
+        onUpdateCloud(cloud.id, buildSessionOctreeData(meta, octreeInfo, cloud.data.fileName ?? cloud.id));
+        return meta;
       }
 
       // --- Flat cloud: classify in memory, write the scalar field. ---
@@ -10674,46 +10693,119 @@ export default function PointCloudViewer({
       // ever sweep it into a noise cloud and cost this cloud its Beer's-law
       // transmission denominator for LAD.
       const labels = scatterToFullLength(response.labels, hitIndices, count, NOISE_CLEAN);
-      onUpdateCloud(id, {
+      onUpdateCloud(cloud.id, {
         ...displayData,
         scalarFields: {
           ...(displayData.scalarFields ?? {}),
           [NOISE_CLASS_ATTRIBUTE]: { values: labels, min: NOISE_CLEAN, max: NOISE_NOISE },
         },
       });
-      armFilter(response);
-    } catch (err) {
-      if ((err as Error)?.name === 'AbortError') return;   // user cancelled
-      const message = err instanceof Error ? err.message : String(err);
-      console.error('[handleDetectNoise] failed:', err);
-      setNoiseError(message);
-      showToast({ type: 'error', title: 'Noise detection failed', message });
+      return response;
+    };
+
+    // Serial, not parallel: each detection is a whole-cloud KD-tree pass, and
+    // the backend threadpool is shared with the rest of the app.
+    const succeeded: DenoiseStats[] = [];
+    const failures: string[] = [];
+    let primaryStats: DenoiseStats | null = null;
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        if (abort.signal.aborted) break;
+        // Re-read through the ref: an earlier iteration's onUpdateCloud has
+        // committed by now, so the closure-captured entry can carry stale data
+        // (and, for octree clouds, meta whose arrays have already moved on).
+        const cloud = cloudsRef.current.find(c => c.id === targets[i].id) ?? targets[i];
+        const name = cloud.data.fileName || 'cloud';
+        setNoiseProgress(targets.length > 1
+          ? `Detecting noise — ${name} (${i + 1}/${targets.length})…`
+          : null);
+        try {
+          const stats = await detectOne(cloud);
+          armFilter(cloud, stats);
+          succeeded.push(stats);
+          if (i === 0) primaryStats = stats;
+        } catch (err) {
+          // A user cancel is not a failure, and it ends the run.
+          if (abort.signal.aborted || (err as Error)?.name === 'AbortError') break;
+          // One scan failing must not abandon the rest of the selection.
+          console.error(`[handleDetectNoise] failed for ${name}:`, err);
+          failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     } finally {
       setNoiseBusy(false);
+      setNoiseProgress(null);
       noiseAbortRef.current = null;
     }
-  }, [selectedIds, clouds, noiseMethod, noiseAutoParams, noiseParams,
-      buildPointSource, onUpdateCloud, setCloudColorMode]);
 
-  // Drop the detection for a cloud: clears the result box, the noise_class
-  // filter and the noise colouring. The `noise_class` COLUMN stays on the cloud
-  // (harmless, and re-running overwrites it) — this only undoes the UI arming.
-  const clearNoiseDetection = useCallback((cloudId: string) => {
+    if (succeeded.length > 0) {
+      // Panel state, not per-cloud state: one field dropdown and one parameter
+      // set serve the whole selection.
+      setSelectedFilterField(`scalar:${NOISE_CLASS_ATTRIBUTE}`);
+      // Auto mode fills the (greyed) inputs with what the backend resolved, so
+      // the user can see the numbers and switch to manual from there rather
+      // than starting blank. The PRIMARY's numbers: they are the ones the
+      // result box below is reporting, and a sibling's would contradict it.
+      const resolved = (primaryStats ?? succeeded[0]).params_used;
+      if (noiseAutoParams && resolved) {
+        setNoiseParams(prev => ({ ...prev, ...resolved }));
+      }
+      const overRemoval = succeeded.some(s => s.over_removal);
+      // Across several scans the result box shows only the primary's numbers,
+      // so the toast carries the run total — otherwise a user who detects on
+      // six scans sees evidence for one.
+      const headline = succeeded.length > 1
+        ? formatMultiScanSummary(succeeded)
+        : formatFlaggedSummary(succeeded[0]);
+      showToast({
+        type: overRemoval ? 'warning' : 'success',
+        title: overRemoval ? 'Noise detection — check before removing' : 'Noise Detected',
+        message: `${headline}. Flagged points are shown in red.`,
+      });
+    }
+
+    if (failures.length > 0) {
+      const message = failures.join('; ');
+      setNoiseError(message);
+      showToast({
+        type: 'error',
+        title: failures.length === 1
+          ? 'Noise detection failed'
+          : `Noise detection failed on ${failures.length} scans`,
+        message,
+      });
+    }
+  }, [filterTargetClouds, noiseBusy, noiseMethod, noiseAutoParams, noiseParams,
+      buildPointSource, onUpdateCloud, setCloudColorMode, defaultFiltersFor]);
+
+  // Drop the detection for the given clouds: clears the result box, the
+  // noise_class filter and the noise colouring. The `noise_class` COLUMN stays
+  // on each cloud (harmless, and re-running overwrites it) — this only undoes
+  // the UI arming.
+  //
+  // Takes a LIST because Detect now arms the whole selection: clearing only the
+  // primary would leave the siblings coloured red and still armed, so the next
+  // Remove would take points the panel no longer showed a reason for.
+  const clearNoiseDetection = useCallback((cloudIds: string[]) => {
     setNoiseResults(prev => {
       const next = new Map(prev);
-      next.delete(cloudId);
+      for (const id of cloudIds) next.delete(id);
       return next;
     });
     setNoiseError(null);
     setCloudFilters(prev => {
-      const existing = prev.get(cloudId);
-      if (!existing?.scalarFields[NOISE_CLASS_ATTRIBUTE]) return prev;
-      const { [NOISE_CLASS_ATTRIBUTE]: _dropped, ...rest } = existing.scalarFields;
-      return new Map(prev).set(cloudId, { ...existing, scalarFields: rest });
+      let next: Map<string, CloudFilters> | null = null;
+      for (const id of cloudIds) {
+        const existing = (next ?? prev).get(id);
+        if (!existing?.scalarFields[NOISE_CLASS_ATTRIBUTE]) continue;
+        const { [NOISE_CLASS_ATTRIBUTE]: _dropped, ...rest } = existing.scalarFields;
+        next = (next ?? new Map(prev)).set(id, { ...existing, scalarFields: rest });
+      }
+      return next ?? prev;
     });
     setSelectedFilterField(prev =>
       prev === `scalar:${NOISE_CLASS_ATTRIBUTE}` ? null : prev);
-    setCloudColorMode(cloudId, { mode: 'height' });
+    for (const id of cloudIds) setCloudColorMode(id, { mode: 'height' });
   }, [setCloudColorMode]);
 
   const handleGroundSegment = useCallback(async () => {
@@ -17157,17 +17249,6 @@ export default function PointCloudViewer({
     return clouds.find(c => c.id === id);
   }, [selectedIds, clouds]);
 
-  // Every selected cloud, in selection order. The Filter tool acts on ALL of
-  // them (like Crop does) rather than on `firstSelectedCloud` alone: the panel
-  // used to render for the first selection while the commit handlers bailed on
-  // `selectedIds.size !== 1`, so with two scans selected the buttons were
-  // silently dead.
-  const filterTargetClouds = useMemo(() => {
-    return Array.from(selectedIds)
-      .map(id => clouds.find(c => c.id === id))
-      .filter((c): c is PointCloudEntry => !!c);
-  }, [selectedIds, clouds]);
-
   // Auto-size the erase brush to the selected cloud. The brush radius is a
   // world-space value, so a fixed default (e.g. 0.1m) is invisible on a
   // meter-to-tens-of-meters scan and far too big on a centimeter-scale one.
@@ -21353,6 +21434,7 @@ export default function PointCloudViewer({
             noiseAutoParams={noiseAutoParams}
             noiseParams={noiseParams}
             noiseBusy={noiseBusy}
+            noiseProgress={noiseProgress}
             noiseResult={noiseResults.get(cloud.id) ?? null}
             noiseError={noiseError}
             onToggleNoiseExpanded={() => setNoiseExpanded(v => !v)}
@@ -21368,7 +21450,7 @@ export default function PointCloudViewer({
             onNoiseParamChange={(key, value) => setNoiseParams(prev => ({ ...prev, [key]: value }))}
             onDetectNoise={handleDetectNoise}
             onCancelDetectNoise={() => noiseAbortRef.current?.abort()}
-            onClearNoise={() => clearNoiseDetection(cloud.id)}
+            onClearNoise={() => clearNoiseDetection(filterTargetClouds.map(c => c.id))}
           />
         );
       })()}
