@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
+import { OctreeRefreshQueue, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
@@ -95,6 +96,7 @@ import {
   projectWorldToCanvasPixel,
   worldBoundsUnion,
   polygonRegionFromCamera,
+  type CropMaskRule,
 } from '../lib/cropGeometry';
 import { projectionKindOf } from '../lib/cameraRay';
 import {
@@ -119,7 +121,8 @@ import { LabelPanel } from './viewer/panels/LabelPanel';
 import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
-import { pendingDeletesToClipBoxes } from '../lib/deletePreview';
+import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules } from '../lib/deletePreview';
+import { stepCounter, stepReporter } from '../lib/stepProgress';
 import {
   computeBoundsFromPositions,
   fitGridToBounds,
@@ -1832,16 +1835,19 @@ export default function PointCloudViewer({
   // 'none' and drives the "Cropping…" badge.
   const [isApplyingCrop, setIsApplyingCrop] = useState(false);
   // Per-scan crop progress. The loop is deliberately SERIAL (each iteration
-  // needs the previous one's buffers collected), and one octree re-conversion is
-  // ~15-20 s, so cropping a multi-scan selection is a minutes-long job that used
-  // to sit behind an unchanging "Cropping…". Null on a single-cloud crop, where
-  // the bare label is already accurate.
+  // needs the previous one's buffers collected). A session-backed crop is now a
+  // mask set on the backend arrays — milliseconds — so the pill mostly flashes
+  // past; the flat in-renderer path and the retain/segment paths (which build a
+  // child octree) still take real time. Null on a single-cloud crop, where the
+  // bare label is already accurate.
   const [cropProgress, setCropProgress] =
     useState<{ label: string; value: number | null } | null>(null);
-  // Set per iteration by the crop loop, read by processOne's bake call (which is
-  // defined above the loop). A ref, not a closure, so each scan's octree rebuild
-  // reports into its own slice of the bar.
-  const cropBakeProgressRef = useRef<((fraction: number) => void) | null>(null);
+  // One AbortController for the WHOLE apply, not per scan: cancelling a 6-scan
+  // crop must stop the loop rather than only the in-flight cloud. `cropRunIdRef`
+  // carries the backend run id so Cancel can hard-kill a streaming stage instead
+  // of merely detaching the fetch. Mirrors filterAbortRef/filterRunIdRef.
+  const cropAbortRef = useRef<AbortController | null>(null);
+  const cropRunIdRef = useRef<string | null>(null);
   // Synthetic LiDAR scan state
   const [isScanning, setIsScanning] = useState(false);
   // Per-stage progress for the synthetic scan (mirrors triProgress/ladProgress).
@@ -2012,19 +2018,6 @@ export default function PointCloudViewer({
   // in the scene store. Reads keep `.get(id)`; writes keep `setEditStates(prev => ...)`.
   const editStates = scene.state.editStates;
   const setEditStates = useMemo(() => makeFieldSetter('editStates'), [makeFieldSetter]);
-
-  // Report the count of clouds with unbaked deletions up to App (drives the
-  // before-quit warning). Only erase deletes accumulate as pendingDeletes;
-  // crops/filters/segments bake immediately, so this is the erase-not-yet-baked
-  // count.
-  useEffect(() => {
-    if (!onPendingDeletesChange) return;
-    let count = 0;
-    for (const st of editStates.values()) {
-      if ((st.pendingDeletes?.length ?? 0) > 0) count++;
-    }
-    onPendingDeletesChange(count);
-  }, [editStates, onPendingDeletesChange]);
 
   // Crop state lives at the viewer level (not per-cloud) so a single
   // region applies uniformly across every selected scan. See cropGeometry.ts
@@ -3080,7 +3073,7 @@ export default function PointCloudViewer({
   // or the frozen camera changes, so redrawing re-tests, and orbiting after
   // the polygon closed does NOT (the region is camera-frozen by design — the
   // preview must stay pinned to the same points the apply will remove).
-  const octreeCropMask = useMemo(() => {
+  const octreeCropMask = useMemo((): CropMaskRule | null => {
     if (cropSegment) return null;
     if (cropMode !== 'polygon' && cropMode !== 'rect') return null;
     if (!cropPolygon || cropPolygon.points.length < 3) return null;
@@ -3090,9 +3083,31 @@ export default function PointCloudViewer({
     return {
       predicate,
       invert: cropInvert,
-      key: `${cropMode}|${pts}|${cropPolygon.canvasSize.width}x${cropPolygon.canvasSize.height}`,
+      key: `live|${cropMode}|${pts}|${cropPolygon.canvasSize.width}x${cropPolygon.canvasSize.height}`,
     };
   }, [cropSegment, cropMode, cropPolygon, cropInvert, buildCropPredicate]);
+
+  // The full per-point mask stack handed to one octree cloud: every crop ALREADY
+  // APPLIED to it whose octree rebuild is still running in the background, plus
+  // the live preview of the crop being drawn now.
+  //
+  // The committed half is what makes an applied crop instant. `delete_region`
+  // sets the backend mask in milliseconds and every compute/export path reads
+  // the session arrays, so the cloud is genuinely cropped the moment it returns;
+  // only the display index lags, and these clauses cover exactly that gap until
+  // `octreeRefreshQueue` swaps the rebuilt octree in. They are derived from the
+  // same region the backend was sent, so what is drawn matches what was deleted
+  // by construction.
+  //
+  // Erase's stamps are NOT here: they are non-inverted, so the GPU clip volume
+  // (`clipBoxes`) already hides them and `pendingDeletesToCropMaskRules` skips
+  // them. Only the inverted (keep-inside) regions a clip union cannot express
+  // fall through to the CPU.
+  const cropMaskRulesFor = useCallback((cloudId: string, live: CropMaskRule | null): CropMaskRule[] => {
+    const committed = pendingDeletesToCropMaskRules(getEditState(cloudId).pendingDeletes ?? []);
+    if (live) committed.push(live);
+    return committed;
+  }, [getEditState]);
 
   // Apply the active crop region to every selected scan. Multi-scan crop
   // produces N cropped scans — one per input — preserving per-scan
@@ -3342,6 +3357,62 @@ export default function PointCloudViewer({
     );
   }
 
+  // ── Background display rebuilds ────────────────────────────────────────────
+  //
+  // Deliberately NOT the BakeQueue above. That one is the compute barrier: a
+  // pending entry there means the rendered pose and the session GEOMETRY
+  // disagree, so `buildPointSource` waits on it. Nothing here defers geometry —
+  // an applied crop's points are already deleted from the session arrays, which
+  // is what every compute and export path reads — so nothing may wait on this
+  // queue. Keeping them separate is what stops a display rebuild from quietly
+  // acquiring barrier semantics and re-imposing the very wait this removes.
+  const [octreeRefreshIds, setOctreeRefreshIds] = useState<string[]>([]);
+  // The runner is a useCallback further down (it needs buildSessionOctreeData
+  // and onUpdateCloud); the queue is constructed once and reaches the current
+  // closure through this ref.
+  const octreeRefreshRunnerRef = useRef<OctreeRefreshRunner>(async () => {});
+  // The rebuild currently in flight. The queue is serial, so one pair is enough:
+  // `cancel`/`cancelAll` only drop QUEUED entries, and a Cancel the user clicked
+  // has to reach the PotreeConverter child too — the backend's cancel token
+  // hard-kills it, where aborting the fetch alone would leave it running to
+  // completion on a rebuild nobody is waiting for.
+  const octreeRefreshAbortRef = useRef<AbortController | null>(null);
+  const octreeRefreshRunIdRef = useRef<string | null>(null);
+  const octreeRefreshQueueRef = useRef<OctreeRefreshQueue | null>(null);
+  if (octreeRefreshQueueRef.current === null) {
+    octreeRefreshQueueRef.current = new OctreeRefreshQueue(
+      (cloudId, sessionId) => octreeRefreshRunnerRef.current(cloudId, sessionId),
+      {
+        onChange: (ids) => setOctreeRefreshIds(ids),
+        // A failed rebuild is not a data problem: the per-tile mask is still
+        // hiding the deleted points, so the cloud keeps rendering the cropped
+        // result. Log it rather than alarming the user about a render cache.
+        onError: (cloudId, err) => {
+          console.error('[octreeRefresh] display rebuild failed for', cloudId, err);
+        },
+      },
+    );
+  }
+
+  // Report the count of clouds with unbaked deletions up to App (drives the
+  // before-quit warning).
+  //
+  // Clouds awaiting a BACKGROUND rebuild are excluded: an applied crop is
+  // unbaked for a few seconds by design, and the app is already baking it. The
+  // warning exists for deletions that will stay unbaked until the user acts —
+  // the erase brush's, which sit behind "Permanently apply deletions" — so
+  // counting a crop mid-rebuild would tell the user to go and do something the
+  // app is doing for them.
+  useEffect(() => {
+    if (!onPendingDeletesChange) return;
+    const rebuilding = new Set(octreeRefreshIds);
+    let count = 0;
+    for (const [id, st] of editStates.entries()) {
+      if ((st.pendingDeletes?.length ?? 0) > 0 && !rebuilding.has(id)) count++;
+    }
+    onPendingDeletesChange(count);
+  }, [editStates, octreeRefreshIds, onPendingDeletesChange]);
+
   // Bring a cloud's octree back into the same frame as its geometry, if a
   // committed transform is still being rendered as a pose.
   //
@@ -3397,6 +3468,91 @@ export default function PointCloudViewer({
   }, [onUpdateCloud, buildSessionOctreeData, setEditStates]);
   const ensureOctreeFrameCurrentRef = useRef(ensureOctreeFrameCurrent);
   ensureOctreeFrameCurrentRef.current = ensureOctreeFrameCurrent;
+
+  /**
+   * Rebuild one cloud's display octree from its session, in the background.
+   *
+   * The runner behind `octreeRefreshQueueRef`. Applying a crop deletes the
+   * points on the backend in milliseconds (`delete_region` sets a mask over the
+   * in-RAM arrays) and hides them on screen with a per-tile mask; this is the
+   * PotreeConverter run that folds the deletion into the octree itself, which
+   * used to be awaited inline and is why a multi-scan crop took minutes.
+   *
+   * The swap and the mask drop happen in one React commit — React 18 batches
+   * these two setState calls even from an async context — so the points never
+   * flash back between the rebuilt octree arriving and its clauses being retired.
+   */
+  const refreshCloudOctree = useCallback(async (cloudId: string, sessionId: string) => {
+    const cloud = cloudsRef.current.find(c => c.id === cloudId);
+    const octreeInfo = cloud?.data.octree;
+    // Deleted (or replaced) while the rebuild was queued — nothing to install.
+    if (!cloud || !octreeInfo) return;
+    const abort = new AbortController();
+    octreeRefreshAbortRef.current = abort;
+    octreeRefreshRunIdRef.current = null;
+    let baked;
+    try {
+      baked = await bakeCloudSession(sessionId, {
+        signal: abort.signal,
+        onRunId: (runId) => { octreeRefreshRunIdRef.current = runId; },
+      });
+    } finally {
+      if (octreeRefreshAbortRef.current === abort) {
+        octreeRefreshAbortRef.current = null;
+        octreeRefreshRunIdRef.current = null;
+      }
+    }
+    if (!cloudsRef.current.some(c => c.id === cloudId)) return;
+    onUpdateCloud(cloudId, buildSessionOctreeData(
+      baked, octreeInfo, cloud.data.fileName ?? cloudId, undefined, { diverged: true },
+    ));
+    setEditStates(prev => {
+      const cur = prev.get(cloudId);
+      if (!cur) return prev;
+      // The bake absorbed the deletions, so their stack entries go with it.
+      // The clauses themselves are idempotent (they re-test survivors and keep
+      // all of them), but `pendingDeletedCount` is not: leaving it set would
+      // subtract the deleted points a SECOND time from a point count that has
+      // already dropped, and the scan row would under-report the cloud.
+      //
+      // `deleted_history_len` is the backend's surviving undo depth — normally
+      // 0, but non-zero if a delete raced in after the compaction — and this
+      // stack indexes that same history one-for-one, so keep exactly that many
+      // trailing entries rather than assuming it cleared.
+      const keep = baked.deleted_history_len ?? 0;
+      const stack = cur.pendingDeletes ?? [];
+      const remaining = keep > 0 ? stack.slice(Math.max(0, stack.length - keep)) : [];
+      if (remaining.length === stack.length && (cur.pendingDeletedCount ?? 0) === 0) return prev;
+      const next = new Map(prev);
+      next.set(cloudId, {
+        ...cur,
+        pendingDeletes: remaining,
+        // Only the fully-absorbed case has a count we can state; a raced-in
+        // delete's own count was measured against the pre-bake array, and the
+        // next delete_region overwrites this with a fresh cumulative figure.
+        pendingDeletedCount: remaining.length === 0 ? 0 : cur.pendingDeletedCount,
+      });
+      return next;
+    });
+  }, [onUpdateCloud, buildSessionOctreeData, setEditStates]);
+  octreeRefreshRunnerRef.current = refreshCloudOctree;
+
+  /**
+   * Abandon every outstanding display rebuild.
+   *
+   * Safe by construction, which is why the pill offers it: the deletions are
+   * already committed on the backend and the per-tile mask is already drawing
+   * the cropped result, so a cancelled rebuild costs only the space the hidden
+   * points keep occupying in an octree nobody sees them through. A cancelled
+   * bake also leaves the session pristine, so the mask and the backend stay in
+   * agreement.
+   */
+  const cancelOctreeRefreshes = useCallback(() => {
+    const runId = octreeRefreshRunIdRef.current;
+    if (runId) void cancelRun(runId).catch(() => {});
+    octreeRefreshAbortRef.current?.abort();
+    octreeRefreshQueueRef.current?.cancelAll();
+  }, []);
 
   // Duplicate a scan — its point data AND any scan-parameter metadata — into a
   // fully independent copy. Three flavors:
@@ -3483,9 +3639,20 @@ export default function PointCloudViewer({
       setEditMode('none');
     });
 
+    // One controller for the whole run — see cropAbortRef. `next` checks the
+    // signal before each scan, so Cancel abandons the remainder instead of only
+    // the cloud in flight.
+    const abort = new AbortController();
+    cropAbortRef.current = abort;
+    cropRunIdRef.current = null;
+
     const cloudIdsToProcess = Array.from(selectedIds);
     const emptied: { id: string; name: string }[] = [];
     const touchedCloudIds: string[] = [];
+    // Clouds whose crop is being rendered by a per-tile mask until their
+    // background octree rebuild lands. Only these keep their delete stack
+    // through finishUp — see the note there.
+    const maskedCloudIds: string[] = [];
     // Sum of kept point counts across all clouds touched in this apply.
     // Used by finishUp to surface a "Cropped to N points" toast.
     const keptCounts: number[] = [];
@@ -3516,9 +3683,23 @@ export default function PointCloudViewer({
         setEditStates(prev => {
           const next = new Map(prev);
           for (const id of touchedCloudIds) {
+            // KEEP the delete stack, but only for a cloud whose crop is being
+            // rendered BY that stack. Those entries are what hide the
+            // cropped-away points until the background octree rebuild lands, so
+            // blanking the state here (as this did) would flash every cropped
+            // point back on screen the instant the apply finished;
+            // `refreshCloudOctree` retires them when the octree catches up.
+            //
+            // Every other path here rebuilt the octree synchronously and the
+            // deletions are already folded into it — segment (split) even clears
+            // the backend's own undo history — so preserving a stack there would
+            // leave clauses masking points that no longer exist.
+            const cur = maskedCloudIds.includes(id) ? next.get(id) : undefined;
             next.set(id, {
               translation: { x: 0, y: 0, z: 0 },
               erasedIndices: new Set<number>(),
+              pendingDeletes: cur?.pendingDeletes ?? [],
+              pendingDeletedCount: cur?.pendingDeletedCount ?? 0,
             });
           }
           return next;
@@ -3581,7 +3762,8 @@ export default function PointCloudViewer({
       // the points never flash back into view.
       setIsApplyingCrop(false);
       setCropProgress(null);
-      cropBakeProgressRef.current = null;
+      cropAbortRef.current = null;
+      cropRunIdRef.current = null;
       setCropBox(null);
       setCropPolygon(null);
       setPolygonInProgress([]);
@@ -3647,11 +3829,24 @@ export default function PointCloudViewer({
       if (cloud.data.octree && cloud.data.octree.sessionId) {
         const octreeInfo = cloud.data.octree;
         const sessionId = octreeInfo.sessionId!;
-        // Crop can ship a screen-space region (freeform polygon, or a rect drawn
-        // from an arbitrary camera), which the backend replays against session
-        // positions — so the octree has to be in that same frame first. Done once
-        // here rather than per sub-path, since extract/split/delete all follow.
-        if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) return;
+        // NO octree frame refresh here, deliberately.
+        //
+        // Crop ships a screen-space region and the backend replays it against
+        // session positions, so this used to re-tile a posed cloud first — a
+        // second full PotreeConverter run per scan, on top of the bake, for
+        // exactly the registered scans a multi-scan crop is usually applied to.
+        //
+        // The two frames already agree. `session_transform` moves
+        // `sess.positions` in BOTH octree modes ("the geometry moves either
+        // way"); "pose" only declines to re-tile the DISPLAY cache, which the
+        // renderer then draws through the same matrix. So the octree renders at
+        // M·p_old, which IS p_new, which is what the frozen camera was looking at
+        // and what the backend tests. `polygonRegionFromCamera` already emits the
+        // view in world coordinates. The per-tile mask agrees too: it composes
+        // `octree.matrixWorld`, which carries the pose.
+        //
+        // Backfill Misses still guards, for a different reason the cacheId gate
+        // genuinely cannot cover — see `ensureOctreeFrameCurrent`.
         let deleteRegion: CropOctreeRegion | null = null;
         if (cropMode === 'box' && cropBox) {
           deleteRegion = {
@@ -3688,7 +3883,7 @@ export default function PointCloudViewer({
               // (no delete_region, no bake — bake compacts irreversibly). One
               // round-trip instead of two. The child's mask is computed over the
               // parent's survivors, so pending erases are already excluded.
-              const r = await sessionExtract(sessionId, { region: keepRegion });
+              const r = await sessionExtract(sessionId, { region: keepRegion, signal: abort.signal });
               if (!r.extracted) {
                 showToast({
                   type: 'warning',
@@ -3768,7 +3963,7 @@ export default function PointCloudViewer({
               // Segment mode: split the session into kept (inside the crop) +
               // a NEW leftover session (the cropped-out points). One array-side
               // call, no file read; both octrees rebuilt from the arrays.
-              const result = await sessionSplit(sessionId, { region: keepRegion });
+              const result = await sessionSplit(sessionId, { region: keepRegion, signal: abort.signal });
               if (result.kept.point_count === 0) {
                 emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
                 return;
@@ -3803,10 +3998,24 @@ export default function PointCloudViewer({
               return;
             }
 
-            // Plain crop: delete the outside region on the array + rebuild from
-            // the arrays (no file read). Crop is a keep-inside (inverted) volume
-            // that doesn't combine with the instant CLIP_INSIDE preview, so it
-            // applies exactly via rebuild. Only erase accumulates as instant.
+            // Plain crop: delete the outside region on the array — and STOP.
+            //
+            // `delete_region` is the whole edit: it sets a mask over the in-RAM
+            // arrays in milliseconds, and every compute and export path reads
+            // those arrays (`_read_points_from_source`), never the octree. So the
+            // cloud is genuinely cropped the moment this returns. What used to
+            // follow was `bake`, a full PotreeConverter run per scan — "the
+            // deliberately-slow step" — awaited inline, which is why a multi-scan
+            // crop took minutes to apply a mask that took milliseconds.
+            //
+            // Erase has been instant for exactly this reason, and crop was the
+            // one path left out: a crop is keep-INSIDE, which as a delete region
+            // is inverted, and an inverted volume doesn't compose into the GPU
+            // CLIP_INSIDE union the erase preview uses. It is expressible per
+            // point, though, by the same predicate the backend was just sent —
+            // so the region joins `pendingDeletes` and hides its points through
+            // `pendingDeletesToCropMaskRules` while `octreeRefreshQueue` folds
+            // the deletion into the octree in the background.
             const result = await deleteCloudRegion(sessionId, deleteRegion);
             if (result.remaining_count === 0) {
               emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
@@ -3823,16 +4032,42 @@ export default function PointCloudViewer({
                   + 'Re-run Backfill Misses on the cropped cloud before estimating leaf-area density.',
               });
             }
-            const baked = await bakeCloudSession(sessionId, {
-              onProgress: (value) => {
-                if (value != null) cropBakeProgressRef.current?.(value);
-              },
+            // Hide the cropped-away points now, and record the backend's count
+            // so the scan row's point total drops with them. The stack is shared
+            // with erase deliberately: it mirrors the backend's `deleted_history`
+            // one-for-one, and that correspondence is what `reset_edits` indexes.
+            setEditStates(prev => {
+              const next = new Map(prev);
+              const cur = next.get(cloud.id)
+                ?? { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+              next.set(cloud.id, {
+                ...cur,
+                pendingDeletes: [...(cur.pendingDeletes ?? []), deleteRegion],
+                pendingDeletedCount: result.deleted_count,
+              });
+              return next;
             });
-            onUpdateCloud(cloud.id, buildSessionOctreeData(baked, octreeInfo, src.fileName ?? cloud.id, undefined, { diverged: true }));
+            // Mark the cloud as no longer matching its source file NOW, rather
+            // than when the background rebuild lands. `handleOctreeMissing` reads
+            // `divergedFromSource` to decide whether a missing octree may be
+            // re-created from the source FILE, and from this moment that file
+            // describes a cloud with the cropped points still in it. Recovering
+            // from it would restore every one of them on what looks like a
+            // success path. `onUpdateCloud` sets the flag (and drops the now-stale
+            // sourcePath) — the same thing the bake's write-back used to do, just
+            // no longer minutes later.
+            onUpdateCloud(cloud.id, src);
+            // …and let the octree catch up off the critical path.
+            octreeRefreshQueueRef.current?.enqueue(cloud.id, sessionId);
+            maskedCloudIds.push(cloud.id);
             touchedCloudIds.push(cloud.id);
             keptCounts.push(result.remaining_count);
             return;
           } catch (err) {
+            // A user cancel is not a failure — the pill's Cancel already stopped
+            // the backend work, so say nothing and leave this cloud (and every
+            // one after it) untouched for a retry.
+            if (abort.signal.aborted || (err instanceof Error && err.name === 'AbortError')) return;
             console.error('[handleApplyCrop] session crop/split failed:', err);
             showToast({ title: `Crop failed for ${src.fileName || 'cloud'}`, type: 'error' });
             return;
@@ -3994,33 +4229,34 @@ export default function PointCloudViewer({
     };
 
     const total = cloudIdsToProcess.length;
-    let i = 0;
-    // processOne is defined above this loop, so the per-scan reporter reaches it
-    // through a ref rather than a closure over `i`.
 
-    const next = async (): Promise<void> => {
-      if (i >= total) {
+    // The step index is a PARAMETER, never a shared mutable counter.
+    //
+    // A per-scan progress reporter outlives the statement that builds it — it is
+    // handed to a call that is still running. The previous version closed over a
+    // `let i` that was incremented BEFORE the await, so every marker for scan k
+    // was labelled k+2 and scaled into k+1's slice: a 4-scan crop showed
+    // "Cropping plot_d.laz (5 of 4)…", ran the bar past 100%, and then jumped
+    // BACKWARDS when the next scan set its own slice start. Passing the index in
+    // copies it into the closure at construction, so a reporter can only ever
+    // describe its own step. See lib/stepProgress.ts.
+    const next = async (index: number): Promise<void> => {
+      if (index >= total || abort.signal.aborted) {
         finishUp();
         return;
       }
-      const cloudId = cloudIdsToProcess[i];
+      const cloudId = cloudIdsToProcess[index];
       const scanName = cloudsRef.current.find(c => c.id === cloudId)?.data.fileName;
-      if (total > 1) {
-        setCropProgress({
-          label: `Cropping ${scanName ?? 'scan'} (${i + 1} of ${total})…`,
-          value: i / total,
-        });
-      }
-      // Sub-progress within THIS scan's slice of the bar: the octree rebuild
-      // reports a 0..1 fraction, which maps onto [i/total, (i+1)/total] so the
-      // bar advances smoothly and stays monotonic across scans.
-      cropBakeProgressRef.current = total > 1
-        ? (frac) => setCropProgress({
-            label: `Cropping ${scanName ?? 'scan'} (${i + 1} of ${total})…`,
-            value: (i + Math.min(Math.max(frac, 0), 1)) / total,
-          })
-        : (frac) => setCropProgress({ label: 'Cropping…', value: frac });
-      i++;
+      const label = total > 1
+        ? `Cropping ${scanName ?? 'scan'}${stepCounter(index, total)}…`
+        : 'Cropping…';
+      // Step granularity, deliberately: the session crop is a backend mask
+      // (milliseconds) and the octree rebuild it used to stream progress for now
+      // runs in the background under its own pill. What is left per scan —
+      // extract/split building a child octree, or the flat in-renderer two-pass —
+      // reports nothing, so an intra-scan bar would be invented rather than
+      // measured.
+      setCropProgress(stepReporter(index, total, label)(0));
       // Await processOne — backend round-trips need to complete before
       // the next iteration starts, otherwise we'd fire all crop requests
       // in parallel and lose the cross-iteration GC headroom.
@@ -4029,10 +4265,24 @@ export default function PointCloudViewer({
       // onUpdateCloud, cloudsRef gets refreshed by our render-body
       // assignment, and GC has a chance to reclaim the previous
       // iteration's old cloud.data buffers before we allocate again.
-      setTimeout(next, 0);
+      setTimeout(() => { void next(index + 1); }, 0);
     };
-    void next();
+    void next(0);
   }, [editMode, selectedIds, isApplyingCrop, onUpdateCloud, buildCropPredicate, cropInvert, cropMode, cropBox, cropPolygon, cropSegment, cropRetainOriginal, onAddScan, onAddCloud, onHideScan, onSetScanSelection, buildSessionOctreeData, scene]);
+
+  // Stop a multi-scan crop mid-run.
+  //
+  // Aborts the shared controller; the loop notices before the next scan and runs
+  // `finishUp`, which commits everything already cropped and tears the crop UI
+  // down. Deliberately does NOT tear down state here: doing both would race the
+  // loop's own teardown. The pill label changes so the wait between the click and
+  // the in-flight scan returning doesn't read as the button having missed.
+  const cancelCrop = useCallback(() => {
+    const runId = cropRunIdRef.current;
+    if (runId) void cancelRun(runId).catch(() => {});
+    cropAbortRef.current?.abort();
+    setCropProgress({ label: 'Cancelling crop…', value: null });
+  }, []);
 
   // Apply erased points permanently - removes erased points and bakes in translation
   const handleApplyErase = useCallback(async () => {
@@ -5780,12 +6030,15 @@ export default function PointCloudViewer({
         const name = cloud.data.fileName || 'cloud';
         // Per-cloud progress is scaled into its slice of the overall bar, so a
         // multi-scan run reads as one monotonic 0→1 rather than N sawteeth.
-        const base = i / targets.length;
-        const span = 1 / targets.length;
+        // Through the shared helper (lib/stepProgress.ts) rather than inline
+        // arithmetic: the index is copied in, so a reporter handed to a call
+        // still in flight cannot start describing the NEXT cloud — the defect
+        // this exact pattern grew in the crop loop.
         const label = targets.length > 1
           ? `Filtering ${name} (${i + 1}/${targets.length})…`
           : 'Filtering points…';
-        setFilterProgress({ label, value: base });
+        const report = stepReporter(i, targets.length, label);
+        setFilterProgress(report(0));
 
         // Session-backed octree clouds: apply the filter on the in-RAM arrays
         // (delete the excluded points + rebuild from the arrays). No file re-read.
@@ -5799,13 +6052,9 @@ export default function PointCloudViewer({
               scalarFilters: args.scalarFilters ?? null,
               rebuild: true,
               signal: controller.signal,
-              // A null value is an indeterminate stage; hold the bar at this
-              // cloud's slice start rather than snapping it back to 0.
-              onProgress: (value, progressLabel) =>
-                setFilterProgress({
-                  label: progressLabel || label,
-                  value: value == null ? base : base + span * value,
-                }),
+              // A null value is an indeterminate stage; the reporter holds the
+              // bar at this cloud's slice start rather than snapping it to 0.
+              onProgress: (value, progressLabel) => setFilterProgress(report(value, progressLabel)),
               onRunId: (runId) => { filterRunIdRef.current = runId; },
             });
             if (result.point_count === 0) {
@@ -17854,7 +18103,7 @@ export default function PointCloudViewer({
                   // survive, so nothing is hidden). Same predicate the apply
                   // sends to the backend, so the preview matches the result
                   // by construction rather than by a parallel implementation.
-                  cropMask={showCropPreview ? octreeCropMask : null}
+                  cropMask={cropMaskRulesFor(cloud.id, showCropPreview ? octreeCropMask : null)}
                   // Live labelling preview — only for the cloud being labelled.
                   labelOverlayRef={
                     labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
@@ -19356,15 +19605,17 @@ export default function PointCloudViewer({
         />
       )}
 
-      {/* Crop apply status indicator. Mirrors the Helios pill but without a
-          cancel button — the crop apply isn't cancelable today. Shown while
-          the backend crop round-trip runs (octree re-conversion is ~15-20s);
-          the to-be-cropped points stay hidden via isApplyingCrop. */}
+      {/* Crop apply status indicator. Cancel stops the whole run, not just the
+          scan in flight — a 6-scan crop the user changed their mind about must
+          not grind through five more. Clouds already cropped stay cropped
+          (each one's delete is committed on the backend as it happens); the
+          remainder are left untouched for a retry. Mirrors cancelFilter. */}
       {isApplyingCrop && (
         <StatusPill
           testId="crop-running"
           label={cropProgress?.label ?? 'Cropping…'}
           progress={cropProgress?.value ?? null}
+          onCancel={cancelCrop}
         />
       )}
 
@@ -19518,19 +19769,28 @@ export default function PointCloudViewer({
         />
       )}
 
-      {/* Rebuilding a posed octree so a screen-space edit can be applied in the
-          same frame as the geometry. The geometry itself is already saved — this
-          is the display cache catching up — so there is no cancel: abandoning it
-          would leave the edit unapplied anyway. */}
-      {refreshingOctreeIds.length > 0 && (
-        <StatusPill
-          testId="octree-refresh-running"
-          label={refreshingOctreeIds.length === 1
-            ? 'Updating display…'
-            : `Updating display… (${refreshingOctreeIds.length} clouds)`}
-          progress={null}
-        />
-      )}
+      {/* The display cache catching up with an edit the geometry already has.
+          Two sources, one pill: a BLOCKING refresh (backfill's guard, which must
+          finish before its region can be shipped) and the BACKGROUND queue an
+          applied crop hands its octree rebuild to.
+
+          The background half is cancellable and the blocking half is not, which
+          is the honest split: abandoning a blocking refresh would leave the edit
+          unapplied, whereas the crop is already applied and already on screen
+          through its per-tile mask — cancelling only leaves the deleted points
+          occupying space in an octree nobody draws them from. */}
+      {(refreshingOctreeIds.length + octreeRefreshIds.length) > 0 && (() => {
+        const n = refreshingOctreeIds.length + octreeRefreshIds.length;
+        const blocking = refreshingOctreeIds.length > 0;
+        return (
+          <StatusPill
+            testId="octree-refresh-running"
+            label={n === 1 ? 'Updating display…' : `Updating display… (${n} clouds)`}
+            progress={null}
+            onCancel={blocking ? undefined : cancelOctreeRefreshes}
+          />
+        );
+      })()}
 
       {qsmInProgress && (
         <StatusPill

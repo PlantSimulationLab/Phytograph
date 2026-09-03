@@ -1,3 +1,5 @@
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 interface StatusPillProps {
@@ -11,6 +13,54 @@ interface StatusPillProps {
 }
 
 /**
+ * Where the pills are drawn.
+ *
+ * Every pill used to position ITSELF at `absolute top-3 left-1/2`, which is fine
+ * for the one-at-a-time case the component was written for and wrong the moment
+ * two operations overlap: the pills land on exactly the same pixels, and the
+ * shorter one is simply hidden behind the longer. Users read that as the pill
+ * flickering between two different messages, or as "multiple progress pills".
+ *
+ * Overlap is normal now rather than exceptional — an applied crop hands its
+ * octree rebuild to a background queue and moves straight on to the next scan,
+ * so the rebuild's pill and the crop's pill are up together by design. So the
+ * pills portal into one flex column instead, and stack.
+ *
+ * The context is optional: with no host mounted a pill falls back to positioning
+ * itself exactly as before, so a pill rendered outside the viewer still works.
+ */
+const StatusPillHostContext = createContext<HTMLDivElement | null>(null);
+
+/**
+ * The column every StatusPill portals into. Mount ONE of these inside the
+ * positioned container the pills should sit in (the viewer root).
+ *
+ * `pointer-events-none` on the column with `pointer-events-auto` on each pill:
+ * the column spans the top of the viewport, and swallowing clicks across that
+ * strip would block orbiting near the top edge.
+ */
+export function StatusPillHost({ children }: { children?: ReactNode }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  // State, not the ref alone: the pills read the element through context and must
+  // re-render once it exists (a ref assignment does not re-render).
+  const [host, setHost] = useState<HTMLDivElement | null>(null);
+  useEffect(() => { setHost(ref.current); }, []);
+  // The column is a SIBLING of `children`, not their parent: the pills are
+  // scattered through the viewer's tree and only portal their DOM here, so the
+  // provider has to span the whole subtree that renders them.
+  return (
+    <StatusPillHostContext.Provider value={host}>
+      <div
+        ref={ref}
+        data-testid="status-pill-stack"
+        className="absolute top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 z-20 pointer-events-none"
+      />
+      {children}
+    </StatusPillHostContext.Provider>
+  );
+}
+
+/**
  * The small top-center status pill shown during long-running viewer operations
  * (cropping, triangulating, leaf-area density). A pulsing green dot, a label,
  * an optional thin progress bar + percentage, and an optional cancel button.
@@ -19,13 +69,19 @@ interface StatusPillProps {
  * every long operation gets a consistent indicator.
  */
 export default function StatusPill({ label, progress, onCancel, testId }: StatusPillProps) {
+  const host = useContext(StatusPillHostContext);
   const hasProgress = typeof progress === 'number' && Number.isFinite(progress);
   const pct = hasProgress ? Math.max(0, Math.min(1, progress as number)) : 0;
 
-  return (
+  const pill = (
     <div
       data-testid={testId}
-      className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 bg-neutral-800/80 backdrop-blur-sm rounded-full border border-neutral-700/50 z-20"
+      className={
+        'flex items-center gap-2 px-3 py-1.5 bg-neutral-800/80 backdrop-blur-sm rounded-full '
+        + 'border border-neutral-700/50 pointer-events-auto '
+        // Standalone fallback: no host mounted, so keep the original self-positioning.
+        + (host ? '' : 'absolute top-3 left-1/2 -translate-x-1/2 z-20')
+      }
     >
       <span className="relative flex h-2 w-2">
         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
@@ -55,4 +111,6 @@ export default function StatusPill({ label, progress, onCancel, testId }: Status
       )}
     </div>
   );
+
+  return host ? createPortal(pill, host) : pill;
 }

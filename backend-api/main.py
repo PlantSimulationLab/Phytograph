@@ -25083,6 +25083,25 @@ def _dir_total_size(p: _Path) -> int:
     return total
 
 
+def _mark_octree_stale_locked(sess: "CloudSession") -> None:
+    """Declare the derived octree stale while remembering what is on screen.
+
+    Every path that changes a session's points without rebuilding immediately
+    (`delete_region`, `reset_edits`, and the commit half of split/filter/
+    transform) has to clear `octree_cache_id`: it no longer describes the
+    session. But the renderer does NOT stop drawing that octree — it keeps
+    streaming from it and hides the deleted points with a clip volume / per-tile
+    mask, which is what makes an applied delete instant. Clearing the id alone
+    therefore removed the only eviction pin on a directory a live cloud was
+    rendering from.
+
+    Caller holds `_cloud_session_lock`. Idempotent: a second delete before any
+    rebuild keeps the FIRST id, which is the one still being drawn."""
+    if sess.octree_cache_id:
+        sess.rendered_octree_cache_id = sess.octree_cache_id
+    sess.octree_cache_id = None
+
+
 def _live_session_octree_ids() -> "set[str]":
     """The octree cache ids every live cloud session is currently rendering from.
 
@@ -25094,7 +25113,12 @@ def _live_session_octree_ids() -> "set[str]":
     ids: "set[str]" = set()
     with _cloud_session_lock:
         for sess in _cloud_sessions.values():
+            # `rendered_octree_cache_id` is the octree a cloud with unbaked
+            # deletions is STILL BEING DRAWN FROM — stale as geometry, live as
+            # pixels. Omitting it let a convert evict the directory a visible
+            # cloud was streaming from. See CloudSession.rendered_octree_cache_id.
             for cid in (getattr(sess, "octree_cache_id", None),
+                        getattr(sess, "rendered_octree_cache_id", None),
                         getattr(sess, "miss_octree_cache_id", None)):
                 if cid:
                     ids.add(cid)
@@ -27057,6 +27081,24 @@ class CloudSession:
     # refresh can be reasoned about; None when the octree matches the geometry.
     # Cleared by `rebuild_octree` and by every path that rebuilds the octree.
     octree_pose: Optional[List[float]] = None
+    # The octree the RENDERER is still drawing, after `octree_cache_id` was
+    # cleared because the derived octree went stale.
+    #
+    # WHY: `octree_cache_id = None` means "this cache no longer describes the
+    # session's points, rebuild before using it" — and the only pin
+    # `_evict_octree_cache` has ever honoured is `octree_cache_id`. But the
+    # renderer does NOT drop the cloud when a delete lands: it keeps drawing the
+    # old octree and hides the deleted points with a clip volume / per-tile mask
+    # (that is the whole instant-delete design, and crop now leans on it while a
+    # background rebuild catches up). So between the delete and the rebuild, the
+    # directory being rendered from was unpinned and the next convert could evict
+    # it out from under a live cloud — the "octree cache is not a cache once a
+    # cloud diverges" failure again, in a narrower window.
+    #
+    # Carries the previous id so eviction pins what is on screen, without
+    # claiming the cache is servable as the session's current geometry.
+    # Cleared whenever a rebuild installs a fresh `octree_cache_id`.
+    rendered_octree_cache_id: Optional[str] = None
 
 
 def _epsg_from_wkt_vlr(header) -> Optional[int]:
@@ -28704,7 +28746,7 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
         # the most recent _MAX_DELETED_HISTORY snapshots (older undos are dropped).
         if len(sess.deleted_history) > _MAX_DELETED_HISTORY:
             sess.deleted_history = sess.deleted_history[-_MAX_DELETED_HISTORY:]
-        sess.octree_cache_id = None  # derived octree is now stale until bake
+        _mark_octree_stale_locked(sess)  # stale until bake; keep the drawn id pinned
         # INVARIANT: `octree_pose` set means "the cached octree is valid,
         # just in an older frame". With no cached octree at all that is false, so
         # the two must never be set together — a later reader that trusts the flag
@@ -28895,7 +28937,7 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
             sess.deleted_history[-1].copy() if k > 0
             else np.zeros(len(sess.positions), dtype=bool)
         )
-        sess.octree_cache_id = None
+        _mark_octree_stale_locked(sess)
         sess.octree_pose = None   # see the invariant note in delete_cloud_region
         deleted_count = int(sess.deleted.sum())
         total = int(len(sess.positions))
@@ -29121,6 +29163,9 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         sess.label_history = {}
         sess.label_dirty = {}
         sess.octree_cache_id = cache_key
+        # This IS now the octree being drawn, so the stale-but-rendered pin is
+        # discharged. See _mark_octree_stale_locked.
+        sess.rendered_octree_cache_id = None
         # The octree just built from these arrays carries any posed transform,
         # so the renderer must stop posing it. Cleared HERE rather than relying on
         # `_session_rebuild` because bake deliberately calls
@@ -29144,6 +29189,15 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         keep_dirs.append(_octree_cache_root() / miss_cache_id)
     _evict_octree_cache(max_bytes, keep=keep_dirs)
 
+    with _cloud_session_lock:
+        # Normally 0 — bake clears `deleted_history` — but a delete that lands
+        # AFTER the compaction critical section above starts a fresh history over
+        # the compacted arrays. The renderer mirrors this stack one-for-one (its
+        # entries index `reset_edits`), so it has to be told the surviving length
+        # rather than assuming zero, or a delete racing a background rebuild
+        # would desynchronise the two and misaddress a later undo.
+        history_len = len(sess.deleted_history)
+
     return {
         "session_id": session_id,
         "point_count": remaining,
@@ -29151,6 +29205,7 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         "cache_id": cache_key,
         "cache_dir": str(cache_dir),
         "miss_octree_cache_id": miss_cache_id,
+        "deleted_history_len": history_len,
         **meta,
     }
 
@@ -29386,6 +29441,7 @@ def _session_rebuild(
         )
     with _cloud_session_lock:
         sess.octree_cache_id = cache_key
+        sess.rendered_octree_cache_id = None   # see _mark_octree_stale_locked
         # The octree was just built FROM the current arrays, so any posed
         # transform is now folded into it. Cleared here rather than at each of
         # the ~10 callers (filter, split, segment, crop-apply, extract, DEM,
@@ -29544,7 +29600,7 @@ def session_split(session_id: str, request: SessionSplitRequest):
         sess.deleted[idx_surv[leftover_mask]] = True
         sess.deleted_history = []
         sess.label_history = {}   # label undo must not reach across this commit either
-        sess.octree_cache_id = None
+        _mark_octree_stale_locked(sess)
         sess.octree_pose = None    # see the invariant note in delete_cloud_region
 
     leftover_meta = None
@@ -30787,7 +30843,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         # Permanent geometry change: drop the derived octree and the erase-undo
         # history so a later erase-undo can't reach across the transform.
         # (Re-set below when the pose path keeps the existing octree.)
-        sess.octree_cache_id = None
+        _mark_octree_stale_locked(sess)
         sess.deleted_history = []
         remaining = int((~sess.deleted).sum())
         sess.label_history = {}   # label undo must not reach across this commit either
@@ -30860,6 +30916,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         cache_key, cache_dir, meta = fast
         with _cloud_session_lock:
             sess.octree_cache_id = cache_key
+            sess.rendered_octree_cache_id = None   # see _mark_octree_stale_locked
             sess.octree_pose = None
     else:
         # Rebuild derived octrees OUTSIDE the lock (PotreeConverter is slow).
@@ -30999,7 +31056,7 @@ def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=
         sess.deleted[idx_surv[~keep]] = True
         sess.deleted_history = []
         sess.label_history = {}   # label undo must not reach across this commit either
-        sess.octree_cache_id = None
+        _mark_octree_stale_locked(sess)
         sess.octree_pose = None    # see the invariant note in delete_cloud_region
         remaining = int((~sess.deleted).sum())
 

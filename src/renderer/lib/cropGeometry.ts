@@ -44,6 +44,47 @@ export interface CropPolygonRegion {
 
 export type CropRegion = CropBoxRegion | CropPolygonRegion;
 
+/** A world-space inclusion test. Matches PointCloudViewer's buildCropPredicate. */
+export type CropPredicate = (wx: number, wy: number, wz: number) => boolean;
+
+/**
+ * One clause of a per-point crop mask: a world-space test plus whether the
+ * points it accepts are the ones to KEEP (`invert: false`) or the ones to hide
+ * (`invert: true`, the Keep-Outside checkbox).
+ *
+ * Masks come in stacks — the live preview of the crop being drawn, plus every
+ * crop already applied to this cloud whose octree has not been rebuilt yet — and
+ * a point must survive EVERY clause to draw. `key` identifies the clause so the
+ * per-tile masking pass can skip a geometry it has already masked under the same
+ * stack instead of re-testing 150k points every frame.
+ */
+export interface CropMaskRule {
+  predicate: CropPredicate;
+  invert: boolean;
+  key: string;
+}
+
+/**
+ * The re-mask key for a whole stack: the clause keys joined, so adding,
+ * removing or redrawing any clause invalidates every tile's cached mask.
+ * `''` for an empty stack, which is what un-hides everything.
+ */
+export function cropMaskRulesKey(rules: readonly CropMaskRule[]): string {
+  return rules.map(r => `${r.key}|${r.invert}`).join('&');
+}
+
+/** True when `rules` keep this world-space point — i.e. every clause accepts it. */
+export function cropRulesKeep(
+  rules: readonly CropMaskRule[],
+  wx: number, wy: number, wz: number,
+): boolean {
+  for (const r of rules) {
+    const inside = r.predicate(wx, wy, wz);
+    if (r.invert ? inside : !inside) return false;
+  }
+  return true;
+}
+
 // Standard ray-casting point-in-polygon test. Treats the polygon as a
 // closed loop (last vertex connects back to first). Edge points return
 // implementation-defined but consistent results, which is fine for

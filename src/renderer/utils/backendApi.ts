@@ -4164,6 +4164,12 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   // Tree segmentation only: number of distinct trees found (max tree id; 0 =
   // ground/miss). Drives the "split into one cloud per tree" fan-out.
   num_trees?: number;
+  // /bake only: how many delete snapshots survived the bake. Normally 0 — bake
+  // clears the undo history — but a delete that lands after the compaction
+  // starts a fresh one. The renderer's `pendingDeletes` stack indexes that same
+  // history for `reset_edits`, so it truncates to this length instead of
+  // assuming the bake absorbed everything.
+  deleted_history_len?: number;
 }
 
 /**
@@ -4697,11 +4703,19 @@ export interface CloudSessionSplitResult {
  */
 export async function sessionSplit(
   sessionId: string,
-  options: { region?: CropOctreeRegion | null; scalarFilters?: ScalarFilter[] | null },
+  options: {
+    region?: CropOctreeRegion | null;
+    scalarFilters?: ScalarFilter[] | null;
+    // A split builds an octree for EACH side, so it is one of the crop paths
+    // that still costs real time. Chained onto the timeout controller so the
+    // crop pill's Cancel abandons the run instead of only the loop after it.
+    signal?: AbortSignal;
+  },
 ): Promise<CloudSessionSplitResult> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/split');
+  if (options.signal) options.signal.addEventListener('abort', () => controller.abort());
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/split`, {
       method: 'POST',
@@ -4730,11 +4744,18 @@ export async function sessionSplit(
  * the child's octree metadata, or null `extracted` when the selection is empty. */
 export async function sessionExtract(
   sessionId: string,
-  options: { region?: CropOctreeRegion | null; scalarFilters?: ScalarFilter[] | null },
+  options: {
+    region?: CropOctreeRegion | null;
+    scalarFilters?: ScalarFilter[] | null;
+    // See sessionSplit: extract builds the child's octree, so a retained crop
+    // over several scans is cancellable through this.
+    signal?: AbortSignal;
+  },
 ): Promise<{ session_id: string; extracted: (OctreeMetadata & { session_id: string; point_count: number; cache_id: string }) | null }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/:id/extract');
+  if (options.signal) options.signal.addEventListener('abort', () => controller.abort());
   try {
     const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/extract`, {
       method: 'POST',

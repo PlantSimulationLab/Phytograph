@@ -158,10 +158,19 @@ test.describe('stored-pose transform', () => {
     expect(after.max[1]).toBeCloseTo(posed.max[1], 3);
   });
 
-  test('a lasso crop refreshes the octree first, then applies in the right place', async () => {
+  test('a lasso crop on a posed cloud lands in the right place, without a re-tile first', async () => {
     // Screen-space regions freeze the camera that was looking at the POSED
-    // octree; the backend replays it against session positions. The two frames
-    // have to be reconciled first, which is the one place the refresh is paid.
+    // octree and the backend replays it against session positions — which reads
+    // like the two frames must be reconciled first, and crop used to pay a full
+    // PotreeConverter run to do so.
+    //
+    // They already agree. A transform moves `sess.positions` in BOTH octree
+    // modes; "pose" only declines to re-tile the DISPLAY cache, which is then
+    // drawn through the same matrix. So the octree renders at M·p_old, which IS
+    // p_new, which is what the frozen camera was looking at and what the backend
+    // tests. This is the test that says so out loud: a rect crop over the left
+    // half of a ROTATED cloud must keep a strict subset. Evaluated in the wrong
+    // frame it would miss the cloud entirely (0 left) or enclose all of it.
     await importOrchard();
     const before = await row().getAttribute('data-octree-cache-id');
     const countBefore = Number(await row().getAttribute('data-point-count'));
@@ -197,9 +206,8 @@ test.describe('stored-pose transform', () => {
     await applyBtn.click();
     await expect(panel).toBeHidden({ timeout: 240_000 });
 
-    // The refresh happened: the octree is no longer the posed original.
-    await expect(row()).not.toHaveAttribute('data-octree-cache-id', before!, { timeout: 240_000 });
-    // And the crop actually removed points rather than silently no-opping.
+    // THE FRAME ASSERTION: the crop removed points rather than silently
+    // no-opping...
     await expect.poll(async () => Number(await row().getAttribute('data-point-count')), {
       message: 'crop should have removed points',
       timeout: 60_000,
@@ -208,5 +216,15 @@ test.describe('stored-pose transform', () => {
     // likely miss the cloud entirely, and "0 left" would otherwise satisfy the
     // assertion above.
     expect(Number(await row().getAttribute('data-point-count'))).toBeGreaterThan(0);
+
+    // The octree still catches up — just afterwards, off the critical path, and
+    // once instead of twice. Polled rather than asserted immediately: that is
+    // the whole point, the apply no longer waits for it.
+    await expect(row()).not.toHaveAttribute('data-octree-cache-id', before!, { timeout: 240_000 });
+    // And the count is still right once the rebuilt octree has replaced the
+    // mask that was standing in for it — a handoff that drops or double-applies
+    // the deletion shows up here as a changed number.
+    expect(Number(await row().getAttribute('data-point-count'))).toBeGreaterThan(0);
+    expect(Number(await row().getAttribute('data-point-count'))).toBeLessThan(countBefore);
   });
 });

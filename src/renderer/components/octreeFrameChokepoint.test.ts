@@ -13,10 +13,18 @@
 //     its enforcement (async ⇒ an un-awaited call site fails to compile) are kept
 //     so future deferred work is covered by default.
 //
-//  2. SCREEN-SPACE regions (lasso crop, erase brush, label brush). These freeze
-//     the camera that was looking at the POSED octree and the backend replays it
-//     against session positions, so the frames must agree first —
-//     `ensureOctreeFrameCurrent`.
+//  2. A derived octree rebuilt while the HITS cacheId — which gates the pose —
+//     stays put. Backfill Misses is the only path that does this, and without
+//     `ensureOctreeFrameCurrent` the miss shell is drawn at DOUBLE the rotation.
+//
+// NOT on that list, though it reads like it should be: the screen-space regions
+// (lasso crop, erase brush, label brush). They freeze the camera that was looking
+// at the POSED octree and the backend replays it against session positions — but
+// `session_transform` moves `sess.positions` in BOTH octree modes, so the posed
+// octree renders at M·p_old, which IS p_new. The frames already agree, and the
+// re-tile those paths used to do first was a full PotreeConverter run for
+// nothing. Crop no longer does it; erase and the label brush still do, and are a
+// standing opportunity rather than a requirement.
 //
 // Pinned at the SOURCE level, the way missExclusionChokepoint.test.ts is: the
 // guarantee lives in a 30k-line React component that cannot be mounted in a unit
@@ -88,11 +96,41 @@ describe('screen-space regions refresh the octree first', () => {
     expect(body).toMatch(/catch \(err\)[\s\S]{0,600}?return false;/);
   });
 
-  it('guards the crop, erase-brush and label-brush region paths', async () => {
+  it('guards every path that still needs one', async () => {
     const src = await viewerSource();
     const guards = [...src.matchAll(/await ensureOctreeFrameCurrentRef\.current\(/g)];
-    // crop apply + erase instant-delete + label stroke.
+    // backfill (required) + erase instant-delete + label stroke. Crop dropped its
+    // guard deliberately — see the header — so this is a floor, not an exact
+    // count, and the backfill case is pinned by name in its own test below.
     expect(guards.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('the crop apply does NOT re-tile before shipping its region', async () => {
+    const src = await viewerSource();
+    // A posed cloud's octree renders where its session geometry already is, so
+    // re-tiling first bought nothing and cost a full PotreeConverter run per
+    // scan — on top of the one the crop itself used to await. Pinned because it
+    // is a one-line revert, and reverting it is invisible except as minutes of
+    // wall clock on a registered multi-scan crop.
+    const at = src.indexOf('const result = await deleteCloudRegion(sessionId, deleteRegion);');
+    expect(at, 'missing the plain crop delete call').toBeGreaterThan(-1);
+    const branch = src.slice(src.indexOf('if (cloud.data.octree && cloud.data.octree.sessionId) {'), at);
+    expect(branch).not.toMatch(/await ensureOctreeFrameCurrentRef\.current\(/);
+  });
+
+  it('the crop apply does not await an octree rebuild at all', async () => {
+    const src = await viewerSource();
+    // The instant path: delete_region sets the mask, the per-tile crop mask hides
+    // the points, and the PotreeConverter run is handed to octreeRefreshQueue.
+    // An awaited bake here is the regression that made a 4-scan crop minutes long.
+    const at = src.indexOf('const result = await deleteCloudRegion(sessionId, deleteRegion);');
+    // Wide enough to cover the whole branch through its `return`, not a fixed
+    // character budget a comment can push the assertions out of.
+    const after = src.slice(at, src.indexOf('\n          } catch (err) {', at));
+    expect(after).not.toMatch(/await bakeCloudSession\(/);
+    expect(after).toMatch(/octreeRefreshQueueRef\.current\?\.enqueue\(/);
+    // …and the region has to be recorded, or the deleted points draw again.
+    expect(after).toMatch(/pendingDeletes: \[\.\.\.\(cur\.pendingDeletes \?\? \[\]\), deleteRegion\]/);
   });
 
   it('re-reads the cloud after a frame refresh, never writing back the snapshot', async () => {

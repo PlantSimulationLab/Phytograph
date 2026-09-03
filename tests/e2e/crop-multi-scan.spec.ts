@@ -123,6 +123,35 @@ test('multi-scan crop applies one world-space box across two selected scans', as
   await expect(panel).toHaveAttribute('data-crop-min', '-0.500,-0.500,0.300');
   await expect(panel).toHaveAttribute('data-crop-max', '1.500,0.500,1.000');
 
+  // ── Record every state the progress pill passes through ────────────────
+  //
+  // The pill is the only place a multi-scan run reports which scan it is on,
+  // and it was lying: the loop advanced its counter BEFORE awaiting the scan's
+  // backend call, and the progress callback read that counter through a
+  // closure. So a 4-scan crop announced "Cropping plot_d.laz (5 of 4)…", ran
+  // the bar past the end of the last scan's slice, and then jumped BACKWARDS
+  // when the next scan set its own slice start.
+  //
+  // A MutationObserver catches every rendered state rather than sampling and
+  // hoping — the apply is fast, and polling would miss exactly the transient
+  // frames the bug lives in.
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__cropPillSamples = [];
+    const record = () => {
+      const el = document.querySelector('[data-testid="crop-running"]');
+      if (!el) return;
+      const text = el.textContent || '';
+      const samples: string[] = w.__cropPillSamples;
+      if (text !== samples[samples.length - 1]) samples.push(text);
+    };
+    w.__cropPillObserver = new MutationObserver(record);
+    w.__cropPillObserver.observe(document.body, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+    });
+    record();
+  });
+
   // ── Apply ──────────────────────────────────────────────────────────────
   // Enter inside an input only commits the input's value — applying is
   // bound to the explicit Apply button so the user can't trigger a crop
@@ -147,6 +176,36 @@ test('multi-scan crop applies one world-space box across two selected scans', as
   // cylinders so only Z selects layers — no point sits on an X/Y face.
   await expect(tinyRow).toHaveAttribute('data-point-count', '24', { timeout: 5_000 });
   await expect(offsetRow).toHaveAttribute('data-point-count', '24', { timeout: 5_000 });
+
+  // ── …and the pill told the truth on the way there ─────────────────────
+  const samples: string[] = await page.evaluate(() => {
+    const w = window as any;
+    w.__cropPillObserver?.disconnect();
+    return w.__cropPillSamples ?? [];
+  });
+  expect(samples.length, 'the pill rendered no state at all').toBeGreaterThan(0);
+
+  let lastPct = -1;
+  for (const text of samples) {
+    const counter = text.match(/\((\d+) of (\d+)\)/);
+    if (counter) {
+      const [, nRaw, totalRaw] = counter;
+      const n = Number(nRaw);
+      expect(Number(totalRaw), `wrong total in "${text}"`).toBe(2);
+      // The bug: `5 of 4`. Naming a scan that does not exist is the loudest
+      // symptom, and the one the user reported.
+      expect(n, `counter out of range in "${text}"`).toBeGreaterThanOrEqual(1);
+      expect(n, `counter past the end of the run in "${text}"`).toBeLessThanOrEqual(2);
+    }
+    const pctMatch = text.match(/(\d+)%/);
+    if (pctMatch) {
+      const pct = Number(pctMatch[1]);
+      // The other half: the bar overshot its scan's slice and then snapped back
+      // when the next scan started. Progress across one run must never go down.
+      expect(pct, `bar went backwards to ${pct}% at "${text}"`).toBeGreaterThanOrEqual(lastPct);
+      lastPct = pct;
+    }
+  }
 });
 
 // Regression: Enter inside a dimension input must commit the value but

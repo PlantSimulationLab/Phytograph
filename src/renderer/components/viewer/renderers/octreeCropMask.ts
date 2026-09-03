@@ -34,6 +34,10 @@
 // full resolution.
 
 import * as THREE from 'three';
+import { cropMaskRulesKey, cropRulesKeep, type CropMaskRule, type CropPredicate } from '../../../lib/cropGeometry';
+
+export { cropMaskRulesKey };
+export type { CropMaskRule, CropPredicate };
 
 // Marks an index buffer as ours, so restore only ever removes an index this
 // module added and never one that legitimately belongs to a geometry.
@@ -42,9 +46,6 @@ const CROP_MASK_FLAG = '__phytographCropMask';
 // Scratch for composing a tile's world transform. Reused across the masking
 // loop — this runs per tile, per re-mask.
 const _tileWorld = new THREE.Matrix4();
-
-/** A world-space inclusion test. Matches PointCloudViewer's buildCropPredicate. */
-export type CropPredicate = (wx: number, wy: number, wz: number) => boolean;
 
 /**
  * Compose a tile's node→scene transform into `out`, WITHOUT touching any matrix.
@@ -95,17 +96,25 @@ function isMaskedGeometry(geometry: any): boolean {
  * time, so they are small float32 — the round-trip through world space is
  * done in float64 here.)
  *
- * `invert` flips the test, matching the Crop tool's Keep-Outside checkbox.
+ * `rules` is a STACK, not a single test, and a point must survive all of them.
+ * That is what lets an applied crop keep hiding its points while the user draws
+ * the next one: the committed regions (whose octree rebuild is still running in
+ * the background) and the live preview compose here rather than fighting over
+ * one index buffer. Each rule's `invert` flips its own test, matching the Crop
+ * tool's Keep-Outside checkbox. An empty stack keeps everything.
  */
 export function applyCropMaskToGeometry(
   geometry: any,
   matrixWorld: THREE.Matrix4,
   displayOffset: { x: number; y: number; z: number } | undefined,
-  predicate: CropPredicate,
-  invert: boolean,
+  rules: readonly CropMaskRule[],
 ): void {
   const position = geometry?.attributes?.position;
   if (!position) return;
+  if (rules.length === 0) {
+    if (isMaskedGeometry(geometry)) geometry.setIndex(null);
+    return;
+  }
 
   const count = position.count;
   const ox = displayOffset?.x ?? 0;
@@ -118,9 +127,8 @@ export function applyCropMaskToGeometry(
   for (let i = 0; i < count; i++) {
     v.set(position.getX(i), position.getY(i), position.getZ(i)).applyMatrix4(matrixWorld);
     // matrixWorld lands the point in the DISPLAY frame (world − offset);
-    // add the offset back to get the world coords the predicate expects.
-    const inside = predicate(v.x + ox, v.y + oy, v.z + oz);
-    if (invert ? !inside : inside) kept.push(i);
+    // add the offset back to get the world coords the predicates expect.
+    if (cropRulesKeep(rules, v.x + ox, v.y + oy, v.z + oz)) kept.push(i);
   }
 
   // Every point survives: drop any mask we previously set rather than paying
@@ -158,8 +166,7 @@ export function clearCropMaskFromGeometry(geometry: any): void {
 export function applyCropMaskToVisibleNodes(
   octree: any,
   displayOffset: { x: number; y: number; z: number } | undefined,
-  predicate: CropPredicate,
-  invert: boolean,
+  rules: readonly CropMaskRule[],
   maskKey: string,
 ): void {
   const visible = octree?.visibleNodes;
@@ -177,7 +184,7 @@ export function applyCropMaskToVisibleNodes(
     // composeTileWorldMatrix's docstring for why updateWorldMatrix is not an
     // option here (measured 93 world-units of drift on an ALS scan).
     composeTileWorldMatrix(octree, sn, _tileWorld);
-    applyCropMaskToGeometry(geom, _tileWorld, displayOffset, predicate, invert);
+    applyCropMaskToGeometry(geom, _tileWorld, displayOffset, rules);
     geom[CROP_MASK_FLAG + 'Key'] = maskKey;
   }
   publishCropMaskStats(octree);

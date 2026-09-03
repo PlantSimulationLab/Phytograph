@@ -76,11 +76,11 @@ can never leak into a later step.
       move itself, so the viewer simply draws the existing index in its new
       position. You will not see a difference.
 
-      The one thing that needs the index rebuilt is a **freeform or
-      rectangle crop, the erase brush, or the label brush** on a rotated
-      cloud, because those select points using the view you drew them in.
-      The first of those after a rotation shows an **Updating display…**
-      indicator while it catches up, then applies normally.
+      The **erase brush** and the **label brush** still rebuild the index on
+      a rotated cloud before they apply, because they select points using the
+      view you drew them in. The first of those after a rotation shows an
+      **Updating display…** indicator while it catches up, then applies
+      normally. Crop does not need to wait.
 
 The toolbar also has a one-click **Move to Origin** that centers the
 cloud's bounding box at (0, 0, 0) without rotating it.
@@ -176,10 +176,23 @@ applies to every scan you have selected.
 
 When more than one scan is selected, the panel shows "Applies to N scans"
 and each scan gets its own cropped result — identities are preserved. The
-scans are cropped one after another (each octree is rebuilt in turn), so the
-indicator names the scan it is on and shows overall progress — *Cropping
-plot_north.laz (3 of 8)…* — rather than a bare **Cropping…** for the whole
-run.
+scans are cropped one after another, so the indicator names the scan it is
+on and shows overall progress — *Cropping plot_north.laz (3 of 8)…* — rather
+than a bare **Cropping…** for the whole run. Its **×** cancels the whole
+run: scans already cropped stay cropped, and the rest are left untouched.
+
+!!! note "Applying is immediate; the display catches up on its own"
+    A crop takes effect as soon as you click Apply, however large the scan.
+    The points are gone from that moment — every tool, every export and every
+    measurement sees the cropped cloud straight away.
+
+    What takes longer is the display index a streamed cloud is drawn from,
+    which has to be rebuilt to match. That runs in the background behind an
+    **Updating display…** indicator, and until it finishes the viewer simply
+    hides the cropped-away points instead. You can keep working — crop
+    another scan, run a tool, export — while it does. Its **×** dismisses the
+    rebuild; nothing is lost if you do, because the cropped result is already
+    what you see and what every tool reads.
 
 !!! note "Preview detail while cropping"
     For large (LOD-streamed) scans, the live crop preview renders at reduced

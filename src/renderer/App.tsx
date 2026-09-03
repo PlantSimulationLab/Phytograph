@@ -33,7 +33,7 @@ import {
   RieglProjectDialog,
   type RieglProjectSelection,
 } from "./components/RieglProjectDialog";
-import StatusPill from "./components/StatusPill";
+import StatusPill, { StatusPillHost } from "./components/StatusPill";
 import { getSettings } from "./lib/store";
 import { isRieglProjectPath, parseRieglProgress } from "./lib/rieglProject";
 import type { FeedbackMode } from "./lib/feedback";
@@ -2115,6 +2115,13 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           viewer ratchets to its largest-ever size and window shrinks crop the
           bottom overlays (axes gizmo, toolbar column) instead of reflowing. */}
       <div className="relative flex-1 min-h-0 min-w-0 flex flex-col">
+        {/* One stacking column for every status pill in the app — the viewer's
+            own long operations AND the update download below. They used to
+            position themselves individually at top-center, so two at once
+            landed on the same pixels and the shorter hid behind the longer.
+            Concurrent pills are ordinary now: an applied crop hands its octree
+            rebuild to a background queue and moves on to the next scan. */}
+        <StatusPillHost>
         {/* Auto-update download progress. Same top-center pill the viewer's own
             long operations use, so a background download reads as "the app is
             busy with something" rather than nothing at all. Not cancelable —
@@ -2161,6 +2168,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           className="flex-1"
         />
         {scans.length === 0 && !viewerHasContent && renderEmptyHint()}
+        </StatusPillHost>
       </div>
     </div>
   );

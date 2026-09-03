@@ -11,6 +11,8 @@ import { applyOctreePose } from './octreePose';
 import {
   applyCropMaskToVisibleNodes,
   clearCropMaskFromVisibleNodes,
+  cropMaskRulesKey,
+  type CropMaskRule,
   publishCropMaskStats,
 } from './octreeCropMask';
 import {
@@ -104,14 +106,14 @@ export interface OctreePointCloudProps {
   // octreeCropMask.ts). Box crops keep using `clipBox`: it's exact for an AABB
   // and runs on the GPU at frame rate, which matters while the gizmo drags.
   //
+  // A STACK of clauses, all of which a point must satisfy to draw: the crop
+  // being drawn right now, plus every crop already applied to this cloud whose
+  // octree rebuild is still catching up in the background. Each clause's
   // `predicate` takes WORLD coordinates and returns "inside the region";
-  // `invert` flips it for Keep-Outside. `key` changes whenever the region
-  // changes and is what triggers a re-mask — pass a stable string.
-  cropMask?: {
-    predicate: (wx: number, wy: number, wz: number) => boolean;
-    invert: boolean;
-    key: string;
-  } | null;
+  // `invert` flips it for Keep-Outside; `key` changes whenever that clause's
+  // region changes and is what triggers a re-mask — pass stable strings.
+  // Null or empty hides nothing.
+  cropMask?: readonly CropMaskRule[] | null;
   /**
    * Live manual-labelling preview, read through a REF.
    *
@@ -247,6 +249,11 @@ function applyScalarSwapToVisibleNodes(octree: any, field: string): void {
 // region at one consistent level, so the reduced preview is uniform. Tunable:
 // higher = denser/uniform but heavier; lower = sparser/lighter. Removed on exit.
 const CROP_PREVIEW_MAX_LEVEL = 4;
+
+// Module-level and frozen so `cropMask ?? EMPTY_CROP_MASK` is referentially
+// stable: a fresh `[]` per render would re-run the mask effect (and its
+// clear-then-reapply cleanup) on every parent render with no crop active.
+const EMPTY_CROP_MASK: readonly CropMaskRule[] = Object.freeze([]);
 
 // True when the crop clip box provably yields an EMPTY result for this cloud —
 // so the per-frame LOD update can be skipped and the cloud simply hidden.
@@ -984,23 +991,22 @@ export function OctreePointCloud({
     // clip state has to be re-applied to the new one.
   }, [octree, materialVersion, clipState]);
 
-  // Exact per-point preview for a screen-space crop region. Masks the tiles
-  // that are already loaded; tiles that stream in afterwards are caught by the
+  // Exact per-point masking for screen-space crop regions. Masks the tiles that
+  // are already loaded; tiles that stream in afterwards are caught by the
   // per-frame afterUpdate below (same pattern as the scalar→intensity swap).
-  // Keyed on cropMask.key so redrawing the polygon re-masks and clearing it
+  // Keyed on the whole stack, so redrawing the polygon (or an applied crop's
+  // octree finally landing, which drops its clause) re-masks, and an empty stack
   // restores full density. The cleanup runs on unmount and on every key change,
-  // which is what un-hides points when the region changes rather than leaving
-  // an earlier polygon's mask behind.
-  const cropMaskKey = cropMask ? `${cropMask.key}|${cropMask.invert}` : '';
+  // which is what un-hides points rather than leaving an earlier mask behind.
+  const cropMaskRules = cropMask ?? EMPTY_CROP_MASK;
+  const cropMaskKey = cropMaskRulesKey(cropMaskRules);
   useEffect(() => {
     if (!octree) return;
-    if (!cropMask) {
+    if (cropMaskRules.length === 0) {
       clearCropMaskFromVisibleNodes(octree);
       return;
     }
-    applyCropMaskToVisibleNodes(
-      octree, displayOffset, cropMask.predicate, cropMask.invert, cropMaskKey,
-    );
+    applyCropMaskToVisibleNodes(octree, displayOffset, cropMaskRules, cropMaskKey);
     return () => clearCropMaskFromVisibleNodes(octree);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [octree, cropMaskKey, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
@@ -1049,13 +1055,13 @@ export function OctreePointCloud({
   const labelOverlayWasActiveRef = useRef(false);
   const frameStateRef = useRef({
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
-    cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
+    cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
   });
   frameStateRef.current = {
     // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
     // emptiness for a rotated cloud (see cropClipsEverything).
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
-    cropMask, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
+    cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
   };
 
   useEffect(() => {
@@ -1137,10 +1143,8 @@ export function OctreePointCloud({
         // crop effect ran — without this they render their cropped-away points
         // as the LOD fills in. Skips any tile already masked under this key, so
         // the steady-state cost is one string compare per visible node.
-        if (mask) {
-          applyCropMaskToVisibleNodes(
-            octree, offset, mask.predicate, mask.invert, maskKey,
-          );
+        if (mask.length > 0) {
+          applyCropMaskToVisibleNodes(octree, offset, mask, maskKey);
         } else {
           // Keep the E2E stats hook truthful while no mask is active, so a test
           // can read a real "nothing hidden" baseline before drawing.

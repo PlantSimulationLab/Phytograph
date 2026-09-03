@@ -14,6 +14,11 @@
 // tracks the current camera.
 
 import * as THREE from 'three';
+import {
+  pointInPolygon,
+  projectWorldToCanvasPixel,
+  type CropMaskRule,
+} from './cropGeometry';
 import type { PendingDeleteRegion } from './pointCloudTypes';
 
 // A large extrusion depth so screen-space (polygon / squares) deletes remove
@@ -81,13 +86,21 @@ function screenRectMatrix(
 
 /**
  * Convert one committed delete region into the clip-box matrices that hide its
- * deleted points. Box → one axis-aligned box. squares_union → one box per
- * square stamp. polygon → the polygon's screen-space bounding rect as a single
- * box (a conservative preview: it may hide a few extra points at the corners,
- * but the BACKEND mask is exact per-point, so the committed result is correct;
- * the bake reflects the true polygon). Returns [] for `invert` regions, whose
- * "keep the complement" semantics don't map to a simple CLIP_INSIDE union — the
- * caller falls back to a one-shot octree refresh for those (rare for deletes).
+ * deleted points. Box → one axis-aligned box. squares_union / spheres_union →
+ * one box per stamp. All exact, and all on the GPU.
+ *
+ * Returns [] for two kinds the clip union cannot state, both of which
+ * `pendingDeletesToCropMaskRules` picks up per point instead:
+ *
+ *   • `invert` regions, whose "keep the complement" semantics don't map to a
+ *     CLIP_INSIDE union at all;
+ *   • POLYGONS, which a box can only approximate by their screen-space bounding
+ *     rect. That approximation used to be defensible — the backend mask was
+ *     exact and the bake landed moments later, so the over-hiding was a blink
+ *     during an operation the user was already waiting on. A crop's rebuild now
+ *     runs in the background, so what a box drew here would be the picture for
+ *     as long as that takes: a concave lasso rendered as its bounding box, which
+ *     is most of what drawing a lasso was for.
  */
 export function deleteRegionToClipBoxes(region: PendingDeleteRegion): THREE.Matrix4[] {
   if (region.invert) return [];
@@ -117,16 +130,88 @@ export function deleteRegionToClipBoxes(region: PendingDeleteRegion): THREE.Matr
     });
   }
 
-  // polygon: use the screen-space bounding rect of the polygon points.
-  const xs = region.points.map(p => p[0]);
-  const ys = region.points.map(p => p[1]);
-  return [screenRectMatrix(
-    region.projection, region.view, region.canvas,
-    Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys),
-  )];
+  // polygon: not a box. See the note above — the exact shape is applied per
+  // point by `pendingDeletesToCropMaskRules`.
+  return [];
 }
 
 /** Flatten a stack of committed delete regions into one clip-box matrix list. */
 export function pendingDeletesToClipBoxes(regions: PendingDeleteRegion[]): THREE.Matrix4[] {
   return regions.flatMap(deleteRegionToClipBoxes);
+}
+
+/** Stable identity for one region, so a tile mask is only recomputed when the stack changes. */
+function regionKey(region: PendingDeleteRegion, index: number): string {
+  if (region.kind === 'box') {
+    return `b${index}|${region.min.join(',')}|${region.max.join(',')}`;
+  }
+  if (region.kind === 'polygon') {
+    // The frozen camera is part of the identity: the same pixels under a
+    // different view select different points.
+    return `p${index}|${region.points.map(pt => `${pt[0].toFixed(1)},${pt[1].toFixed(1)}`).join(';')}`
+      + `|${region.canvas.width}x${region.canvas.height}|${region.view.map(v => v.toFixed(4)).join(',')}`;
+  }
+  return `${region.kind}${index}`;
+}
+
+/**
+ * Per-point mask clauses for the committed deletes that a clip box CANNOT
+ * express — i.e. the INVERTED ones.
+ *
+ * `deleteRegionToClipBoxes` returns [] for those, and that hole is exactly why
+ * crop could not use the instant-delete path: a crop is "keep what is inside",
+ * which as a delete region is inverted, so the GPU clip union hid nothing and
+ * the only way to make the result visible was to rebuild the octree. Running the
+ * predicate per point covers it precisely — the same test the backend applied to
+ * the session arrays, so the preview matches the committed result by
+ * construction rather than by a parallel implementation.
+ *
+ * Non-inverted regions are deliberately skipped: the clip volume already hides
+ * them on the GPU, and testing them again on the CPU would be pure cost.
+ *
+ * `squares_union` / `spheres_union` (the erase and label brushes) never arrive
+ * inverted, so they never reach the predicate branches below.
+ */
+export function pendingDeletesToCropMaskRules(regions: PendingDeleteRegion[]): CropMaskRule[] {
+  const rules: CropMaskRule[] = [];
+  regions.forEach((region, index) => {
+    // A non-inverted BOX is exactly what the GPU clip volume tests, at frame
+    // rate, so leave it there. Everything else that reaches this function is
+    // either inverted or a polygon — see deleteRegionToClipBoxes.
+    if (!region.invert && region.kind !== 'polygon') return;
+    const key = regionKey(region, index);
+    // A delete region names the points it REMOVES. As a mask clause the sense
+    // flips: `invert: false` keeps what the predicate accepts. So a delete's own
+    // `invert` (delete the complement — a crop's keep-inside) becomes a plain
+    // keep-inside clause, and a non-inverted delete becomes an inverted clause.
+    const maskInvert = !region.invert;
+    if (region.kind === 'box') {
+      const [minX, minY, minZ] = region.min;
+      const [maxX, maxY, maxZ] = region.max;
+      rules.push({
+        key,
+        invert: maskInvert,
+        predicate: (wx, wy, wz) =>
+          wx >= minX && wx <= maxX && wy >= minY && wy <= maxY && wz >= minZ && wz <= maxZ,
+      });
+      return;
+    }
+    if (region.kind === 'polygon') {
+      const { projection, view, canvas } = region;
+      const canvasSize = { width: canvas.width, height: canvas.height };
+      const points = region.points.map(([x, y]) => ({ x, y }));
+      const inside = (wx: number, wy: number, wz: number) => {
+        const pixel = projectWorldToCanvasPixel({ x: wx, y: wy, z: wz }, projection, view, canvasSize);
+        if (!pixel) return false;
+        return pointInPolygon(pixel, points);
+      };
+      // A point BEHIND the camera (or otherwise unprojectable) reads as outside.
+      // For a keep-inside crop that is right — it was not in the lasso. For a
+      // keep-OUTSIDE crop it is right too, and only by writing the clause this
+      // way round: `invert: true` over `inside` keeps it, which matches the
+      // backend, whose 2D membership test also excludes it from the delete set.
+      rules.push({ key, invert: maskInvert, predicate: inside });
+    }
+  });
+  return rules;
 }

@@ -1,12 +1,37 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
-  applyCropMaskToGeometry,
+  applyCropMaskToGeometry as applyCropMaskRulesToGeometry,
   clearCropMaskFromGeometry,
-  applyCropMaskToVisibleNodes,
+  applyCropMaskToVisibleNodes as applyCropMaskRulesToVisibleNodes,
   clearCropMaskFromVisibleNodes,
+  cropMaskRulesKey,
+  type CropMaskRule,
   type CropPredicate,
 } from './octreeCropMask';
+
+// The masking functions take a STACK of clauses (an applied crop keeps hiding
+// its points while the next one is drawn). These single-clause wrappers keep the
+// original cases reading as they did; the stack behaviour has its own block at
+// the bottom.
+function applyCropMaskToGeometry(
+  geom: any,
+  matrixWorld: THREE.Matrix4,
+  displayOffset: { x: number; y: number; z: number } | undefined,
+  predicate: CropPredicate,
+  invert: boolean,
+): void {
+  applyCropMaskRulesToGeometry(geom, matrixWorld, displayOffset, [{ predicate, invert, key: 'one' }]);
+}
+function applyCropMaskToVisibleNodes(
+  octree: any,
+  displayOffset: { x: number; y: number; z: number } | undefined,
+  predicate: CropPredicate,
+  invert: boolean,
+  maskKey: string,
+): void {
+  applyCropMaskRulesToVisibleNodes(octree, displayOffset, [{ predicate, invert, key: maskKey }], maskKey);
+}
 
 // Minimal stand-in for a potree tile geometry: a non-indexed position
 // attribute plus the setIndex/index surface this module drives.
@@ -239,5 +264,86 @@ describe('invert re-masking (regression)', () => {
     applyCropMaskToVisibleNodes(octree, undefined, keepLowX, true, 'poly|true');
     expect(geom.index).not.toBeNull();
     expect(geom.index.array.length).toBe(0);
+  });
+});
+
+// A crop applied to a session-backed cloud is instant: the backend deletes the
+// points and this mask hides them until the background octree rebuild lands. So
+// several clauses can be live at once — every crop already applied to the cloud,
+// plus the live preview of the one being drawn.
+describe('a stack of mask clauses', () => {
+  const keepHighY: CropPredicate = (_x, y) => y > 0.5;
+
+  it('keeps only the points EVERY clause accepts', () => {
+    const geom = makeGeometry([
+      [0, 1, 0],   // low x, high y — kept by both
+      [0, 0, 0],   // low x, low y  — dropped by the second
+      [1, 1, 0],   // high x        — dropped by the first
+      [0.1, 2, 0], // kept by both
+    ]);
+    applyCropMaskRulesToGeometry(geom, identity, undefined, [
+      { predicate: keepLowX, invert: false, key: 'a' },
+      { predicate: keepHighY, invert: false, key: 'b' },
+    ]);
+    expect(Array.from(geom.index.array)).toEqual([0, 3]);
+  });
+
+  it('applies each clause its OWN invert', () => {
+    const geom = makeGeometry([
+      [0, 1, 0],   // low x (dropped by the inverted first clause)
+      [1, 1, 0],   // high x, high y — kept
+      [1, 0, 0],   // high x, low y  — dropped by the second
+    ]);
+    applyCropMaskRulesToGeometry(geom, identity, undefined, [
+      { predicate: keepLowX, invert: true, key: 'a' },
+      { predicate: keepHighY, invert: false, key: 'b' },
+    ]);
+    expect(Array.from(geom.index.array)).toEqual([1]);
+  });
+
+  it('an empty stack hides nothing, and clears a mask left by an earlier one', () => {
+    const geom = makeGeometry([[0, 0, 0], [1, 0, 0]]);
+    applyCropMaskRulesToGeometry(geom, identity, undefined, [
+      { predicate: keepLowX, invert: false, key: 'a' },
+    ]);
+    expect(geom.index).not.toBeNull();
+    // This is the moment the background rebuild lands: the octree now excludes
+    // the points itself, so the clause retires and the mask must come off — a
+    // stale mask would hide points that are legitimately there.
+    applyCropMaskRulesToGeometry(geom, identity, undefined, []);
+    expect(geom.index).toBeNull();
+  });
+
+  it('re-masks when a clause is added, removed or redrawn', () => {
+    const a: CropMaskRule = { predicate: keepLowX, invert: false, key: 'a' };
+    const b: CropMaskRule = { predicate: keepHighY, invert: false, key: 'b' };
+    // The key is what the per-tile pass compares to decide whether to skip, so
+    // every one of these must produce a different string.
+    const keys = [
+      cropMaskRulesKey([]),
+      cropMaskRulesKey([a]),
+      cropMaskRulesKey([a, b]),
+      cropMaskRulesKey([b, a]),
+      cropMaskRulesKey([{ ...a, invert: true }]),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
+    // …and an unchanged stack must NOT, or the mask would be recomputed for
+    // every visible tile on every frame.
+    expect(cropMaskRulesKey([a, b])).toBe(cropMaskRulesKey([a, b]));
+  });
+
+  it('skips a tile already masked under the same stack, and re-masks when it changes', () => {
+    let calls = 0;
+    const counting: CropPredicate = (x) => { calls++; return x < 0.5; };
+    const geom = makeGeometry([[0, 0, 0], [1, 0, 0]]);
+    const octree = makeOctree([makeNode(geom)]);
+    const rules: CropMaskRule[] = [{ predicate: counting, invert: false, key: 'a' }];
+    applyCropMaskRulesToVisibleNodes(octree, undefined, rules, cropMaskRulesKey(rules));
+    expect(calls).toBe(2);
+    applyCropMaskRulesToVisibleNodes(octree, undefined, rules, cropMaskRulesKey(rules));
+    expect(calls, 'same stack must not re-test the tile').toBe(2);
+    const grown = [...rules, { predicate: counting, invert: false, key: 'b' }];
+    applyCropMaskRulesToVisibleNodes(octree, undefined, grown, cropMaskRulesKey(grown));
+    expect(calls).toBeGreaterThan(2);
   });
 });

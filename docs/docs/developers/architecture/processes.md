@@ -218,6 +218,17 @@ so a conversion never drops the dir it just wrote.
     it and logs a warning. Overshooting a cap on regenerable disk is
     recoverable; deleting the only copy of an edit is not.
 
+    One pin is not obvious from `octree_cache_id` alone. An unbaked edit
+    (`delete_region`, `reset_edits`) clears that field — the cached octree no
+    longer describes the session's points — but the renderer does **not** stop
+    drawing it: it keeps streaming from that directory and hides the deleted
+    points with a clip volume or a per-tile mask, which is what makes an applied
+    delete instant. So the directory on screen was unpinned for exactly as long
+    as the rebuild took. `_mark_octree_stale_locked` carries the old id into
+    `CloudSession.rendered_octree_cache_id` and `_live_session_octree_ids()`
+    pins that too. Crop now leans on this window deliberately (its rebuild runs
+    in the background), so the pin is load-bearing rather than theoretical.
+
     Recovery closes the other half. A diverged cloud whose octree goes missing is
     rebuilt from its **session** (`POST /api/cloud/session/{id}/rebuild_octree`,
     which reconverts from the in-RAM arrays and reads no file). Only when there
