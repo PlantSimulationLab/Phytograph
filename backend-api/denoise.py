@@ -118,6 +118,26 @@ OVER_REMOVAL_FRACTION = 0.20
 LARGE_CLOUD_HINT = 30_000_000
 
 _QUERY_CHUNK = 1_000_000
+# ...and a ceiling on chunk*k, because `chunk` alone does not bound the query.
+_QUERY_CELLS = 20_000_000
+
+
+def _chunk_rows(chunk: int, k: int) -> int:
+    """Rows per `tree.query` call: `chunk`, lowered so `chunk * k` stays under
+    `_QUERY_CELLS`.
+
+    `tree.query` allocates an (rows, k) distance array AND an (rows, k) index
+    array -- 16 bytes a cell -- so `chunk` bounds the peak only for a FIXED k.
+    Both callers take k from a user parameter with no upper bound (ROR's "min
+    neighbours", SOR's "neighbours"), which multiplies straight into the chunk:
+    at nb_points=1000 the 1 M-row chunk asks for a 16 GB allocation. Denoise
+    runs in a worker subprocess, so that peak is what the parent pays for.
+
+    The budget is the cost the SOR default already had (1 M rows x k=21,
+    ~320 MB), so no existing default chunks smaller than it used to: ROR's k=3
+    keeps the full 1 M rows and SOR's k=21 gives up ~5%.
+    """
+    return max(1, min(int(chunk), _QUERY_CELLS // max(1, int(k))))
 
 
 def _nn_distances(points: np.ndarray, sample: int = 200_000,
@@ -184,7 +204,8 @@ def statistical_outlier_mask(points: np.ndarray, nb_neighbors: int = DEFAULT_SOR
     The query is CHUNKED. A one-shot ``tree.query(points, k=nb+1)`` materialises
     both the distances and the indices for every point: at 10 M points and k=21
     that is ~1.7 GB each, and only the per-row mean is ever used. Chunking keeps
-    peak memory at O(chunk*k) while the accumulated `mean_d` stays O(N).
+    peak memory at O(chunk*k) while the accumulated `mean_d` stays O(N) -- and
+    `_chunk_rows` bounds that product absolutely, since k is a user parameter.
     """
     n = len(points)
     if n <= nb_neighbors:
@@ -192,7 +213,7 @@ def statistical_outlier_mask(points: np.ndarray, nb_neighbors: int = DEFAULT_SOR
     if tree is None:
         tree = cKDTree(points)
     mean_d = np.empty(n, dtype=np.float64)
-    step = max(1, int(chunk))
+    step = _chunk_rows(chunk, nb_neighbors + 1)
     for start in range(0, n, step):
         stop = min(start + step, n)
         d, _ = tree.query(points[start:stop], k=nb_neighbors + 1, workers=workers)
@@ -250,7 +271,8 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
     `test_ror_matches_query_ball_point_except_on_exact_ties`.
 
     Nothing proportional to the neighbour lists is ever allocated: the chunked
-    query holds O(chunk * nb_points) distances.
+    query holds O(chunk * nb_points) distances, and `_chunk_rows` caps that
+    product so a large `nb_points` shrinks the chunk instead of the RAM.
 
     `tree` may be a cKDTree already built on exactly `points`, to avoid a
     rebuild; it is built here when omitted.
@@ -267,7 +289,7 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
     # survive the prune so the `<= radius` below can accept it.
     bound = float(np.nextafter(radius, np.inf))
     keep = np.empty(n, dtype=bool)
-    step = max(1, int(chunk))
+    step = _chunk_rows(chunk, k)
     for start in range(0, n, step):
         stop = min(start + step, n)
         d, _ = tree.query(points[start:stop], k=k,

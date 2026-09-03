@@ -159,6 +159,31 @@ def test_chunked_query_matches_one_shot(tree):
         assert np.array_equal(chunked, whole)
 
 
+def test_the_query_chunk_shrinks_as_k_grows(tree):
+    """`chunk` bounds `tree.query`'s allocation only for a FIXED k, and k comes
+    straight from a user parameter with no upper bound ("min neighbours" /
+    "neighbours"). Unbounded, the two multiply: a 1 M-row chunk at nb_points=1000
+    asks for (rows, k) distances AND indices, i.e. ~16 GB, in a worker subprocess
+    whose peak the parent pays for. `_chunk_rows` spends the same budget on fewer
+    rows instead.
+    """
+    # The budget is a ceiling on rows*k, never an increase on the caller's chunk.
+    assert denoise._chunk_rows(10 ** 6, 3) == 10 ** 6, "ROR's default must not shrink"
+    assert denoise._chunk_rows(7, 1000) == 7, "a small chunk is never raised"
+    assert denoise._chunk_rows(10 ** 6, 1000) * 1000 <= denoise._QUERY_CELLS
+    assert denoise._chunk_rows(10 ** 9, 21) * 21 <= denoise._QUERY_CELLS
+    # Monotonic in k, and never zero however large k gets.
+    rows = [denoise._chunk_rows(10 ** 6, k) for k in (1, 10, 100, 10_000, 10 ** 9)]
+    assert rows == sorted(rows, reverse=True) and rows[-1] >= 1
+
+    # And it is still only a chunking decision: the mask is unchanged.
+    points, _ = tree
+    assert np.array_equal(
+        radius_outlier_mask(points, 40, 0.15),
+        radius_outlier_mask(points, 40, 0.15, chunk=13),
+    )
+
+
 def test_ror_matches_query_ball_point_except_on_exact_ties():
     """ROR is asked as a BOUNDED k-NN query rather than a neighbour count, for
     speed (measured 32x on a real TLS scan; see `radius_outlier_mask`). This
