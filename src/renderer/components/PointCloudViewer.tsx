@@ -370,6 +370,20 @@ const TRAJ_SORT_DELAY_MS = 700;
 // trajectory's own time span.
 const PREVIEW_DURATION_S = 5;
 
+// The scan row's expanded detail blocks opt back into text selection (the row
+// itself is `select-none`, so a drag in the panel list can't smear a selection
+// across the UI). Their text — origin coordinates, extent, source file, field
+// names — is exactly what a user wants to paste into a note or a bug report, so
+// it is selectable; this keeps the drag that selects it from also re-toggling
+// the row. The row's own onClick fires on the mouse-up that ENDS a selection
+// drag, which for a solo-selected scan would deselect it out from under the
+// text the user just highlighted. Swallowed only when a selection actually
+// exists, so a plain click on the detail text still selects the scan.
+const stopClickAfterTextSelection = (e: React.MouseEvent) => {
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && sel.toString().length > 0) e.stopPropagation();
+};
+
 // Default opacity for a mesh with no explicit per-mesh override. Kept as a
 // single source of truth so the render path and the meshes-panel slider agree.
 //  - voxel-grid boxes      -> GRID_MESH_DEFAULT_OPACITY (0.4): see the box's contents
@@ -20269,7 +20283,11 @@ export default function PointCloudViewer({
                   </div>
                   {/* Expanded parameters block. */}
                   {isExpanded && scanHasParams && (
-                    <div data-testid={`scan-expanded-${scan.id}`} className="pl-6 pr-2 pb-2 pt-1 text-[10px] text-neutral-400 space-y-0.5">
+                    <div
+                      data-testid={`scan-expanded-${scan.id}`}
+                      onClick={stopClickAfterTextSelection}
+                      className="pl-6 pr-2 pb-2 pt-1 text-[10px] text-neutral-400 space-y-0.5 select-text"
+                    >
                       {scan.params.scannerModel && scan.params.scannerModel !== 'generic' && (
                         <div>
                           model: <span className="text-neutral-300">{getScannerModel(scan.params.scannerModel).label}</span>
@@ -20366,7 +20384,8 @@ export default function PointCloudViewer({
                   {isExpanded && scanHasData && (
                     <div
                       data-testid={`scan-cloud-info-${scan.id}`}
-                      className="pl-6 pr-2 pb-1 pt-1 text-[10px] text-neutral-400 space-y-0.5"
+                      onClick={stopClickAfterTextSelection}
+                      className="pl-6 pr-2 pb-1 pt-1 text-[10px] text-neutral-400 space-y-0.5 select-text"
                     >
                       <div>
                         points: <span className="font-mono text-neutral-300">{effectivePointCount.toLocaleString()}</span>
@@ -20478,7 +20497,8 @@ export default function PointCloudViewer({
                     return (
                       <div
                         data-testid={`scan-columns-${scan.id}`}
-                        className="pl-6 pr-2 pb-2 text-[10px] text-neutral-400 space-y-0.5"
+                        onClick={stopClickAfterTextSelection}
+                        className="pl-6 pr-2 pb-2 text-[10px] text-neutral-400 space-y-0.5 select-text"
                       >
                         <div>
                           <span>fields: </span>
