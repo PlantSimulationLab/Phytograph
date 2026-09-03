@@ -48,8 +48,8 @@ test('stitch merges two octree clouds into one cloud with correct count and boun
   await expect(rows).toHaveCount(2, { timeout: 20_000 });
 
   // Both inputs are octree-backed (the real case the bug regressed).
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
   await expect(treeRow).toHaveAttribute('data-point-count', '900');
   await expect(tinyRow).toHaveAttribute('data-octree', 'true');
@@ -129,8 +129,8 @@ test('stitch is undoable — undo restores both originals with their counts', as
   // One Cmd+Z reverses the whole stitch: both originals return with their counts.
   await page.keyboard.press('ControlOrMeta+z');
   await expect(rows).toHaveCount(2, { timeout: 20_000 });
-  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]'))
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'))
     .toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
-  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]'))
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tree"]'))
     .toHaveAttribute('data-point-count', '900', { timeout: 20_000 });
 });

@@ -423,7 +423,8 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       // fanned out. An explicit wizard/XML label still wins, but only for a
       // single position — applying it to every position would give a multi-scan
       // import N identically-named scans.
-      label: (positions.length === 1 ? input.label : undefined) ?? name ?? data.fileName ?? 'Scan',
+      label: (positions.length === 1 ? input.label : undefined) ?? name
+        ?? (data.fileName ? baseNameForLabel(data.fileName) : undefined) ?? 'Scan',
       visible: true,
       // Likewise: one explicit colour can only claim a single position.
       color: (positions.length === 1 ? input.color : undefined) ?? nextColor(),
@@ -800,7 +801,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           const data = await parsePointCloud(file);
           const newScan: Scan = {
             id: crypto.randomUUID(),
-            label: data.fileName ?? 'Scan',
+            label: data.fileName ? baseNameForLabel(data.fileName) : 'Scan',
             visible: true,
             color: getNextColor(),
             data,
@@ -1043,7 +1044,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             const data = await parsePointCloud(file);
             newScans.push({
               id: crypto.randomUUID(),
-              label: data.fileName ?? 'Scan',
+              label: data.fileName ? baseNameForLabel(data.fileName) : 'Scan',
               visible: true,
               color: getColorForFile(),
               data,

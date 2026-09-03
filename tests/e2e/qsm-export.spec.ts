@@ -35,7 +35,7 @@ test('exports a built QSM to CSV and OBJ via the export dialog', async () => {
     await importFiles(app, page, 'import-point-cloud', [TREE]);
     await completeImportWizard(page);
 
-    const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
     await expect(treeRow).toBeVisible({ timeout: 20_000 });
     // A single import auto-selects the new scan — don't click (that would toggle
     // it off); just confirm it's selected before building.

@@ -38,7 +38,7 @@ test('generates a DEM from ground points and exports raster grids', async () => 
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -68,7 +68,7 @@ test('generates a DEM from ground points and exports raster grids', async () => 
     await page.getByTestId('dem-run-button').click();
 
     // 3) A DEM surface mesh appears, named "<cloud> DEM", with real triangles.
-    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants.xyz DEM"]');
+    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants DEM"]');
     await expect(demRow).toBeVisible({ timeout: 60_000 });
     const tris = parseInt((await demRow.getAttribute('data-triangle-count')) ?? '0', 10);
     expect(tris).toBeGreaterThan(0);
@@ -147,7 +147,7 @@ test('generates a CHM (DSM − DTM) with canopy heights, never negative', async 
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
     // Segment ground so the CHM's DTM half grids ground points only.
@@ -172,7 +172,7 @@ test('generates a CHM (DSM − DTM) with canopy heights, never negative', async 
     await page.getByTestId('dem-run-button').click();
 
     // A CHM surface mesh appears, named "<cloud> CHM", with real triangles.
-    const chmRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants.xyz CHM"]');
+    const chmRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants CHM"]');
     await expect(chmRow).toBeVisible({ timeout: 60_000 });
     expect(parseInt((await chmRow.getAttribute('data-triangle-count')) ?? '0', 10)).toBeGreaterThan(0);
 
@@ -209,7 +209,7 @@ test('generates DTM, DSM and CHM together in one run', async () => {
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
   await page.getByTestId('tool-ground-segment').click();
@@ -239,7 +239,7 @@ test('generates DTM, DSM and CHM together in one run', async () => {
     DEM: 'Terrain (DTM)', DSM: 'Surface (DSM)', CHM: 'Canopy height (CHM)',
   };
   for (const suffix of ['DEM', 'DSM', 'CHM']) {
-    const row = page.locator(`[data-testid="mesh-row"][data-mesh-name="ground_plants.xyz ${suffix}"]`);
+    const row = page.locator(`[data-testid="mesh-row"][data-mesh-name="ground_plants ${suffix}"]`);
     await expect(row).toBeVisible({ timeout: 90_000 });
     expect(parseInt((await row.getAttribute('data-triangle-count')) ?? '0', 10)).toBeGreaterThan(0);
     // The row subtitle shows the product badge, not a bare triangle count.
@@ -260,7 +260,7 @@ test('a DTM carries colour-by layers and exports the selected one as a raster', 
   try {
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
     await page.getByTestId('tool-ground-segment').click();
@@ -280,7 +280,7 @@ test('a DTM carries colour-by layers and exports the selected one as a raster', 
     await page.getByTestId('dem-run-button').click();
 
     // ONE DEM mesh appears (no separate density/intensity meshes).
-    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants.xyz DEM"]');
+    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants DEM"]');
     await expect(demRow).toBeVisible({ timeout: 90_000 });
     await expect(page.locator('[data-testid="mesh-row"]')).toHaveCount(1);
 

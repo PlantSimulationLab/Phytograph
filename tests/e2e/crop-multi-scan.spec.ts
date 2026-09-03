@@ -51,7 +51,7 @@ test('multi-scan crop applies one world-space box across two selected scans', as
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 
@@ -59,7 +59,7 @@ test('multi-scan crop applies one world-space box across two selected scans', as
   await importFiles(app, page, 'import-auto', TINY_OFFSET);
   await completeImportWizard(page);
 
-  const offsetRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset.xyz"]');
+  const offsetRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset"]');
   await expect(offsetRow).toBeVisible({ timeout: 20_000 });
   await expect(offsetRow).toHaveAttribute('data-point-count', '60');
 
@@ -217,7 +217,7 @@ test('Enter inside a dim input commits the value without applying the crop', asy
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
 
@@ -256,7 +256,7 @@ test('crop panel × button dismisses without applying', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
 

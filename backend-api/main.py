@@ -28361,9 +28361,10 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
     `[i/N]` prefix the renderer's counter parses.
     """
     n = _source_scan_count(source_path)
-    # A single-position file keeps the FULL basename it always had — that string
-    # becomes the scan's label, and shortening it to the stem would silently
-    # rename every existing import.
+    # This string becomes the scan's label, so it's the STEM in both branches —
+    # the extension is noise in the scans panel, and a multi-scan source has
+    # always shortened it, so keeping the full basename for a single scan made
+    # one source name its scans two different ways.
     stem = source_path.stem
     out: List[dict] = []
     for i in range(n):
@@ -28373,7 +28374,7 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
         # not be co-located.
         sub = request.model_copy(update={"scan_index": i if n > 1 else None})
         entry: dict = {"scan_index": i,
-                       "name": source_path.name if n == 1 else f"{stem} — scan {i + 1}"}
+                       "name": stem if n == 1 else f"{stem} — scan {i + 1}"}
 
         # Window each sub-import's own 0..1 sweep into ITS SLICE of the overall
         # bar. Suppressing the inner progress entirely (the obvious way to stop N

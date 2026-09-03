@@ -29,12 +29,10 @@ import { resetToFreshScene } from './helpers/resetApp';
 // showed up here as an intermittent miss on the 20 s row-visibility wait.
 const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
 
-const CASES = [
-  { file: 'tiny.ply', name: 'tiny.ply' },
-  { file: 'tiny.pcd', name: 'tiny.pcd' },
-  { file: 'tiny.las', name: 'tiny.las' },
-  { file: 'tiny.laz', name: 'tiny.laz' },
-];
+// The auto-name is the file's STEM, extension trimmed — so all four cases
+// import as "tiny". They never collide: each test runs on a fresh scene.
+const CASES = ['tiny.ply', 'tiny.pcd', 'tiny.las', 'tiny.laz']
+  .map(file => ({ file, name: file.replace(/\.[^.]+$/, '') }));
 
 let session: LaunchedApp;
 test.beforeAll(async () => {

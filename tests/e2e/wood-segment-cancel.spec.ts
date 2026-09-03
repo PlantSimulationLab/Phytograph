@@ -30,7 +30,7 @@ test('wood/leaf segmentation shows a Cancel button and recovers after cancel', a
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 

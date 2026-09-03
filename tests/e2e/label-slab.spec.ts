@@ -39,7 +39,7 @@ async function importDepthLayers() {
   const { app, page } = session;
   await importFiles(app, page, 'import-auto', DEPTH_LAYERS);
   await completeImportWizard(page);
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="depth-layers.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="depth-layers"]');
   await expect(row).toBeVisible({ timeout: 30_000 });
   await expect(row).toHaveAttribute('data-point-count', String(TOTAL));
   await expect(row).toHaveAttribute('data-selected', 'true');

@@ -39,7 +39,7 @@ async function loadFramedScene() {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'),
   ).toBeVisible({ timeout: 20_000 });
   await page.waitForFunction(
     () => (window as any).__getCameraState?.()?.framedContent === true,

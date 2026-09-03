@@ -185,9 +185,9 @@ class TestMultiSessionEndpoint:
             main.CloudSessionCreateRequest(source_path=str(src)), src)
         assert res["scan_count"] == 1
         assert len(res["scans"]) == 1
-        # The FULL basename, exactly as before multi-scan existed — this string
-        # becomes the scan's label, so a stem here would rename every import.
-        assert res["scans"][0]["name"] == "o.ptx"
+        # The STEM, matching the multi-scan branch above — this string becomes
+        # the scan's label, and the extension is noise in the scans panel.
+        assert res["scans"][0]["name"] == "o"
         assert res["scans"][0]["session"]["point_count"] == 12 * 15
 
     def test_a_plain_xyz_goes_through_unchanged(self, tmp_path, monkeypatch):

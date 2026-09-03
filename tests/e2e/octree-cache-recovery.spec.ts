@@ -28,7 +28,7 @@ test('rebuilds an octree-backed cloud after its disk cache is deleted', async ()
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-octree', 'true');
     const pointCount = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
@@ -109,7 +109,7 @@ test('recovers repeatedly, and never claims an untouched cloud was edited', asyn
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     const pointCount = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
     expect(pointCount).toBeGreaterThan(0);
@@ -195,7 +195,7 @@ test('recovers an EDITED cloud from its live session, not from its source file',
     await importFiles(app, page, 'import-point-cloud', SCALARS);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
 

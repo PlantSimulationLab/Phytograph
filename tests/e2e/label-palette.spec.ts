@@ -38,7 +38,7 @@ async function openLabelTool() {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
 

@@ -31,8 +31,8 @@ test('imports multiple point clouds at once via Import → Point Cloud', async (
     // tiny.xyz = 60 pts, tree.xyz = 900 pts (comment/header lines skipped).
     // These come back from the octree metadata, proving the multi-select
     // routed through the same backend path the single-file import uses.
-    const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-    const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+    const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
 
     await expect(tinyRow).toBeVisible({ timeout: 20_000 });
     await expect(treeRow).toBeVisible({ timeout: 20_000 });

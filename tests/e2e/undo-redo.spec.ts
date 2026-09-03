@@ -33,7 +33,7 @@ test('mesh add is undoable; undo removes it and redo restores it', async () => {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -71,7 +71,7 @@ test('mesh delete is undoable', async () => {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
   await page.getByTestId('tool-triangulate').click();
@@ -106,7 +106,7 @@ test('skeleton extraction is undoable', async () => {
   await importFiles(app, page, 'import-point-cloud', TREE_FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -142,7 +142,7 @@ test('scan delete is undoable (octree cloud survives undo)', async () => {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
   await expect(row).toHaveAttribute('data-selected', 'true');

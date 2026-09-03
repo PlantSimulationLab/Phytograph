@@ -36,7 +36,7 @@ test('segments ground vs plant and colours by the ground_class attribute', async
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(2200);
 
@@ -73,8 +73,8 @@ test('segments ground vs plant and colours by the ground_class attribute', async
   // The split checkbox produced two child clouds with the original points
   // partitioned (1600 ground + 600 plant). Assert both rows exist with their
   // expected point counts — concrete output, not "didn't error".
-  const groundRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz (ground)"]');
-  const plantRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz (non-ground)"]');
+  const groundRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants (ground)"]');
+  const plantRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants (non-ground)"]');
   // Each split sub-cloud is a separate backend re-conversion, so allow time.
   await expect(groundRow).toBeVisible({ timeout: 60_000 });
   await expect(plantRow).toBeVisible({ timeout: 60_000 });
@@ -102,7 +102,7 @@ test('measures the ground tolerance from the scan when asked', async () => {
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -124,8 +124,8 @@ test('measures the ground tolerance from the scan when asked', async () => {
   // The split proves the measured tolerance separated the fixture correctly:
   // the plant blob starts at z≈0.12, so anything ≥0.12 would swallow it and
   // anything ≈0.001 would reject the ground. Only a measured value works.
-  const groundRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz (ground)"]');
-  const plantRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz (non-ground)"]');
+  const groundRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants (ground)"]');
+  const plantRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants (non-ground)"]');
   await expect(groundRow).toBeVisible({ timeout: 60_000 });
   await expect(plantRow).toBeVisible({ timeout: 60_000 });
   expect(parseInt((await groundRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(1600);
@@ -158,7 +158,7 @@ test('filters a segmented cloud by ground_class via class checkboxes', async () 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
@@ -233,7 +233,7 @@ test('hides the class legend after the segmented cloud is deleted', async () => 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');

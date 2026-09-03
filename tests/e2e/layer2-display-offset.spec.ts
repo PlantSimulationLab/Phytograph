@@ -43,7 +43,7 @@ test('Layer2: UTM cloud frames with displayOffset and crops in world space', asy
     await importBtn.click();
     await expect(wizard).toBeHidden({ timeout: 30_000 });
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="utm-tree.xyz"]');
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="utm-tree"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '192');
 

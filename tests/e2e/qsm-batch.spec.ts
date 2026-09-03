@@ -46,8 +46,8 @@ test('batch-builds one QSM per selected scan via the UI', async () => {
   await importFiles(app, page, 'import-point-cloud', [TREE, TREE2]);
   await completeImportWizard(page);
 
-  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
-  const tree2Row = page.locator('[data-testid="scan-row"][data-scan-name="tree2.xyz"]');
+  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
+  const tree2Row = page.locator('[data-testid="scan-row"][data-scan-name="tree2"]');
   await expect(treeRow).toBeVisible({ timeout: 20_000 });
   await expect(tree2Row).toBeVisible({ timeout: 20_000 });
 
@@ -107,7 +107,7 @@ test('batch-builds one QSM per selected scan via the UI', async () => {
   // Each QSM is named after its own source scan and has real cylinders —
   // proving they were built separately, not a single merged model.
   const names = await page.getByTestId('qsm-row-name').allInnerTexts();
-  expect(names.sort()).toEqual(['tree.xyz', 'tree2.xyz']);
+  expect(names.sort()).toEqual(['tree', 'tree2']);
 
   for (let i = 0; i < 2; i++) {
     const row = qsmRows.nth(i);
@@ -130,8 +130,8 @@ test('aggregates multiple scans into a single fused QSM via the UI', async () =>
   await importFiles(app, page, 'import-point-cloud', [TREE_VIEW1, TREE_VIEW2]);
   await completeImportWizard(page);
 
-  const view1Row = page.locator('[data-testid="scan-row"][data-scan-name="tree-view1.xyz"]');
-  const view2Row = page.locator('[data-testid="scan-row"][data-scan-name="tree-view2.xyz"]');
+  const view1Row = page.locator('[data-testid="scan-row"][data-scan-name="tree-view1"]');
+  const view2Row = page.locator('[data-testid="scan-row"][data-scan-name="tree-view2"]');
   await expect(view1Row).toBeVisible({ timeout: 20_000 });
   await expect(view2Row).toBeVisible({ timeout: 20_000 });
 
@@ -152,7 +152,7 @@ test('aggregates multiple scans into a single fused QSM via the UI', async () =>
   await expect(qsmRows).toHaveCount(1, { timeout: 120_000 });
 
   // Its name marks it as fused from multiple scans.
-  await expect(page.getByTestId('qsm-row-name')).toContainText('tree-view1.xyz + 1 more');
+  await expect(page.getByTestId('qsm-row-name')).toContainText('tree-view1 + 1 more');
 
   // Structurally it's still one clean tree: a real trunk + cylinders.
   const row = qsmRows.first();

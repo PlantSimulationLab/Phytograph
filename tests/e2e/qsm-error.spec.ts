@@ -21,7 +21,7 @@ test('shows a QSM build error and clears it when the modal re-opens', async () =
     await importFiles(app, page, 'import-point-cloud', SPARSE);
     await completeImportWizard(page);
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="sparse.xyz"]');
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="sparse"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-selected', 'true');
 

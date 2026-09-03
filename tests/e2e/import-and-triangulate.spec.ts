@@ -33,7 +33,7 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
 
     // Confirm the cloud appeared in the cloud list with the right point
     // count. tiny.xyz has 60 data lines (2 comment lines skipped).
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-point-count', '60');
 

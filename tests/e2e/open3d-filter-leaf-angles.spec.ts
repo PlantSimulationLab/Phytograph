@@ -29,7 +29,7 @@ test('Open3D mesh: triangle filter + leaf-angle plot (no Helios)', async () => {
     await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 

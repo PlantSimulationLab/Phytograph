@@ -48,7 +48,7 @@ test('wizard previews columns and imports with auto-detect', async () => {
   await importBtn.click();
   await expect(wizard).toBeHidden();
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
 });
@@ -72,7 +72,7 @@ test('marking a column as a Label in the wizard yields a class legend', async ()
   await page.getByTestId('import-wizard-import').click();
   await expect(wizard).toBeHidden();
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(row).toHaveAttribute('data-selected', 'true');
@@ -125,7 +125,7 @@ test('mapping columns to Scan Row/Column Index carries the raster grid', async (
   await page.getByTestId('import-wizard-import').click();
   await expect(wizard).toBeHidden();
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="raster-grid.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="raster-grid"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(9);
 
@@ -167,7 +167,7 @@ test('unticking Import drops an ASCII column from the imported cloud', async () 
   await page.getByTestId('import-wizard-import').click();
   await expect(wizard).toBeHidden();
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   // Dropping a COLUMN must not drop any POINT.
   expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
@@ -338,8 +338,8 @@ test('wizard steps through a multi-file import', async () => {
   await importBtn.click();
   await expect(wizard).toBeHidden();
 
-  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]')).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="scalars"]')).toBeVisible({ timeout: 20_000 });
 });
 
 test('apply-to-all enables import without stepping through every scan', async () => {
@@ -392,7 +392,7 @@ test('a params-less import still expands to show its fields and extent', async (
   await page.getByTestId('import-wizard-import').click();
   await expect(wizard).toBeHidden();
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   // Precondition: this really is a scan with NO parameters — the case that
   // previously had no chevron at all.

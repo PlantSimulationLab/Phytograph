@@ -65,7 +65,7 @@ test('exports several plain clouds in one batch, with select-all', async () => {
   const rows = page.getByTestId('export-scan-row');
   await expect(rows).toHaveCount(2);
   const labels = await rows.evaluateAll(els => els.map(e => e.getAttribute('data-label')));
-  expect(labels.sort()).toEqual(['sparse.xyz', 'tiny.xyz']);
+  expect(labels.sort()).toEqual(['sparse', 'tiny']);
 
   // With nothing selected in the panel, everything starts checked — and because
   // neither cloud is a scan, the Helios XML output stands down and says why.
@@ -138,7 +138,7 @@ test('lists plain clouds alongside scans and blocks them only where the format n
   // says why rather than silently disappearing.
   await page.getByTestId('export-scan-mode-xml').click();
   await expect(page.getByTestId('export-scan-mode-xml')).toHaveAttribute('data-active', 'true');
-  const plainRow = page.locator('[data-testid="export-scan-row"][data-label="tiny.xyz"]');
+  const plainRow = page.locator('[data-testid="export-scan-row"][data-label="tiny"]');
   await expect(plainRow).toHaveAttribute('data-disabled', 'true');
   await expect(plainRow).toHaveAttribute('title', /scanner parameters/i);
 

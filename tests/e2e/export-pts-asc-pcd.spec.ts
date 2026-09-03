@@ -53,7 +53,7 @@ async function importAndOpenExport(outName: string) {
   await completeImportWizard(page);
 
   const cloudRow = page.locator(
-    '[data-testid="scan-row"][data-scan-name="colored-intensity.xyz"]');
+    '[data-testid="scan-row"][data-scan-name="colored-intensity"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(POINTS);
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
@@ -191,7 +191,7 @@ test('a re-imported PTS export keeps its geometry, colour and intensity', async 
   await importFiles(session.app, session.page, 'import-point-cloud', savePath);
   await completeImportWizard(session.page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="roundtrip.pts"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="roundtrip"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   // The count line must not cost a point, and must not become one.
   expect(parseInt((await row.getAttribute('data-point-count')) ?? '0', 10)).toBe(POINTS);

@@ -1172,12 +1172,13 @@ describe('parsePointCloudsFromPath', () => {
 
   it('returns a single element for an ordinary single-scan source', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
-      { scan_index: 0, name: 'cloud.xyz', session: sessionMeta('only') },
+      { scan_index: 0, name: 'cloud', session: sessionMeta('only') },
     ]));
     const out = await parsePointCloudsFromPath('/abs/cloud.xyz');
     expect(out).toHaveLength(1);
-    // The full basename, unchanged — this string becomes the scan's label.
-    expect(out[0].name).toBe('cloud.xyz');
+    // The stem the backend sends — this string becomes the scan's label, and
+    // the extension is noise in the scans panel.
+    expect(out[0].name).toBe('cloud');
   });
 
   it('keeps the positions that imported when one of them failed', async () => {

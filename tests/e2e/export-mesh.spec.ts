@@ -46,7 +46,7 @@ async function buildAndSelectMesh(): Promise<number> {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');

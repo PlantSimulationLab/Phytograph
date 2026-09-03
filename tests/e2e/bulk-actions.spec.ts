@@ -49,9 +49,9 @@ test('header hide acts only on the selection, leaving unselected scans visible',
   const { app, page } = session;
   await importThreeScans(app, page);
 
-  const tiny = rowByName(page, 'tiny.xyz');
-  const tree = rowByName(page, 'tree.xyz');
-  const tree2 = rowByName(page, 'tree2.xyz');
+  const tiny = rowByName(page, 'tiny');
+  const tree = rowByName(page, 'tree');
+  const tree2 = rowByName(page, 'tree2');
 
   // All start visible.
   await expect(tiny).toHaveAttribute('data-visible', 'true');
@@ -98,8 +98,8 @@ test('header delete removes the selection behind a single confirmation', async (
   const { app, page } = session;
   await importThreeScans(app, page);
 
-  const tiny = rowByName(page, 'tiny.xyz');
-  const tree = rowByName(page, 'tree.xyz');
+  const tiny = rowByName(page, 'tiny');
+  const tree = rowByName(page, 'tree');
 
   // Select two scans.
   await tiny.click();
@@ -116,7 +116,7 @@ test('header delete removes the selection behind a single confirmation', async (
 
   // Both selected scans gone; the third remains. No second dialog.
   await expect(page.locator('[data-testid="scan-row"]')).toHaveCount(1);
-  await expect(rowByName(page, 'tree2.xyz')).toBeVisible();
+  await expect(rowByName(page, 'tree2')).toBeVisible();
   await expect(page.getByTestId('confirm-delete')).toHaveCount(0);
 });
 
@@ -125,7 +125,7 @@ test('a single-row trash still confirms with the scan name, not a count', async 
   await importThreeScans(app, page);
 
   // Click the per-row trash on tree.xyz (unchanged single-delete path).
-  const tree = rowByName(page, 'tree.xyz');
+  const tree = rowByName(page, 'tree');
   const id = await tree.getAttribute('data-scan-id');
   await page.getByTestId(`scan-delete-${id}`).click();
 
@@ -134,5 +134,5 @@ test('a single-row trash still confirms with the scan name, not a count', async 
   await page.getByTestId('confirm-delete').click();
 
   await expect(page.locator('[data-testid="scan-row"]')).toHaveCount(2);
-  await expect(rowByName(page, 'tree.xyz')).toHaveCount(0);
+  await expect(rowByName(page, 'tree')).toHaveCount(0);
 });

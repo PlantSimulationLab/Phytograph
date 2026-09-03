@@ -136,7 +136,7 @@ test.describe('point picker', () => {
   async function importScalars() {
     await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
     await completeImportWizard(session.page);
-    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '60');
     await waitForCameraSettled();
@@ -153,7 +153,7 @@ test.describe('point picker', () => {
 
     await expect(labels()).toHaveCount(1, { timeout: 10_000 });
     const label = labels().first();
-    await expect(label.getByTestId('picked-point-scan')).toHaveText('scalars.xyz');
+    await expect(label.getByTestId('picked-point-scan')).toHaveText('scalars');
 
     // Coordinates: the fixture has no global shift, so world is the only column
     // and it must reproduce the source row to millimetre precision.
@@ -241,7 +241,7 @@ test.describe('point picker', () => {
     // straight through the foreground and labels the background 8 m behind it.
     await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'depth-layers.xyz'));
     await completeImportWizard(session.page);
-    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="depth-layers.xyz"]');
+    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="depth-layers"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '1706');
 
@@ -348,7 +348,7 @@ test.describe('point picker', () => {
     // show both, and they must differ by exactly the shift.
     await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'utm-tree.xyz'));
     await completeImportWizard(session.page);
-    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="utm-tree.xyz"]');
+    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="utm-tree"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-point-count', '192');
     await waitForCameraSettled();

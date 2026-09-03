@@ -58,7 +58,7 @@ async function startPolygonDraw(session: LaunchedApp) {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-selected', 'true');
 
@@ -202,7 +202,7 @@ test('rect drag released over a panel still commits (clamped) instead of hanging
 
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-selected', 'true');
 

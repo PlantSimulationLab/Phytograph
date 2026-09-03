@@ -58,7 +58,7 @@ async function buildQsmFromTree(app: ElectronApplication, page: Page): Promise<v
   await importFiles(app, page, 'import-point-cloud', [TREE]);
   await completeImportWizard(page);
 
-  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
   await expect(treeRow).toBeVisible({ timeout: 20_000 });
   await expect(treeRow).toHaveAttribute('data-selected', 'true');
 
@@ -142,7 +142,7 @@ test.describe('QSM CSV import', () => {
     // to the user as the QSM vanishing the moment it is re-imported.
     await importFiles(app, page, 'import-point-cloud', [UTM_TREE]);
     await completeImportWizard(page);
-    const scanRow = page.locator('[data-testid="scan-row"][data-scan-name="utm-tree.xyz"]');
+    const scanRow = page.locator('[data-testid="scan-row"][data-scan-name="utm-tree"]');
     await expect(scanRow).toBeVisible({ timeout: 20_000 });
 
     await page.getByTestId('tool-qsm').click();

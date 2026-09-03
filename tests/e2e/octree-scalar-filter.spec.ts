@@ -48,7 +48,7 @@ async function importAndSelect(app: import('@playwright/test').ElectronApplicati
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
@@ -118,7 +118,7 @@ test('segments an octree cloud into in-range + out-of-range clouds', async () =>
 
   // The leftover cloud is named "<original> (filtered out)".
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz (filtered out)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="scalars (filtered out)"]'),
   ).toBeVisible();
 });
 
@@ -278,8 +278,8 @@ test('filters every selected scan, not just the first', async () => {
   await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
   await completeImportWizard(page);
 
-  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
-  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b.xyz"]');
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b"]');
   await expect(rowA).toBeVisible({ timeout: 20_000 });
   await expect(rowB).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await rowA.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
@@ -318,8 +318,8 @@ test('segments every selected scan, keeping both halves of each', async () => {
   await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
   await completeImportWizard(page);
 
-  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
-  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b.xyz"]');
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b"]');
   await expect(rowA).toBeVisible({ timeout: 20_000 });
   await expect(rowB).toBeVisible({ timeout: 20_000 });
   await rowA.click({ modifiers: ['ControlOrMeta'] });
@@ -348,10 +348,10 @@ test('segments every selected scan, keeping both halves of each', async () => {
   }).toPass({ timeout: 30_000 });
 
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz (filtered out)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="scalars (filtered out)"]'),
   ).toBeVisible();
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="scalars-b.xyz (filtered out)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="scalars-b (filtered out)"]'),
   ).toBeVisible();
 });
 
@@ -407,8 +407,8 @@ test('a touched-but-unnarrowed X does not crop siblings to the first scan', asyn
   await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
   await completeImportWizard(page);
 
-  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
-  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b.xyz"]');
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalars-b"]');
   await expect(rowA).toBeVisible({ timeout: 20_000 });
   await expect(rowB).toBeVisible({ timeout: 20_000 });
   // scalars.xyz is the PRIMARY (first in the selection), so select it last-but-

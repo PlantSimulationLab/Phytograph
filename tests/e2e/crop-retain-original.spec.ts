@@ -62,7 +62,7 @@ test('retained crop adds a new cloud and leaves the original intact but hidden',
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
   await expect(tinyRow).toHaveAttribute('data-visible', 'true');
@@ -94,7 +94,7 @@ test('retained crop adds a new cloud and leaves the original intact but hidden',
 
   // The kept points landed in a new, visible, octree-backed cloud.
   const croppedRow = page.locator(
-    '[data-testid="scan-row"][data-scan-name="tiny.xyz (cropped)"]',
+    '[data-testid="scan-row"][data-scan-name="tiny (cropped)"]',
   );
   await expect(croppedRow).toBeVisible({ timeout: 10_000 });
   await expect(croppedRow).toHaveAttribute('data-point-count', '24', { timeout: 10_000 });
@@ -117,7 +117,7 @@ test('a retained crop is undoable — undo removes the crop and restores nothing
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-selected', 'true');
 
@@ -137,7 +137,7 @@ test('a retained crop is undoable — undo removes the crop and restores nothing
   await expect(page.getByTestId('scan-row')).toHaveCount(1, { timeout: 10_000 });
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz (cropped)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="tiny (cropped)"]'),
   ).toHaveCount(0);
 });
 
@@ -147,7 +147,7 @@ test('the retain option is disabled in Segment mode', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-selected', 'true');
   await page.getByTestId('tool-crop').click();
@@ -176,7 +176,7 @@ test('retained crop preserves the scanner origin on the new cloud', async () => 
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   const originBefore = await tinyRow.getAttribute('data-scan-origin');
 
@@ -189,7 +189,7 @@ test('retained crop preserves the scanner origin on the new cloud', async () => 
   await expect(page.getByTestId('crop-panel')).toHaveCount(0, { timeout: 10_000 });
 
   const croppedRow = page.locator(
-    '[data-testid="scan-row"][data-scan-name="tiny.xyz (cropped)"]',
+    '[data-testid="scan-row"][data-scan-name="tiny (cropped)"]',
   );
   await expect(croppedRow).toBeVisible({ timeout: 10_000 });
 
@@ -206,8 +206,8 @@ test('multi-scan retained crop derives one uniquely-named cloud per source', asy
   await importFiles(app, page, 'import-auto', [TINY, TREE]);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(treeRow).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId('scan-row')).toHaveCount(2);
@@ -234,10 +234,10 @@ test('multi-scan retained crop derives one uniquely-named cloud per source', asy
   // would hand both children the same label.
   await expect(page.getByTestId('scan-row')).toHaveCount(4, { timeout: 15_000 });
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz (cropped)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="tiny (cropped)"]'),
   ).toHaveCount(1);
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz (cropped)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="tree (cropped)"]'),
   ).toHaveCount(1);
 
   // Both originals survive, hidden and at their full counts.

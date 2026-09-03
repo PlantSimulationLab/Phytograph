@@ -42,7 +42,7 @@ async function openLabelTool() {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
   await expect(row).toHaveAttribute('data-selected', 'true');
@@ -349,7 +349,7 @@ test('commit bakes the labels into the cloud and clears the dirty flag', async (
 
   // The labels survived the rebuild as real data, and the cloud kept its points.
   await expect(panel).toHaveAttribute('data-labelled-count', '60');
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toHaveAttribute('data-point-count', '60');
 });
 

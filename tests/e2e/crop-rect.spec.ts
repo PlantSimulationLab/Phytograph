@@ -47,7 +47,7 @@ test('rect crop: full-viewport drag keeps all enclosed points', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
 
@@ -121,7 +121,7 @@ test('rect crop: committed region uses an orthographic projection (no perspectiv
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
 
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
@@ -186,7 +186,7 @@ test('rect crop: half-viewport drag keeps a strict subset of points', async () =
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
 

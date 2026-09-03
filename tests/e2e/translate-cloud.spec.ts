@@ -79,7 +79,7 @@ test.describe('translate cloud', () => {
     await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     // Load-bearing: this must be an octree cloud, the path the bugs affected.
     await expect(cloudRow).toHaveAttribute('data-octree', 'true');
@@ -101,7 +101,7 @@ test.describe('translate cloud', () => {
   // remount the outgoing entry can still be in the registry alongside the new
   // one. Reading an arbitrary key then returns the stale pre-bake entry — which
   // reports net.x === 5 and makes it look like nothing was baked.
-  const readEntry = async (scanName = 'tiny.xyz') => {
+  const readEntry = async (scanName = 'tiny') => {
     const cacheId = await session.page
       .locator(`[data-testid="scan-row"][data-scan-name="${scanName}"]`)
       .getAttribute('data-octree-cache-id');
@@ -117,7 +117,7 @@ test.describe('translate cloud', () => {
 
   // readEntry, but fails the poll instead of throwing while the octree for a
   // freshly-rebuilt cacheId is still streaming in.
-  const readEntryWhenReady = async (scanName = 'tiny.xyz') => {
+  const readEntryWhenReady = async (scanName = 'tiny') => {
     // Poll: right after import (and right after a bake rebuild) the row's
     // data-octree-cache-id and the registry entry for it can settle a frame
     // apart, so a one-shot read can miss. Retry until the current cacheId's
@@ -371,7 +371,7 @@ test.describe('translate cloud', () => {
 
     await importFiles(app, page, 'import-auto', LARGE_FIXTURE);
     await completeImportWizard(page);
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="large-extent.xyz"]');
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="large-extent"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row).toHaveAttribute('data-selected', 'true');
     await page.waitForFunction(() => {
@@ -492,7 +492,7 @@ test.describe('translate cloud', () => {
 
     // The drag reached the gizmo and moved the DRAFT along that axis only.
     const axis = (['x', 'y', 'z'] as const)[best];
-    const draft = await readEntryWhenReady('large-extent.xyz');
+    const draft = await readEntryWhenReady('large-extent');
     expect(Math.abs(draft.net[axis])).toBeGreaterThan(1e-3);
     for (const other of ['x', 'y', 'z'] as const) {
       if (other !== axis) expect(Math.abs(draft.net[other])).toBeLessThan(1e-6);

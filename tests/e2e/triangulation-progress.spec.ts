@@ -29,7 +29,7 @@ test('ball-pivoting triangulation shows a per-stage progress pill', async () => 
     await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 

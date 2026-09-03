@@ -39,7 +39,7 @@ test('segments wood vs leaf and colours by the wood_class attribute', async () =
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(4240);
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
@@ -64,8 +64,8 @@ test('segments wood vs leaf and colours by the wood_class attribute', async () =
   // Split produced two child clouds. Their point counts should partition the
   // original (wood + leaf = 4240) with wood the minority — concrete output,
   // not "didn't error". Bounds allow for the classifier's real error rate.
-  const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz (wood)"]');
-  const leafRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz (leaf)"]');
+  const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf (wood)"]');
+  const leafRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf (leaf)"]');
   await expect(woodRow).toBeVisible({ timeout: 60_000 });
   await expect(leafRow).toBeVisible({ timeout: 60_000 });
   const woodN = parseInt((await woodRow.getAttribute('data-point-count')) ?? '0', 10);
@@ -90,7 +90,7 @@ test('removes wood, leaving a leaf-only cloud', async () => {
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(4240);
@@ -116,8 +116,8 @@ test('segments two selected scans together and labels both', async () => {
   await importFiles(app, page, 'import-point-cloud', [FIXTURE, FIXTURE2]);
   await completeImportWizard(page);
 
-  const row1 = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
-  const row2 = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf2.xyz"]');
+  const row1 = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
+  const row2 = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf2"]');
   await expect(row1).toBeVisible({ timeout: 20_000 });
   await expect(row2).toBeVisible({ timeout: 20_000 });
 

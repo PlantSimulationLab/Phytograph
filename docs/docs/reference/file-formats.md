@@ -543,8 +543,9 @@ single position and imports as one scan.
 
 The scans are named after the file without its extension — `plot3.ptx`
 holding three blocks imports as `plot3 — scan 1`, `plot3 — scan 2`,
-`plot3 — scan 3`. A single-position file keeps its full file name
-(extension included) unchanged.
+`plot3 — scan 3`. A single-position file is named the same way, so
+`plot3.laz` imports as `plot3`. The scan's own **source:** line in the Scans
+panel still records the file it came from, extension included.
 
 They are **not merged into one cloud**, because a merged cloud would have to
 pick one origin to stand in for all of them, and that origin is used for real

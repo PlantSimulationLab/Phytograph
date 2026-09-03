@@ -24,7 +24,7 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     // 60 data points (1 header row skipped).
     const pointCount = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);

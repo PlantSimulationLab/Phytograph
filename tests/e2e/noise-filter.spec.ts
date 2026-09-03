@@ -54,7 +54,7 @@ async function importAndSelect() {
   const { app, page } = session;
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(TOTAL);
@@ -149,8 +149,8 @@ test('detects noise on every selected scan, not just the first', async () => {
   await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
   await completeImportWizard(page);
 
-  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree.xyz"]');
-  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree-b.xyz"]');
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree-b"]');
   await expect(rowA).toBeVisible({ timeout: 20_000 });
   await expect(rowB).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await rowA.getAttribute('data-point-count')) ?? '0', 10)).toBe(TOTAL);
@@ -217,7 +217,7 @@ test('segmenting splits the noise into its own cloud, losing nothing', async () 
   }).toPass({ timeout: 60_000 });
 
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree.xyz (filtered out)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="noisy-tree (filtered out)"]'),
   ).toBeVisible();
 });
 

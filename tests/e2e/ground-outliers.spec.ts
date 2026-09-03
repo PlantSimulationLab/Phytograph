@@ -39,7 +39,7 @@ async function importFixture() {
   const { app, page } = session;
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="ground-outlier.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="ground-outlier"]');
   await expect(row).toBeVisible({ timeout: 30_000 });
   await page.waitForFunction(
     () => typeof (window as any).__getCameraState === 'function'
@@ -107,7 +107,7 @@ test('a cloud with no sub-terrain noise is unaffected', async () => {
   await importFiles(app, page, 'import-auto', join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz'));
   await completeImportWizard(page);
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'),
   ).toBeVisible({ timeout: 30_000 });
 
   await page.getByTestId('tool-set-scene-origin').click();

@@ -72,7 +72,7 @@ test('applying a Segment crop leaves the camera exactly where it was', async () 
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 
@@ -95,7 +95,7 @@ test('applying a Segment crop leaves the camera exactly where it was', async () 
   // Both output clouds exist — so the add path really ran (this test would be
   // vacuous if the crop silently no-oped).
   await expect(tinyRow).toHaveAttribute('data-point-count', '24', { timeout: 10_000 });
-  const segmentRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz (segment)"]');
+  const segmentRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny (segment)"]');
   await expect(segmentRow).toBeVisible({ timeout: 10_000 });
 
   // Give the (suppressed) frame-on-add effect its 50 ms timeout plus margin to
@@ -131,7 +131,7 @@ test('a Segment cloud inherits its source scan colour', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
 
   // The first imported scan takes the first palette entry (blue).
@@ -145,7 +145,7 @@ test('a Segment cloud inherits its source scan colour', async () => {
   await page.getByTestId('crop-apply').click();
   await expect(page.getByTestId('crop-panel')).toHaveCount(0, { timeout: 10_000 });
 
-  const segmentRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz (segment)"]');
+  const segmentRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny (segment)"]');
   await expect(segmentRow).toBeVisible({ timeout: 10_000 });
 
   // Regression: this was a hardcoded amber (#f59e0b) regardless of the parent.
@@ -160,7 +160,7 @@ test('a retained crop inherits its source scan colour', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   const sourceColor = await tinyRow.getAttribute('data-scan-color');
   expect(sourceColor).toBe('#3b82f6');
@@ -178,7 +178,7 @@ test('a retained crop inherits its source scan colour', async () => {
   await page.getByTestId('crop-apply').click();
   await expect(page.getByTestId('crop-panel')).toHaveCount(0, { timeout: 10_000 });
 
-  const croppedRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz (cropped)"]');
+  const croppedRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny (cropped)"]');
   await expect(croppedRow).toBeVisible({ timeout: 10_000 });
   // Regression: this took allocateScanColor's next free entry (green) instead
   // of the parent's blue.

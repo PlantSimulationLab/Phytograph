@@ -43,7 +43,7 @@ async function loadFramedScene(session: LaunchedApp) {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
   await page.waitForFunction(

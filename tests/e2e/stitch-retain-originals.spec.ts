@@ -43,8 +43,8 @@ async function importBothAndOpenDialog(session: LaunchedApp) {
   const rows = page.locator('[data-testid="scan-row"]');
   await expect(rows).toHaveCount(2, { timeout: 20_000 });
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
-  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const treeRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
   await expect(treeRow).toHaveAttribute('data-point-count', '900');
 

@@ -61,7 +61,7 @@ async function importAndOpenExport(outName: string) {
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
@@ -354,7 +354,7 @@ test('re-importing an exported LAS restores the scalar fields', async () => {
   await importFiles(session.app, page, 'import-point-cloud', savePath);
   await completeImportWizard(page);
 
-  const rrow = page.locator('[data-testid="scan-row"][data-scan-name="roundtrip.las"]');
+  const rrow = page.locator('[data-testid="scan-row"][data-scan-name="roundtrip"]');
   await expect(rrow).toBeVisible({ timeout: 30_000 });
   expect(parseInt((await rrow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
 

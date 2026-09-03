@@ -157,7 +157,7 @@ test('a scene with no recorded scanner positions keeps the default and disables 
   const { app, page } = session;
   await importFiles(app, page, 'import-auto', PLAIN_XYZ);
   await completeImportWizard(page);
-  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]'))
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'))
     .toBeVisible({ timeout: 30_000 });
 
   const panel = await openOriginPanel();
@@ -175,7 +175,7 @@ test('scans imported into a populated scene do not move the origin', async () =>
   // ordinary scene-centre default.
   await importFiles(app, page, 'import-auto', PLAIN_XYZ);
   await completeImportWizard(page);
-  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]'))
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="tiny"]'))
     .toBeVisible({ timeout: 30_000 });
 
   const panel = await openOriginPanel();

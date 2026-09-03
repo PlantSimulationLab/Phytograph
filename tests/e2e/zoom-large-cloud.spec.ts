@@ -27,7 +27,7 @@ test('a scroll burst on a 13M-point cloud converges without reversing', async ()
   await importFiles(app, page, 'import-auto', CLOUD);
   await completeImportWizard(page);
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="BPP_tree_000.xyz"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="BPP_tree_000"]'),
   ).toBeVisible({ timeout: 180_000 });
   await page.waitForFunction(
     () => (window as any).__getCameraState?.()?.framedContent === true,

@@ -29,7 +29,7 @@ test('scalar color mode resets to per-scan after the source cloud is deleted', a
     await importFiles(app, page, 'import-point-cloud', WOOD_FIXTURE);
     await completeImportWizard(page);
 
-    const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
+    const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
     await expect(woodRow).toBeVisible({ timeout: 20_000 });
     await expect(woodRow).toHaveAttribute('data-selected', 'true');
 
@@ -60,7 +60,7 @@ test('scalar color mode resets to per-scan after the source cloud is deleted', a
     await importFiles(app, page, 'import-point-cloud', PLAIN_FIXTURE);
     await completeImportWizard(page);
 
-    const plainRow = page.locator('[data-testid="scan-row"][data-scan-name="tree-view1.xyz"]');
+    const plainRow = page.locator('[data-testid="scan-row"][data-scan-name="tree-view1"]');
     await expect(plainRow).toBeVisible({ timeout: 20_000 });
 
     // 4. The stale scalar:wood_class mode must NOT survive. With the bug it

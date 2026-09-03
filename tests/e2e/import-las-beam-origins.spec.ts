@@ -20,7 +20,7 @@ test('Imports a LAS with beam-origin ExtraBytes as a moving-platform scan', asyn
     await completeImportWizard(page);
 
     const row = page.locator(
-      '[data-testid="scan-row"][data-scan-name="beam_origins.las"]');
+      '[data-testid="scan-row"][data-scan-name="beam_origins"]');
     await expect(row).toBeVisible({ timeout: 30_000 });
 
     // The 120 returns load…

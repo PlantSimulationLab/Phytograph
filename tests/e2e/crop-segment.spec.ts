@@ -81,7 +81,7 @@ test('crop Segment splits a scan in two without losing points', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 
@@ -143,7 +143,7 @@ test('crop Segment splits a scan in two without losing points', async () => {
   // A new "tiny.xyz (segment)" cloud holds the cropped-out points: the
   // other 3 layers → 36 pts. No points lost (24 + 36 = 60).
   const segmentRow = page.locator(
-    '[data-testid="scan-row"][data-scan-name="tiny.xyz (segment)"]',
+    '[data-testid="scan-row"][data-scan-name="tiny (segment)"]',
   );
   await expect(segmentRow).toBeVisible({ timeout: 10_000 });
   await expect(segmentRow).toHaveAttribute('data-point-count', '36', { timeout: 10_000 });
@@ -157,7 +157,7 @@ test('crop without Segment discards cropped-out points (no new cloud)', async ()
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 
@@ -197,7 +197,7 @@ test('crop without Segment discards cropped-out points (no new cloud)', async ()
   // Original cropped to 24; no "(segment)" cloud exists.
   await expect(tinyRow).toHaveAttribute('data-point-count', '24', { timeout: 10_000 });
   await expect(
-    page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz (segment)"]'),
+    page.locator('[data-testid="scan-row"][data-scan-name="tiny (segment)"]'),
   ).toHaveCount(0);
   // Exactly one scan row in total.
   await expect(page.getByTestId('scan-row')).toHaveCount(1);
@@ -218,7 +218,7 @@ test('Segment mode previews the whole cloud; Keep Inside culls', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(tinyRow).toBeVisible({ timeout: 20_000 });
   await expect(tinyRow).toHaveAttribute('data-point-count', '60');
 

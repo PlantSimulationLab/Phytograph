@@ -44,7 +44,7 @@ test('a dropped point cloud with no OS path still imports as octree-backed', asy
     // File → Import. Before the fix there was no wizard — it parsed flat inline.
     await completeImportWizard(page);
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="dropped.xyz"]');
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="dropped"]');
     await expect(row).toBeVisible({ timeout: 20_000 });
 
     // tiny.xyz = 60 points (two comment/header lines skipped). The count coming

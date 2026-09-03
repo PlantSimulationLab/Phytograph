@@ -48,7 +48,7 @@ async function startSeeding(session: LaunchedApp) {
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-selected', 'true');
 

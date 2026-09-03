@@ -23,7 +23,7 @@ test('adds procedural leaves to a QSM via the UI', async () => {
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
     // Build the QSM.

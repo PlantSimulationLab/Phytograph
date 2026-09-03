@@ -43,7 +43,7 @@ function rowByName(page: import('@playwright/test').Page, name: string) {
 async function importTree(app: import('@playwright/test').ElectronApplication, page: import('@playwright/test').Page) {
   await importFiles(app, page, 'import-point-cloud', [TREE]);
   await completeImportWizard(page);
-  const original = rowByName(page, 'tree.xyz');
+  const original = rowByName(page, 'tree');
   await expect(original).toHaveCount(1, { timeout: 20_000 });
   await expect(original).toHaveAttribute('data-octree', 'true');
   return original;
@@ -63,7 +63,7 @@ test('duplicating a scan creates an independent "(copy)" with the same point cou
 
   // A second row appears, named "tree.xyz (copy)" with a matching point count.
   await expect(rows(page)).toHaveCount(2, { timeout: 20_000 });
-  const copy = rowByName(page, 'tree.xyz (copy)');
+  const copy = rowByName(page, 'tree (copy)');
   await expect(copy).toHaveCount(1);
   await expect(copy).toHaveAttribute('data-point-count', originalCount ?? '');
   await expect(copy).toHaveAttribute('data-octree', 'true');
@@ -85,12 +85,12 @@ test('duplicating the copy enumerates to "(copy 2)"', async () => {
   const originalId = await original.getAttribute('data-scan-id');
 
   await page.getByTestId(`scan-duplicate-${originalId}`).click();
-  const copy = rowByName(page, 'tree.xyz (copy)');
+  const copy = rowByName(page, 'tree (copy)');
   await expect(copy).toHaveCount(1, { timeout: 20_000 });
 
   // Duplicate the copy → "tree.xyz (copy 2)" (re-based, not stacked).
   const copyId = await copy.getAttribute('data-scan-id');
   await page.getByTestId(`scan-duplicate-${copyId}`).click();
   await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
-  await expect(rowByName(page, 'tree.xyz (copy 2)')).toHaveCount(1);
+  await expect(rowByName(page, 'tree (copy 2)')).toHaveCount(1);
 });

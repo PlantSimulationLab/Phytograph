@@ -45,7 +45,7 @@ async function importCloudAndTriangulate(page: typeof session.page) {
   await importFiles(session.app, page, 'import-auto', CLOUD_FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   const scanId = await cloudRow.getAttribute('data-scan-id');
   await triangulateScan(page, scanId!);

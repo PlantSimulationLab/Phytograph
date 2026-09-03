@@ -44,7 +44,7 @@ test('File → New clears all data and frees backend sessions', async () => {
     await importFiles(app, page, 'import-point-cloud', [TREE]);
     await completeImportWizard(page);
 
-    const original = page.locator('[data-testid="scan-row"][data-scan-name="tree.xyz"]');
+    const original = page.locator('[data-testid="scan-row"][data-scan-name="tree"]');
     await expect(original).toHaveCount(1, { timeout: 20_000 });
     await expect(original).toHaveAttribute('data-octree', 'true');
 

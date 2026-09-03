@@ -40,7 +40,7 @@ test('segments individual trees and colours by the tree_instance attribute', asy
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(EXPECTED_POINTS);
 
@@ -74,7 +74,7 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -180,7 +180,7 @@ test('warns before an expensive run, then segments when confirmed', async () => 
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -221,7 +221,7 @@ test('the split distance is editable and changes how many trees come out', async
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -284,7 +284,7 @@ test('warns when the split distance is set above the intra-tree gap', async () =
 
   await importFiles(app, page, 'import-point-cloud', FIXTURE);
   await completeImportWizard(page);
-  await expect(page.locator('[data-testid="scan-row"][data-scan-name="multi_tree.xyz"]'))
+  await expect(page.locator('[data-testid="scan-row"][data-scan-name="multi_tree"]'))
     .toHaveAttribute('data-selected', 'true');
 
   await page.getByTestId('tool-tree-segment').click();

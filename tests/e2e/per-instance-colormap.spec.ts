@@ -92,7 +92,7 @@ async function makeTwoMeshes(page: Page, app: LaunchedApp['app']) {
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
   await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -280,13 +280,13 @@ test('two clouds hold different color modes at the same time', async () => {
   await importFiles(app, page, 'import-point-cloud',
     join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf.xyz'));
   await completeImportWizard(page);
-  const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf.xyz"]');
+  const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
   await expect(woodRow).toBeVisible({ timeout: 20_000 });
 
   await importFiles(app, page, 'import-point-cloud',
     join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree-view1.xyz'));
   await completeImportWizard(page);
-  const plainRow = page.locator('[data-testid="scan-row"][data-scan-name="tree-view1.xyz"]');
+  const plainRow = page.locator('[data-testid="scan-row"][data-scan-name="tree-view1"]');
   await expect(plainRow).toBeVisible({ timeout: 20_000 });
 
   // Segment ONLY the first cloud.

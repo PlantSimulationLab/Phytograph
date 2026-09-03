@@ -44,7 +44,7 @@ test('viewport gizmo orients down a world axis with Z-up and no zoom change', as
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
   // Wait for the camera controller (and its window hooks) to be live.
@@ -116,7 +116,7 @@ test('clicking the gizmo +X head (real mouse) reorients the camera', async () =>
   await importFiles(app, page, 'import-auto', FIXTURE);
   await completeImportWizard(page);
 
-  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(cloudRow).toBeVisible({ timeout: 20_000 });
 
   await page.waitForFunction(

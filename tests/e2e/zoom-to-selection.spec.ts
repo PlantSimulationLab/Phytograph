@@ -109,12 +109,12 @@ test('Zoom to Selection frames the UNION of multiple selected clouds', async () 
 
   await importFiles(app, page, 'import-auto', CLOUD);
   await completeImportWizard(page);
-  const nearRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const nearRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(nearRow).toBeVisible({ timeout: 30_000 });
 
   await importFiles(app, page, 'import-auto', FAR_CLOUD);
   await completeImportWizard(page);
-  const farRow = page.locator('[data-testid="scan-row"][data-scan-name="large-extent.xyz"]');
+  const farRow = page.locator('[data-testid="scan-row"][data-scan-name="large-extent"]');
   await expect(farRow).toBeVisible({ timeout: 30_000 });
   await expect(farRow).toHaveAttribute('data-point-count', '64');
   await waitForCameraHooks(page);

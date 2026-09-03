@@ -35,7 +35,7 @@ test('exports an octree-backed cloud to XYZ via the backend', async () => {
 
     await stubSaveDialog(app, savePath);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     // tiny.xyz has 60 data points (2 comment lines skipped) — same count the
     // triangulate spec relies on.

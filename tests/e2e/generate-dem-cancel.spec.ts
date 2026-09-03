@@ -31,7 +31,7 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     await importFiles(app, page, 'import-point-cloud', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
@@ -107,7 +107,7 @@ test('DEM generation shows a Cancel button and recovers after cancel', async () 
     // Prove a new op can start and complete after the cancel: run again and let it
     // finish, asserting a real DEM surface mesh appears (concrete output).
     await runButton.click();
-    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants.xyz DEM"]');
+    const demRow = page.locator('[data-testid="mesh-row"][data-mesh-name="ground_plants DEM"]');
     await expect(demRow).toBeVisible({ timeout: 60_000 });
     expect(parseInt((await demRow.getAttribute('data-triangle-count')) ?? '0', 10)).toBeGreaterThan(0);
   } finally {

@@ -50,7 +50,7 @@ test('erase brush: painting square stamps and applying removes points (octree)',
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toHaveAttribute('data-point-count', '60');
 
@@ -147,7 +147,7 @@ test('erase brush: Clear Strokes discards the preview without erasing', async ()
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(row).toHaveAttribute('data-selected', 'true');
@@ -189,7 +189,7 @@ test('erase brush: E toggles erase mode within the open tool', async () => {
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(row).toHaveAttribute('data-selected', 'true');
@@ -236,7 +236,7 @@ test('erase brush: toggling mode off and on accumulates stamps (no reset)', asyn
   await importFiles(app, page, 'import-auto', TINY);
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny.xyz"]');
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toBeVisible({ timeout: 20_000 });
   // Freshly imported scan is auto-selected (no re-click — that would toggle off).
   await expect(row).toHaveAttribute('data-selected', 'true');

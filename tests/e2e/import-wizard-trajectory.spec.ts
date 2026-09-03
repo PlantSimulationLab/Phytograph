@@ -48,7 +48,7 @@ test('attaches a trajectory file to an imported cloud through the wizard', async
     // Finish the import.
     await completeImportWizard(page);
 
-    const row = page.locator('[data-testid="scan-row"][data-scan-name="leafcube_moving.xyz"]');
+    const row = page.locator('[data-testid="scan-row"][data-scan-name="leafcube_moving"]');
     await expect(row).toBeVisible({ timeout: 30_000 });
     const scanId = await row.getAttribute('data-scan-id');
 

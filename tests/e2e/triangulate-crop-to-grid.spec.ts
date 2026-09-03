@@ -27,7 +27,7 @@ test('Ball Pivot crop-to-grid meshes only the points inside the voxel box', asyn
     await importFiles(app, page, 'import-auto', FIXTURE);
     await completeImportWizard(page);
 
-    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants.xyz"]');
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="ground_plants"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     await expect(cloudRow).toHaveAttribute('data-point-count', String(FULL_COUNT));
 

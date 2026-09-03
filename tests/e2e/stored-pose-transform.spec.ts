@@ -32,7 +32,7 @@ test.describe('stored-pose transform', () => {
     await resetToFreshScene(session.app, session.page);
   });
 
-  const row = () => session.page.locator('[data-testid="scan-row"][data-scan-name="orchard-row.xyz"]');
+  const row = () => session.page.locator('[data-testid="scan-row"][data-scan-name="orchard-row"]');
 
   async function importOrchard() {
     const { app, page } = session;
