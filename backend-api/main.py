@@ -8763,6 +8763,11 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
         elif slug in ('origin_x', 'origin_y', 'origin_z') and backfilled.get("origins") is not None:
             axis = {'origin_x': 0, 'origin_y': 1, 'origin_z': 2}[slug]
             miss_cols.append(np.asarray(backfilled["origins"], dtype=np.float64)[:, axis])
+        elif slug in _GRID_INDEX_SLUGS and backfilled.get(slug) is not None:
+            # The row/column gapfill path knows each synthesised miss's cell, so
+            # carry it rather than zeroing it — a zero here would put every
+            # recovered miss in row 0 / column 0 of any structured export.
+            miss_cols.append(np.asarray(backfilled[slug], dtype=np.float64))
         else:
             miss_cols.append(np.zeros(n_miss, np.float64))
     miss_vals = np.column_stack(miss_cols) if miss_cols else np.empty((n_miss, 0), np.float64)
@@ -9042,7 +9047,7 @@ def _attach_origins(xyz, labels, vals, origins):
 
 def _run_gapfill_extract(cloud):
     """Recover sky/miss points on a built PyHelios cloud and return the synthesised
-    ones as (synth_xyz (M,3) float64, count int).
+    ones as (synth_xyz (M,3) float64, count int, grid {slug: (M,)} | None).
 
     gapfillMisses() (which auto-selects the row/column or timestamp path in C++)
     APPENDS the reconstructed misses to the cloud, each flagged as a miss. We slice
@@ -9052,6 +9057,14 @@ def _run_gapfill_extract(cloud):
     10M scale. Because we only call this on a cloud built from a scan with NO real
     misses (the endpoint guards on that), every miss-flagged row is a synthesised
     one. The real hits are left behind — the session already holds them.
+
+    `grid` carries the synthesised misses' raster address when the C++ knew it.
+    The ROW/COLUMN path iterates the grid to find empty cells, so it attaches
+    'row'/'column' to every miss it emits; the TIMESTAMP path reconstructs pulse
+    grouping from per-hit times without ever forming a raster, so it attaches
+    none, and this returns None. Read through the columnar bulk getter for the
+    same reason as everything else here — a per-hit loop is unaffordable at
+    scale — with the absent sentinel telling the two paths apart.
     """
     import numpy as np
 
@@ -9062,10 +9075,34 @@ def _run_gapfill_extract(cloud):
     if miss_flag.shape[0] != xyz.shape[0]:
         # Defensive: bulk getters must agree on hit count. If they don't, recover
         # nothing rather than mis-slice.
-        return np.empty((0, 3), np.float64), 0
+        return np.empty((0, 3), np.float64), 0, None
     mask = miss_flag != 0
     synth_xyz = np.ascontiguousarray(xyz[mask], dtype=np.float64)
-    return synth_xyz, int(mask.sum())
+
+    # C++ hit-data labels are the bare 'row'/'column' the dispatcher probes; the
+    # session/export side spells them row_index/column_index (see _GRID_INDEX_SLUGS).
+    _ABSENT = -9999.0
+    grid = {}
+    for label, slug in (("row", "row_index"), ("column", "column_index")):
+        try:
+            col = np.asarray(cloud.getHitDataColumnArray(label, _ABSENT),
+                             dtype=np.float64)
+        except Exception:
+            grid = {}
+            break
+        if col.shape[0] != mask.shape[0]:
+            grid = {}
+            break
+        vals = col[mask]
+        # The timestamp path attaches no raster address at all. A PARTIAL one
+        # would mean some misses have no cell, which no consumer can use, so
+        # take the grid only when every synthesised miss carries one.
+        if vals.size == 0 or (vals == _ABSENT).any():
+            grid = {}
+            break
+        grid[slug] = np.ascontiguousarray(vals)
+
+    return synth_xyz, int(mask.sum()), (grid or None)
 
 
 def _dem_in_lad_frame(dem: "DemRaster", lad_shift) -> "DemRaster":
@@ -10920,32 +10957,189 @@ def _write_scan_to_bytes(resolved: dict, fmt: str, base: str, progress=None) -> 
             os.remove(tpath)
 
     # ---- E57 (pye57) ----
+    # Needs the scan entry (pose + grid) to write a STRUCTURED file, which this
+    # signature doesn't carry, so the export path calls `_emit_e57_file`. Kept
+    # here so this function stays the single answer to "what does format X look
+    # like" — and so a caller that reaches this branch fails loudly rather than
+    # silently writing the unstructured, unflagged file this used to produce.
     if fmt == "e57":
-        import pye57
-        with tempfile.NamedTemporaryFile(suffix=".e57", delete=False) as tmp:
-            tpath = tmp.name
-        try:
-            e = pye57.E57(tpath, mode="w")
-            data = {
-                "cartesianX": np.ascontiguousarray(xyz[:, 0]),
-                "cartesianY": np.ascontiguousarray(xyz[:, 1]),
-                "cartesianZ": np.ascontiguousarray(xyz[:, 2]),
-            }
-            if intensity is not None:
-                data["intensity"] = np.ascontiguousarray(intensity.astype(np.float64))
-            if colors is not None:
-                c = np.clip(colors, 0, 1) * 255.0
-                data["colorRed"] = np.ascontiguousarray(c[:, 0])
-                data["colorGreen"] = np.ascontiguousarray(c[:, 1])
-                data["colorBlue"] = np.ascontiguousarray(c[:, 2])
-            e.write_scan_raw(data, name=base)
-            e.close()
-            with open(tpath, "rb") as fh:
-                return f"{base}.e57", fh.read()
-        finally:
-            os.remove(tpath)
+        raise ValueError(
+            "E57 is written by _emit_e57_file, which also needs the scan entry "
+            "(origin, grid resolution and sweep) — not just the resolved channels.")
 
     raise ValueError(f"Unsupported scan export format: {fmt}")
+
+
+# E57 stores rowIndex/columnIndex as uint16 ('H' in pye57's SUPPORTED_POINT_FIELDS),
+# so a grid past this in either axis cannot be addressed and falls back to an
+# unstructured write rather than shipping wrapped indices.
+_E57_MAX_GRID_INDEX = 65535
+
+
+def _e57_write_scan(path: "Path", resolved: dict, scan_entry, base: str,
+                    progress=None) -> dict:
+    """Write one resolved scan to `path` as E57. Returns grid stats.
+
+    Two things separate this from the flat writer it replaced:
+
+    **Misses are flagged, not merely present.** `cartesianInvalidState` is E57's
+    native "this beam returned nothing" field — the very one `_e57_to_las` reads
+    on import. Without it an included miss is a real row parked ~1 km out with
+    nothing marking it, so re-importing our own export read the miss shell as
+    genuine returns and inflated the extent ~1000x (the hang described in
+    CLAUDE.md). pye57 also excludes invalid points from the file's bounding box.
+
+    **The file is structured when the scan can be gridded at all.** `rowIndex`/
+    `columnIndex` come from `_scan_grid_cells`, so every source PTX can grid,
+    E57 can too — instrument indices (PTX / structured-E57 imports) or angular
+    binning against the declared sweep (RIEGL projects, synthetic Helios scans).
+    With both present pye57 derives a real `indexBounds` from their min/max
+    instead of the degenerate `columnMaximum: 0` a flat write leaves behind.
+
+    Unlike PTX this does NOT collapse multiple returns into one cell: E57's
+    indexBounds carries returnMinimum/returnMaximum, so a multi-return cell keeps
+    every echo. That also means no sort — E57 skips the argsort PTX needs.
+
+    Points are written in the SCANNER-LOCAL frame with the scanner's pose in the
+    header (`translation`), which is what real scanners emit and what
+    `_e57_to_las` expects on import — it pose-transforms by rot/trans. The
+    translation is the scanner's REGISTERED WORLD position, so the import-time
+    global shift is added back for it alone, exactly as PTX does for the same
+    georeferencing reason.
+    """
+    import pye57
+
+    n = xyz_n = resolved["positions"].shape[0]
+    xyz = resolved["positions"]
+    colors = resolved["colors"]
+    intensity = resolved["intensity"]
+    scalars = resolved["scalars"]
+
+    origin = np.asarray(scan_entry.origin, np.float64).reshape(3)
+    t = getattr(scan_entry, "translation", None)
+    if t is not None:
+        # The viewer translation moves the points, so it must move the scanner
+        # with them — otherwise `local` is off by it (see the PTX writer).
+        origin = origin + np.asarray(t, np.float64).reshape(3)
+    local = xyz - origin
+    ws = resolved.get("world_shift")
+    origin_world = origin if ws is None else origin + np.asarray(ws, np.float64)
+
+    if progress is not None:
+        progress(0.2, "assigning grid cells")
+
+    # Structured only when every point lands in a cell: a partial grid would
+    # leave some points with no legal index, and E57 has no "unplaced" sentinel
+    # the way PTX has its empty cell.
+    cells = _scan_grid_cells(resolved, scan_entry)
+    row = col = None
+    source = "none"
+    n_rows = n_cols = 0
+    if cells is not None:
+        cell, n_rows, n_cols, source = cells
+        if n_rows <= _E57_MAX_GRID_INDEX and n_cols <= _E57_MAX_GRID_INDEX \
+                and cell.size and (cell >= 0).all():
+            # Column-major flat index (see _scan_grid_cells), decoded back.
+            row = (cell % n_rows).astype(np.uint16)
+            col = (cell // n_rows).astype(np.uint16)
+        else:
+            source = "none"
+
+    data = {
+        "cartesianX": np.ascontiguousarray(local[:, 0]),
+        "cartesianY": np.ascontiguousarray(local[:, 1]),
+        "cartesianZ": np.ascontiguousarray(local[:, 2]),
+    }
+    if intensity is not None:
+        data["intensity"] = np.ascontiguousarray(
+            np.asarray(intensity, np.float64))
+    if colors is not None:
+        c = np.clip(colors, 0, 1) * 255.0
+        data["colorRed"] = np.ascontiguousarray(c[:, 0])
+        data["colorGreen"] = np.ascontiguousarray(c[:, 1])
+        data["colorBlue"] = np.ascontiguousarray(c[:, 2])
+    miss = scalars.get(_MISS_SLUG)
+    n_miss = 0
+    if miss is not None and len(miss) == n:
+        inv = (np.asarray(miss) != 0)
+        n_miss = int(inv.sum())
+        # E57: 0 = valid cartesian, non-zero = no return in this direction.
+        data["cartesianInvalidState"] = np.ascontiguousarray(
+            inv.astype(np.int8))
+    if row is not None:
+        data["rowIndex"] = np.ascontiguousarray(row)
+        data["columnIndex"] = np.ascontiguousarray(col)
+
+    if progress is not None:
+        progress(0.5, f"writing {n:,} points")
+
+    # pye57 derives the file's bounding box from the VALID points alone, so a scan
+    # where every point is a miss reduces over an empty array and dies inside
+    # numpy. Write those points UNFLAGGED rather than dropping them: the flag is
+    # only meaningful as "these cells, unlike the others, returned nothing", and
+    # with no others it carries no information — whereas dropping the points
+    # would silently discard the entire scan. An all-miss file still re-imports
+    # as points, just not as misses. (The crash predates the structured writer,
+    # but a hits-only export of a sky-heavy scan reaches it far more easily.)
+    if "cartesianInvalidState" in data and not (
+            data["cartesianInvalidState"] == 0).any():
+        data.pop("cartesianInvalidState")
+
+    e = pye57.E57(str(path), mode="w")
+    try:
+        # A scan with no points at all has no bounding box either, and pye57
+        # reduces over the empty arrays the same way. Write the container with no
+        # scan node: a valid, readable, empty E57 rather than a numpy traceback.
+        if n > 0:
+            e.write_scan_raw(data, name=base,
+                             translation=np.asarray(origin_world, np.float64))
+    finally:
+        e.close()
+    if progress is not None:
+        progress(1.0, f"wrote {n:,} points")
+
+    return {"rows": n_rows, "cols": n_cols, "points": int(xyz_n),
+            "misses": n_miss, "structured": row is not None, "source": source}
+
+
+def _emit_e57_file(name: str, resolved: dict, scan_entry, base: str,
+                   dest: Optional[Path], progress=None) -> dict:
+    """One `files` entry for an E57 scan.
+
+    With `dest` the file is written STRAIGHT TO ITS DESTINATION and never
+    materialised as bytes. pye57 can only write to a path, so the flat writer
+    this replaced round-tripped every export through a temp file AND a full
+    `fh.read()` — for a large scan that is the whole file resident in RAM on top
+    of the channel arrays, before base64 inflates it another 4/3. Writing to the
+    destination directly removes both copies. Without a destination the caller
+    still gets base64, via a temp file, and pays that cost.
+    """
+    import tempfile
+
+    if dest is not None:
+        target = dest / name
+        tmp = target.with_name(target.name + ".part")
+        try:
+            stats = _e57_write_scan(tmp, resolved, scan_entry, base,
+                                    progress=progress)
+            os.replace(tmp, target)
+        except BaseException:
+            # Never leave a truncated .e57 behind — a partial file still opens.
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return {"name": name, "data": None, "is_xml": False,
+                "bytes": target.stat().st_size, "written": True, "grid": stats}
+
+    with tempfile.TemporaryDirectory() as td:
+        tpath = Path(td) / name
+        stats = _e57_write_scan(tpath, resolved, scan_entry, base,
+                                progress=progress)
+        entry = _emit_scan_export_file(name, tpath.read_bytes(), False, None)
+    entry["grid"] = stats
+    return entry
 
 
 def _read_las_columns(file_path: str) -> dict:
@@ -11063,21 +11257,28 @@ _PTX_MAX_CELLS = 60_000_000
 _PTX_MAX_INLINE_CELLS = 2_000_000
 
 
-def _ptx_export_cells(resolved: dict, scan_entry) -> "tuple[np.ndarray, int, int, str]":
-    """Assign each point to a PTX grid cell. Returns (cell, n_rows, n_cols, source).
+def _scan_grid_cells(resolved: dict, scan_entry):
+    """Assign each point to a scan-grid cell. Returns (cell, n_rows, n_cols,
+    source), or None when this cloud cannot be placed on a grid at all.
 
     `cell` is the column-major flat index `col * n_rows + row`, or -1 for a point
     that has no place in the raster. That index IS the PTX write order, so the
     writer becomes one ascending walk with no transpose and no full-raster
-    allocation.
+    allocation; the structured-E57 writer decodes it back to (row, column).
 
     Two sources, in order of authority:
       * `row_index`/`column_index` — instrument ground truth, exact;
       * angular binning against the scan's Ntheta/Nphi sweep — used when the
-        cloud carries no raster (a synthetic Helios scan, or an ASCII import).
+        cloud carries no raster (a synthetic Helios scan, an ASCII import, or a
+        RIEGL project, whose `.pat`/FOV metadata supplies the sweep but whose
+        RXP pulse stream carries no per-point raster address).
         Note this is not an approximation for a raster scan: every hit lies on a
         known beam. And a mis-binned point still carries its own exact local xyz,
         so a wrong bin reorders the raster without corrupting any geometry.
+
+    Returning None (rather than raising) is what lets E57 fall back to an
+    unstructured write; PTX has no such option and wraps this in
+    `_ptx_export_cells`, which turns each None case into its own explanation.
     """
     xyz = resolved["positions"]
     scalars = resolved["scalars"]
@@ -11108,16 +11309,13 @@ def _ptx_export_cells(resolved: dict, scan_entry) -> "tuple[np.ndarray, int, int
             n_rows, n_cols = max(n_rows, rmax + 1), max(n_cols, cmax + 1)
             return np.where(valid, c * n_rows + r, -1), n_rows, n_cols, "index"
 
+    # No raster indices and no declared sweep: nothing to bin against.
     if n_rows <= 0 or n_cols <= 0:
-        raise ValueError(
-            "PTX needs a complete scan grid: this cloud carries no row/column "
-            "indices and its scan parameters have no Ntheta x Nphi resolution. "
-            "Set the scan resolution, or export from a structured source.")
+        return None
+    # A non-raster sweep (spiral, etc.) has no rectangular cell to bin into.
     pattern = getattr(scan_entry, "scan_pattern", None) or "raster"
     if pattern != "raster":
-        raise ValueError(
-            f"PTX stores one sample per grid cell, so it can't represent a "
-            f"'{pattern}' scan. Export this scan as E57 or LAS instead.")
+        return None
 
     origin = np.asarray(scan_entry.origin, np.float64).reshape(3)
     t = getattr(scan_entry, "translation", None)
@@ -11144,6 +11342,27 @@ def _ptx_export_cells(resolved: dict, scan_entry) -> "tuple[np.ndarray, int, int
     cc = np.where(cc == n_cols, n_cols - 1, cc).astype(np.int64)
     good = ok & (rr >= 0) & (rr < n_rows) & (cc >= 0) & (cc < n_cols)
     return np.where(good, cc * n_rows + rr, -1), n_rows, n_cols, "angles"
+
+
+def _ptx_export_cells(resolved: dict, scan_entry) -> "tuple[np.ndarray, int, int, str]":
+    """`_scan_grid_cells` with PTX's raise-on-failure contract.
+
+    PTX cannot be written without a complete raster — the format IS the grid —
+    so each way of having no grid becomes its own actionable error rather than a
+    fallback. E57 calls the core directly and degrades instead.
+    """
+    cells = _scan_grid_cells(resolved, scan_entry)
+    if cells is not None:
+        return cells
+    if not int(scan_entry.n_theta or 0) or not int(scan_entry.n_phi or 0):
+        raise ValueError(
+            "PTX needs a complete scan grid: this cloud carries no row/column "
+            "indices and its scan parameters have no Ntheta x Nphi resolution. "
+            "Set the scan resolution, or export from a structured source.")
+    pattern = getattr(scan_entry, "scan_pattern", None) or "raster"
+    raise ValueError(
+        f"PTX stores one sample per grid cell, so it can't represent a "
+        f"'{pattern}' scan. Export this scan as E57 or LAS instead.")
 
 
 def _ptx_first_per_cell(cell: "np.ndarray", rank: "np.ndarray"):
@@ -11720,13 +11939,24 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
         return {"success": False, "error": f"Unsupported data format: {fmt}"}
 
     is_ptx = fmt == "ptx"
+    is_e57 = fmt == "e57"
     # PTX writes EVERY cell, so an excluded miss simply becomes an empty cell —
     # byte-identical output either way. Excluding is also the correct reading: a
     # Helios/E57 miss is a real row parked 20 km out, which would otherwise
     # occupy its cell with a bogus point where the format wants the empty
     # sentinel. And on a sky-heavy scan it halves the rows before the sort.
+    #
+    # E57 is the opposite case, and the toggle stays LIVE for it: the format does
+    # not require every cell to be present, so an excluded miss really is absent
+    # (leaving a sparse but still-indexed grid), while an included one is written
+    # as a flagged `cartesianInvalidState` cell rather than a bogus far-field
+    # return. A hits-only E57 is a legitimately smaller file, so the choice is
+    # the user's to make.
     want_misses = False if is_ptx else request.include_misses
-    force = _GRID_INDEX_SLUGS if is_ptx else ()
+    # Both structured writers place points by (row, column), so the raster
+    # indices must survive the modal's column picker — without this a user's
+    # column selection silently downgrades the E57 to unstructured.
+    force = _GRID_INDEX_SLUGS if (is_ptx or is_e57) else ()
 
     files = []
     total_points = 0
@@ -11759,11 +11989,17 @@ def _do_scan_export_data(request: "ScanExportRequest", base: str,
 
             if progress is not None:
                 progress(head, f"Writing {label} ({i + 1}/{n})")
-            if is_ptx:
-                # Bypasses _write_scan_to_bytes' (name, bytes) contract so a large
-                # raster can stream straight to disk — see _emit_ptx_file.
-                entry = _emit_ptx_file(f"{stems[i]}.ptx", resolved, scan_entry, dest,
-                                       progress=sub)
+            if is_ptx or is_e57:
+                # Both bypass _write_scan_to_bytes' (name, bytes) contract: they
+                # need the scan entry's pose and grid, and both write straight to
+                # disk rather than materialising the whole file as bytes — see
+                # _emit_ptx_file / _emit_e57_file.
+                if is_ptx:
+                    entry = _emit_ptx_file(f"{stems[i]}.ptx", resolved, scan_entry,
+                                           dest, progress=sub)
+                else:
+                    entry = _emit_e57_file(f"{stems[i]}.e57", resolved, scan_entry,
+                                           stems[i], dest, progress=sub)
                 files.append(entry)
                 if dest is not None:
                     written.append(dest / entry["name"])
@@ -28303,7 +28539,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
     # activity while it runs.
     _report(None, "Reconstructing misses")
     try:
-        synth_xyz, count = _run_gapfill_extract(cloud)
+        synth_xyz, count, synth_grid = _run_gapfill_extract(cloud)
     except Exception as exc:
         # Helios raises (HeliosRuntimeError) when it can't reconstruct the scan
         # grid — e.g. a sparse row/column raster ("too few populated scan rows"),
@@ -28329,6 +28565,12 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "positions": synth_xyz,
         "directions": synth_dirs,
     }
+    if synth_grid:
+        # The raster address of each synthesised miss, when the row/column path
+        # produced one (the timestamp path forms no raster and supplies none).
+        # Carried so a structured export can place these misses in their own
+        # cells rather than falling back to angular binning.
+        buffer.update(synth_grid)
     if moving and origins is not None and synth_xyz.shape[0] > 0:
         # Per-pulse origins aren't recoverable per synthetic miss here; store the
         # scan-origin broadcast so the LAD reader has an origin column. Refined

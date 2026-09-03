@@ -290,6 +290,11 @@ export function ExportModal({
   // PTX emits every cell of the scan raster, so "include misses" is inert for it
   // (an excluded miss is written as the same empty-cell sentinel).
   const ptxSelected = !xmlMode && scanDataFormat === 'ptx';
+  // E57 is the opposite case and the toggle stays LIVE: the format doesn't
+  // require every cell, so an excluded miss really is absent, while an included
+  // one is written as a flagged `cartesianInvalidState` cell rather than a bogus
+  // far-field return — which is what makes it re-importable.
+  const e57Selected = !xmlMode && scanDataFormat === 'e57';
   const missesEnabled = anyCheckedHasMisses && !ptxSelected;
   // LAS/LAZ scan data: lock intensity as well as geometry (see lockFixedDimsForLas).
   const activeScanColumns = useMemo(
@@ -562,7 +567,9 @@ export function ExportModal({
                 className={`flex items-center gap-2 text-[11px] my-2 ${missesEnabled ? 'text-neutral-200 cursor-pointer' : 'text-neutral-500 cursor-not-allowed'}`}
                 title={ptxSelected
                   ? 'PTX always writes every grid cell, so this makes no difference to the file.'
-                  : anyCheckedHasMisses ? 'Write the sky/miss points (and the is_miss column).' : 'None of the checked scans carry sky/miss points.'}
+                  : !anyCheckedHasMisses ? 'None of the checked scans carry sky/miss points.'
+                  : e57Selected ? 'Write the sky/miss points as flagged empty cells (E57 cartesianInvalidState), so they re-import as misses rather than far-field returns.'
+                  : 'Write the sky/miss points (and the is_miss column).'}
               >
                 <input
                   type="checkbox" data-testid="export-scan-include-misses"

@@ -576,6 +576,22 @@ mode is still checked when you switch back to **Data only**.
     in the scanner's local frame with the registered scanner position in the
     header, so the file opens in the right place in Cyclone or CloudCompare.
 
+!!! note "Exporting to E57"
+    E57 is structured too, but it doesn't require every cell to be present, so it
+    behaves differently from PTX in two ways. The file gets **row/column
+    indices** whenever the scan has a grid to write — the same two sources PTX
+    uses: real indices from an E57/PTX import, or a raster scan's **Ntheta x
+    Nphi** sweep to bin against. Where PTX refuses a scan with neither, E57 simply
+    writes an unstructured file. And a cell with more than one return keeps
+    **every** echo, where PTX has to collapse it to one.
+
+    Misses are written as cells flagged with E57's own `cartesianInvalidState`,
+    which is what the importer reads — so an exported scan comes back as scan
+    data rather than as a cloud of points sitting ~20 km out. Unlike PTX,
+    **Include miss points** genuinely applies: untick it for a smaller,
+    hits-only file. Points are written in the scanner's local frame with its
+    pose in the scan header, as scanners themselves do.
+
 **Columns** — for the text formats (XYZ / CSV / TXT, and the XML bundle's
 `.xyz` data) plus PLY and LAS / LAZ, a column picker lets you check which fields
 to write. `x`, `y`, `z` are required and locked on. Only the text formats and PLY
@@ -587,8 +603,11 @@ schema, so the column picker is hidden for them.
 `is_miss` flag are written, so misses survive the round-trip. The `is_miss`
 column is always included while this is on, even if you unchecked it in the
 column picker — without that flag the far-field miss points would re-import as
-real returns, breaking the round-trip. Turn it off for a returns-only export.
-Available only when at least one checked scan carries misses.
+real returns, breaking the round-trip. (E57 uses the format's own
+`cartesianInvalidState` flag for this instead of a column; PTX needs no flag,
+since an empty cell already says it.) Turn it off for a returns-only export.
+Available only when at least one checked scan carries misses — and greyed out
+for PTX, where it makes no difference to the file.
 
 **Export grid** — shown only in **XML + data** mode when the scene holds one or
 more [voxel grids](../concepts/scans.md). Tick it to reveal a checklist of the

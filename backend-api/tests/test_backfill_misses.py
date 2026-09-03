@@ -48,11 +48,19 @@ class _FakeCloud:
     instances = []
     SYNTH = 3  # synthetic misses produced per gapfill
     gapfill_error = None  # set to an exception instance to make gapfillMisses raise
+    # Which C++ gapfill path to model. The ROW/COLUMN path iterates the grid to
+    # find empty cells, so it attaches 'row'/'column' to every miss it emits;
+    # the TIMESTAMP path reconstructs pulse grouping from times without ever
+    # forming a raster and attaches neither. `_run_gapfill_extract` has to tell
+    # them apart from the hit data alone.
+    grid_path = False
 
     def __init__(self):
         self.calls = []
         self._hit_xyz = np.empty((0, 3), np.float32)
         self._codes = np.empty((0,), np.float64)
+        self._row = np.empty((0,), np.float64)
+        self._col = np.empty((0,), np.float64)
         self._labels_seen = []
         _FakeCloud.instances.append(self)
 
@@ -68,6 +76,15 @@ class _FakeCloud:
         self._labels_seen = list(labels or [])
         self._hit_xyz = np.ascontiguousarray(xyz, dtype=np.float32)
         self._codes = np.zeros(len(xyz), dtype=np.float64)
+        # Hits keep whatever raster address they were ingested with.
+        n = len(xyz)
+        self._row = np.zeros(n, np.float64)
+        self._col = np.zeros(n, np.float64)
+        for i, lab in enumerate(self._labels_seen):
+            if lab == "row" and vals is not None:
+                self._row = np.asarray(vals, dtype=np.float64)[:, i]
+            elif lab == "column" and vals is not None:
+                self._col = np.asarray(vals, dtype=np.float64)[:, i]
 
     def gapfillMisses(self):
         self.calls.append(("gapfill",))
@@ -78,11 +95,29 @@ class _FakeCloud:
                          dtype=np.float32)
         self._hit_xyz = np.vstack([self._hit_xyz, synth]) if self._hit_xyz.size else synth
         self._codes = np.concatenate([self._codes, np.ones(self.SYNTH, np.float64)])
+        if _FakeCloud.grid_path:
+            # Row/column path: each synthesised miss knows the empty cell it fills.
+            self._row = np.concatenate(
+                [self._row, np.arange(self.SYNTH, dtype=np.float64)])
+            self._col = np.concatenate(
+                [self._col, np.arange(self.SYNTH, dtype=np.float64) + 10.0])
+        else:
+            # Timestamp path: no raster, so the label is absent on these hits.
+            nan = np.full(self.SYNTH, np.nan, np.float64)
+            self._row = np.concatenate([self._row, nan])
+            self._col = np.concatenate([self._col, nan])
 
     def getHitDataArray(self, label):
         if label == "gapfillMisses_code":
             return self._codes.copy()
         return np.full(self._codes.shape[0], np.nan, np.float64)
+
+    def getHitDataColumnArray(self, label, absent_value=-9999.0):
+        """Columnar bulk read; `absent_value` where the label was never set."""
+        col = {"row": self._row, "column": self._col}.get(label)
+        if col is None:
+            return np.full(self._codes.shape[0], absent_value, np.float64)
+        return np.where(np.isnan(col), absent_value, col)
 
     def getHitsXYZRGBArrays(self):
         rgb = np.zeros_like(self._hit_xyz)
@@ -98,6 +133,7 @@ def stub_pyhelios(monkeypatch):
     import types
     _FakeCloud.instances = []
     _FakeCloud.gapfill_error = None
+    _FakeCloud.grid_path = False
     fake = types.ModuleType("pyhelios")
     fake.LiDARCloud = _FakeCloud
     monkeypatch.setitem(sys.modules, "pyhelios", fake)
@@ -559,3 +595,113 @@ def test_moving_without_timestamp_returns_clean_error(stub_pyhelios):
     assert resp["has_misses"] is False
     assert "timestamp" in resp["error"].lower()
     assert sess.backfilled_misses is None  # nothing persisted on the guarded error
+
+
+# ---------------------------------------------------------------------------
+# Raster address of the synthesised misses
+#
+# The C++ row/column path iterates the grid to find empty cells, so it attaches
+# 'row'/'column' to every miss it emits (LiDAR.cpp). `_run_gapfill_extract` used
+# to read back only the coordinates and the miss flag, discarding that address —
+# so a recovered miss had no cell, and a structured export could only fall back
+# to angular binning. The timestamp path forms no raster and attaches none, and
+# must keep reporting none rather than a fabricated cell.
+# ---------------------------------------------------------------------------
+
+def test_rowcolumn_gapfill_keeps_the_raster_address(stub_pyhelios):
+    _FakeCloud.grid_path = True
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 5])
+
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+    buf = sess.backfilled_misses
+    # Stored under the session/export spelling, not the bare C++ label.
+    assert buf.get("row_index") is not None, "the miss cell was discarded"
+    assert buf.get("column_index") is not None
+    assert len(buf["row_index"]) == _FakeCloud.SYNTH
+    # The fake's row/column path emits row = i, column = i + 10.
+    assert list(buf["row_index"]) == [0.0, 1.0, 2.0]
+    assert list(buf["column_index"]) == [10.0, 11.0, 12.0]
+
+
+def test_timestamp_gapfill_reports_no_raster_address(stub_pyhelios):
+    """The timestamp path never forms a raster, so there is no cell to carry. A
+    fabricated one would be worse than none — it would put every recovered miss
+    somewhere real-looking and wrong."""
+    _FakeCloud.grid_path = False
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 5])
+
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+    buf = sess.backfilled_misses
+    assert buf.get("row_index") is None
+    assert buf.get("column_index") is None
+
+
+def test_partial_raster_address_is_refused_wholesale(stub_pyhelios):
+    """Some misses with a cell and some without is unusable — a consumer cannot
+    place the ones that lack it. Take the grid only when every miss carries one."""
+    _FakeCloud.grid_path = True
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+
+    real_gapfill = _FakeCloud.gapfillMisses
+
+    def holey(self):
+        real_gapfill(self)
+        self._row[-1] = np.nan  # one synthesised miss with no cell
+
+    _FakeCloud.gapfillMisses = holey
+    try:
+        resp = _call(sess.session_id, origin=[0, 0, 5])
+    finally:
+        _FakeCloud.gapfillMisses = real_gapfill
+
+    assert resp["backfilled"] == _FakeCloud.SYNTH  # the misses still land
+    assert sess.backfilled_misses.get("row_index") is None
+
+
+def test_recovered_cells_reach_the_lad_arrays(stub_pyhelios):
+    """The buffer feeds `_session_to_lad_arrays` via `_append_backfilled_misses`,
+    which fills each label column for the miss rows. Without this the recovered
+    misses would all land in row 0 / column 0 of a structured export."""
+    _FakeCloud.grid_path = True
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+    _call(sess.session_id, origin=[0, 0, 5])
+
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(
+        sess, [0, 0, 5], include_backfilled=True)
+
+    assert flags["has_misses"] is True
+    assert "row_index" in labels and "column_index" in labels
+    n_hits = len(_TS_POSITIONS)
+    miss_rows = np.asarray(vals)[n_hits:]
+    row_col = miss_rows[:, labels.index("row_index")]
+    col_col = miss_rows[:, labels.index("column_index")]
+    assert list(row_col) == [0.0, 1.0, 2.0]
+    assert list(col_col) == [10.0, 11.0, 12.0]
+    assert not np.all(col_col == 0.0), "every recovered miss landed in column 0"
