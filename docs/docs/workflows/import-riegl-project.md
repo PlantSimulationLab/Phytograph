@@ -176,12 +176,24 @@ is enough to bend a "ground" surface that should be flat.
 Positions that recorded no usable tilt simply import unlevelled; the picker
 says how many, and the rest are still levelled.
 
-A levelled scan reports its **scanner tilt as 0°** in the Scans panel, because
-the tilt has been taken out of the points — the cloud really is plumb, and the
-marker stands upright to match. The measurement itself is not discarded; it is
-what produced the rotation. If you want the angular model to describe the
-instrument as it physically sat on the tripod (which is what
-[LAD](../concepts/leaf-area-density.md) wants — see below), import unlevelled.
+!!! note "What the Scans panel's **tilt** row means"
+
+    It reports the tilt **the cloud has**, not the reading the inclinometer
+    took — so it answers "is this cloud plumb?", which is the question the rest
+    of your workflow depends on.
+
+    | Imported | Panel shows | Because |
+    |---|---|---|
+    | **Levelled** | `roll 0° · pitch 0° (level)` | The tilt was rotated out of the points |
+    | **Unlevelled** | the measured tilt, e.g. `roll 1.32° · pitch 2.97°` | The points kept it |
+
+    The row is always shown, so `0° (level)` is a statement rather than a gap.
+    Levelling does not discard the measurement — it is what produced the
+    rotation, and it stays with the scan.
+
+    If you want the angular model to describe the instrument as it physically
+    sat on the tripod (which is what [LAD](../concepts/leaf-area-density.md)
+    wants — see below), import unlevelled.
 
 #### A `.PROJ` usually is, but only partly
 

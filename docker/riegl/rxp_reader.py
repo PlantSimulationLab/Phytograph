@@ -1998,6 +1998,18 @@ def _attach_scan_params_extras(entry: dict, frame: str = FRAME_LOCAL) -> None:
         # on measured data (see sensor_level_matrix).
     else:
         params["origin"] = entry.get("origin_prior") or [0.0, 0.0, 0.0]
+        # UNLEVELLED, AND THAT IS WORTH SAYING OUT LOUD. The points kept the
+        # tilt the instrument had, so the cloud really is off plumb by this
+        # much — state it whenever the position measured it. Leaving it absent
+        # (which is what this branch used to do) made an unlevelled import
+        # look level while a levelled one, still carrying the raw reading,
+        # looked tilted: the two cases read as each other's opposite, and the
+        # frame each described was never stated. The pair of branches now says
+        # the same thing in both directions — this is the tilt the CLOUD has,
+        # zero once levelling has taken it out.
+        if pose is not None:
+            params["tilt_roll_deg"] = float(pose["roll_deg"])
+            params["tilt_pitch_deg"] = float(pose["pitch_deg"])
 
     model = (entry.get("instrument") or {}).get("model")
     if model:

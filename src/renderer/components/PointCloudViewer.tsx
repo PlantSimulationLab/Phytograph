@@ -20339,11 +20339,21 @@ export default function PointCloudViewer({
                         <span className="mx-1">·</span>
                         div <span className="font-mono text-neutral-300">{scan.params.beamDivergenceMrad} mrad</span>
                       </div>
-                      {(scan.params.tiltRollDeg !== 0 || scan.params.tiltPitchDeg !== 0) && (
-                        <div>
-                          tilt: <span className="font-mono text-neutral-300">roll {scan.params.tiltRollDeg}° · pitch {scan.params.tiltPitchDeg}°</span>
-                        </div>
-                      )}
+                      {/* ALWAYS shown, including at 0/0. This row states the
+                          tilt the CLOUD has, and "level" is an answer, not a
+                          missing one. Hiding the zero case made the two RIEGL
+                          import paths read as each other's opposite: a levelled
+                          import (plumb, but labelled with the raw inclinometer
+                          reading) looked tilted, while an unlevelled one (which
+                          really is off plumb) showed no tilt row at all and so
+                          looked level. `tiltRollDeg` is a required field with a
+                          0 default, so there is never a value to omit. */}
+                      <div>
+                        tilt: <span className="font-mono text-neutral-300">roll {scan.params.tiltRollDeg}° · pitch {scan.params.tiltPitchDeg}°</span>
+                        {scan.params.tiltRollDeg === 0 && scan.params.tiltPitchDeg === 0 && (
+                          <span className="text-neutral-500"> (level)</span>
+                        )}
+                      </div>
                     </div>
                   )}
 

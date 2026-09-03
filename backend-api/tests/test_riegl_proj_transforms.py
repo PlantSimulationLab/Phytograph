@@ -734,6 +734,47 @@ def test_a_position_with_no_sensor_pose_imports_unlevelled():
     assert "sensor_matrix" not in entry
 
 
+def test_levelled_and_unlevelled_describe_the_cloud_not_the_tripod():
+    """The tilt fields must mean the same thing in BOTH frames.
+
+    They report the tilt the delivered CLOUD has. So levelling — which takes
+    the tilt out — reports zero, and declining to level reports the tilt the
+    points kept. Asserted as a pair because the bug was the pair being
+    inconsistent, not either value alone: the levelled branch emitted the raw
+    inclinometer reading (so a plumb cloud was labelled tilted) while the
+    unlevelled branch emitted nothing at all (so a genuinely tilted cloud was
+    labelled level). Each read as the other's opposite, which is precisely
+    backwards, and neither branch stated which frame it meant.
+    """
+    def build(frame):
+        entry = {
+            "scan_params": {"phi_min": 0.0, "phi_max": 360.0},
+            "sop": None,
+            "origin_prior": [3.0, 4.0, 5.0],
+            "sensor_pose": {"roll_deg": 1.316, "pitch_deg": 2.972,
+                            "source": "scanner_pose_hr"},
+        }
+        R._attach_scan_params_extras(entry, frame)
+        return entry
+
+    levelled = build(R.FRAME_SENSOR)["scan_params"]
+    unlevelled = build(R.FRAME_LOCAL)["scan_params"]
+
+    # Levelled: the tilt is gone from the points, so it is gone from the report.
+    assert levelled["tilt_roll_deg"] == 0.0
+    assert levelled["tilt_pitch_deg"] == 0.0
+
+    # Unlevelled: the points kept it, so it is stated — never omitted, which
+    # would render as "level" in the scan panel.
+    assert unlevelled["tilt_roll_deg"] == pytest.approx(1.316)
+    assert unlevelled["tilt_pitch_deg"] == pytest.approx(2.972)
+
+    # Only ONE of the two carries a levelling matrix, and it is the one whose
+    # tilt reads zero — the rotation and the claim about it stay in lockstep.
+    assert "sensor_matrix" in build(R.FRAME_SENSOR)
+    assert "sensor_matrix" not in build(R.FRAME_LOCAL)
+
+
 def test_attach_sensor_pose_prefers_the_fused_pose_then_falls_back(tmp_path):
     raw = POSE_FIXTURE["positions"]["peach_2018_ScanPos001"]["raw"]
     incl = "hk_incl (10006.0), 1520, 130, 0, 0"
