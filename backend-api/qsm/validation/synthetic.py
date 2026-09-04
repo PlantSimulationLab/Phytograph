@@ -230,3 +230,45 @@ def sample_cloud(
 def _wrap(a: np.ndarray) -> np.ndarray:
     """Wrap angles to [-pi, pi]."""
     return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def headed_tree(n_scaffolds: int = 3) -> QSM:
+    """A HEADED / open-centre tree: a short thick determinate trunk that ends in a
+    whorl of ``n_scaffolds`` co-dominant scaffolds (the almond shape).
+
+    The trunk is rank 0 and STOPS at the head; every scaffold is rank 1. There is
+    deliberately NO dominant arm -- the scaffolds share the trunk's cross-section
+    and carry comparable subtrees -- so a largest-subtree continuation rule with
+    no termination test must get this wrong (it traces trunk + one scaffold as a
+    single rank-0 shoot). The complement of ``simple_tree`` (monopodial).
+    """
+    b = _Builder()
+    trunk = b.add_shoot(
+        start=[0, 0, 0], direction=[0, 0, 1], length=0.8,
+        radius_base=0.060, radius_tip=0.052, rank=0, n_seg=6,
+    )
+    head = b.tip_of(trunk)
+    head_cyl = trunk.cylinder_ids[-1]
+    # Scaffolds leave the head at ~35 deg from vertical, evenly in azimuth, with
+    # near-equal radii (codominant) and near-equal lengths.
+    for k in range(n_scaffolds):
+        az = 2.0 * np.pi * k / n_scaffolds
+        d = [np.cos(az) * 0.7, np.sin(az) * 0.7, 1.0]
+        sc = b.add_shoot(
+            start=head, direction=d, length=1.6,
+            radius_base=0.030 - 0.001 * k, radius_tip=0.012, rank=1, n_seg=10,
+            parent_shoot_id=trunk.shoot_id, parent_cyl_id=head_cyl,
+        )
+        b.link_child(trunk, sc)
+        # one rank-2 sub-branch on each scaffold
+        sub_attach = b.cyl_at_fraction(sc, 0.6)
+        sub_base = next(c for c in b.cylinders if c.cyl_id == sub_attach).end
+        sd = [np.cos(az + 1.1), np.sin(az + 1.1), 0.7]
+        sub = b.add_shoot(
+            start=sub_base, direction=sd, length=0.5,
+            radius_base=0.010, radius_tip=0.005, rank=2, n_seg=4,
+            parent_shoot_id=sc.shoot_id, parent_cyl_id=sub_attach,
+        )
+        b.link_child(sc, sub)
+    return b.build(meta={"name": "headed_tree", "head_cyl": head_cyl,
+                        "n_scaffolds": n_scaffolds})

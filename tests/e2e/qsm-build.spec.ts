@@ -29,6 +29,16 @@ test('builds a QSM with shoot ranks from a plant cloud via the UI', async () => 
     // Open the QSM build panel and run the build.
     await page.getByTestId('tool-qsm').click();
     await expect(page.getByTestId('qsm-panel')).toBeVisible();
+
+    // The axis-continuation control is present and drives the build. Set it
+    // explicitly (a non-default value) so the build exercises the wired path
+    // rather than only the server-side default.
+    const forkSym = page.getByTestId('qsm-fork-symmetry');
+    await expect(forkSym).toBeVisible();
+    await expect(forkSym).toHaveValue('0.75');
+    await forkSym.fill('0.8');
+    await expect(forkSym).toHaveValue('0.8');
+
     await page.getByTestId('qsm-build-button').click();
 
     // A QSM row appears in the results panel within ~60s.

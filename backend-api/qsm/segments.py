@@ -53,11 +53,17 @@ class SegmentOptions:
     # the separation collapses (true continuations dip to cos ~0.73 from level-set
     # noise, and the skeleton merges the whorl into an ordinary 2-way fork), so the
     # gate wrongly terminates real scaffolds -- rank-1 recall fell to 0.17-0.33.
-    # Per user decision (2026-06-07): a trunk that continues as rank-0 into a
-    # scaffold is acceptable; scaffold recall matters more. So the gate stays OFF
-    # and we keep pure largest-GrowthLength continuation. The trunk-whorl rank edge
-    # case is a known, accepted limitation (see Layer-2 validation notes); a
-    # confidence-gated viewport prompt is the eventual fix, not a magic threshold.
+    #
+    # SUPERSEDED, and worth reading before re-enabling this: the trunk-into-scaffold
+    # over-extension is now FIXED, but in ``qsm/continuation.py`` (Stage F) rather
+    # than here. The reason this gate could not do it is that an ABSOLUTE angle to
+    # the parent is fragile on a smoothed skeleton, while a SIBLING-to-sibling
+    # radius comparison at the same junction is relative and largely cancels that
+    # noise -- and it needs the Stage-E CORRECTED radii, which do not exist yet at
+    # this point in the pipeline (measured at the redbud's true fork: symmetry 0.50
+    # provisional / 0.39 raw-fit / 0.90 corrected). So this gate stays OFF and
+    # Stage C keeps pure largest-GrowthLength continuation; termination is decided
+    # after radius correction, where the evidence is good enough to decide it.
     continuation_min_colinear: float = 0.0
     # Provisional radius from node point-count: r = clip(k * sqrt(count), ...).
     # Only used until Phase D fits real radii; topology/rank don't depend on it

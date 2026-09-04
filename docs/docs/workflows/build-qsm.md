@@ -57,7 +57,24 @@ first:
    **4.23 mm** is a published example value; if you know your species'
    typical twig diameter, set it. It mainly affects the thinnest tips, not
    the trunk or scaffolds.
-4. Click **Build QSM**.
+4. Set **Axis continuation** if the default doesn't suit the tree's
+   training. This is how evenly two branches must match in thickness
+   before the shoot is treated as **ending** at that fork rather than
+   continuing through it.
+
+    - **Lower** (≈0.6–0.7) ends the trunk more readily — right for
+      **headed** / **open-centre** trees, where a short trunk splits into
+      several co-dominant scaffolds.
+    - **Higher** (≈0.85–0.95) traces the trunk through more forks — right
+      for a strong **central leader**.
+    - The default **0.75** is the published threshold for a codominant
+      union and handles both shapes on typical orchard and landscape
+      trees.
+
+    If a rebuilt QSM shows the trunk running up into the canopy through
+    what is obviously a scaffold, lower this. If a genuine leader is being
+    cut short at a fork it should pass straight through, raise it.
+5. Click **Build QSM**.
 
 The build runs the full pipeline on the backend (skeleton → shoot
 segmentation → cylinder fitting → radius correction → metrics). A
@@ -357,8 +374,9 @@ them, and the hard-coded parameters you can't see in the UI.
 
 ### Hard-coded parameters
 
-Everything except **twig radius** (and the hidden continuation weights) is
-fixed at a validated default. The most relevant:
+Everything except **twig radius** and **axis continuation** (and the
+hidden continuation weights) is fixed at a validated default. The most
+relevant:
 
 | Parameter | Value | What it controls |
 |---|---|---|
@@ -366,6 +384,9 @@ fixed at a validated default. The most relevant:
 | Point cap | 60,000 | Clouds are downsampled to this before building |
 | Twig radius (UI) | 4.23 mm | Tip diameter the taper is anchored to |
 | Continuation weights | (1, 0, 0) | Largest-GrowthLength axis rule |
+| Axis continuation (UI) | 0.75 | Sibling-thickness ratio at/above which a fork is codominant and the shoot ENDS there |
+| Fork size floor | 0.50 | Both arms must carry comparable distal length before a fork can end an axis |
+| Structural floors | 1% of tree length, 0.35 x trunk radius | Keep crown twigs from ending an axis (they fork symmetrically too) |
 | Short-branch prune | 0.10 m | Leaf fragments shorter than this are dropped as skeleton noise |
 | Cylinder fit | Huber IRLS, k = 1.345 | Robust M-estimator (no RANSAC) |
 | Point→cylinder cutoff | 0.5 m | Points farther than this from any axis are ignored (other trees, ground) |

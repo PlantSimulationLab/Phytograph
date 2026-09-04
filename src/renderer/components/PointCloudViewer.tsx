@@ -13801,7 +13801,7 @@ export default function PointCloudViewer({
       .filter((c): c is PointCloudEntry => !!c);
     if (targets.length === 0) return;
 
-    const { twigRadiusMm } = opts;
+    const { twigRadiusMm, forkSymmetry } = opts;
     const MAX_QSM_POINTS = 60000; // dormant trees are sparse; this is plenty
     // 'aggregate' fuses several multi-view scans of ONE tree into a single QSM;
     // 'per-scan' builds one QSM per scan (separate trees). Only meaningful for
@@ -13840,6 +13840,7 @@ export default function PointCloudViewer({
         points,
         source,
         twig_radius_mm: twigRadiusMm,
+        fork_symmetry: forkSymmetry,
       }, abort.signal, report);
 
       if (!response.success) {
@@ -13891,6 +13892,7 @@ export default function PointCloudViewer({
             sources: sources.length > 0 ? sources : undefined,
             points: points.length > 0 ? points : undefined,
             twig_radius_mm: twigRadiusMm,
+            fork_symmetry: forkSymmetry,
           }, abort.signal, report);
         } catch (err) {
           if (abort.signal.aborted) return;

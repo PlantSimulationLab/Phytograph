@@ -73,7 +73,17 @@ pipeline lives in the `qsm/` package and is a thin call from the endpoint:
 geodesic level-set **skeleton** → **segment** tree + GrowthLength continuation +
 **shoot rank** (largest-GrowthLength axis continuation; trunk=0) → robust IRLS
 **cylinder fit** + SurfCov/mad → monotone-taper **radius correction** (anchored to
-a per-species `twig_radius_mm`, default 4.23 mm) → horticultural **metrics**.
+a per-species `twig_radius_mm`, default 4.23 mm) → **axis termination**
+(`qsm/continuation.py`) → horticultural **metrics**.
+
+Axis termination lets a shoot END at a codominant fork, so a headed tree's trunk
+stops at the heading cut instead of being traced up one scaffold. It runs AFTER
+radius correction on purpose: the test is a sibling-radius comparison
+(`r2/r1 >= fork_symmetry`, default 0.75, aRchi's published value) plus a subtree-size
+floor, and only the corrected radii separate it — measured at a real redbud's true
+fork, symmetry is 0.50 on the provisional radius, 0.39 on the raw fit and 0.90 after
+correction. Set `axis_termination: false` to restore the never-terminating behavior,
+or raise/lower `fork_symmetry` per tree architecture.
 
 Returns `cylinders[]` (each with `start`/`end`/`radius`/`parent_id`/`shoot_id`/
 `rank`/`surf_cov`/`mad`), `shoots[]` (continuous axes with `rank` + parent/child

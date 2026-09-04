@@ -4967,6 +4967,10 @@ export interface QSMBuildRequest {
   w_growthlength?: number;      // continuation weights; default (1, 0, 0)
   w_area?: number;
   w_colinear?: number;
+  // Axis termination: let a shoot END at a codominant fork, so a headed tree's
+  // trunk stops at the head instead of being traced up one scaffold.
+  axis_termination?: boolean;   // default true
+  fork_symmetry?: number;       // aRchi sibling-radius test r2/r1; default 0.75
 }
 
 export interface QSMCylinder {

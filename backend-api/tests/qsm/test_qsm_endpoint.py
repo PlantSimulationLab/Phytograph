@@ -78,6 +78,58 @@ def test_build_qsm_headline_shoot_rank(client, cloud_points):
         assert c["shoot_id"] >= 0
 
 
+@pytest.fixture(scope="module")
+def headed_cloud() -> list[list[float]]:
+    """A cloud of the HEADED tree (short determinate trunk -> codominant
+    scaffolds), for the axis-termination behavior."""
+    from qsm.validation.synthetic import headed_tree
+
+    gt = headed_tree(n_scaffolds=3)
+    return sample_cloud(gt, seed=13, points_per_m2=12000, noise_sigma=0.0006).tolist()
+
+
+def test_axis_termination_ends_the_trunk_at_the_head(client, headed_cloud):
+    """END-TO-END through the real endpoint: on a headed tree the rank-0 shoot
+    must STOP at the head rather than being traced up one scaffold.
+
+    Asserted as a comparison against the same endpoint with axis_termination
+    off, so it measures the feature rather than a fixture constant.
+    """
+    off = build_qsm(client, {"points": headed_cloud, "axis_termination": False})
+    on = build_qsm(client, {"points": headed_cloud, "axis_termination": True})
+    assert off["success"] and on["success"]
+
+    def rank0_top(body):
+        return max(c["end"][2] for c in body["cylinders"] if c["rank"] == 0)
+
+    assert rank0_top(on) < rank0_top(off) - 0.3, (
+        f"rank-0 top {rank0_top(on):.2f} should be well below the un-terminated "
+        f"{rank0_top(off):.2f} -- the trunk should end at the head"
+    )
+    assert len([s for s in on["shoots"] if s["rank"] == 0]) == 1
+    assert len([s for s in on["shoots"] if s["rank"] == 1]) >= 2, (
+        "both arms of the head should become rank-1 scaffolds"
+    )
+
+
+def test_fork_symmetry_knob_changes_the_result(client, headed_cloud):
+    """The exposed control must actually move the ANSWER -- a fully-wired knob
+    read by nothing has shipped in this repo before, so assert on the result and
+    not merely that the field is accepted.
+
+    Note the bar has to exceed 1.0 to be unreachable: this fixture's reconstructed
+    head is very nearly symmetric (r2/r1 > 0.99), which is the point of the
+    fixture. A 0.99 bar still terminates it.
+    """
+    strict = build_qsm(client, {"points": headed_cloud, "fork_symmetry": 1.5})
+    default = build_qsm(client, {"points": headed_cloud})
+    top_strict = max(c["end"][2] for c in strict["cylinders"] if c["rank"] == 0)
+    top_default = max(c["end"][2] for c in default["cylinders"] if c["rank"] == 0)
+    assert top_strict > top_default + 0.3, (
+        f"fork_symmetry had no effect: {top_strict:.2f} vs {top_default:.2f}"
+    )
+
+
 def test_build_qsm_topology_consistent(client, cloud_points):
     """Parent links are valid: exactly one root cylinder (parent -1), and every
     other parent_id references an existing cylinder."""

@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.79.0"
+BACKEND_VERSION = "0.80.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -16329,6 +16329,13 @@ class QSMBuildRequest(BaseModel):
     w_growthlength: float = 1.0
     w_area: float = 0.0
     w_colinear: float = 0.0
+    # AXIS TERMINATION (Stage F): let a shoot END at a codominant fork, so a
+    # headed orchard tree's trunk stops at the head and a central leader stops at
+    # its terminal 'Y' instead of being traced up one arm. `fork_symmetry` is the
+    # aRchi sibling-radius test r2/r1 -- raise it to make the trunk continue
+    # through more forks, lower it to end the trunk more readily.
+    axis_termination: bool = True
+    fork_symmetry: float = 0.75
 
 
 class QSMCylinder(BaseModel):
@@ -16458,6 +16465,7 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
     from qsm.segments import segments_to_qsm, SegmentOptions
     from qsm.cylinders import fit_qsm_cylinders
     from qsm.radius import correct_radii, RadiusCorrectionOptions
+    from qsm.continuation import retag_ranks, ContinuationOptions
     from qsm.metrics import compute_metrics
 
     def _report(frac, msg):
@@ -16513,6 +16521,19 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
         _report(0.85, "Correcting radii")
         qsm = correct_radii(qsm, RadiusCorrectionOptions(
             twig_radius=request.twig_radius_mm / 1000.0,
+        ))
+
+        # F: axis termination -- allow a shoot to END at a codominant fork. Runs
+        # AFTER radius correction because the discriminator (sibling radius
+        # symmetry) is only separable on corrected radii: measured on the redbud,
+        # symmetry at the true fork is 0.50 provisional / 0.39 raw-fit / 0.90
+        # corrected. Only rank + shoot_id change, so the per-shoot taper above
+        # still ran along the full physical axis (which is correct -- a
+        # trunk-plus-scaffold is one smooth taper even when it is two shoots).
+        _report(0.92, "Resolving shoot ranks")
+        qsm = retag_ranks(qsm, ContinuationOptions(
+            enabled=request.axis_termination,
+            fork_symmetry=request.fork_symmetry,
         ))
 
         _report(0.95, "Computing metrics")

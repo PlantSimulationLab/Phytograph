@@ -19,11 +19,24 @@ as explicit, documented behaviors rather than silently tolerated:
      trunk (recall) and that the rank-0 base is at the true tree base -- the trunk
      IS found, it just continues too far. ("If the trunk continues as rank 0 into a
      scaffold, that's acceptable" -- user.)
+     NOTE: this module's pipeline stops at correct_radii and therefore does NOT
+     run Stage F (qsm/continuation.py), which is what actually terminates the
+     trunk at the whorl. These bars describe the A->E pipeline. If Stage F is
+     added to _run() below, the over-extension assertion in
+     test_known_limitation_trunk_overextends_is_bounded INVERTS -- it should then
+     assert the trunk terminates at the whorl instead. It is left as-is because
+     these fixtures are absent (see below) and flipping an assertion that never
+     executes would be an untested claim.
   2. FINE TWIGS: the geodesic skeleton merges the shortest rank-3 twigs into their
      parents, so tip COUNT is under-reported. We assert LENGTH recovery (95%+),
      which is what matters for volume/structure, rather than tip count.
 
-If a fixture isn't present the case is skipped (not failed).
+If a fixture isn't present the case is skipped (not failed). AS OF 2026-09-03 NONE
+of them are present -- they are gitignored and no longer on disk, so this ENTIRE
+module skips. Do not read a green run here as evidence that rank behavior is
+validated; regenerate the PyHelios fixtures first. The behavior these tests were
+written to guard is covered meanwhile by tests/qsm/test_qsm_continuation.py, which
+needs no external fixtures.
 """
 
 from __future__ import annotations

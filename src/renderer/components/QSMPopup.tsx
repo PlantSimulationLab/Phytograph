@@ -10,6 +10,9 @@ export interface QSMStartOptions {
   // tree) vs build one QSM per scan. Only meaningful for >1 scan.
   aggregate: boolean;
   twigRadiusMm: number;
+  // aRchi sibling-radius fork test (r2/r1). Below this the axis continues through
+  // the fork; at or above it the fork is codominant and the shoot ENDS there.
+  forkSymmetry: number;
 }
 
 interface QSMPopupProps {
@@ -64,6 +67,9 @@ export function QSMPopup({
   // surfaced when >1 scan is selected (a single selection always builds one QSM).
   const [multiMode, setMultiMode] = useState<'aggregate' | 'per-scan'>('aggregate');
   const [twigRadiusMm, setTwigRadiusMm] = useState(4.23);
+  // Axis continuation strictness = the aRchi fork test threshold. 0.75 is the
+  // published default and is what terminates the redbud 'Y' and the almond head.
+  const [forkSymmetry, setForkSymmetry] = useState(0.75);
 
   // Re-seed from the live Scans-panel selection every time the modal opens (like
   // LADPopup / BackfillMissesPopup). Depending only on `isOpen` — not `eligible` —
@@ -100,9 +106,9 @@ export function QSMPopup({
 
   const handleRun = useCallback(() => {
     if (selectedScans.length === 0) return;
-    onStart(selectedScans.map(s => s.id), { aggregate, twigRadiusMm });
+    onStart(selectedScans.map(s => s.id), { aggregate, twigRadiusMm, forkSymmetry });
     onClose();
-  }, [selectedScans, aggregate, twigRadiusMm, onStart, onClose]);
+  }, [selectedScans, aggregate, twigRadiusMm, forkSymmetry, onStart, onClose]);
 
   if (!isOpen) return null;
 
@@ -258,6 +264,30 @@ export function QSMPopup({
             />
             <div className="text-[9px] text-neutral-500 mt-1">
               Per-species twig diameter the radius taper is anchored to at the tips.
+            </div>
+          </div>
+
+          {/* Axis continuation strictness (Stage F axis termination) */}
+          <div className="border-t border-neutral-700 pt-4">
+            <label className="block text-[10px] text-neutral-400 mb-1">
+              Axis continuation: {forkSymmetry.toFixed(2)}
+            </label>
+            <input
+              data-testid="qsm-fork-symmetry"
+              type="range"
+              min={0.6}
+              max={0.95}
+              step={0.01}
+              value={forkSymmetry}
+              onChange={(e) => setForkSymmetry(parseFloat(e.target.value))}
+              disabled={inProgress}
+              className="w-full accent-amber-500"
+            />
+            <div className="text-[9px] text-neutral-500 mt-1">
+              How evenly two branches must match in thickness before a shoot is
+              treated as ENDING at that fork. Lower ends the trunk more readily
+              (headed / open-centre trees); higher traces it through more forks
+              (central leader).
             </div>
           </div>
 

@@ -111,19 +111,17 @@ def test_rank_agreement_headline_behaviors_simple_tree():
 
 
 @pytest.mark.xfail(
-    reason="The strict OVERALL rank-accuracy >=0.85 + trunk-PRECISION >=0.95 bars "
-    "are not achievable by design. Layer-2 (PyHelios GT) resolved the rank "
-    "semantics: the GT trunk is a short determinate shoot ending in a whorl, but "
-    "our largest-GrowthLength continuation extends rank-0 up a scaffold -- so trunk "
-    "precision is intentionally low (~0.2-0.3) and overall arc-length accuracy "
-    "caps below 0.85. Per user decision 2026-06-07 this trunk-into-scaffold "
-    "behavior is ACCEPTED (the eventual fix is a confidence-gated viewport prompt, "
-    "not a magic threshold). Rank is instead validated on Layer-2 via RECALL "
-    "(never miss the trunk) + bounded trunk over-extension -- see "
-    "test_qsm_layer2.py::test_rank_recall_and_match and "
-    "::test_known_limitation_trunk_overextends_is_bounded. This strict test is "
-    "kept as an xfail tripwire: if a future change DOES achieve it (e.g. the "
-    "whorl-aware continuation), this will xpass and prompt re-enabling the bar.",
+    reason="STAGE C ONLY -- this calls segments_to_qsm directly, which is the "
+    "never-terminating largest-GrowthLength rule and so still extends rank-0 up a "
+    "scaffold. That is now DELIBERATE rather than an accepted defect: axis "
+    "termination moved to Stage F (qsm/continuation.py::retag_ranks), which runs "
+    "after radius correction because the discriminator (sibling radius symmetry) "
+    "is only separable on corrected radii -- measured at the redbud's true fork, "
+    "0.50 provisional / 0.39 raw-fit / 0.90 corrected. So Stage C alone cannot "
+    "meet these bars by construction and this stays xfail; the whorl behavior is "
+    "asserted end-to-end in test_qsm_continuation.py instead. Kept as a tripwire: "
+    "an xpass means Stage C itself started terminating axes, which would be a "
+    "surprise worth understanding.",
     strict=False,
 )
 def test_rank_overall_accuracy_strict_xfail_tripwire():
