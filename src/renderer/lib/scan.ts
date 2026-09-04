@@ -317,11 +317,41 @@ export function duplicateScanName(sourceLabel: string, existing: Iterable<string
 // visually distinct. Order: blue, green, amber, red, violet, pink, teal, orange.
 const SCAN_PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
 
-// Pick the first palette color not already in `usedColors`; if all are taken,
-// fall back to cycling by the count of used colors so successive allocations
-// still vary.
+// A STATEFUL colour generator over {@link SCAN_PALETTE}: each call claims the
+// first entry not yet taken, so N successive calls yield N distinct swatches.
+//
+// This exists because a single import can produce SEVERAL scans — a multi-block
+// PTX or a multi-scan E57 fans out into one scan per scanner setup — and those
+// scans are only committed to the scene AFTER all of them are built. A colour
+// picker that reads the committed scan list therefore sees the same state on
+// every call and hands out the same colour to every position, which is exactly
+// the bug this replaced. Seed it with the colours already on the scene and call
+// it once per new scan.
+//
+// Past exhaustion it cycles on a MONOTONIC cursor rather than on `used.size`.
+// That distinction is load-bearing: the set cannot grow beyond the palette, so a
+// size-based fallback freezes on one colour from the 9th allocation onward —
+// reintroducing the identical-swatch bug for any source with more than 8
+// positions. The cursor keeps advancing, so colours keep varying.
+export function createScanColorAllocator(usedColors: Iterable<string> = []): () => string {
+  const used = new Set(usedColors);
+  let cursor = 0;
+  return () => {
+    const free = SCAN_PALETTE.find(c => !used.has(c));
+    if (free !== undefined) {
+      used.add(free);
+      return free;
+    }
+    return SCAN_PALETTE[cursor++ % SCAN_PALETTE.length];
+  };
+}
+
+// One-shot form of {@link createScanColorAllocator}: the first palette colour
+// not already in `usedColors`. Use this only where a SINGLE scan is created (a
+// duplicate, a params-only scan); anything creating several in a row needs the
+// allocator, or they all come out the same colour.
 export function allocateScanColor(usedColors: Set<string>): string {
-  return SCAN_PALETTE.find(c => !usedColors.has(c)) ?? SCAN_PALETTE[usedColors.size % SCAN_PALETTE.length];
+  return createScanColorAllocator(usedColors)();
 }
 
 export type { ScanParameters } from './scanParameters';

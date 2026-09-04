@@ -27,7 +27,7 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
 // Count BLUE pixels — i.e. rendered cloud points, not the crop gizmo.
 //
-// The first imported scan is coloured #3b82f6 (blue) by SCAN_COLORS in App.tsx,
+// The first imported scan is coloured #3b82f6 (blue) by SCAN_PALETTE in lib/scan.ts,
 // while the crop box draws in green (#22c55e) over a large translucent face.
 // Counting "blue dominates red and green" therefore isolates the points from
 // the box: a plain brightness count is swamped by the box's ~100k fill pixels

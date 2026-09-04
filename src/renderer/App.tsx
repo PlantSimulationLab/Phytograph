@@ -5,7 +5,7 @@ import { useDropzone } from "react-dropzone";
 import { ToastContainer, showToast } from "./components/Toast";
 import { BulkImportProgress, type BulkImportProgressState } from "./components/BulkImportProgress";
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
-import { scanDisplayName, type Scan, type ScanRegistration, allocateScanColor } from "./lib/scan";
+import { scanDisplayName, type Scan, type ScanRegistration, allocateScanColor, createScanColorAllocator } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
 import { shiftPoseStream } from "./lib/poseStream";
 import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
@@ -125,18 +125,6 @@ function stitchFlatClouds(scansToStitch: Scan[], fileName: string): PointCloudDa
 
   return { positions, colors, intensities, pointCount: totalPoints, bounds: { min, max, center, size }, fileName };
 }
-
-// Predefined colors for scans (for labels/identification)
-const SCAN_COLORS = [
-  '#3b82f6', // blue
-  '#22c55e', // green
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#ec4899', // pink
-  '#14b8a6', // teal
-  '#f97316', // orange
-];
 
 // `onResetScene` remounts the whole App + SceneProvider subtree (see Root in
 // main.tsx) — File → New calls it for a launch-fresh reset without a window
@@ -340,10 +328,15 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     return () => document.removeEventListener('focusin', handleFocusIn);
   }, []);
 
-  // Get next available color (skips colors currently used by existing scans).
+  // One colour for ONE new object (skips colours already on the scene).
+  //
+  // Deliberately not a generator: it reads the COMMITTED scan list, which does
+  // not change until the import is committed, so calling it twice in a row
+  // returns the same colour both times. Anything that creates several objects
+  // before committing — notably a multi-scan file — must use
+  // createScanColorAllocator() instead.
   const getNextColor = useCallback(() => {
-    const usedColors = new Set(scans.map(s => s.color));
-    return SCAN_COLORS.find(c => !usedColors.has(c)) || SCAN_COLORS[scans.length % SCAN_COLORS.length];
+    return allocateScanColor(new Set(scans.map(s => s.color)));
   }, [scans]);
 
   // Import wizard: shown for every point-cloud import that has an on-disk path.
@@ -771,8 +764,13 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           importAbortRef.current = controller;
           setImportProgress({ current: 1, total: 1, label: `Loading ${file.name}`, fraction: null });
           let imported: Scan[];
+          // ONE file, but possibly several scan positions (a multi-block PTX, a
+          // multi-scan E57), and they're all built before any is committed — so
+          // this needs a generator that remembers what it just handed out.
+          // Created per import so a later import doesn't resume a stale cursor.
+          const allocateColor = createScanColorAllocator(scans.map(s => s.color));
           try {
-            imported = await buildScansFromWizardResult(results[0], getNextColor, {
+            imported = await buildScansFromWizardResult(results[0], allocateColor, {
               signal: controller.signal,
               onProgress: (fraction, message) =>
                 setImportProgress(p => (p ? { ...p, fraction, hint: message || undefined } : p)),
@@ -837,7 +835,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       // Reset import type to auto after import
       pendingImportTypeRef.current = 'auto';
     }
-  }, [getNextColor, openImportWizard, buildScansFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
+  }, [scans, getNextColor, openImportWizard, buildScansFromWizardResult, importScanXml, importQsmCsv, materializeDroppedFile]);
 
   // Handle multiple files
   const handleMultipleFiles = useCallback(async (files: File[], opts?: ImportOptions) => {
@@ -850,23 +848,18 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     let meshCount = 0;
     let skeletonCount = 0;
     let qsmCount = 0;
-    let colorIndex = 0;
 
     const importType = opts?.importType ?? pendingImportTypeRef.current;
     // Menu-driven imports supply on-disk paths parallel to `files` (resolved by
     // the native dialog); synthetic Files have no webUtils path otherwise.
     const explicitPaths = opts?.paths;
 
-    const getColorForFile = () => {
-      const usedColors = new Set([...scans.map(s => s.color), ...newScans.map(e => e.color)]);
-      // Skip colors that are already used
-      while (usedColors.has(SCAN_COLORS[colorIndex % SCAN_COLORS.length]) && colorIndex < SCAN_COLORS.length * 2) {
-        colorIndex++;
-      }
-      const color = SCAN_COLORS[colorIndex % SCAN_COLORS.length];
-      colorIndex++;
-      return color;
-    };
+    // One colour per object created by this batch — meshes and skeletons
+    // included, so nothing in a mixed drop collides. The allocator accumulates
+    // internally, which is what the old `scans` + `newScans` union was for; that
+    // union also missed a multi-scan file's positions, since they're only pushed
+    // into `newScans` once the whole file is built.
+    const getColorForFile = createScanColorAllocator(scans.map(s => s.color));
 
     // Point-cloud files with an on-disk path are collected and run through the
     // wizard together (one stepper) AFTER mesh/skeleton files import inline.
@@ -1490,6 +1483,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
       const okScans = project.scans.filter(
         (s: RieglScanPosition) => s.session && !s.error,
       );
+      // One colour per position. A project with more than 8 setups is ordinary,
+      // so this needs the cycling allocator rather than a per-iteration union
+      // (which freezes on one colour once the palette is used up).
+      const allocateColor = createScanColorAllocator(scans.map((sc) => sc.color));
       for (const s of okScans) {
         if (importCancelledRef.current) break;
         const data = buildPointCloudFromOctree(
@@ -1503,9 +1500,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           id: crypto.randomUUID(),
           label: s.name,
           visible: true,
-          color: allocateScanColor(
-            new Set([...scans.map((sc) => sc.color), ...newScans.map((sc) => sc.color)]),
-          ),
+          color: allocateColor(),
           data,
           // The scan pattern (.pat or .scn), the instrument, the origin and —
           // on a registered import — the pose decomposed into heading and tilt

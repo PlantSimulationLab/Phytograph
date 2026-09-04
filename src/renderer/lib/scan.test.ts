@@ -5,6 +5,7 @@ import {
   columnSlugs, missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, scanOriginOf,
   meanScanOrigin, missReconSources, type Scan,
   composeRegistration, invertRigid4x4, multiply4x4, registeredScans, referenceScanIds,
+  allocateScanColor, createScanColorAllocator,
 } from './scan';
 import { DEFAULT_SCAN_PARAMETERS } from './scanParameters';
 import type { PointCloudData, OctreeRef, ScalarField } from './pointCloudTypes';
@@ -539,5 +540,65 @@ describe('referenceScanIds', () => {
     // to badge, and the dangling id must not leak out as a phantom reference.
     const ids = referenceScanIds([scan('b', regOnto('deleted-scan'))]);
     expect(ids.size).toBe(0);
+  });
+});
+
+describe('allocateScanColor / createScanColorAllocator', () => {
+  const BLUE = '#3b82f6';
+  const GREEN = '#22c55e';
+  const AMBER = '#f59e0b';
+  const RED = '#ef4444';
+  const PALETTE_SIZE = 8;
+
+  it('picks the first palette colour not already on the scene', () => {
+    expect(allocateScanColor(new Set())).toBe(BLUE);
+    expect(allocateScanColor(new Set([BLUE]))).toBe(GREEN);
+    expect(allocateScanColor(new Set([BLUE, GREEN]))).toBe(AMBER);
+  });
+
+  // The reported bug: importing ONE file holding several scanner setups (a
+  // multi-block PTX, a multi-scan E57) gave every resulting scan the same
+  // swatch, because the colour picker read the committed scan list — which does
+  // not change until the whole import commits. A generator has to remember what
+  // it just handed out.
+  it('hands out a DIFFERENT colour on each successive call', () => {
+    const next = createScanColorAllocator([]);
+    const three = [next(), next(), next()];
+    expect(three).toEqual([BLUE, GREEN, AMBER]);
+    expect(new Set(three).size).toBe(3);
+  });
+
+  it('skips colours already used by existing scans', () => {
+    const next = createScanColorAllocator([BLUE, AMBER]);
+    expect([next(), next()]).toEqual([GREEN, RED]);
+  });
+
+  // Guards the trap that makes the obvious implementation wrong. Accumulating
+  // into a `used` set and re-asking for "the first free colour" falls back to
+  // `used.size % 8` once every entry is taken — and the set cannot grow past 8,
+  // so every allocation from the 9th on returns the SAME colour, reproducing the
+  // original bug for any source with more than 8 positions.
+  it('keeps cycling past palette exhaustion instead of repeating one colour', () => {
+    const next = createScanColorAllocator([]);
+    const twelve = Array.from({ length: 12 }, next);
+
+    // First pass: all 8 distinct entries.
+    expect(new Set(twelve.slice(0, PALETTE_SIZE)).size).toBe(PALETTE_SIZE);
+
+    // Past exhaustion the colours must still VARY call to call.
+    expect(twelve[8]).not.toBe(twelve[9]);
+    expect(twelve[9]).not.toBe(twelve[10]);
+    expect(twelve[10]).not.toBe(twelve[11]);
+
+    // Concretely: it wraps to the head of the palette rather than freezing.
+    expect(twelve.slice(8, 12)).toEqual([BLUE, GREEN, AMBER, RED]);
+  });
+
+  // Each import creates its own allocator, so one import's cursor never leaks
+  // into the next.
+  it('gives independent instances the same sequence from the same seed', () => {
+    const a = createScanColorAllocator([BLUE]);
+    const b = createScanColorAllocator([BLUE]);
+    expect([a(), a()]).toEqual([b(), b()]);
   });
 });

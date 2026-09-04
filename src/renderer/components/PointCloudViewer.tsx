@@ -84,7 +84,7 @@ import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurat
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { stopClickAfterTextSelection } from '../lib/textSelection';
-import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, isBackfillEligible, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
+import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, createScanColorAllocator, isBackfillEligible, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -1421,12 +1421,11 @@ export default function PointCloudViewer({
       return;
     }
     const xmlDir = xmlPath ? dirname(xmlPath) : '';
-    const used = new Set(scans.map(s => s.color));
-    const allocateColor = () => {
-      const chosen = allocateScanColor(used);
-      used.add(chosen);
-      return chosen;
-    };
+    // One colour per <scan> in the XML. The shared allocator keeps cycling past
+    // the 8th entry; accumulating into a set and re-asking for "the first free
+    // colour" freezes on one colour instead, which an XML with more than 8
+    // scans would hit.
+    const allocateColor = createScanColorAllocator(scans.map(s => s.color));
     // Renumber labels off the current count so an import after manual
     // adds doesn't collide with existing "Scan N" names.
     const offset = scans.length;

@@ -42,6 +42,18 @@ test('splits a multi-position PTX into one scan per scanner setup', async () => 
     expect(names[0]).toContain('scan 1');
     expect(names[1]).toContain('scan 2');
 
+    // ...and distinguishable SWATCHES, following the same convention two
+    // separately-imported files get. The regression: the single-file import
+    // passed a stateless colour picker that recomputed from the committed scan
+    // list, which doesn't change until the whole import commits — so every
+    // position in one file came out the same colour. "Per-scan colour" is the
+    // default colour mode, so this is how the positions read in the viewer too.
+    const colors = await rows.evaluateAll(
+      (els) => els.map((e) => (e as HTMLElement).dataset.scanColor!));
+    expect(colors[0]).toBe('#3b82f6');   // first free palette entry
+    expect(colors[1]).toBe('#22c55e');   // the NEXT one, not blue again
+    expect(new Set(colors).size).toBe(2);
+
     // The point of the split: each scan gets ITS OWN pose and grid. Before this,
     // both would have reported position 1's origin and its 12 x 8 grid.
     const ids = await rows.evaluateAll(
