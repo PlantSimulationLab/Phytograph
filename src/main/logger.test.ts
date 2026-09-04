@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { join } from 'node:path';
 
 // logger.ts imports electron-log/main.js, electron, and node:fs. Mock all three
 // so initLogging() runs headless and we can inspect the per-session filename it
@@ -55,7 +56,7 @@ describe('per-session log naming', () => {
     expect(tag).toMatch(/pid\d+$/);
     const resolve = fileTransport.resolvePathFn as (v: { libraryDefaultDir: string }) => string;
     const path = resolve({ libraryDefaultDir: '/logs' });
-    expect(path).toBe(`/logs/main-${tag}.log`);
+    expect(path).toBe(join('/logs', `main-${tag}.log`));
   });
 });
 
@@ -75,8 +76,8 @@ describe('retention sweep (keep last 10 sessions)', () => {
       const main = `main-sess${i}.log`;
       const back = `phytograph-backend-sess${i}.log`;
       dirEntries.push(main, back);
-      mtimes[`/logs/${main}`] = 1000 + i;
-      mtimes[`/logs/${back}`] = 1000 + i;
+      mtimes[join('/logs', main)] = 1000 + i;
+      mtimes[join('/logs', back)] = 1000 + i;
     }
     const { initLogging, getLogSessionTag } = await import('./logger.js');
     initLogging();
@@ -85,13 +86,13 @@ describe('retention sweep (keep last 10 sessions)', () => {
 
     // 12 seeded − 10 kept = 2 oldest sessions pruned → 4 files (main+backend each).
     expect(unlinked.sort()).toEqual([
-      '/logs/main-sess0.log',
-      '/logs/main-sess1.log',
-      '/logs/phytograph-backend-sess0.log',
-      '/logs/phytograph-backend-sess1.log',
+      join('/logs', 'main-sess0.log'),
+      join('/logs', 'main-sess1.log'),
+      join('/logs', 'phytograph-backend-sess0.log'),
+      join('/logs', 'phytograph-backend-sess1.log'),
     ]);
     // The newest 10 sessions survive.
-    expect(unlinked).not.toContain('/logs/main-sess11.log');
+    expect(unlinked).not.toContain(join('/logs', 'main-sess11.log'));
     expect(unlinked.some((f) => f.includes(currentTag))).toBe(false);
   });
 
@@ -99,7 +100,7 @@ describe('retention sweep (keep last 10 sessions)', () => {
     process.env.PHYTOGRAPH_E2E = '1';
     for (let i = 0; i < 12; i++) {
       dirEntries.push(`main-sess${i}.log`);
-      mtimes[`/logs/main-sess${i}.log`] = 1000 + i;
+      mtimes[join('/logs', `main-sess${i}.log`)] = 1000 + i;
     }
     const { initLogging } = await import('./logger.js');
     initLogging();
