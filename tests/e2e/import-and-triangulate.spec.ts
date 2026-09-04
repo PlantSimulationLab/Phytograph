@@ -89,7 +89,7 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
 
     // The default mesh name should indicate the triangulation method and the
     // source cloud, not a bare "Mesh".
-    await expect(meshRow.getByTestId('mesh-row-name')).toHaveText('Poisson triangulation (tiny.xyz)');
+    await expect(meshRow.getByTestId('mesh-row-name')).toHaveText('Poisson triangulation (tiny)');
 
     // Expand the row and assert the triangulation provenance readout shows the
     // method and the non-default octree depth we set (7).
