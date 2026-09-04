@@ -31,7 +31,7 @@
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "test:unit:coverage": "vitest run --coverage",
-    "test:backend": "cd backend-api && ./venv/bin/pytest",
+    "test:backend": "node scripts/run-pytest.mjs",
     "check:backend": "node scripts/check-backend-bundle.mjs",
     "test:e2e": "npm run check:backend && playwright test",
     "test:e2e:profile": "npm run check:backend && node scripts/monitor-resources.mjs --timeline perf/e2e-timeline.jsonl -- npx playwright test",

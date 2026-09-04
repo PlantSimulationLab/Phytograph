@@ -19,7 +19,10 @@ prove culling is result-neutral.
 """
 import multiprocessing as mp
 import os
-import resource
+try:  # Unix-only; Windows falls back to psutil in _peak_rss().
+    import resource
+except ImportError:  # pragma: no cover - platform-dependent
+    resource = None
 import sys
 import time
 from pathlib import Path
@@ -106,6 +109,19 @@ def _ingest_ascii(main, xyz, sc, tmpdir):
     return cloud.getHitCount()
 
 
+def _peak_rss():
+    """Peak RSS of this process.
+
+    Units differ by platform (getrusage reports KiB on Linux, psutil reports
+    bytes on Windows), but every consumer below compares two runs measured the
+    same way in the same process, so only within-run consistency matters.
+    """
+    if resource is not None:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    import psutil
+    return psutil.Process().memory_info().peak_wset
+
+
 def _measure(mode, xyz, sc, q):
     """Time + peak-RSS one ingest path in a fresh process (clean RSS high-water)."""
     import tempfile
@@ -123,7 +139,7 @@ def _measure(mode, xyz, sc, q):
         shutil.rmtree(tmpdir, ignore_errors=True)
     q.put({
         "elapsed": elapsed,
-        "peak_rss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        "peak_rss": _peak_rss(),
         "hits": hits,
     })
 
