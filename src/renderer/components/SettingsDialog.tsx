@@ -310,10 +310,13 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 </div>
                 <p className="text-[11px] text-neutral-500 leading-snug">
                   Needed to import RIEGL raw scanner projects (<code>.riproject</code>). RiVLib is
-                  proprietary and cannot be shipped with Phytograph &mdash; download it from RIEGL's
-                  members area and select the extracted folder (the one containing{' '}
-                  <code>bin/</code>, <code>include/</code>, <code>lib/</code>). Nothing is copied;
-                  the folder is read directly. Requires Docker, and is macOS-only in this release.
+                  proprietary and cannot be shipped with Phytograph &mdash; download{' '}
+                  <strong>Part 1</strong> for <code>x86_64-linux-gcc9</code> from RIEGL's members
+                  area (the Linux build is the one that matters &mdash; it runs inside a container,
+                  and no other gcc version will load) and select the extracted folder (the one
+                  containing <code>bin/</code>, <code>include/</code>, <code>lib/</code>). Nothing
+                  is copied; the folder is read directly. Requires Docker, and is macOS-only in this
+                  release.
                 </p>
                 {settings?.rivlibPath && (
                   <p
@@ -342,7 +345,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                         ['rivlib', rieglStatus.rivlibValid, 'RiVLib folder',
                          settings?.rivlibPath
                            ? 'No lib/libscanifc.so here — pick the extracted folder'
-                           : 'Not set — choose the extracted RiVLib folder'],
+                           : 'Not set — choose the extracted Part 1 / x86_64-linux-gcc9 folder'],
                         ['image',
                          rieglStatus.imageBuilt && !rieglStatus.imageStale,
                          'Reader image up to date',

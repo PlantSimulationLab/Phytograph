@@ -36,12 +36,23 @@ RiVLib is proprietary. Its licence forbids redistribution, so Phytograph
 Phytograph reads it from wherever you put it. Nothing is copied into the app.
 
 1. Sign in to RIEGL's members area and download **RiVLib Part 1** for
-   **`x86_64-linux-gcc9`**.
+   **`x86_64-linux-gcc9`**. The download page offers Parts 1–3 and several
+   compiler versions (gcc 5, 7, 9, 11, 13); Part 1 for gcc 9 is the only
+   combination Phytograph can use. Parts 2 and 3 are not needed.
 
     !!! note "Why the Linux build on a Mac?"
         The library runs inside a Linux container, so it is the Linux build
         that matters — not your Mac's architecture. The container is
         `linux/amd64` regardless of whether you have Apple silicon.
+
+    !!! warning "Why gcc 9 specifically"
+        RiVLib is distributed per compiler ABI, and the container it runs in is
+        pinned to a matching one (Debian bullseye, glibc 2.31). A build for
+        another gcc version will be *accepted* when you pick the folder — the
+        checklist only looks for `lib/libscanifc.so` — and then fail later,
+        when the reader tries to load it. If an import fails with a loader
+        error mentioning `GLIBC` or `libstdc++`, you have the wrong build:
+        download the gcc 9 one and point Phytograph at it instead.
 
 2. Extract it. You want the folder that contains `bin/`, `include/` and `lib/`
    — **not** `lib/` itself.
@@ -300,6 +311,14 @@ puts it back on the bounding box.
 **"No `lib/libscanifc.so` under …"**
 : The chosen folder isn't a RiVLib root. Pick the level containing `bin/`,
   `include/` and `lib/`.
+
+**The folder is accepted, but the import fails with a `GLIBC` or `libstdc++`
+loader error.**
+: You have a RiVLib built for the wrong compiler. Phytograph needs **Part 1**
+  for **`x86_64-linux-gcc9`** — the folder check only looks for
+  `lib/libscanifc.so`, which every variant has, so a gcc 11 or 13 build passes
+  the check and only fails when the library is actually loaded. Download the
+  gcc 9 build and re-select it in Settings.
 
 **"Docker is not running" while Docker Desktop is clearly up.**
 : Fixed in v0.68.0. Older builds probed Docker with a call that forked the
