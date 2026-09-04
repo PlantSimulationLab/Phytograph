@@ -79,7 +79,7 @@ def test_table_is_the_only_definition():
     """Guards the consolidation: a new local `aliases = {` mapping slugs to name
     tuples is how the six-copy drift started. Fail loudly if one reappears."""
     src = (main.__file__ or "").replace(".pyc", ".py")
-    with open(src) as f:
+    with open(src, encoding="utf-8") as f:
         body = f.read()
     # Local dicts literally named `aliases` were the duplicated form.
     offenders = re.findall(r"^\s+aliases = \{\s*$", body, re.MULTILINE)

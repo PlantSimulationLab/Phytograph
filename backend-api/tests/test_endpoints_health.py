@@ -44,7 +44,7 @@ def test_backend_version_matches_frontend_constant():
     companion test below.)
     """
     repo_root = Path(__file__).resolve().parents[2]
-    constants = (repo_root / "src" / "shared" / "constants.ts").read_text()
+    constants = (repo_root / "src" / "shared" / "constants.ts").read_text(encoding="utf-8")
 
     import re
     m = re.search(r"EXPECTED_BACKEND_VERSION\s*=\s*['\"]([^'\"]+)['\"]", constants)
@@ -66,7 +66,7 @@ def test_package_json_version_matches_backend_version():
     — but a drift means released installers ship with stale versioning.
     """
     repo_root = Path(__file__).resolve().parents[2]
-    pkg = json.loads((repo_root / "package.json").read_text())
+    pkg = json.loads((repo_root / "package.json").read_text(encoding="utf-8"))
     assert pkg["version"] == main.BACKEND_VERSION, (
         f"package.json version={pkg['version']} does not match "
         f"backend BACKEND_VERSION={main.BACKEND_VERSION}. "
