@@ -14153,8 +14153,6 @@ def _wood_geometric_labels(
     never drift apart. No region-grow / speckle / regularise here (the callers add
     those). `precomputed=(features, nbr_idx)` reuses an existing feature pass (the
     SOTA path computes features once and shares them — the pass is ~25s on 480k)."""
-    from sklearn.mixture import GaussianMixture
-
     n = len(pts)
     if precomputed is not None:
         features, nbr_idx = precomputed
@@ -14171,6 +14169,16 @@ def _wood_geometric_labels(
     seed = np.zeros(n, dtype=bool)
     if n >= 50:
         try:
+            # Imported INSIDE the try on purpose. sklearn reaches us transitively
+            # (open3d requires it) and is pinned in requirements.txt + `collectAll`
+            # in scripts/build-backend.mjs — but a packaged build once shipped an
+            # sklearn/ with no mixture/, and with this import at function scope the
+            # ModuleNotFoundError escaped past the fallback below and 500'd every
+            # wood segmentation. Here it degrades to the mean-score split instead.
+            # The warning matters: silently falling back would mean shipping
+            # plausible-but-worse labels with nothing to notice them by.
+            from sklearn.mixture import GaussianMixture
+
             gmm = GaussianMixture(n_components=2, n_init=3, reg_covar=1e-6, random_state=0)
             s = score.reshape(-1, 1)
             gmm.fit(s)
@@ -14186,7 +14194,10 @@ def _wood_geometric_labels(
                 # High-precision seed: a STRICTER posterior than wood_bias, so the
                 # connectivity backbone is anchored only on near-certain wood.
                 seed = proba >= max(float(wood_bias), 0.85)
-        except Exception:
+        except Exception as exc:
+            logger.warning("wood/leaf GMM split unavailable (%s: %s); falling back "
+                           "to the mean-score threshold — labels will be coarser",
+                           type(exc).__name__, exc)
             raw = None
 
     if raw is None:

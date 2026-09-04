@@ -16,6 +16,35 @@ pip install -r requirements.txt pyinstaller
 present. If you see the warning **"using bare pyinstaller from PATH"** in
 the build output, the venv wasn't found.
 
+## `build:backend` fails with `BUNDLE IMPORT SELF-TEST FAILED`
+
+The bundle built, but the packaged binary can't import a module the app needs
+at runtime. The failing module is named in the output:
+
+```
+[selftest] FAIL sklearn.mixture: ModuleNotFoundError: No module named 'sklearn.mixture'
+[selftest] 13/14 imports OK
+```
+
+PyInstaller only bundles what its static analysis can *see*, so a
+function-local import inside a rarely-exercised endpoint gets dropped
+silently. Fix it by declaring the module in `scripts/build-backend.mjs`:
+
+- **`hiddenImports`** — pure-Python modules with no data files.
+- **`collectAll`** — packages with native extensions, data files, or
+  submodules PyInstaller doesn't trace. Note that `--collect-all` gathers a
+  package's *own* files but **not** its external dependencies; those need
+  their own `hiddenImports` entries.
+
+Then re-run `npm run build:backend`. Don't ship a bundle that fails this
+check — it builds and launches fine, and only dies when a user reaches the
+affected feature.
+
+This check exists because that exact bug shipped: `sklearn.mixture` was
+missing from the bundle, so wood/leaf segmentation raised
+`ModuleNotFoundError` in the packaged app while dev and pytest — which run
+against `backend-api/venv`, where every module is present — passed.
+
 ## `build:backend` fails with `No such file or directory: …/venv/bin/python3`
 
 The venv has stale shebangs (usually from being copied or its parent

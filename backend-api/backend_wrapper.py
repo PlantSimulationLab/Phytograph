@@ -23,6 +23,43 @@ if _SEG_WORKER_DIR:
     sys.exit(seg_worker.run(_SEG_WORKER_DIR))
 
 
+# When spawned with PHYTOGRAPH_IMPORT_SELFTEST set, import the third-party modules
+# that only some code paths reach, report what failed, and exit — do NOT start the
+# server. scripts/build-backend.mjs runs this against the freshly built bundle.
+#
+# Why: PyInstaller bundles what its static analysis can SEE, and a lazy
+# function-local import inside a rarely-exercised endpoint is exactly what it
+# misses. That shipped twice here — `sklearn.mixture` was absent (the bundle had
+# an sklearn/ directory, so a file-existence check looked fine), and once that was
+# collected, sklearn's own deps joblib/threadpoolctl were still missing. Both
+# failed ONLY in the packaged app; dev and pytest run against the venv, where
+# every module is present. A real import in the real binary is the only check
+# that distinguishes the two.
+if os.environ.get("PHYTOGRAPH_IMPORT_SELFTEST"):
+    import importlib
+    _REQUIRED = [
+        "sklearn.mixture",   # _wood_geometric_labels (wood/leaf segmentation)
+        "skimage", "cut_pursuit_py", "numpy_indexed", "maxflow",  # TreeIso
+        "CSF",               # ground segmentation
+        "pye57", "plyfile", "laspy", "pyproj", "tifffile",  # IO
+        "open3d", "scipy", "pytexit",
+        # pyhelios is deliberately NOT here: loading it pulls in the native
+        # libhelios, whose resolution depends on cwd/env rather than on what
+        # PyInstaller bundled, so it reports failures this check can't act on.
+        # The backend's own _assert_pyhelios_native() covers it at startup.
+    ]
+    _failed = []
+    for _m in _REQUIRED:
+        try:
+            importlib.import_module(_m)
+        except Exception as _e:
+            _failed.append(f"{_m}: {type(_e).__name__}: {_e}")
+    for _f in _failed:
+        print(f"[selftest] FAIL {_f}")
+    print(f"[selftest] {len(_REQUIRED) - len(_failed)}/{len(_REQUIRED)} imports OK")
+    sys.exit(1 if _failed else 0)
+
+
 # ==================== Command line ====================
 # Parsed HERE — after the seg-worker re-entry above (which is spawned with an
 # empty argv and must never reach this parser), but BEFORE the matplotlib/uvicorn

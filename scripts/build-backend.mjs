@@ -130,6 +130,14 @@ const hiddenImports = [
   // run it), and it lazily imports `main`. Declared explicitly so PyInstaller
   // bundles it even though that re-entry path is only taken at runtime.
   'seg_worker',
+  // joblib + threadpoolctl are scikit-learn's own runtime requirements (see the
+  // sklearn note on `collectAll` below). `--collect-all sklearn` gathers sklearn's
+  // files but NOT its external deps, and sklearn/__init__.py reaches both during
+  // import — so without these the bundled `from sklearn.mixture import ...` dies
+  // on `No module named 'threadpoolctl'` instead. Pure-Python, so hidden-imports
+  // is enough; they need no data files.
+  'joblib',
+  'threadpoolctl',
 ];
 
 // --collect-all bundles a package's binaries + data files + submodules.
@@ -155,7 +163,14 @@ const hiddenImports = [
 // app ("proj.db not found"), never in dev.
 // tifffile writes GeoTIFF DEM rasters (/api/dem/export-raster) — pure-Python (no
 // GDAL), but collect-all pulls its submodules PyInstaller doesn't always trace.
-const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'numpy_indexed', 'pye57', 'pyproj', 'tifffile'];
+// sklearn: `_wood_geometric_labels` in main.py imports sklearn.mixture. It arrives
+// transitively via open3d, so it LOOKS present — but PyInstaller's static analysis
+// only followed the subpackages open3d itself imports, which do NOT include
+// `mixture`. The bundle shipped an sklearn/ directory with no mixture/, so every
+// wood/leaf segmentation raised ModuleNotFoundError in the packaged app while dev
+// (running against the venv) passed. collect-all, not a hidden-import, so the
+// whole package travels regardless of which subpackages get traced.
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'sklearn', 'numpy_indexed', 'pye57', 'pyproj', 'tifffile'];
 
 // Vendored TreeIso (MIT) lives under backend-api/vendor/ and is imported lazily
 // via a runtime sys.path tweak in main.py. Add vendor/ to the analysis path so
@@ -258,9 +273,32 @@ proc.on('exit', (code) => {
   console.log(
     `[build-backend] stamped bundle as version ${builtVersion} ` +
     `(sources ${builtHash.slice(0, 16)}…)`);
+  // Prove the bundle can actually IMPORT what the lazily-imported code paths need.
+  // PyInstaller only bundles what static analysis sees, so a function-local import
+  // in a rarely-hit endpoint is silently dropped — `sklearn.mixture` shipped
+  // missing exactly that way, and broke wood/leaf segmentation in the packaged app
+  // only. Checking for a directory is NOT enough (sklearn/ existed, sans mixture/),
+  // so this runs the real binary and imports for real. Cheap: one launch, no server.
+  const selftest = spawnSync(
+    join(distPath, 'phytograph_backend', 'phytograph_backend'), [],
+    { env: { ...process.env, PHYTOGRAPH_IMPORT_SELFTEST: '1' }, encoding: 'utf8' });
+  const selftestOut = `${selftest.stdout ?? ''}${selftest.stderr ?? ''}`.trim();
+  const selftestFailed = selftest.status !== 0;
   // The bundle directory was just recreated from scratch, which drops the
   // com.dropbox.ignored xattr — re-mark it, or ~1 GB of regenerable output
   // starts syncing (and gets scanned by every backup/AV agent) all over again.
+  // Done BEFORE the self-test verdict below, because a failing self-test still
+  // leaves that ~1 GB on disk — exiting early without re-marking would start the
+  // sync it exists to prevent.
   applyDropboxIgnores();
+  if (selftestFailed) {
+    console.error(`[build-backend] BUNDLE IMPORT SELF-TEST FAILED:\n${selftestOut}`);
+    console.error(`[build-backend] The bundle is missing modules the app needs at`);
+    console.error(`[build-backend] runtime. Add them to hiddenImports (pure-Python)`);
+    console.error(`[build-backend] or collectAll (native/data files) above, then`);
+    console.error(`[build-backend] re-run. Do NOT ship this bundle.`);
+    process.exit(1);
+  }
+  console.log(`[build-backend] ${selftestOut.split('\n').pop()}`);
   console.log('[build-backend] done.');
 });
