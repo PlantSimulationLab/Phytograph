@@ -74,6 +74,36 @@ test('imports multiple point clouds at once via Import → Point Cloud', async (
         { timeout: 20_000 },
       )
       .toBe(2);
+
+    // …and the recompile must leave the material in the mode the cloud is
+    // actually supposed to be in. The assertion above only proves the event
+    // fired; this reads the seam the material effect publishes from inside
+    // itself, so it fails if the recompile stops rebuilding the material.
+    //
+    // This is the regression guard for HOW that recompile is delivered. It used
+    // to be a REMOUNT: the parent bumped a per-cacheId generation that fed the
+    // component's React key, so first paint destroyed and rebuilt the whole
+    // OctreePointCloud. That is invisible with two clouds and awful with a
+    // hundred — each remount unregisters the octree from the shared frame
+    // driver and re-streams its nodes, so splitting a ~100-tree plot into
+    // per-tree clouds made every child blink in and out as its own remount
+    // landed (measured on a 3.6M-point orchard block: 109 children, 112
+    // remounts, clouds unregistered across ~1.4s). The cure now rebuilds the
+    // material IN PLACE inside the component, so the cloud never leaves the
+    // scene. Both spellings satisfy the `__octreeRepainted` assertion above,
+    // which is why this one reads the material state instead.
+    const modes = await page.evaluate(
+      () => (window as any).__octreeRenderMode as Record<string, { colorMode: string }> | undefined,
+    );
+    // 'per-scan' is passed to the octree renderer as 'single' (a uniform swatch
+    // of the scan's own colour — there is no per-scan shader), so 'single' here
+    // IS the default per-scan mode, and specifically not potree-core's default
+    // elevation gradient that this whole mechanism exists to override.
+    expect(Object.keys(modes ?? {}).length).toBe(2);
+    for (const [cacheId, m] of Object.entries(modes ?? {})) {
+      expect(m.colorMode, `octree ${cacheId} should render its per-scan swatch`)
+        .toBe('single');
+    }
   } finally {
     await close();
   }

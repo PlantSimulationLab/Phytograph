@@ -336,6 +336,20 @@ export function OctreePointCloud({
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
   const firstTilesFiredRef = useRef(false);
+  // NOTE (first paint): there is deliberately NO extra shader rebuild here when
+  // the first tiles land. The parent used to force a full REMOUNT at that moment
+  // to cure a potree-core material bug, and the obvious replacement — re-running
+  // the material effect in place — is worse than it looks: that effect calls
+  // `updateShaderSource()` + `needsUpdate`, and three.js keys programs on the
+  // shader SOURCE, so any run whose #defines differ links a brand-new GL program.
+  // Those programs are released only by `material.dispose()`, which potree only
+  // reaches from `PointCloudOctree.dispose()` — i.e. never, while the cloud is
+  // alive (the LRU frees geometry only). So an extra per-cloud rebuild leaks a
+  // program per cloud with no matching free; measured on the per-tree split it
+  // cost the WebGL context outright (3 of 8 runs of segment-trees.spec.ts died,
+  // 0 of 8 without it). The material is already kept correct without it: the
+  // material effect runs on mount with the real props, and `afterUpdate` re-
+  // asserts `sn.material = cur` on every visible node each frame.
   // Tracks the last crop-empty/hidden state so the E2E hook (__octreeCropHidden)
   // is only written on transition, not every frame.
   const cropHiddenRef = useRef<boolean | null>(null);
@@ -419,6 +433,16 @@ export function OctreePointCloud({
         scene.add(pco);
         pcoForCleanup = pco;
         setOctree(pco);
+        // E2E seam: how many times each octree has been LOADED into the scene.
+        // A cache id that reaches 2 was remounted, which is the flicker
+        // regression (see tests/e2e/octree-no-remount.spec.ts): a remount drops
+        // the cloud from the shared frame driver and re-streams its nodes, so on
+        // a many-cloud split the user watches clouds blink in and out. A plain
+        // counter increment on a path that already does async work.
+        if (data.octree?.cacheId) {
+          const counts = ((globalThis as any).__octreeLoadCounts ??= {});
+          counts[data.octree.cacheId] = (counts[data.octree.cacheId] ?? 0) + 1;
+        }
         onOctreeReadyRef.current?.(pco);
       })
       .catch((err) => {
@@ -540,14 +564,16 @@ export function OctreePointCloud({
   useEffect(() => {
     if (!octree) return;
 
-    // Why dispose + recreate the material instead of mutating in place:
-    // three.js's WebGLPrograms cache is keyed on the material instance.
-    // potree-core's pointColorType setter rewrites the shader source
-    // string and flips `needsUpdate=true`, but in practice three.js
-    // continues serving the previously compiled program — toggling
-    // colour modes after the first frame leaves JS state matching the
-    // new mode while the GPU keeps drawing the old one. Replacing the
-    // material outright forces a fresh program compile on the next draw.
+    // NOTE: this effect MUTATES the one material potree created for this cloud
+    // (`octree.material`); it does not dispose or replace it. An older version
+    // of this comment described a dispose-and-recreate that the code no longer
+    // does — worth knowing, because nothing here ever frees GPU resources.
+    // Every distinct set of #defines this material passes through links a
+    // program that three.js retains on it until `material.dispose()`, and the
+    // only caller of that is `PointCloudOctree.dispose()` on unmount (potree's
+    // LRU frees geometry only). So keep the number of times this effect runs
+    // proportional to real prop changes: a gratuitous extra run per cloud is
+    // enough to exhaust the WebGL context on a many-cloud scene.
     //
     // Tile propagation: per-tile sceneNodes (created by potree-core's
     // toTreeNode as the LOD streamer loads each node) capture the cloud
@@ -1100,8 +1126,9 @@ export function OctreePointCloud({
         const cur = octree.material;
         const visible = (octree as any).visibleNodes;
         if (!Array.isArray(visible)) return;
-        // Notify the parent the first time geometry is actually present, so it
-        // can force the one-shot recompile remount (mount-into-gradient-mode fix).
+        // First frame with geometry actually present. Tell the parent so its
+        // bookkeeping / E2E seam sees the event. Deliberately does NOT trigger a
+        // shader rebuild — see the note at the top of this component.
         if (!firstTilesFiredRef.current && visible.length > 0) {
           firstTilesFiredRef.current = true;
           onReady?.();

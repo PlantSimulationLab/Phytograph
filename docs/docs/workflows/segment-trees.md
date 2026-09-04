@@ -74,7 +74,9 @@ shown grey). (No legend is shown for tree instances — with one entry per tree 
 would fill the viewport and the IDs are arbitrary anyway.) If you enabled
 **Split**, one new cloud per tree (`… (tree N)`) is added to the list, each
 carrying the same colour that tree has in the recoloured cloud — so the swatches
-in the scan list match what you see in the viewer.
+in the scan list match what you see in the viewer. The recoloured original is
+hidden automatically, so you see the per-tree clouds rather than the whole cloud
+drawn on top of them. Tick its eye icon in the scan list to bring it back.
 
 The split runs after the recoloured cloud appears, and each per-tree cloud gets
 its own display octree — on a large plot with many trees that takes a while. A

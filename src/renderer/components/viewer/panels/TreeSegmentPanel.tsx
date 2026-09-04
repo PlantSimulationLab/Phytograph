@@ -255,7 +255,7 @@ export function TreeSegmentPanel({
           data-testid="tree-split-clouds-help"
           label="Split into one cloud per tree"
           align="right"
-          text="Also add a separate cloud for each detected tree (… (tree N)) to the scan list, so you can hide, export, or process each individually. The original cloud is always kept and recoloured by tree."
+          text="Also add a separate cloud for each detected tree (… (tree N)) to the scan list, so you can hide, export, or process each individually. The original cloud is kept and recoloured by tree, but hidden so it doesn't draw on top of the per-tree clouds — show it again with its eye toggle in the scan list."
         />
       </label>
 

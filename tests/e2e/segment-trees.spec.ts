@@ -153,6 +153,16 @@ test('"split into one cloud per tree" adds a separate cloud per detected tree', 
   expect(new Set(swatches).size, `swatches were not distinct: ${swatches.join(', ')}`)
     .toBe(childCount);
 
+  // Splitting auto-hides the segmented original: it still holds every point, so
+  // leaving it visible would draw the whole cloud on top of the per-tree children
+  // just extracted from it. The children stay visible.
+  await expect(cloudRow).toHaveAttribute('data-visible', 'false');
+  for (let i = 0; i < childCount; i++) {
+    const name = (await childRows.nth(i).getAttribute('data-scan-name')) ?? '';
+    await expect(childRows.nth(i), `child "${name}" should stay visible`)
+      .toHaveAttribute('data-visible', 'true');
+  }
+
   // The pill was shown while the children were being built, and is gone now.
   expect(await sawSplitPill).toBe(true);
   await expect(splitPill).toHaveCount(0);

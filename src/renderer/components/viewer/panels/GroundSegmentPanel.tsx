@@ -200,7 +200,7 @@ export function GroundSegmentPanel({
           data-testid="ground-split-clouds-help"
           label="Split into ground + plant clouds"
           align="right"
-          text="Also output two new clouds — ground and non-ground — alongside the classified original, so you can hide, export, or process them separately. The original is always kept and recoloured by class."
+          text="Also output two new clouds — ground and non-ground — alongside the classified original, so you can hide, export, or process them separately. The original is kept and recoloured by class, but hidden so it doesn't draw on top of the two halves — show it again with its eye toggle in the scan list."
         />
       </div>
 

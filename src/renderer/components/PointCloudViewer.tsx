@@ -823,32 +823,36 @@ export default function PointCloudViewer({
       return next;
     });
   }, []);
-  // One-shot remount generation per octree cacheId. An OctreePointCloud that
-  // MOUNTS directly into a gradient mode (height/scalar) — e.g. a freshly
-  // imported cloud while the scene-default colorMode is already 'height' — compiles
-  // its colour shader before any tiles exist, so the first tiles render with a
-  // stale (grayscale) program until something forces a recompile. The
+  // Which octrees have reported their first painted tiles. An OctreePointCloud
+  // that MOUNTS directly into a gradient mode (height/scalar) — e.g. a freshly
+  // imported cloud while the scene-default colorMode is already 'height' —
+  // compiles its colour shader before any tiles exist, so the first tiles render
+  // with a stale (grayscale) program until something forces a recompile. The
   // colorMode/field remount key only fires on a *change*, not on mount-into.
-  // We bump this generation once, shortly after the cloud appears, to force a
-  // single fresh-material remount with tiles present (the same cure as a manual
-  // mode toggle). Keyed by cacheId and guarded so it fires at most once per
-  // octree — no remount loop.
-  const [octreePaintGen, setOctreePaintGen] = useState<Record<string, number>>({});
-  const octreePaintedRef = useRef<Set<string>>(new Set());
-  // Fired (via OctreePointCloud.onFirstTilesReady) the first time an octree's
-  // tiles paint. Forces a single fresh-material remount so a cloud that mounted
-  // before its material effect could override potree-core's defaults recompiles
-  // its shader with geometry present — the same cure as a manual mode toggle.
   //
-  // This used to be gated to gradient/scalar modes only, on the assumption that
-  // per-scan / single / rgb "render correctly on first paint." That assumption
-  // breaks under batch import: when several octrees mount at once, the first
-  // paint can land before the material effect runs, so a per-scan cloud renders
-  // with potree-core's DEFAULT pointColorType (elevation) instead of our COLOR
-  // material — the cloud shows a flat z-height/grey ramp until the user toggles
-  // color mode and back. Because per-scan was excluded here, nothing corrected
-  // it. We now fire for EVERY mode so the one-shot recompile always runs.
-  // Guarded → fires at most once per cacheId, never loops.
+  // In practice the material is already correct without forcing anything: the
+  // material effect runs on mount with the real props, and OctreePointCloud
+  // re-asserts each visible node's material every frame. So this set is now
+  // only bookkeeping + the E2E seam, and deliberately no longer feeds the React
+  // key — remounting ~100 split clouds one at a time is exactly the flicker
+  // this component was making the user watch.
+  const octreePaintedRef = useRef<Set<string>>(new Set());
+  // Forces a genuine REMOUNT of one cloud's octree component. Unlike the
+  // first-paint recompile above, this exists for octree RECOVERY: a rebuild is
+  // deterministic, so the cache id can come back unchanged, and the loader
+  // effect (keyed on cacheId) would not re-run to pick up the newly written
+  // files. Bumping this changes the React key and forces a fresh load. Rare and
+  // per-cloud, so it costs nothing at scale.
+  const [octreeReloadGen, setOctreeReloadGen] = useState<Record<string, number>>({});
+  // Fired (via OctreePointCloud.onFirstTilesReady) the first time an octree's
+  // tiles paint. Records the cacheId; fires at most once per octree.
+  //
+  // Historically this ALSO forced a fresh-material remount, because a cloud
+  // whose first paint landed before its material effect ran could render with
+  // potree-core's DEFAULT pointColorType (elevation) instead of our material —
+  // a flat z-height/grey ramp until the user toggled colour mode and back. That
+  // remount is gone (it was the per-tree-split flicker); the material effect on
+  // mount plus the per-frame material re-assert cover the same case.
   const handleOctreeFirstTiles = useCallback((cacheId: string) => {
     if (octreePaintedRef.current.has(cacheId)) return;
     octreePaintedRef.current.add(cacheId);
@@ -856,7 +860,6 @@ export default function PointCloudViewer({
     // verifies the first-paint recompile by reading the set of cacheIds the
     // one-shot fix fired for. See tests/e2e/import-multi-pointcloud.spec.ts.
     (window as any).__octreeRepainted = Array.from(octreePaintedRef.current);
-    setOctreePaintGen(prev => ({ ...prev, [cacheId]: (prev[cacheId] ?? 0) + 1 }));
   }, []);
   // Custom min/max overrides keyed by `${colorMode}:${field?}`. Undefined entries
   // mean "use the data-derived range."
@@ -3278,7 +3281,7 @@ export default function PointCloudViewer({
           const rebuilt = await rebuildSessionOctree(octreeInfo.sessionId);
           const newData = buildSessionOctreeData(rebuilt, octreeInfo, fileName);
           onRebuildScanOctree(cloud.id, newData);
-          setOctreePaintGen(prev => ({
+          setOctreeReloadGen(prev => ({
             ...prev,
             [rebuilt.cache_id]: (prev[rebuilt.cache_id] ?? 0) + 1,
           }));
@@ -3327,7 +3330,7 @@ export default function PointCloudViewer({
       // Force the loader to re-run even if the cacheId is unchanged (deterministic
       // rebuild → same hash). Bumping the paint generation remounts the component
       // with the now-present octree files.
-      setOctreePaintGen(prev => ({
+      setOctreeReloadGen(prev => ({
         ...prev,
         [rebuilt.cache_id]: (prev[rebuilt.cache_id] ?? 0) + 1,
       }));
@@ -12135,6 +12138,13 @@ export default function PointCloudViewer({
           }));
           for (const e of childEntries) suppressFrameCloudIdsRef.current.add(e.id);
           for (const e of childEntries) onAddCloud(e);
+          // The parent still holds every point, so leaving it visible draws the
+          // whole cloud on top of the per-tree children just split out of it —
+          // z-fighting mush instead of a visible separation. Guarded on children
+          // actually arriving: the extract can legitimately return none (every
+          // point at tree id 0), and hiding the parent then would leave an empty
+          // viewport with nothing to show for the run.
+          if (childEntries.length > 0) onHideScan(id);
         }
 
         showToast({
@@ -12193,6 +12203,7 @@ export default function PointCloudViewer({
 
       // Optional split: one child cloud per tree id (skip 0 = unassigned).
       if (treeSplitClouds && onAddCloud) {
+        let splitChildren = 0;
         const byTree = new Map<number, number[]>();
         for (let i = 0; i < count; i++) {
           // `labels` (scattered to full length), NOT response.labels — the
@@ -12240,7 +12251,12 @@ export default function PointCloudViewer({
             // The loop skips treeId <= 0, so the fallback is unreachable.
             color: crownColorForTreeId(treeId) ?? '#4caf50',
           });
+          splitChildren++;
         }
+        // Hide the parent — it still holds every point, so leaving it visible
+        // draws the whole cloud on top of the per-tree children just split out
+        // of it. Same guard as the session path above.
+        if (splitChildren > 0) onHideScan(id);
       }
 
       showToast({
@@ -12272,7 +12288,7 @@ export default function PointCloudViewer({
       treeSegmentAbortRef.current = null;
       treeSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints]);
 
   // Refine the tree_instance field in place (flat clouds only — octree clouds
   // bake the attribute on disk and would need a backend re-run). Reads the
@@ -17573,9 +17589,9 @@ export default function PointCloudViewer({
   // The cloud the class legend / colorbar describes. This one MAY fall back
   // past the selection: splitting a segmented cloud selects the freshly-created
   // children, which carry only positions/colors and so map nothing — without a
-  // fallback the legend the still-visible segmented parent is displaying would
-  // vanish the moment the split completed. Kept separate from
-  // colorbarSourceCloud precisely so this fallback can't leak into the panel.
+  // fallback the legend the segmented parent is displaying would vanish the
+  // moment the split completed. Kept separate from colorbarSourceCloud
+  // precisely so this fallback can't leak into the panel.
   const legendSourceCloud = useMemo(() => {
     const mapsAScalar = (c: PointCloudEntry) => colorModeFor(c.id).mode === 'scalar';
     const selected = Array.from(selectedIds)
@@ -18038,7 +18054,18 @@ export default function PointCloudViewer({
                   // just the colour mode — switching the field needs a fresh
                   // material + BindingStates so the new attribute's buffer
                   // (swapped into `intensity`) binds correctly.
-                  key={`octree-${cloudColorMode}-${cloudScalarField ?? ''}-${sourceData.octree ? (octreePaintGen[sourceData.octree.cacheId] ?? 0) : 0}`}
+                  // NOT keyed on the first-paint generation any more. That used
+                  // to force a one-shot REMOUNT when a cloud's tiles first
+                  // painted — invisible for one cloud, awful for many: each
+                  // remount unregisters the octree from the shared frame driver
+                  // and re-streams its nodes, so splitting a ~100-tree plot made
+                  // every child blink in and out as its own remount landed
+                  // (measured: 112 of 112 octrees remounted). Nothing replaced
+                  // it, because nothing needed to — see the note by
+                  // octreePaintedRef above.
+                  // `octreeReloadGen` is still here: an octree REBUILD can land
+                  // on the same cache id, and only a remount re-runs the loader.
+                  key={`octree-${cloudColorMode}-${cloudScalarField ?? ''}-${sourceData.octree ? (octreeReloadGen[sourceData.octree.cacheId] ?? 0) : 0}`}
                   data={sourceData}
                   // The octree attaches to the scene root, NOT inside the parent
                   // <group position> above, so the group's translation never
