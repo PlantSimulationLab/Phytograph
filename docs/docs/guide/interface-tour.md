@@ -126,7 +126,7 @@ Expanding a scan shows whatever that scan actually carries:
 
 - **Scan parameters**, when it has them — scanner model, origin (or
   trajectory summary for a moving scan), pattern and grid size, angular
-  sweep, return mode, beam diameter and divergence, and tilt.
+  sweep, tilt, and heading, plus the return type detected from its data.
 - **Cloud details**, when it has point data — the point count (flagged
   when there are unapplied edits, and noting whether the scan carries
   sky/miss returns), the extent in metres, the global shift applied at
@@ -155,7 +155,7 @@ the same import, or place a second scanner with the same sweep settings.
 (For a one-off non-destructive crop you don't need to duplicate first —
 tick **Keep original cloud** in the crop panel instead.)
 
-A scan can hold point data, scan parameters (origin, sweep, return mode),
+A scan can hold point data, scan parameters (origin, sweep, tilt),
 or both — see [Scans](../concepts/scans.md) for details.
 
 Multi-select with <kbd>Shift</kbd>+click (range) or

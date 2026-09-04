@@ -5,8 +5,8 @@ scan from one scanner position, and may carry:
 
 - **Point data** — the recorded points (positions, optionally colors,
   intensities, scalar fields).
-- **Scan parameters** — the scanner's origin, angular sweep, sample
-  counts, return type, and beam properties.
+- **Scan parameters** — the scanner's origin, angular sweep, and sample
+  counts.
 - **Both** — the common case for a freshly recorded scan you know the
   scanner position for.
 
@@ -101,24 +101,6 @@ them silently.
   sweep bounds (degrees) and number of rays. A spinning multibeam has no
   azimuth *range* (it rotates a full 360° per revolution); its azimuth
   control is just the **points per revolution** (angular resolution)
-- **Return type** — how many returns each pulse reports (a property of the
-  real instrument):
-    - **Single** — at most **one** return per pulse, chosen by the
-      **selection** policy below. Models single-return instruments (Leica,
-      FARO, single-return-configured spinning sensors).
-    - **Multi** — **all** detected returns up to a **max returns** cap.
-      Models full-waveform / multi-echo instruments (RIEGL VZ-400i, miniVUX)
-      that penetrate foliage.
-
-    For an idealized, *exact* scan (one ray per pulse, no beam footprint),
-    set **rays per pulse** to 1 when you run the scan — that is a simulation
-    option, not a return type. See [Simulate a scan](../workflows/simulate-scan.md).
-- **Return selection** (single only) — which return to keep when the beam
-  cone resolves several: **strongest**, **first** (nearest), or **last** (farthest)
-- **Max returns** (multi only) — the cap on returns reported per pulse
-- **Beam properties** — exit diameter and divergence, which define the cone
-  the pulse's sub-rays sample (at rays-per-pulse = 1 the cone collapses to
-  one exact ray)
 - **Scanner tilt** — residual roll/pitch lean away from level (degrees)
 - **Scanner heading** — initial azimuth the scanner faces in the
   horizontal plane (degrees; 0 is the default heading). Orients the
@@ -127,6 +109,28 @@ them silently.
 - **Platform trajectory** (optional) — turns a static scan into a
   **moving-platform** scan (drone / ground robot / tractor). Imported from
   a trajectory file; see *Moving-platform scans* below.
+
+### Return type is detected, not declared
+
+A scan's **return type** (single- vs multi-return) is **read from the point
+data**, not set by hand. A cloud is multi-return when it carries the three
+per-pulse columns — `target_index`, `target_count` and `timestamp` — that tie
+each return back to the pulse that produced it. Those columns are what
+[leaf-area density](leaf-area-density.md) and
+[triangulation](../workflows/triangulate.md) actually key on, so declaring a
+return type could never change how a real scan was processed.
+
+When a scan has point data, the Scan Parameters dialog reports what was found
+under **Detected from point data**, and the Scans-panel row shows the same
+verdict. If a scan reads as single-return when you expected multi, the file
+did not preserve the per-pulse columns — PTX, for instance, cannot carry them
+(see [file formats](../reference/file-formats.md)). Re-import from a format
+that does.
+
+For a **simulated** scan the return type is a choice, because there is no data
+yet to read: pick it — along with max returns, return selection, and the beam
+optics — in **Synthetic Scan Options** when you run the scan. See
+[Simulate a scan](../workflows/simulate-scan.md).
 
 ## Moving-platform scans
 

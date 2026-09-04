@@ -148,6 +148,29 @@ export const DEFAULT_RETAINED_FIELDS: string[] = SCAN_HIT_FIELDS
 // All catalog slugs — used by coercion to drop unknown stored values.
 export const SCAN_HIT_FIELD_SLUGS: string[] = SCAN_HIT_FIELDS.map((f) => f.slug);
 
+// The per-pulse columns that MAKE a cloud multi-return: they tie each return to
+// the pulse that produced it. Both `target_*` are defaultRetained: false, so a
+// multi-return run using the default retention set would drop them — and a cloud
+// without them reads back as SINGLE-return (see detectedReturnMode in ./scan) for
+// the renderer AND for the backend's LAD/triangulation grouping. Kept here beside
+// the catalog so the three slugs have one definition.
+export const PER_PULSE_HIT_FIELDS = ['timestamp', 'target_index', 'target_count'] as const;
+
+/**
+ * The retained-field set a synthetic run must actually use.
+ *
+ * For a multi-return run the per-pulse columns are forced in regardless of what
+ * the user ticked: they are what makes the output multi-return, not a display
+ * convenience. A single-return run passes the user's selection through untouched.
+ */
+export function effectiveRetainedFields(
+  retainedFields: string[],
+  returnMode: 'single' | 'multi',
+): string[] {
+  if (returnMode !== 'multi') return [...retainedFields];
+  return Array.from(new Set([...retainedFields, ...PER_PULSE_HIT_FIELDS]));
+}
+
 // Explanation shown under a field whose data may not resolve for the current
 // scan settings. `null` for always-available fields (no caveat needed).
 export function availabilityNote(availability: FieldAvailability): string | null {

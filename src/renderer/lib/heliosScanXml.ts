@@ -273,7 +273,7 @@ function parseScanElement(
       } else if (selRaw !== null) {
         warnings.push(
           `${scanName}: unrecognised <returnSelection> "${selRaw}"; defaulted to ` +
-          `"${returnSelection}". Edit the scan's return selection if that's wrong.`,
+          `"${returnSelection}". Set it in Synthetic Scan Options if you re-run this scan.`,
         );
       }
     } else {
@@ -283,17 +283,23 @@ function parseScanElement(
       } else if (mxRaw !== null) {
         warnings.push(
           `${scanName}: invalid <maxReturns> "${mxRaw}"; defaulted to ${maxReturns}. ` +
-          `Edit the scan's max returns if that's wrong.`,
+          `Set it in Synthetic Scan Options if you re-run this scan.`,
         );
       }
     }
   } else {
     returnMode = DEFAULT_SCAN_PARAMETERS.returnMode;
+    // Deliberately NOT presented as something to go and fix. The stored mode only
+    // seeds a Helios XML re-export; leaf-area density and triangulation read the
+    // return mode from the point data's per-pulse columns, so a missing tag costs
+    // an imported scan nothing. (The old text told users to set it "before scanning
+    // or running LAD", which was false for the LAD half.)
     warnings.push(
-      `${scanName}: no <returnMode> tag in the XML, so the return mode defaulted ` +
-      `to "${returnMode} (${returnSelection})". This XML predates return-mode ` +
-      `round-tripping (or wasn't exported by Phytograph). Open the scan's ` +
-      `parameters and set the return mode before scanning or running LAD.`,
+      `${scanName}: no <returnMode> tag in the XML, so the recorded return mode ` +
+      `defaulted to "${returnMode} (${returnSelection})". This XML predates ` +
+      `return-mode round-tripping (or wasn't exported by Phytograph). Analyses ` +
+      `read the return mode from the point data itself, so this only affects a ` +
+      `re-exported XML; choose the mode in Synthetic Scan Options to simulate a scan.`,
     );
   }
 

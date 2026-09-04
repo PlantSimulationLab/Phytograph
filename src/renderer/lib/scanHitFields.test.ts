@@ -5,6 +5,8 @@ import {
   STANDARD_HIT_FIELD_SLUGS,
   DEFAULT_RETAINED_FIELDS,
   availabilityNote,
+  effectiveRetainedFields,
+  PER_PULSE_HIT_FIELDS,
 } from './scanHitFields';
 
 // The five standard slugs must mirror backend-api/main.py _LIDAR_STANDARD_HIT_FIELDS.
@@ -58,5 +60,44 @@ describe('scanHitFields catalog', () => {
     expect(availabilityNote('always')).toBeNull();
     expect(availabilityNote('multiReturn')).toMatch(/multi-return/i);
     expect(availabilityNote('extra')).toMatch(/primitive data/i);
+  });
+});
+
+// Regression: a multi-return synthetic run must produce a cloud that reads back as
+// multi-return. `target_index`/`target_count` are defaultRetained: false and
+// assembleScanScalarFields prunes any unretained STANDARD field, so with the
+// default selection a multi-return run yielded a cloud carrying only `timestamp` —
+// which detectedReturnMode (and the backend's own grouping) reads as SINGLE.
+// The run's return mode, not the checkbox list, is the authority here.
+describe('effectiveRetainedFields', () => {
+  it('forces the per-pulse columns into a multi-return run', () => {
+    const out = effectiveRetainedFields(DEFAULT_RETAINED_FIELDS, 'multi');
+    for (const slug of PER_PULSE_HIT_FIELDS) expect(out).toContain(slug);
+  });
+
+  it('is exactly the default set for a multi run once the per-pulse columns are added', () => {
+    // Guards the actual defect: the defaults alone are NOT enough.
+    expect(DEFAULT_RETAINED_FIELDS).not.toContain('target_index');
+    expect(DEFAULT_RETAINED_FIELDS).not.toContain('target_count');
+  });
+
+  it('leaves a single-return run\'s selection untouched', () => {
+    const out = effectiveRetainedFields(DEFAULT_RETAINED_FIELDS, 'single');
+    expect(out).toEqual(DEFAULT_RETAINED_FIELDS);
+    expect(out).not.toContain('target_index');
+  });
+
+  it('preserves the user\'s other picks and never duplicates', () => {
+    const out = effectiveRetainedFields(['reflectance', 'timestamp'], 'multi');
+    expect(out).toContain('reflectance');
+    expect(out.filter((s) => s === 'timestamp')).toHaveLength(1);
+  });
+
+  it('keeps every per-pulse slug in the standard set the backend reads', () => {
+    // If one ever stopped being "standard", retainedStandards would silently drop
+    // it from the request and the bug would come back by a different route.
+    for (const slug of PER_PULSE_HIT_FIELDS) {
+      expect(STANDARD_HIT_FIELD_SLUGS).toContain(slug);
+    }
   });
 });

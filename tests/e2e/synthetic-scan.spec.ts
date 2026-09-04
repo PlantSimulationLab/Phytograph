@@ -221,9 +221,9 @@ test('multi-return scan yields more points than an exact (1 ray/pulse) scan', as
   const scanPopup = page.getByTestId('scan-parameters-popup');
   const scanOptions = page.getByTestId('synthetic-scan-options-popup');
 
-  // Configure the overhead scanner once, choosing a return type each run. Beam
-  // optics are always shown now (both single and multi sample the cone).
-  const configureScanner = async (mode: 'single' | 'multi') => {
+  // Configure the overhead scanner's POSITION and sweep. Return type and beam
+  // optics are no longer scan properties — they're per-run options, set below.
+  const configureScanner = async () => {
     await page.getByTestId('tool-add-scan').click();
     await expect(scanPopup).toBeVisible();
     await page.getByTestId('scan-label-input').fill('overhead');
@@ -234,21 +234,23 @@ test('multi-return scan yields more points than an exact (1 ray/pulse) scan', as
     await page.getByTestId('scan-azimuth-points').fill('120');
     await page.getByTestId('scan-zenith-min').fill('0');
     await page.getByTestId('scan-zenith-max').fill('180');
-    await page.getByTestId(`scan-return-${mode}`).click();
-    await expect(page.getByTestId('scan-beam-fields')).toBeVisible();
-    await page.getByTestId('scan-beam-diameter').fill('0.01');
-    await page.getByTestId('scan-beam-divergence').fill('10');
-    if (mode === 'multi') {
-      await page.getByTestId('scan-max-returns').fill('6');
-    }
     await page.getByTestId('scan-submit').click();
     await expect(scanPopup).not.toBeVisible();
   };
 
   // raysPerPulse = 1 ⇒ exact single-ray scan; > 1 ⇒ realistic beam cone.
-  const runScanAndReadCount = async (raysPerPulse: number): Promise<number> => {
+  // Return mode + beam optics are chosen here, in the run dialog.
+  const runScanAndReadCount = async (
+    raysPerPulse: number, mode: 'single' | 'multi',
+  ): Promise<number> => {
     await page.getByTestId('run-synthetic-scan').click();
     await expect(scanOptions).toBeVisible();
+    await page.getByTestId(`scan-return-${mode}`).click();
+    await page.getByTestId('scan-beam-diameter').fill('0.01');
+    await page.getByTestId('scan-beam-divergence').fill('10');
+    if (mode === 'multi') {
+      await page.getByTestId('scan-max-returns').fill('6');
+    }
     // Rays-per-pulse is always available now (it's the universal cone-sampling
     // knob, and the way to get an idealized exact scan).
     await page.getByTestId('scan-opt-rays-per-pulse').fill(String(raysPerPulse));
@@ -261,8 +263,8 @@ test('multi-return scan yields more points than an exact (1 ray/pulse) scan', as
   };
 
   // ── Exact run: single return, one ray per pulse ──────────────────────
-  await configureScanner('single');
-  const exactCount = await runScanAndReadCount(1);
+  await configureScanner();
+  const exactCount = await runScanAndReadCount(1, 'single');
   expect(exactCount).toBeGreaterThan(100);
 
   // Remove the scanner before placing the multi one.
@@ -274,10 +276,21 @@ test('multi-return scan yields more points than an exact (1 ray/pulse) scan', as
   if (await confirm.isVisible().catch(() => false)) await confirm.click();
 
   // ── Multi run: full-waveform, many rays per pulse ────────────────────
-  await configureScanner('multi');
-  const multiCount = await runScanAndReadCount(100);
+  await configureScanner();
+  const multiCount = await runScanAndReadCount(100, 'multi');
 
   // Full-waveform multi-return resolves extra echoes a single exact ray can't,
   // so it must report strictly more points than the exact scan.
   expect(multiCount).toBeGreaterThan(exactCount);
+
+  // …and the resulting cloud must READ BACK as multi-return. A multi run has to
+  // carry the per-pulse columns (target_index/target_count/timestamp) or the very
+  // property the user asked for is absent from the output: detection reports
+  // single, and LAD/triangulation group nothing. Both target_* are off by default
+  // in the retained-fields list, so this asserts the run forces them in — the
+  // whole point of running in multi-return mode.
+  const multiRow = page.locator('[data-testid="scan-row"][data-scan-name="overhead"]');
+  const multiScanId = await multiRow.getAttribute('data-scan-id');
+  await page.getByTestId(`scan-expand-${multiScanId}`).click();
+  await expect(page.getByTestId(`scan-expanded-${multiScanId}`)).toContainText('return: multi');
 });

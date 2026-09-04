@@ -303,11 +303,15 @@ instrument identity rather than reverting to generic.
 
 A scan's **return mode** also round-trips, via `<returnMode>` (plus
 `<returnSelection>` for single-return or `<maxReturns>` for multi-return) tags.
-Helios scan XML has no native field for return mode, and it can't be inferred
-from the exported columns, so Phytograph writes it explicitly. If you import an
-older XML (or one not exported by Phytograph) that lacks these tags, the scan
-loads as single-return and a warning tells you to set the mode in the scan's
-parameters before scanning or running LAD — it never silently guesses.
+Helios scan XML has no native field for return mode, so Phytograph writes it
+explicitly to preserve the settings a **simulated** scan was run with.
+
+These tags don't affect how an imported cloud is processed. Leaf-area density
+and triangulation read the return mode from the per-pulse columns in the point
+data itself (see
+[Return type is detected, not declared](../concepts/scans.md#return-type-is-detected-not-declared)),
+so an XML without them costs you nothing on a real scan — it only means a
+later simulated re-run starts from the defaults.
 
 ### Importing textured meshes
 

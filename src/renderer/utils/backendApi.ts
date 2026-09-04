@@ -4126,10 +4126,15 @@ export async function backfillMisses(
   trajectory?: unknown,
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
+  // Whether `origin` is a REAL scanner position. A scan with no recorded
+  // position has no meaningful apex, and the backend refuses rather than
+  // reconstructing misses from a placeholder — see the endpoint's guard and
+  // `isBackfillEligible`. Defaults true so existing callers are unchanged.
+  originKnown: boolean = true,
 ): Promise<BackfillMissesResult> {
   return await fetchJsonWithProgress<BackfillMissesResult>(
     `/api/cloud/session/${sessionId}/backfill-misses`,
-    { origin, ...(raster ?? {}), trajectory },
+    { origin, origin_known: originKnown, ...(raster ?? {}), trajectory },
     signal,
     600000,
     onProgress,

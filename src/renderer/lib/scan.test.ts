@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import {
   duplicateScanName, derivedScanName, hasData, hasParams, scanDisplayName,
-  columnSlugs, missColumnsAvailable, isBackfillEligible, scanHasKnownOrigin, scanOriginOf,
+  columnSlugs, missColumnsAvailable, detectedReturnMode, missingMultiReturnColumns, isBackfillEligible, scanHasKnownOrigin, scanOriginOf,
   meanScanOrigin, missReconSources, type Scan,
   composeRegistration, invertRigid4x4, multiply4x4, registeredScans, referenceScanIds,
   allocateScanColor, createScanColorAllocator,
@@ -28,7 +28,7 @@ function makeData(fileName?: string): PointCloudData {
 // labels) and an optional hasMisses flag — the surface isBackfillEligible reads.
 function makeScanWithColumns(
   slugs: string[],
-  opts: { hasMisses?: boolean; flat?: boolean } = {},
+  opts: { hasMisses?: boolean; flat?: boolean; withOrigin?: boolean } = {},
 ): Scan {
   const data = makeData('scan.las');
   if (opts.flat) {
@@ -39,6 +39,11 @@ function makeScanWithColumns(
     const octree: OctreeRef = {
       cacheId: 'c', sourceXyzPath: '', sessionId: 'sess',
       hasMisses: opts.hasMisses,
+      // Opt-IN scanner position. Left absent by default so the tests that assert
+      // an originless cloud (scanHasKnownOrigin / scanOriginOf / meanScanOrigin)
+      // still describe a plain XYZ import; the backfill-eligibility tests, which
+      // need a known apex (see `isBackfillEligible`), pass `withOrigin`.
+      ...(opts.withOrigin ? { scanOrigin: [0, 0, 1.5] as [number, number, number] } : {}),
       attributeLabels: Object.fromEntries(slugs.map((s) => [s, s])),
     };
     data.octree = octree;
@@ -200,9 +205,18 @@ describe('missReconSources', () => {
 });
 
 describe('isBackfillEligible', () => {
-  it('is true: has data, no misses yet, reconstructable columns', () => {
-    expect(isBackfillEligible(makeScanWithColumns(['timestamp']))).toBe(true);
-    expect(isBackfillEligible(makeScanWithColumns(['row_index', 'column_index']))).toBe(true);
+  it('is true: has data, no misses yet, reconstructable columns, known origin', () => {
+    expect(isBackfillEligible(makeScanWithColumns(['timestamp'], { withOrigin: true }))).toBe(true);
+    expect(isBackfillEligible(
+      makeScanWithColumns(['row_index', 'column_index'], { withOrigin: true }))).toBe(true);
+  });
+
+  it('is false without a scanner origin, however good the columns are', () => {
+    // The apex is not optional: miss directions are measured FROM the scanner
+    // (`cart2sphere(xyz - origin)` backend-side), so there is nothing to
+    // reconstruct against without it.
+    expect(isBackfillEligible(makeScanWithColumns(['timestamp']))).toBe(false);
+    expect(isBackfillEligible(makeScanWithColumns(['row_index', 'column_index']))).toBe(false);
   });
 
   it('is false when the scan already has misses (E57 / structured PLY)', () => {
@@ -304,6 +318,7 @@ describe('the time column is recognised under either octree spelling', () => {
     data: {
       octree: {
         cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+        scanOrigin: [0, 0, 1.5],
         attributeRanges: { 'gps-time': { min: [85.15], max: [233.57] } },
       },
     },
@@ -319,10 +334,144 @@ describe('the time column is recognised under either octree spelling', () => {
     expect(missReconSources(gpsTimeScan).preferred).toBe('timestamp');
   });
 
+  // THE OPPOSITE BUG, and the far more common one. `gps_time` is a STANDARD LAS
+  // dimension, so laspy writes it into every point-format-1/3 record and
+  // PotreeConverter emits a `gps-time` attribute for EVERY octree — all-zero on
+  // a cloud that never carried per-pulse time. Verified against the real cache:
+  // all 70 octrees on this machine had `gps-time` with min==max==0, and 16 of
+  // them had no other time column at all.
+  //
+  // Counting that empty column made columnSlugs report a timestamp on literally
+  // every cloud, so Backfill Misses offered itself for a plain 7-column XYZ
+  // (`x y z r g b intensity`) and the backend then refused the run with "carries
+  // neither a per-pulse timestamp nor scan-grid row/column indices" — the tool
+  // advertising a capability the data does not have.
+  const emptyGpsTimeScan = {
+    data: {
+      octree: {
+        cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+        attributeLabels: { 'gps-time': 'Timestamp' },
+        attributeRanges: {
+          'gps-time': { min: [0], max: [0] },
+          intensity: { min: [11], max: [1798] },
+        },
+      },
+    },
+  } as never;
+
+  it('ignores an all-zero `gps-time` column', () => {
+    const slugs = columnSlugs(emptyGpsTimeScan);
+    expect([...slugs]).not.toContain('timestamp');
+    // The populated column beside it is unaffected.
+    expect([...slugs]).toContain('intensity');
+  });
+
+  it('refuses Backfill Misses on a cloud whose only time column is empty', () => {
+    expect(missColumnsAvailable(emptyGpsTimeScan)).toBe(false);
+    expect(isBackfillEligible(emptyGpsTimeScan)).toBe(false);
+    expect(missReconSources(emptyGpsTimeScan).hasTimestamp).toBe(false);
+    expect(missReconSources(emptyGpsTimeScan).preferred).toBeNull();
+  });
+
+  it('still allows backfill via the grid when gps-time is empty', () => {
+    // The grid path is independent of the time column: an empty `gps-time`
+    // must not suppress row/column recovery.
+    const s = {
+      data: {
+        octree: {
+          cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+          scanOrigin: [0, 0, 1.5],
+          attributeRanges: {
+            'gps-time': { min: [0], max: [0] },
+            row_index: { min: [0], max: [1023] },
+            column_index: { min: [0], max: [2047] },
+          },
+        },
+      },
+    } as never;
+    expect(isBackfillEligible(s)).toBe(true);
+    expect(missReconSources(s).preferred).toBe('grid');
+  });
+
+  // A scan can carry perfect recovery columns and still be unbackfillable: the
+  // reconstruction is GEOMETRIC. The backend derives every hit's ray as
+  // `cart2sphere(xyz - origin)` and fans the recovered misses from that apex, so
+  // without a real scanner position the answer is wrong rather than approximate.
+  //
+  // THE REPORTED BUG: a row/column-grid scan with no scan position ran to
+  // completion and produced garbage, because the renderer silently substituted
+  // `[0,0,0]` for the missing origin. Measured for a scanner 22 m from the world
+  // origin: 76 deg mean beam-direction error (max 176 deg), and a constant 8 m
+  // return radius smeared across 14.6-30.6 m.
+  it('refuses a grid scan with no known scanner position', () => {
+    const noOrigin = {
+      data: {
+        octree: {
+          cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+          attributeRanges: {
+            row_index: { min: [0], max: [1023] },
+            column_index: { min: [0], max: [2047] },
+          },
+        },
+      },
+    } as never;
+    // The columns ARE there — this is not a column problem.
+    expect(missColumnsAvailable(noOrigin)).toBe(true);
+    expect(scanHasKnownOrigin(noOrigin)).toBe(false);
+    // ...but without an apex there is nothing to reconstruct against.
+    expect(isBackfillEligible(noOrigin)).toBe(false);
+  });
+
+  it('allows the same scan once a scanner position is known', () => {
+    const withOrigin = {
+      data: {
+        octree: {
+          cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+          scanOrigin: [10, 20, 3],
+          attributeRanges: {
+            row_index: { min: [0], max: [1023] },
+            column_index: { min: [0], max: [2047] },
+          },
+        },
+      },
+    } as never;
+    expect(scanHasKnownOrigin(withOrigin)).toBe(true);
+    expect(isBackfillEligible(withOrigin)).toBe(true);
+  });
+
+  it('accepts an origin supplied by scan parameters', () => {
+    // A Helios XML <scan> / file header supplies the apex through `params`, not
+    // the octree — both count as known.
+    const viaParams = {
+      data: {
+        octree: {
+          cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+          attributeRanges: { timestamp: { min: [85.15], max: [233.57] } },
+        },
+      },
+      params: { origin: { x: 1, y: 2, z: 3 } },
+    } as never;
+    expect(isBackfillEligible(viaParams)).toBe(true);
+  });
+
+  it('keeps a column whose range is unknown', () => {
+    // Absence of a range is absence of evidence, not proof of emptiness — a
+    // label-only octree must keep its pre-existing "trust the key" behaviour.
+    const s = {
+      data: {
+        octree: { cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+          scanOrigin: [0, 0, 1.5],
+          attributeLabels: { 'gps-time': 'Timestamp' } },
+      },
+    } as never;
+    expect(isBackfillEligible(s)).toBe(true);
+  });
+
   it('still works for a cloud that names the column `timestamp` itself', () => {
     // The old-export shape: a float32 extra dim named `timestamp`.
     const s = {
       data: { octree: { cacheId: 'c', sessionId: 's', sourceXyzPath: '', hasMisses: false,
+        scanOrigin: [0, 0, 1.5],
         attributeRanges: { timestamp: { min: [85.15], max: [233.57] } } } },
     } as never;
     expect(isBackfillEligible(s)).toBe(true);
@@ -600,5 +749,64 @@ describe('allocateScanColor / createScanColorAllocator', () => {
     const a = createScanColorAllocator([BLUE]);
     const b = createScanColorAllocator([BLUE]);
     expect([a(), a()]).toEqual([b(), b()]);
+  });
+});
+
+describe('detectedReturnMode', () => {
+  const MULTI = ['timestamp', 'target_index', 'target_count'];
+
+  it('reports multi when all three per-pulse columns are present', () => {
+    expect(detectedReturnMode(makeScanWithColumns(MULTI))).toBe('multi');
+    expect(detectedReturnMode(makeScanWithColumns(MULTI, { flat: true }))).toBe('multi');
+  });
+
+  it('reports single when any one of the three is missing', () => {
+    // Mirrors the backend's `all(...)` rule: two of three is not multi-return,
+    // because a return can't be tied to its pulse without the full triple.
+    for (const omit of MULTI) {
+      const slugs = MULTI.filter((s) => s !== omit);
+      expect(detectedReturnMode(makeScanWithColumns(slugs))).toBe('single');
+    }
+  });
+
+  it('reports single for a plain cloud with no per-pulse columns', () => {
+    expect(detectedReturnMode(makeScanWithColumns(['intensity']))).toBe('single');
+  });
+
+  it('returns null when the scan has no point data to inspect', () => {
+    const paramsOnly: Scan = {
+      id: '1', label: 'a', visible: true, color: '#000',
+      params: DEFAULT_SCAN_PARAMETERS,
+    };
+    expect(detectedReturnMode(paramsOnly)).toBeNull();
+  });
+
+  // The regression guard. PotreeConverter writes the time column under its LAS
+  // dimension name `gps-time`, not the canonical `timestamp` slug, so an octree
+  // cloud that round-tripped through LAS gps_time carries ONLY that spelling.
+  // Comparing raw buffer keys would miss it and report a genuinely multi-return
+  // cloud as single — silently, since single-return is a plausible answer.
+  it('detects multi when the timestamp column is spelled gps-time (octree buffer key)', () => {
+    const scan = makeScanWithColumns(['gps-time', 'target_index', 'target_count']);
+    expect(detectedReturnMode(scan)).toBe('multi');
+  });
+});
+
+describe('missingMultiReturnColumns', () => {
+  it('names exactly the absent columns, in canonical order', () => {
+    expect(missingMultiReturnColumns(makeScanWithColumns(['target_index'])))
+      .toEqual(['timestamp', 'target_count']);
+  });
+
+  it('is empty for a multi-return cloud', () => {
+    expect(missingMultiReturnColumns(
+      makeScanWithColumns(['timestamp', 'target_index', 'target_count']),
+    )).toEqual([]);
+  });
+
+  it('normalises gps-time so it is not reported missing', () => {
+    expect(missingMultiReturnColumns(
+      makeScanWithColumns(['gps-time', 'target_index', 'target_count']),
+    )).toEqual([]);
   });
 });

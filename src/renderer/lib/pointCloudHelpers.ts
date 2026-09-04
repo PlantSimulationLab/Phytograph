@@ -1385,14 +1385,21 @@ export function buildLADRequest(
       theta_max: p.zenithMaxDeg,
       phi_min: p.azimuthMinDeg,
       phi_max: p.azimuthMaxDeg,
-      // LAD's wire field is the single/multi binary the inversion keys on (multi
-      // needs the per-pulse target_count weighting); it mirrors returnMode directly.
+      // The scan's DECLARED return mode, deliberately — not the detected one.
+      //
+      // The backend picks the algorithm from the resolved columns regardless of this
+      // field ("detected AUTHORITATIVELY ... never from the return_type label
+      // alone"), and reads it for exactly one purpose: warning when the label claims
+      // multi-return but the per-pulse columns are missing. That warning only means
+      // anything if this carries a DECLARED INTENT, so sending the detected value
+      // would make it unreachable — the two could never disagree. A synthetic scan
+      // writes its run's return mode back onto params (see executeScan), so a
+      // multi-return run whose columns didn't survive still trips the warning.
+      //
+      // Beam optics are deliberately NOT sent: helios-core reads exit diameter and
+      // divergence only inside syntheticScan, so they never influenced an inversion.
       return_type: p.returnMode,
     };
-    if (p.returnMode === 'multi') {
-      entry.beam_exit_diameter = p.beamExitDiameterM;
-      entry.beam_divergence = p.beamDivergenceMrad;
-    }
     // Moving-platform scan: forward the trajectory so the backend reconstructs a
     // per-beam origin per return (joined by timestamp) and runs the beam-based
     // (Gtheta) inversion. The point data must carry a `timestamp` column for the

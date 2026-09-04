@@ -52,7 +52,7 @@ import { ScanParametersPopup } from './ScanParametersPopup';
 import { type HeliosXmlScan, type HeliosXmlGrid } from '../lib/heliosScanXml';
 import { SyntheticScanOptionsPopup } from './SyntheticScanOptionsPopup';
 import { type SyntheticScanOptions } from '../lib/syntheticScanOptions';
-import { SCAN_HIT_FIELDS, STANDARD_HIT_FIELD_SLUGS } from '../lib/scanHitFields';
+import { SCAN_HIT_FIELDS, STANDARD_HIT_FIELD_SLUGS, effectiveRetainedFields } from '../lib/scanHitFields';
 import { ScanMarkerEntry, EditableTrajectoryPoses, TrajectoryPreviewScanner, TrajectoryPath as TrajectoryEditorPath } from './ScannerMarker';
 import { TrajectoryTablePanel } from './TrajectoryTablePanel';
 import {
@@ -84,7 +84,7 @@ import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurat
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { stopClickAfterTextSelection } from '../lib/textSelection';
-import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, createScanColorAllocator, isBackfillEligible, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
+import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, createScanColorAllocator, isBackfillEligible, detectedReturnMode, missingMultiReturnColumns, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
@@ -5444,6 +5444,15 @@ export default function PointCloudViewer({
         // frame or the reconstructed misses fan from a point millions of metres off the
         // hits. No-op when the cloud carries no shift. Mirrors buildLADRequest.
         const ws = oct.worldShift ?? [0, 0, 0];
+        // Whether this cloud has a REAL scanner position. The `[0,0,0]` below is
+        // a last-resort placeholder that keeps the request well-formed; it is NOT
+        // a usable apex, and `originKnown` tells the backend so. Reconstruction is
+        // geometric — every ray is `cart2sphere(xyz - origin)` — so a made-up
+        // origin yields a full, plausible-looking, entirely wrong miss cloud
+        // (measured: 76 deg mean beam error for a scanner 22 m off). The UI
+        // already blocks this via `isBackfillEligible`; the flag closes the same
+        // hole for any path that reaches the endpoint directly.
+        const originKnown = scanHasKnownOrigin(cloud);
         const worldOrigin: [number, number, number] =
           cloud.params?.origin
             ? [cloud.params.origin.x, cloud.params.origin.y, cloud.params.origin.z]
@@ -5465,10 +5474,12 @@ export default function PointCloudViewer({
               theta_max: p.zenithMaxDeg,
               phi_min: p.azimuthMinDeg,
               phi_max: p.azimuthMaxDeg,
-              // Beam optics drive the cone sampling for single- and multi-return
-              // scans alike (at rays-per-pulse = 1 the cone collapses to one ray).
-              beam_exit_diameter: p.beamExitDiameterM,
-              beam_divergence: p.beamDivergenceMrad,
+              // Beam optics are deliberately NOT sent. Verified in helios-core:
+              // gapfillMisses / _timestamp / _rowcolumn never read exitDiameter or
+              // beamDivergence — reconstructed miss directions come purely from the
+              // angular grid above. Sending them dressed up an inert value as an
+              // input to the reconstruction, which invites "tuning" a number that
+              // cannot change the result.
             }
           : undefined;
         const prefix = n > 1 ? `Scan ${i + 1} of ${n} — ` : '';
@@ -5530,7 +5541,7 @@ export default function PointCloudViewer({
         // the gate reads.
         if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) return;
         try {
-          const res = await backfillMisses(oct.sessionId!, origin, raster, trajectory, abort.signal, report);
+          const res = await backfillMisses(oct.sessionId!, origin, raster, trajectory, abort.signal, report, originKnown);
           stopSynth();  // the request resolved — no more synthetic creep for this scan
           if (abort.signal.aborted) return;
           if (res.error) {
@@ -10045,11 +10056,16 @@ export default function PointCloudViewer({
           theta_max_deg: p.zenithMaxDeg,
           phi_min_deg: p.azimuthMinDeg,
           phi_max_deg: p.azimuthMaxDeg,
-          return_mode: p.returnMode,
-          max_returns: p.maxReturns,
-          return_selection: p.returnSelection,
-          exit_diameter_m: p.beamExitDiameterM,
-          beam_divergence_mrad: p.beamDivergenceMrad,
+          // Return mode + beam optics are per-RUN simulation options (like noise),
+          // not per-scan properties: they only ever drove synthetic generation, so
+          // they're set once in the Synthetic Scan Options dialog and applied to
+          // every scanner this run. A real scan's return mode is read off its data
+          // columns instead (see detectedReturnMode).
+          return_mode: options.returnMode,
+          max_returns: options.maxReturns,
+          return_selection: options.returnSelection,
+          exit_diameter_m: options.beamExitDiameterM,
+          beam_divergence_mrad: options.beamDivergenceMrad,
           // Tilt is a per-scan property; noise is a per-run simulation option
           // applied uniformly to every scanner this run.
           tilt_roll_deg: p.tiltRollDeg,
@@ -10225,7 +10241,15 @@ export default function PointCloudViewer({
         const f = SCAN_HIT_FIELDS.find((x) => x.slug === slug);
         return f && !f.isStandard;
       });
-      const retainedStandards = options.retainedFields.filter(
+      // A multi-return run force-retains the per-pulse columns (see
+      // effectiveRetainedFields): they're what makes the cloud multi-return, and
+      // both target_* are defaultRetained: false, so the default selection would
+      // otherwise yield a "multi-return" scan that reads back as single. Used for
+      // BOTH the backend request and the local cloud assembly, so the two can never
+      // disagree about which columns survive.
+      const runRetainedFields = effectiveRetainedFields(
+        options.retainedFields, options.returnMode);
+      const retainedStandards = runRetainedFields.filter(
         (slug) => STANDARD_HIT_FIELD_SLUGS.includes(slug));
 
       const response = await runLidarScan({
@@ -10256,12 +10280,22 @@ export default function PointCloudViewer({
         if (result.numPoints === 0) continue;
 
         const baseName = `${scanDisplayName(scanner)}_scan`;
-        const data = buildScanCloudData(result, baseName, options.retainedFields);
+        const data = buildScanCloudData(result, baseName, runRetainedFields);
         if (!data) continue;
 
         totalPoints += result.numPoints;
         scannersWithHits++;
 
+        // A run deliberately does NOT write its return/beam options back onto the
+        // scan's params. Those params still hold the SCANNER MODEL's datasheet
+        // optics (RIEGL VZ-400i: multi/15/0.35 mrad; Leica P40: single/0.23 mrad —
+        // see scannerModels.ts), applied when the user picks an instrument. Since
+        // the run's settings are one global choice covering every scan position,
+        // copying them back would overwrite each instrument's real values with the
+        // run's generic ones — permanently, and with no editor left to restore them.
+        // The instrument identity is the more valuable thing to preserve, so an
+        // exported XML reports the scan's instrument optics rather than the last
+        // run's settings.
         const alreadyHasData = hasData(scanner);
         if (alreadyHasData && overwriteMode === 'duplicate') {
           // Keep the original; spawn a new scan carrying both the params and data.
@@ -20619,19 +20653,19 @@ export default function PointCloudViewer({
                           sweep: <span className="font-mono text-neutral-300">θ {scan.params.zenithMinDeg.toFixed(0)}–{scan.params.zenithMaxDeg.toFixed(0)}° · φ {scan.params.azimuthMinDeg.toFixed(0)}–{scan.params.azimuthMaxDeg.toFixed(0)}°</span>
                         </div>
                       )}
-                      <div>
-                        return: <span className="text-neutral-300">{scan.params.returnMode}</span>
-                        {scan.params.returnMode === 'multi' && (
-                          <span> (≤{scan.params.maxReturns})</span>
-                        )}
-                        {scan.params.returnMode === 'single' && (
-                          <span> ({scan.params.returnSelection})</span>
-                        )}
-                        <span className="mx-1">·</span>
-                        beam Ø <span className="font-mono text-neutral-300">{scan.params.beamExitDiameterM} m</span>
-                        <span className="mx-1">·</span>
-                        div <span className="font-mono text-neutral-300">{scan.params.beamDivergenceMrad} mrad</span>
-                      </div>
+                      {/* Return mode as the DATA reports it, not as params
+                          declare it. A scan's stored returnMode is now only
+                          simulation input + XML round-trip provenance, so showing
+                          it here would report a stale default on every imported
+                          cloud while LAD and triangulation went by the columns.
+                          Omitted entirely for a params-only scan position (no
+                          data to describe yet). */}
+                      {detectedReturnMode(scan) != null && (
+                        <div>
+                          return: <span className="text-neutral-300">{detectedReturnMode(scan)}</span>
+                          <span className="text-neutral-500"> (from data)</span>
+                        </div>
+                      )}
                       {/* ALWAYS shown, including at 0/0. This row states the
                           tilt the CLOUD has, and "level" is an answer, not a
                           missing one. Hiding the zero case made the two RIEGL
@@ -23391,6 +23425,20 @@ export default function PointCloudViewer({
               : 'create'
         }
         showBulkImport={scanPopupState.kind === 'add'}
+        detectedReturn={(() => {
+          // Read the return mode off the target scan's DATA for the read-only
+          // summary. 'add' creates a bare scan position with no data yet, so
+          // there is nothing to detect and the section stays hidden.
+          if (scanPopupState.kind !== 'edit' && scanPopupState.kind !== 'add-params-to') {
+            return undefined;
+          }
+          const target = scans.find(s => s.id === scanPopupState.id);
+          if (!target) return undefined;
+          return {
+            mode: detectedReturnMode(target),
+            missingColumns: missingMultiReturnColumns(target),
+          };
+        })()}
         onBuildTrajectory={(label, params) => {
           // Edit/attach target an existing scan; create builds a new one on Save.
           // Seed the editor from the params the popup collected (which may already

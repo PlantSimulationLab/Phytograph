@@ -20065,6 +20065,74 @@ def _canonical_slug_for_name(name: str) -> Optional[str]:
     """
     return _CANONICAL_ALIAS_TO_SLUG.get(_normalise_column_name(name))
 
+
+# Seconds in a GPS week. GPS Week Time is seconds-into-week, so it is bounded by
+# this; a timestamp beyond it cannot be week-seconds and must be an absolute
+# clock. The only evidence available for an ASCII source, which declares no
+# encoding of its own.
+_GPS_WEEK_SECONDS = 604800.0
+
+
+def _mark_gps_time_absolute(header) -> None:
+    """Set LAS global_encoding bit 0 — "gps_time is Adjusted-Standard GPS".
+
+    `_read_las_into_arrays` maps this bit onto `gps_time_encoding`, and the create
+    endpoint turns a `gps_week` reading into a user-facing warning that a
+    moving-platform trajectory join cannot align. So the bit is not decoration:
+    leaving it clear on an absolute-clock cloud produces a confidently wrong
+    warning. Written through laspy's typed accessor where available, falling back
+    to the raw bit for older/odd headers (mirrors the reader's own two-step).
+    """
+    try:
+        header.global_encoding.gps_time_type = 1
+    except Exception:
+        try:
+            header.global_encoding.value = int(header.global_encoding.value) | 1
+        except Exception:
+            pass  # best-effort: a missing bit only costs the warning, not the data
+
+
+def _split_timestamp_extra_dim(extra_dims: "List[dict]") -> "tuple[List[dict], Optional[dict]]":
+    """Partition `extra_dims` into (everything else, the timestamp dim or None).
+
+    THE POINT: a per-pulse timestamp must ride the LAS **standard `gps_time`
+    field**, which is float64, and never a float32 extra dimension.
+
+    float32 carries ~24 bits of mantissa, so the gap between representable values
+    scales with magnitude: harmless near zero, but 0.03 s at GPS week-seconds
+    (~4.7e5) and **32 s at adjusted-standard GPS (~3.5e8)**. Measured on the real
+    import path, a 120 s scan of 5,000 distinct GPS-magnitude times came back as
+    **5 distinct values** (max error 16 s), and `example-datasets/BR04_ALS_origins.xyz`
+    collapsed 188,653 distinct times to 497. That is fatal downstream rather than
+    merely lossy: `gapfillMisses()`'s timestamp path groups returns into pulses
+    purely by comparing per-hit times, so thousands of returns sharing one value
+    cannot be resolved into the shots they came from.
+
+    It also hid well. `_read_las_into_arrays` rescues a `timestamp` extra dim into
+    the float64 `LasReadResult.timestamps`, so the damage arrived wearing a
+    float64 dtype and looked healthy at every downstream inspection point.
+
+    The export writer (`_do_point_cloud_export`) already did this correctly and
+    said why in its own comment; the IMPORT writers that can carry a timestamp
+    (`_xyz_to_las`, `_ply_to_las`, `_session_to_las`) declared every dim float32
+    and never wrote `gps_time`. `_e57_to_las` and `_ptx_to_las` build fixed
+    extra-dim lists (is_miss + row/column index) with no time column, so they
+    never had the bug and do not call this. Keeping the rule in one function means
+    a future writer — or one of those two growing a timestamp — cannot quietly
+    reintroduce it.
+
+    Matching is via `_canonical_slug_for_name`, so every spelling in the alias
+    table (`timestamp`/`gps_time`/`gps-time`/`time`/`Timestamp[s]`) is caught.
+    Callers must declare only the returned dims as extra dimensions, and assign
+    the timestamp column to `record.gps_time` / `las.gps_time` as float64.
+    """
+    ts = next((ed for ed in extra_dims
+               if _canonical_slug_for_name(str(ed.get("slug", ""))) == 'timestamp'), None)
+    if ts is None:
+        return list(extra_dims), None
+    return [ed for ed in extra_dims if ed is not ts], ts
+
+
 def _dims_for_slug(dims, slug: str) -> "tuple[str, ...]":
     """Source dimension names that resolve to `slug`, best candidate FIRST.
 
@@ -23013,6 +23081,11 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     # potree-core 2.0 loader.
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    # A timestamp column is pulled OUT of the extra dims and written to the
+    # standard float64 gps_time field instead — see `_split_timestamp_extra_dim`
+    # for the 32-seconds-at-GPS-magnitude reason. Point format 3 carries
+    # gps_time, so no format bump is needed.
+    extra_dims, ts_dim = _split_timestamp_extra_dim(extra_dims)
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
@@ -23086,6 +23159,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
             rgb_cols, rgb_is_255, intensity_role, intensity_lo, intensity_hi,
             extra_dims, full_xyz_out=full_xyz_chunks,
             origin_cols=origin_cols, origins_out=origin_chunks,
+            ts_dim=ts_dim,
         )
     except (ValueError, KeyError) as e:
         # A non-numeric value reaching the x/y/z/RGB float cast almost always
@@ -23121,7 +23195,8 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                        intensity_lo, intensity_hi, extra_dims,
                        full_xyz_out: "Optional[list]" = None,
                        origin_cols: "Optional[Dict[str, str]]" = None,
-                       origins_out: "Optional[list]" = None) -> int:
+                       origins_out: "Optional[list]" = None,
+                       ts_dim: "Optional[dict]" = None) -> int:
     """Inner streaming loop for `_xyz_to_las`, split out so the caller can wrap
     column-mismatch errors (raised here from the float casts) into a clean 400.
     Returns the total points written.
@@ -23142,7 +23217,13 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
     column name in `names`, and the three columns are stacked in x,y,z order as
     float64 into `origins_out`, aligned point-for-point with the same NaN-filtered
     rows. Origins are world/UTM coordinates kept OUT of the quantized LAS and the
-    float32 extras so LAD's ground-truth-origin shortcut sees full precision."""
+    float32 extras so LAD's ground-truth-origin shortcut sees full precision.
+
+    `ts_dim` is the timestamp column split out of `extra_dims` by the caller (see
+    `_split_timestamp_extra_dim`). It is written to the standard float64 gps_time
+    field rather than declared as a float32 extra dimension, which at GPS
+    magnitudes would quantize it to ~32 s and destroy pulse grouping. It stays in
+    `names`/`usecols` — only its DESTINATION changes."""
     import laspy
     total_points = 0
     with laspy.open(str(out_las), mode="w", header=header) as writer:
@@ -23210,6 +23291,21 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                     chunk[intensity_role].to_numpy(dtype=np.float64),
                     intensity_lo, intensity_hi,
                 )
+            if ts_dim is not None:
+                # float64, into the standard field — never a float32 extra dim
+                # (see `_split_timestamp_extra_dim`).
+                _ts_vals = chunk[ts_dim["col"]].to_numpy(dtype=np.float64)
+                record.gps_time = _ts_vals
+                # An ASCII file declares no clock, so the encoding has to be
+                # INFERRED — and getting it wrong is not cosmetic: the reader maps
+                # global_encoding bit 0 straight onto 'gps_week', which makes the
+                # create endpoint warn that a trajectory join cannot align. Leaving
+                # the bit clear would put that warning on every ASCII import,
+                # including absolute-clock ALS exports where it is simply false.
+                # GPS Week Time is bounded by the 604800 s week, so anything past
+                # it cannot be week-seconds and is an absolute clock.
+                if _ts_vals.size and np.nanmax(np.abs(_ts_vals)) > _GPS_WEEK_SECONDS:
+                    _mark_gps_time_absolute(writer.header)
             for ed in extra_dims:
                 # Extra dims carry RAW values (the renderer normalises by the
                 # attribute's own range) — including a rescued secondary
@@ -23336,6 +23432,9 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
     # 32-bit int range — see _session_to_las for the full rationale.
     header.offsets = (np.floor([x[keep].min(), y[keep].min(), z[keep].min()]) if n else np.zeros(3))
+    # Timestamp → standard float64 gps_time, never a float32 extra dim
+    # (see `_split_timestamp_extra_dim`).
+    extra_dims, ts_dim = _split_timestamp_extra_dim(extra_dims)
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
 
@@ -23360,10 +23459,20 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
             record[_MISS_SLUG] = is_miss[keep]
         else:
             record[ed["slug"]] = vertex[ed["col"]][keep].astype(np.float32)
+    if ts_dim is not None:
+        ts_vals = np.asarray(vertex[ts_dim["col"]][keep], dtype=np.float64)
+        record.gps_time = ts_vals
+        if ts_vals.size and np.nanmax(np.abs(ts_vals)) > _GPS_WEEK_SECONDS:
+            _mark_gps_time_absolute(header)
 
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         writer.write_points(record)
 
+    # `ts_dim` is deliberately NOT in the sidecar. The sidecar is keyed by octree
+    # BUFFER name, and the timestamp now reaches the octree as PotreeConverter's
+    # own `gps-time` attribute — not an extra dim under the `timestamp` slug. Its
+    # "Timestamp" label is supplied by `_read_octree_labels`, which setdefaults
+    # exactly that key; adding it here would advertise a buffer that isn't there.
     return n, [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
 
@@ -27539,8 +27648,24 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     # the stored ints small for any CRS; laspy re-applies offset on read, so
     # downstream coordinates are unchanged.
     header.offsets = (np.floor(pos.min(axis=0)) if n else np.zeros(3, dtype=np.float64))
-    for ed in sess.extra_dims_meta:
+    # Drop a `timestamp` extra dim from the SCHEMA and write the float64
+    # `sess.timestamps` to the standard gps_time field instead (below). Imports no
+    # longer create such a dim, but a session restored from an octree built before
+    # that fix still carries one — rewriting it as float32 here would re-quantize
+    # the times on every bake/rebuild. `sess.timestamps` holds the same column at
+    # full precision, so the standard field is strictly the better copy.
+    _extra_dims_out, _ts_extra = _split_timestamp_extra_dim(list(sess.extra_dims_meta))
+    if _ts_extra is not None and sess.timestamps is None:
+        # No float64 copy to fall back on: keep the float32 dim rather than lose
+        # the column outright. Already-degraded values, faithfully preserved.
+        _extra_dims_out, _ts_extra = list(sess.extra_dims_meta), None
+    for ed in _extra_dims_out:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+    # Preserve the clock identity across a bake/rebuild. Without this the session's
+    # 'adjusted_standard' reading is lost on the round trip and comes back as
+    # 'gps_week', which the create endpoint reports as a trajectory-join warning.
+    if getattr(sess, "gps_time_encoding", None) == 'adjusted_standard':
+        _mark_gps_time_absolute(header)
 
     # bbox over the full selection (cheap — just the f64 xyz), computed before the
     # chunked write so the header mins/maxs cover every chunk.
@@ -27555,10 +27680,14 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     # transient stacked on top of the session arrays. Chunking caps the record to
     # one block (`_LAS_WRITE_CHUNK` rows) at a time — same bytes on disk, a
     # fraction of the peak RAM. Mirrors `_xyz_to_las_stream`'s chunked writer.
-    # Does the session already carry the time as a named extra dim? If so the
-    # standard gps_time field must stay empty — see the note in the write loop.
-    _ts_is_extra = any(_canonical_slug_for_name(str(ed.get("slug", ""))) == 'timestamp'
-                       for ed in sess.extra_dims_meta)
+    # A `timestamp` extra dim is now REMOVED from the schema above whenever
+    # `sess.timestamps` can replace it, so the two columns can no longer both be
+    # written — the duplicate-column problem this guard used to prevent is gone at
+    # the source. It stays True only in the fallback case (a legacy float32 dim
+    # with no float64 copy), where gps_time must indeed stay empty.
+    _ts_is_extra = _ts_extra is None and any(
+        _canonical_slug_for_name(str(ed.get("slug", ""))) == 'timestamp'
+        for ed in _extra_dims_out)
     idx = np.flatnonzero(keep)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         for start in range(0, n, _LAS_WRITE_CHUNK):
@@ -27589,7 +27718,7 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
             # "Timestamp" label — indistinguishable in the menu.
             if sess.timestamps is not None and not _ts_is_extra:
                 record.gps_time = sess.timestamps[block]
-            for ed in sess.extra_dims_meta:
+            for ed in _extra_dims_out:
                 record[ed["slug"]] = sess.extras[ed["slug"]][block]
             writer.write_points(record)
             del record, bpos
@@ -27915,8 +28044,20 @@ class BackfillMissesRequest(BaseModel):
     optional angular raster (n_theta/n_phi/theta_*/phi_*) sets the scan grid the
     gapfiller reconstructs misses over, falling back to a count-based estimate
     when omitted. `trajectory` marks a moving-platform scan (per-pulse origins
-    joined by timestamp), which forces the timestamp gapfill path."""
+    joined by timestamp), which forces the timestamp gapfill path.
+
+    `origin_known` states whether `origin` is a REAL scanner position rather than
+    a placeholder. It exists because the two cases are indistinguishable in the
+    numbers — a scan legitimately authored at the world origin sends the same
+    [0,0,0] a caller substituting a default would — and the difference decides
+    whether the result means anything. Every per-hit ray direction is
+    `cart2sphere(xyz - origin)` and the misses fan out from that same apex, so a
+    made-up origin yields confidently wrong geometry (measured: 76 deg mean beam
+    error, max 176 deg, for a scanner 22 m off). Defaults True so existing
+    callers that DO send a real origin are unaffected; the renderer sends False
+    when the scan carries no position."""
     origin: List[float]                 # [x, y, z] scanner position
+    origin_known: bool = True           # False => `origin` is a placeholder
     n_theta: Optional[int] = None
     n_phi: Optional[int] = None
     theta_min: Optional[float] = None   # degrees
@@ -28731,6 +28872,24 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
                     "them: it carries neither a per-pulse timestamp nor scan-grid "
                     "row/column indices. Re-import a scan that retains misses "
                     "(E57 / structured PLY) or one of those columns."),
+        )
+
+    # A known scanner position is as REQUIRED as the columns, and for the same
+    # reason: the reconstruction is geometric. `_directions_from_origin` derives
+    # every hit's ray as `cart2sphere(xyz - origin)` and `cloud.addScan()` fans
+    # the recovered misses from that apex, so a placeholder origin does not
+    # degrade the answer — it invalidates it, while still returning a full,
+    # plausible-looking miss cloud. Refuse instead of producing that. A moving
+    # platform is exempt: its per-beam origins come from the trajectory, so the
+    # static `origin` is not what the geometry rests on.
+    if request.trajectory is None and not request.origin_known:
+        raise HTTPException(
+            status_code=400,
+            detail=("This scan has no known scanner position, so its sky/miss "
+                    "points cannot be reconstructed: miss directions are measured "
+                    "from the scanner, and without it every recovered ray points "
+                    "the wrong way. Set the scan position (or import scan "
+                    "parameters) and run Backfill Misses again."),
         )
 
     # Stream the heavy build/gapfill/extract with per-stage progress markers, and

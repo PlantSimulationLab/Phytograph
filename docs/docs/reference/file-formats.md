@@ -187,10 +187,11 @@ needs. Structured E57 keeps every echo for a cell; PTX cannot.
 
 This matters because using only first echoes biases LAD **high** — Kent and
 Bailey ([2024](https://doi.org/10.1016/j.rse.2024.114229)) found it the most
-biased of every weighting method they tested. And the loss is unflagged: a
-multi-return scan exported to PTX and re-imported *is* a single-return scan, its
-**return type** agrees, and the usual "marked multi-return but the columns are
-missing" warning never fires. **So export multi-return scans to E57, not PTX**,
+biased of every weighting method they tested. And the loss is quiet: a
+multi-return scan exported to PTX and re-imported *is* a single-return scan, and
+since the return type is detected from the columns, it will honestly report
+**single-return** — correct, but easy to miss if you assumed the echoes had
+survived the round-trip. **So export multi-return scans to E57, not PTX**,
 and import RIEGL data as a
 [`.riproject` / `.PROJ`](../workflows/import-riegl-project.md) rather than via a
 PTX export from RiSCAN PRO. For genuinely single-return instruments — which is
@@ -675,6 +676,16 @@ Synthetic scans keep the same guarantee: a generated scan's per-return timestamp
 stored at full double precision (read from the engine via the float64 columnar path), so a
 synthetic moving-platform scan's trajectory join and its exported timestamps are not
 quantized — matching imported clouds.
+
+**ASCII imports (XYZ/TXT/PTS/CSV) share the guarantee too.** A column mapped to the
+`timestamp` role is written to the intermediate LAS's standard `gps_time` field
+(float64), never a float32 ExtraBytes dimension. This matters at real GPS
+magnitudes: 32-bit floats step by ~0.03 s at GPS week-seconds and ~32 s at
+Adjusted-Standard magnitude, which is enough to merge thousands of distinct
+returns onto a single time — breaking the pulse grouping that Backfill Misses
+and multi-return processing depend on. Because an ASCII file declares no clock
+of its own, the encoding is inferred from magnitude: values beyond the 604,800 s
+GPS week are treated as an absolute clock, anything within it as GPS Week Time.
 
 ### LAS ExtraBytes per-beam origins
 

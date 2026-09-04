@@ -1,7 +1,8 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { X, CloudFog } from 'lucide-react';
 import type { Scan } from '../lib/scan';
-import { hasData, isBackfillEligible, scanHasKnownOrigin, missReconSources } from '../lib/scan';
+import { hasData, isBackfillEligible, scanHasKnownOrigin, missReconSources,
+         missColumnsAvailable } from '../lib/scan';
 import { SelectAllHeader } from './SelectAllHeader';
 
 interface BackfillMissesPopupProps {
@@ -117,8 +118,18 @@ export function BackfillMissesPopup({
     [scans, initialSelectedIds],
   );
   const alreadyHasMisses = selectedDataScans.filter(s => s.data?.octree?.hasMisses === true).length;
+  // A scan blocked ONLY by a missing scanner position is a different problem from
+  // one missing the recovery columns: the user can fix it (set the scan position)
+  // rather than having to re-import in another format. Called out separately so
+  // the note names the actual remedy — it reads as an unexplained refusal
+  // otherwise, since the columns it needs are visibly present.
+  const noOrigin = selectedDataScans.filter(
+    s => s.data?.octree?.hasMisses !== true
+      && missColumnsAvailable(s)
+      && !scanHasKnownOrigin(s),
+  ).length;
   const unrecoverable = selectedDataScans.filter(
-    s => s.data?.octree?.hasMisses !== true && !isBackfillEligible(s),
+    s => s.data?.octree?.hasMisses !== true && !missColumnsAvailable(s),
   ).length;
 
   const totalPoints = useMemo(
@@ -237,10 +248,18 @@ export function BackfillMissesPopup({
             </div>
           )}
 
-          {(alreadyHasMisses > 0 || unrecoverable > 0) && (
+          {(alreadyHasMisses > 0 || unrecoverable > 0 || noOrigin > 0) && (
             <div className="text-[10px] text-amber-300 bg-amber-500/5 border border-amber-500/30 rounded px-2 py-1.5 space-y-1" data-testid="backfill-skip-note">
               {alreadyHasMisses > 0 && (
                 <div>{alreadyHasMisses} selected scan(s) already have sky/miss points — nothing to recover.</div>
+              )}
+              {noOrigin > 0 && (
+                <div data-testid="backfill-no-origin-note">
+                  {noOrigin} selected scan(s) have the columns to recover misses but no
+                  known scanner position. Miss directions are measured from the scanner,
+                  so without it every reconstructed ray points the wrong way. Set the
+                  scan position first.
+                </div>
               )}
               {unrecoverable > 0 && (
                 <div>

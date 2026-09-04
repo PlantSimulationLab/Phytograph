@@ -18,11 +18,37 @@ can see it and reuse it.
 - A scan has **no sky/miss points** (the "Show misses" toggle is absent
   in the Scans panel), **and**
 - it carries a per-return **`timestamp`** column and/or scan-grid
-  **`row`/`column`** indices to rebuild the miss directions from.
+  **`row`/`column`** indices to rebuild the miss directions from, **and**
+- it has a **known scanner position**.
 
 If a scan already retains misses, there's nothing to do. If it has
 neither a timestamp nor a row/column grid, misses **can't** be recovered —
 re-import the scan in a format that keeps them (E57 / structured PLY).
+
+!!! warning "The scanner position is required, not optional"
+
+    Miss directions are measured **from the scanner**: each recovered ray is
+    reconstructed as the direction from the scan origin to its return, and the
+    misses are then projected outward from that same apex. Without the true
+    position there is nothing to reconstruct against — the result isn't
+    approximate, it's wrong, and it still *looks* like a complete miss cloud.
+
+    So a scan with the right columns but no recorded position is listed as
+    ineligible until you set one. Set the scan position (or import scan
+    parameters / a Helios XML `<scan>`) first, then run Backfill Misses.
+
+    A **moving-platform** scan is the exception: its per-beam emission origins
+    come from the trajectory, so it doesn't depend on a single static apex.
+
+!!! note "A `Timestamp` entry in Color-by doesn't always mean the data is there"
+
+    `gps_time` is a standard LAS dimension, so it exists on every imported
+    cloud whether or not the source ever recorded per-pulse time — on a plain
+    `x y z r g b intensity` file it is present but entirely zero. Backfill
+    Misses judges a scan by whether the column actually **varies**, not by
+    whether it exists, so such a scan is correctly listed as ineligible even
+    though the Color-by picker offers a "Timestamp" entry that renders as a
+    flat, single-valued field.
 
 ## Steps
 

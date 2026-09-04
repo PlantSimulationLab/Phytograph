@@ -70,11 +70,13 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
   await page.getByTestId('scan-azimuth-min').fill('45');
   await page.getByTestId('scan-azimuth-max').fill('315');
 
-  await page.getByTestId('scan-return-multi').click();
-  const beamFields = page.getByTestId('scan-beam-fields');
-  await expect(beamFields).toBeVisible();
-  await page.getByTestId('scan-beam-diameter').fill('0.02');
-  await page.getByTestId('scan-beam-divergence').fill('1.2');
+  // Return type and beam optics are NOT scan properties any more — they only
+  // ever drove synthetic generation, so they live in Synthetic Scan Options.
+  // A params-only scan position has no data, so there is also nothing to report
+  // in the read-only detected-return summary.
+  await expect(page.getByTestId('scan-return-multi')).toHaveCount(0);
+  await expect(page.getByTestId('scan-beam-diameter')).toHaveCount(0);
+  await expect(page.getByTestId('scan-detected-return')).toHaveCount(0);
 
   await page.getByTestId('scan-submit').click();
   await expect(popup).not.toBeVisible();
@@ -95,16 +97,17 @@ test('add, edit, and delete a params-only scan through the UI', async () => {
   const expanded = page.getByTestId(`scan-expanded-${scanId}`);
   await expect(expanded).toBeVisible();
   await expect(expanded).toContainText('50 × 180');
-  await expect(expanded).toContainText('multi');
+  // No "return:" line on a params-only scan: the row reports the mode the DATA
+  // shows, and this scan position has no data yet.
+  await expect(expanded).not.toContainText('return:');
 
   // Edit via the row's edit button.
   await page.getByTestId(`scan-edit-${scanId}`).click();
   await expect(popup).toBeVisible();
   const label = page.getByTestId('scan-label-input');
   await expect(label).toHaveValue('North Tripod');
-  // Multi-return state should round-trip and beam fields stay visible.
-  await expect(beamFields).toBeVisible();
-  await expect(page.getByTestId('scan-beam-diameter')).toHaveValue('0.02');
+  // Reopening for edit must not resurrect the moved fields either.
+  await expect(page.getByTestId('scan-beam-diameter')).toHaveCount(0);
   await label.fill('North Tripod (renamed)');
   await page.getByTestId('scan-submit').click();
   await expect(popup).not.toBeVisible();

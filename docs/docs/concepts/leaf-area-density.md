@@ -98,12 +98,13 @@ scan's parameters:
   are grouped by pulse and weighted equally, and sky/miss rays are
   gap-filled before the inversion. This needs per-return metadata —
   `timestamp`, `target_index`, and `target_count` — preserved from the
-  source file. When a scan is marked multi-return but those columns are
-  missing, Phytograph falls back to the single-return algorithm and warns
-  you.
+  source file.
 
-You don't choose the algorithm directly — it follows each scan's
-**return type** (set in its [scan parameters](scans.md)).
+You don't choose the algorithm, and there is no setting for it: it follows
+directly from whether those three per-pulse columns are present in the data.
+The Scan Parameters dialog reports the verdict under **Detected from point
+data**, and the LAD dialog echoes it read-only. See
+[Return type is detected, not declared](scans.md#return-type-is-detected-not-declared).
 
 ### Keep the later echoes if the instrument recorded them
 

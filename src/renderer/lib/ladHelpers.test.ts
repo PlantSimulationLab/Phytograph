@@ -116,7 +116,13 @@ describe('buildLADRequest', () => {
     s.points!.flat().forEach((v, i) => expect(v).toBeCloseTo(flat[i], 5));
   });
 
-  it('attaches multi-return beam fields only for multi-return scans', () => {
+  // Beam optics are NEVER sent to LAD, for either return mode. helios-core reads
+  // exit diameter and divergence only inside syntheticScan — `calculateLeafArea`
+  // never calls the accessors — so sending them dressed up an inert value as an
+  // inversion input. `return_type` still carries the scan's DECLARED mode, which
+  // is what the backend's "marked multi but the columns are missing" warning
+  // needs; the algorithm itself is chosen from the resolved columns.
+  it('sends the declared return type and never the inert beam optics', () => {
     const single = buildLADRequest([makeScan()], GRID, PARAMS).scans[0];
     expect(single.return_type).toBe('single');
     expect(single.beam_exit_diameter).toBeUndefined();
@@ -133,8 +139,8 @@ describe('buildLADRequest', () => {
     });
     const multi = buildLADRequest([multiScan], GRID, PARAMS).scans[0];
     expect(multi.return_type).toBe('multi');
-    expect(multi.beam_exit_diameter).toBe(0.02);
-    expect(multi.beam_divergence).toBe(0.7);
+    expect(multi.beam_exit_diameter).toBeUndefined();
+    expect(multi.beam_divergence).toBeUndefined();
   });
 
   it('sends session_id ALONE when a session cloud also has a source path', () => {

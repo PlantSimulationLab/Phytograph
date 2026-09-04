@@ -5,7 +5,7 @@ import type { GridOption } from '../lib/gridOption';
 import type { HeliosGrid, GThetaOverrideSpec, GThetaValueSpec, DeWitDistribution } from '../utils/backendApi';
 import type { Scan } from '../lib/scan';
 import type { MeshData } from '../lib/pointCloudTypes';
-import { hasData, hasParams, isBackfillEligible } from '../lib/scan';
+import { hasData, hasParams, isBackfillEligible, detectedReturnMode } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
 import { buildLADRequest, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
 import { InfoHint } from './InfoHint';
@@ -288,10 +288,16 @@ export function LADPopup({
     [reuseTri, selectedScans],
   );
 
-  // Return-type summary derived from the selected scans (read-only — set it per
-  // scan in the Scans panel). LAD only cares about multi-return vs. single.
+  // Return-type summary derived from each selected scan's DATA — the same rule the
+  // backend applies (`_lad_labels_vals`: multi iff timestamp + target_index +
+  // target_count are all present). Previously this read `params.returnMode`, a
+  // user-declared label the inversion never consulted, so an imported multi-return
+  // cloud could be summarised here as single while the backend correctly ran it as
+  // multi. Nothing to set: it's a property of the data.
   const returnTypes = useMemo(
-    () => new Set(selectedScans.map(s => s.params!.returnMode)),
+    () => new Set(
+      selectedScans.map(s => detectedReturnMode(s)).filter((m): m is 'single' | 'multi' => m != null),
+    ),
     [selectedScans],
   );
 
@@ -924,7 +930,7 @@ export function LADPopup({
                   Selected scans mix single- and multi-return; each is computed with its own return type.
                 </span>
               ) : returnTypes.has('multi') ? (
-                <span>Return type: <span className="text-neutral-200">multi-return</span> (full-waveform; beam params from scan parameters)</span>
+                <span>Return type: <span className="text-neutral-200">multi-return</span> (full-waveform; detected from the per-pulse columns in the data)</span>
               ) : (
                 <span>Return type: <span className="text-neutral-200">single-return</span></span>
               )}

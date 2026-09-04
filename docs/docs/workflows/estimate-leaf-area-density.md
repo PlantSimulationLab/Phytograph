@@ -139,8 +139,8 @@ surface.
       expand the grid → **Snap to ground**) so each column follows the ground; the
       dialog then shows *"This grid is snapped to ground."* See
       [Terrain following](#terrain-following-snap-the-grid-to-the-ground) below.
-    - The **return type** is shown read-only; it follows each scan's own
-      parameters. Multi-return scans need per-pulse metadata in the source
+    - The **return type** is shown read-only; it is detected from the
+      per-pulse columns each scan's data carries, not set anywhere
       (see [the concept page](../concepts/leaf-area-density.md#single-vs-multi-return-scans)).
 
 5. **Click Compute LAD.** The calculation runs on the backend (the first

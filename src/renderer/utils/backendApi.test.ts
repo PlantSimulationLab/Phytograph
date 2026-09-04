@@ -1513,7 +1513,19 @@ describe('backfillMisses', () => {
 
   it('omits raster fields when no raster is supplied (backend falls back to its estimate)', async () => {
     const body = await sentBody('sess1', [0, 0, 5]);
-    expect(body).toEqual({ origin: [0, 0, 5] });
+    // `origin_known` defaults true so existing callers keep working; the backend
+    // refuses a backfill only when told the origin is a placeholder.
+    expect(body).toEqual({ origin: [0, 0, 5], origin_known: true });
+  });
+
+  it('forwards origin_known=false so the backend can refuse a placeholder apex', async () => {
+    // A scan with no recorded scanner position still has to send SOME origin to
+    // keep the request well-formed, so the coordinates alone cannot tell the
+    // backend the apex is fabricated — this flag is what does. Without it the
+    // backfill runs on a made-up origin and returns confident garbage.
+    const body = await sentBody(
+      'sess1', [0, 0, 0], undefined, undefined, undefined, undefined, false);
+    expect(body).toEqual({ origin: [0, 0, 0], origin_known: false });
   });
 });
 

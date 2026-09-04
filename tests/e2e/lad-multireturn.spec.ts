@@ -51,14 +51,18 @@ test('Computes multi-return leaf area density from an imported full-waveform sca
     expect(displayedPoints).toBeGreaterThan(5000);
     expect(displayedPoints).toBeLessThan(8000);
 
-    // The imported scan's return type comes from the XML/params. Set it to
-    // multi-return via the scan parameters popup so the LAD request marks it
-    // multi (the backend still detects multi from the columns, but this matches
-    // how a user would label a full-waveform scan).
+    // Return type is DETECTED from the data, not declared by the user: this scan
+    // carries the per-pulse columns, so the scan-parameters dialog must report it
+    // as multi-return on its own, with no toggle to set. (Previously the test had
+    // to click "multi" here to match what the backend was already doing.)
     await scanRows.nth(0).locator('[data-testid^="scan-edit-"]').click();
     const paramsPopup = page.getByTestId('scan-parameters-popup');
     await expect(paramsPopup).toBeVisible();
-    await page.getByTestId('scan-return-multi').click();
+    const detected = page.getByTestId('scan-detected-return');
+    await expect(detected).toBeVisible();
+    await expect(detected).toHaveAttribute('data-return-mode', 'multi');
+    // The editable toggle is gone — return mode is not a scan property.
+    await expect(page.getByTestId('scan-return-multi')).toHaveCount(0);
     await page.getByTestId('scan-submit').click();
     await expect(paramsPopup).not.toBeVisible();
 

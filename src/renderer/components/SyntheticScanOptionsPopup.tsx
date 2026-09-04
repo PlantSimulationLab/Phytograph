@@ -7,6 +7,7 @@ import {
   type SyntheticScanOptions,
 } from '../lib/syntheticScanOptions';
 import { scanDisplayName, type Scan } from '../lib/scan';
+import type { SingleReturnSelection } from '../lib/scanParameters';
 import { SCAN_HIT_FIELDS, availabilityNote } from '../lib/scanHitFields';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { ComputePathBadge } from './ComputePathBadge';
@@ -152,7 +153,10 @@ export function SyntheticScanOptionsPopup({
   // DebouncedNumberInput owns each field's text draft and only commits finite
   // values, so clearing the field to retype works (no snap-back to the min).
   // Clamping to the min happens on the committed value inside the component.
-  const setNum = (key: 'rangeNoiseMm' | 'angleNoiseMrad' | 'pulseDistanceThresholdM') =>
+  const setNum = (
+    key: 'rangeNoiseMm' | 'angleNoiseMrad' | 'pulseDistanceThresholdM'
+      | 'beamExitDiameterM' | 'beamDivergenceMrad',
+  ) =>
     (v: number) => {
       setOpts(o => ({ ...o, [key]: v }));
     };
@@ -174,7 +178,11 @@ export function SyntheticScanOptionsPopup({
   // its own color mode + the intensities array). Multi-return fields are only
   // meaningful when more than one sub-ray is fired per pulse.
   const fieldChoices = SCAN_HIT_FIELDS.filter(f => f.slug !== 'intensity');
-  const isMultiReturn = opts.raysPerPulse > 1;
+  // Deliberately keyed on raysPerPulse, NOT on opts.returnMode: the two gated
+  // fields (pulse deviation, sub-rays hit) are per-SUB-RAY statistics, so they
+  // resolve only when the beam cone is actually sampled by more than one ray.
+  // A multi-return scan at raysPerPulse = 1 still has nothing to report for them.
+  const hasSubRays = opts.raysPerPulse > 1;
   const toggleField = (slug: string) =>
     setOpts(o => ({
       ...o,
@@ -375,6 +383,72 @@ export function SyntheticScanOptionsPopup({
             )}
           </div>
 
+          {/* Returns + beam optics. These belong to the RUN, not to a scan
+              position: they only ever affected synthetic generation (helios-core
+              reads beam optics solely inside syntheticScan), and a real scan's
+              return mode comes from its own data columns. They sit next to Rays
+              per pulse because that knob decides whether the beam cone — the thing
+              these two fields size — exists at all. */}
+          <div data-testid="scan-opt-return-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
+            <p className="text-xs text-neutral-400">Returns</p>
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Return type</label>
+              <div className="flex gap-2">
+                {(['single', 'multi'] as const).map(rm => (
+                  <button
+                    key={rm}
+                    type="button"
+                    data-testid={`scan-return-${rm}`}
+                    onClick={() => setOpts(o => ({ ...o, returnMode: rm }))}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm capitalize transition-colors ${
+                      opts.returnMode === rm
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+                    }`}
+                  >
+                    {rm}-return
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1.5 text-[11px] text-neutral-500">
+                {opts.returnMode === 'single'
+                  ? 'One return per pulse, selected below. Applied to every scan position in this run.'
+                  : 'All returns per pulse up to the cap below (full-waveform; penetrates foliage). Applied to every scan position in this run.'}
+              </p>
+            </div>
+            {opts.returnMode === 'multi' ? (
+              <div>
+                <label className="block text-xs text-neutral-500 mb-1">Max returns per pulse</label>
+                <DebouncedNumberInput
+                  data-testid="scan-max-returns"
+                  min={1}
+                  step={1}
+                  debounceMs={0}
+                  parse={(s) => parseInt(s, 10)}
+                  value={opts.maxReturns}
+                  onCommit={(v) => setOpts(o => ({ ...o, maxReturns: Math.max(1, Math.round(v)) }))}
+                  className={inputCls}
+                />
+              </div>
+            ) : (
+              <div>
+                <label className="block text-xs text-neutral-500 mb-1">Return selection</label>
+                <select
+                  data-testid="scan-return-selection"
+                  value={opts.returnSelection}
+                  onChange={(e) => setOpts(o => ({
+                    ...o, returnSelection: e.target.value as SingleReturnSelection,
+                  }))}
+                  className={inputCls}
+                >
+                  <option value="strongest">Strongest</option>
+                  <option value="first">First (nearest)</option>
+                  <option value="last">Last (farthest)</option>
+                </select>
+              </div>
+            )}
+          </div>
+
           <div data-testid="scan-opt-waveform-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
             <p className="text-xs text-neutral-400">Beam-cone sampling</p>
             <div>
@@ -406,6 +480,34 @@ export function SyntheticScanOptionsPopup({
                 className={inputCls}
               />
             </div>
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Beam exit diameter (m)</label>
+              <DebouncedNumberInput
+                data-testid="scan-beam-diameter"
+                min={0}
+                step="any"
+                debounceMs={0}
+                value={opts.beamExitDiameterM}
+                onCommit={setNum('beamExitDiameterM')}
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-neutral-500 mb-1">Beam divergence (mrad)</label>
+              <DebouncedNumberInput
+                data-testid="scan-beam-divergence"
+                min={0}
+                step="any"
+                debounceMs={0}
+                value={opts.beamDivergenceMrad}
+                onCommit={setNum('beamDivergenceMrad')}
+                className={inputCls}
+              />
+              <p className="mt-1 text-[11px] text-neutral-500">
+                Beam cone geometry the sub-rays are fired across. Ignored at rays
+                per pulse = 1, where the cone collapses to one exact ray.
+              </p>
+            </div>
           </div>
 
           {/* Retained per-hit fields — which auto-generated per-hit scalars are
@@ -429,7 +531,7 @@ export function SyntheticScanOptionsPopup({
               when constant-valued.
             </p>
             {fieldChoices.map((f) => {
-              const note = f.availability === 'multiReturn' && !isMultiReturn
+              const note = f.availability === 'multiReturn' && !hasSubRays
                 ? availabilityNote(f.availability)
                 : f.availability === 'extra'
                   ? availabilityNote(f.availability)

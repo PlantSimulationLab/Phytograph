@@ -184,10 +184,53 @@ export function columnSlugs(scan: WithData): Set<string> {
   // The buffer key itself must NOT be renamed at the source: it indexes the GPU
   // buffer (see octreeAttributeSlug's note). Mapping it here, where the question
   // is "which columns does this cloud carry?", keeps both layers correct.
-  for (const k of Object.keys(oct?.attributeLabels ?? {})) slugs.add(octreeAttributeSlug(k));
-  for (const k of Object.keys(oct?.attributeRanges ?? {})) slugs.add(octreeAttributeSlug(k));
+  //
+  // But `gps_time` is a STANDARD LAS dimension: laspy writes it into every
+  // point-format-1/3 record and PotreeConverter therefore emits a `gps-time`
+  // attribute for EVERY octree, all-zero on a cloud that never had per-pulse
+  // time (a plain 7-column XYZ, say). Counting that empty column as a timestamp
+  // made this function claim a timestamp on literally every cloud — which is how
+  // Backfill Misses offered itself, and the Scans dropdown listed "timestamp",
+  // for a scan the backend then refused with "carries neither a per-pulse
+  // timestamp nor scan-grid row/column indices". The backend's own rule is
+  // NON-DEGENERATE data, not mere presence (`_las_read` requires
+  // `np.any(vals != vals.flat[0])` before it routes gps_time to
+  // CloudSession.timestamps), so mirror that here: a column whose octree range
+  // is empty (min == max) carries nothing and is not reported.
+  for (const k of Object.keys(oct?.attributeLabels ?? {})) {
+    if (isDegenerateOctreeColumn(oct, k)) continue;
+    slugs.add(octreeAttributeSlug(k));
+  }
+  for (const [k, range] of Object.entries(oct?.attributeRanges ?? {})) {
+    if (isDegenerateRange(range)) continue;
+    slugs.add(octreeAttributeSlug(k));
+  }
   for (const k of Object.keys(scan.data?.scalarFields ?? {})) slugs.add(k);
   return slugs;
+}
+
+// An octree attribute range that spans nothing (min == max on every component).
+// PotreeConverter emits one for each standard LAS dimension the source never
+// populated, so this is what distinguishes "the column exists in the schema"
+// from "the column carries data". A range with no min/max recorded is NOT
+// degenerate — absence of a range is absence of evidence, and the pre-existing
+// behaviour (trust the key) is the safe default there.
+function isDegenerateRange(range: unknown): boolean {
+  const r = range as { min?: unknown; max?: unknown } | undefined;
+  if (!Array.isArray(r?.min) || !Array.isArray(r?.max)) return false;
+  if (r.min.length === 0 || r.min.length !== r.max.length) return false;
+  return r.min.every((v, i) => v === (r.max as unknown[])[i]);
+}
+
+// Whether the octree column `key` is present-but-empty. Labels alone say nothing
+// about content, so the verdict comes from the matching range when there is one.
+function isDegenerateOctreeColumn(
+  oct: { attributeRanges?: Record<string, unknown> } | undefined,
+  key: string,
+): boolean {
+  const ranges = oct?.attributeRanges;
+  if (!ranges || !(key in ranges)) return false;
+  return isDegenerateRange(ranges[key]);
 }
 
 // True when the cloud carries the columns needed to reconstruct misses: a
@@ -218,15 +261,64 @@ export function missReconSources(scan: WithData): MissReconSources {
   return { hasTimestamp, hasGrid, preferred };
 }
 
+// The per-pulse columns that make a cloud multi-return. All three are required:
+// target_index/target_count group returns into pulses, and the timestamp is the
+// join key. Mirrors the backend's own rule in `_lad_labels_vals` (main.py) —
+//   is_multi = has_timestamp and all(target_index, target_count present)
+// — and the C++ `isMultiReturnData()` (target_count > 1). Keep the three in sync;
+// the backend is authoritative, this is the renderer's read of the same columns.
+const MULTI_RETURN_COLUMNS = ['timestamp', 'target_index', 'target_count'] as const;
+
+/**
+ * The return mode a cloud's DATA actually exhibits, independent of any label a
+ * user or an imported XML put on the scan.
+ *
+ * This is the honest answer for a real (imported) scan: whether an inversion or a
+ * triangulation treats it as multi-return is decided by these columns backend-side
+ * and never by `params.returnMode`. Returns null when the scan carries no point
+ * data yet (nothing to detect — e.g. the Add Scan dialog before data is attached).
+ *
+ * Reads through `columnSlugs`, so it inherits the `gps-time` → `timestamp`
+ * normalisation: comparing raw octree buffer keys would miss the timestamp on any
+ * cloud that round-tripped through LAS gps_time and report it as single-return.
+ */
+export function detectedReturnMode(scan: WithData): 'single' | 'multi' | null {
+  if (scan.data == null) return null;
+  const slugs = columnSlugs(scan);
+  return MULTI_RETURN_COLUMNS.every((s) => slugs.has(s)) ? 'multi' : 'single';
+}
+
+/** Which of the multi-return columns a cloud is missing (for the UI's detail line). */
+export function missingMultiReturnColumns(scan: WithData): string[] {
+  const slugs = columnSlugs(scan);
+  return MULTI_RETURN_COLUMNS.filter((s) => !slugs.has(s));
+}
+
 // A scan is eligible for Backfill Misses when it has data, does NOT already carry
 // misses (octree.hasMisses), and carries the columns to reconstruct them. Scans
 // that already have misses (E57 / structured PLY) are skipped; scans with neither
 // timestamp nor grid can't be recovered (re-import a miss-retaining format).
-export function isBackfillEligible(scan: WithData): boolean {
+//
+// A KNOWN SCANNER ORIGIN IS ALSO REQUIRED, and it is not a display detail. The
+// backend derives every hit's ray direction as `cart2sphere(xyz - origin)`
+// (`_directions_from_origin`) and hands the same point to `cloud.addScan()` as
+// the apex the reconstructed misses fan out from. Get the origin wrong and every
+// direction is wrong: measured on a scanner 22 m from the world origin, assuming
+// [0,0,0] threw beam directions off by 76 deg on average (max 176 deg) and
+// smeared a constant 8 m return radius across 14.6-30.6 m.
+//
+// The renderer used to substitute `[0,0,0]` for a scan with no position, so
+// Backfill Misses ran happily on a fabricated apex and produced confident
+// garbage. There is no partial credit here — without the true origin the answer
+// is wrong, so this is a hard gate rather than a warning.
+export function isBackfillEligible(
+  scan: { data?: PointCloudData; params?: ScanParameters },
+): boolean {
   return (
     scan.data != null &&
     scan.data.octree?.hasMisses !== true &&
-    missColumnsAvailable(scan)
+    missColumnsAvailable(scan) &&
+    scanHasKnownOrigin(scan)
   );
 }
 
@@ -237,8 +329,13 @@ export function isBackfillEligible(scan: WithData): boolean {
 // file header), whose `origin` is a real scanner position. A plain XYZ/LAS/PLY
 // import has NEITHER — its params stay undefined (see App buildScanFromWizard
 // result), so the overlay must stay disabled: a placeholder origin would scatter
-// the misses into a wrong-frame disk. Misses are still COMPUTED (valid for LAD as
-// directions); only their visualisation is gated.
+// the misses into a wrong-frame disk.
+//
+// This gates COMPUTATION as well as display. It used to gate only the overlay,
+// on the reasoning that misses were "still valid for LAD as directions" — that
+// was wrong. The directions ARE the thing the origin determines
+// (`cart2sphere(xyz - origin)` backend-side), so a scan with no known origin
+// cannot be backfilled at all; see `isBackfillEligible`.
 export function scanHasKnownOrigin(scan: { data?: PointCloudData; params?: ScanParameters }): boolean {
   return scan.data?.octree?.scanOrigin != null || scan.params != null;
 }

@@ -4,8 +4,6 @@ import { DebouncedNumberInput } from './DebouncedNumberInput';
 import {
   DEFAULT_SCAN_PARAMETERS,
   applyTrajectoryToParams,
-  type PulseReturnMode,
-  type SingleReturnSelection,
   type ScanParameters,
   type ScanPattern,
 } from '../lib/scanParameters';
@@ -53,6 +51,18 @@ interface ScanParametersPopupProps {
   // create voxel-grid meshes from any <grid> blocks.
   showBulkImport?: boolean;
   onBulkImport?: (scans: HeliosXmlScan[], grids: HeliosXmlGrid[], xmlPath: string, warnings: string[]) => void | Promise<void>;
+  // What the target scan's POINT DATA says about its return mode, for the
+  // read-only summary. Return mode is no longer an editable scan property: for a
+  // real scan it's decided by the per-pulse columns the data carries (which is
+  // what every backend consumer reads), and for a synthetic run it's chosen in
+  // the Synthetic Scan Options dialog. `null` when there is no data to inspect
+  // (creating a scan position, or a params-only scan) — the section is hidden.
+  // `missingColumns` names the absent multi-return columns so a single-return
+  // verdict says WHY. Supplied by the parent, which holds the cloud.
+  detectedReturn?: {
+    mode: 'single' | 'multi' | null;
+    missingColumns: string[];
+  };
   // Open the manual trajectory editor with the current label + params. The popup
   // closes and the parent drives the docked pose table + 3D pose editing; Save
   // there finalizes the scan (create) or updates it (edit). When present, the
@@ -70,6 +80,7 @@ export function ScanParametersPopup({
   showBulkImport,
   onBulkImport,
   onBuildTrajectory,
+  detectedReturn,
 }: ScanParametersPopupProps) {
   // Resolve the active mode. `initial` implies 'edit'; otherwise default to
   // 'create' unless the caller explicitly asked for 'attach'.
@@ -969,93 +980,38 @@ export function ScanParametersPopup({
             </>
           )}
 
-          <div>
-            <label className="block text-sm font-medium text-neutral-300 mb-1.5">Return type</label>
-            <div className="flex gap-2">
-              {(['single', 'multi'] as PulseReturnMode[]).map(rm => (
-                <button
-                  key={rm}
-                  type="button"
-                  data-testid={`scan-return-${rm}`}
-                  onClick={() => setParams(p => ({ ...p, returnMode: rm }))}
-                  className={`flex-1 px-3 py-2 rounded-lg text-sm capitalize transition-colors ${
-                    params.returnMode === rm
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
-                  }`}
-                >
-                  {rm}-return
-                </button>
-              ))}
-            </div>
-            <p className="mt-1.5 text-[11px] text-neutral-500">
-              {params.returnMode === 'single'
-                ? 'One return per pulse, selected below. For an idealized exact scan, set rays per pulse to 1 when you run the scan.'
-                : 'All returns per pulse up to the cap below (full-waveform; penetrates foliage).'}
-            </p>
-          </div>
-
-          {params.returnMode === 'multi' && (
-            <div>
-              <label className="block text-xs text-neutral-500 mb-1">Max returns per pulse</label>
-              <DebouncedNumberInput
-                data-testid="scan-max-returns"
-                min={1}
-                step={1}
-                debounceMs={0}
-                parse={(s) => parseInt(s, 10)}
-                value={params.maxReturns}
-                onCommit={(v) => setParams(p => ({ ...p, maxReturns: Math.max(1, Math.round(v)) }))}
-                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-              />
+          {/* Return mode — REPORTED, not set. Nothing in the app reads a
+              user-declared return mode for a real scan: LAD and triangulation
+              decide multi vs single from the per-pulse columns the data carries
+              (backend _lad_labels_vals / isMultiReturnData), and beam optics are
+              read only inside helios-core's syntheticScan. So the value the user
+              needs here is what their DATA says, and the value that drives a
+              simulation belongs to the run — it lives in Synthetic Scan Options.
+              Hidden with no data to inspect (creating a bare scan position). */}
+          {detectedReturn?.mode != null && (
+            <div
+              data-testid="scan-detected-return"
+              data-return-mode={detectedReturn.mode}
+              className="border border-neutral-700 rounded-lg p-3 bg-neutral-800/50"
+            >
+              <p className="text-xs text-neutral-400 mb-1">Detected from point data</p>
+              <p className="text-sm text-neutral-200">
+                {detectedReturn.mode === 'multi' ? 'Multi-return' : 'Single-return'}
+              </p>
+              <p className="mt-1 text-[11px] text-neutral-500">
+                {detectedReturn.mode === 'multi'
+                  ? 'This cloud carries per-pulse returns (target index, target count and timestamp), so leaf-area density and triangulation group its returns into pulses automatically.'
+                  : detectedReturn.missingColumns.length > 0
+                    ? `Treated as one return per point — no ${detectedReturn.missingColumns.join(', ')} column${detectedReturn.missingColumns.length === 1 ? '' : 's'}. Re-import a format that preserves the per-pulse columns for a multi-return inversion.`
+                    : 'Treated as one return per point.'}
+              </p>
+              <p className="mt-1.5 text-[11px] text-neutral-500">
+                Return type and beam optics for a simulated scan are set in{' '}
+                <span className="text-neutral-300">Synthetic Scan Options</span> when
+                you run one.
+              </p>
             </div>
           )}
-
-          {params.returnMode === 'single' && (
-            <div>
-              <label className="block text-xs text-neutral-500 mb-1">Return selection</label>
-              <select
-                data-testid="scan-return-selection"
-                value={params.returnSelection}
-                onChange={(e) => setParams(p => ({ ...p, returnSelection: e.target.value as SingleReturnSelection }))}
-                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-              >
-                <option value="strongest">Strongest</option>
-                <option value="first">First (nearest)</option>
-                <option value="last">Last (farthest)</option>
-              </select>
-            </div>
-          )}
-
-          {/* Beam optics define the cone the sub-rays sample for both single- and
-              multi-return scans. (At rays-per-pulse = 1 the cone collapses to an
-              exact ray and these are effectively ignored.) */}
-          <div data-testid="scan-beam-fields" className="border border-neutral-700 rounded-lg p-3 space-y-3 bg-neutral-800/50">
-            <div>
-              <label className="block text-xs text-neutral-500 mb-1">Beam exit diameter (m)</label>
-              <DebouncedNumberInput
-                data-testid="scan-beam-diameter"
-                min={0}
-                step="any"
-                debounceMs={0}
-                value={params.beamExitDiameterM}
-                onCommit={(v) => setParams(p => ({ ...p, beamExitDiameterM: Math.max(0, v) }))}
-                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-neutral-500 mb-1">Beam divergence (mrad)</label>
-              <DebouncedNumberInput
-                data-testid="scan-beam-divergence"
-                min={0}
-                step="any"
-                debounceMs={0}
-                value={params.beamDivergenceMrad}
-                onCommit={(v) => setParams(p => ({ ...p, beamDivergenceMrad: Math.max(0, v) }))}
-                className="w-full px-3 py-2 bg-neutral-700 border border-neutral-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500"
-              />
-            </div>
-          </div>
 
           {multibeamNeedsTrajectory && (
             <p data-testid="scan-multibeam-needs-trajectory" className="text-xs text-amber-300">

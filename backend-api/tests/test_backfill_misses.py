@@ -445,6 +445,100 @@ def test_orphaned_session_404(stub_pyhelios):
 
 
 # ---------------------------------------------------------------------------
+# A KNOWN SCANNER ORIGIN IS REQUIRED
+#
+# The reconstruction is geometric: `_directions_from_origin` derives every hit's
+# ray as cart2sphere(xyz - origin), and cloud.addScan() fans the recovered misses
+# from that same apex. So a placeholder origin does not merely degrade the
+# result, it invalidates it — while still returning a full, plausible-looking
+# miss cloud, which is the worst possible failure mode.
+#
+# THE REPORTED BUG: a scan with row/column indices but no scan position ran to
+# completion and produced garbage, because the renderer substituted [0,0,0].
+# Measured for a scanner 22 m from the world origin: 76 deg mean beam-direction
+# error (max 176 deg), and a constant 8 m return radius smeared over 14.6-30.6 m.
+# ---------------------------------------------------------------------------
+
+def test_unknown_origin_is_rejected(stub_pyhelios):
+    """A scan whose caller admits the origin is a placeholder must be refused."""
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+
+    with pytest.raises(main.HTTPException) as exc:
+        _call(sess.session_id, origin=[0, 0, 0], origin_known=False)
+    assert exc.value.status_code == 400
+    assert "scanner position" in str(exc.value.detail).lower()
+    # Refused BEFORE any work: no cloud built, no buffer written.
+    assert not stub_pyhelios.instances
+    assert sess.backfilled_misses is None
+
+
+def test_known_origin_at_world_zero_is_allowed(stub_pyhelios):
+    """[0,0,0] is a legitimate scanner position when it is the REAL one.
+
+    The guard keys off the explicit flag, not the coordinates — a scan actually
+    authored at the world origin must still backfill, which is exactly why the
+    numbers alone cannot decide this.
+    """
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 0], origin_known=True)
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+
+
+def test_origin_known_defaults_true_for_existing_callers(stub_pyhelios):
+    """Omitting the flag keeps the old behaviour, so a caller that always sends a
+    real origin is unaffected by the new field."""
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 5])
+    assert resp["backfilled"] == _FakeCloud.SYNTH
+
+
+def test_moving_platform_is_exempt_from_the_origin_guard(stub_pyhelios):
+    """A moving scan's geometry rests on per-beam trajectory origins, not the
+    static apex, so an unknown `origin` is not disqualifying there.
+
+    Asserted by the error it DOES produce: this fixture has no timestamp, so the
+    trajectory join fails with its own message. Reaching that error proves the
+    origin guard did not fire first.
+    """
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"row_index": [0, 1, 2], "column_index": [0, 0, 1]},
+        [{"slug": "row_index", "label": "Row Index"},
+         {"slug": "column_index", "label": "Column Index"}],
+    )
+    _register(sess)
+
+    resp = _call(
+        sess.session_id, origin=[0, 0, 0], origin_known=False,
+        trajectory={"poses": [
+            {"t": 0.0, "x": 0.0, "y": 0.0, "z": 0.0,
+             "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+            {"t": 1.0, "x": 1.0, "y": 0.0, "z": 0.0,
+             "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+        ]},
+    )
+    assert "timestamp" in resp.get("error", "").lower()
+
+
+# ---------------------------------------------------------------------------
 # Reader integration: the buffer flows into the misses overlay + LAD arrays
 # ---------------------------------------------------------------------------
 

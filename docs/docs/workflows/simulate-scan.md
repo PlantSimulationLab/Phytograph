@@ -29,14 +29,16 @@ You need geometry in the scene to scan: typically a generated
 
     - **Marks the position with that instrument's shape**, drawn to its
       real-world size (a Velodyne puck is ~14 cm; a Leica P40 ~40 cm).
-    - **Auto-fills the instrument-fixed parameters** — beam optics
-      (diameter and divergence), scan pattern, return type (single or
-      multi, with the matching max-returns/selection), per-channel beam
-      elevations (for spinning sensors), and the maximum angular sweep —
-      from the manufacturer's datasheet. Resolution (point counts) is
-      yours to set, and every auto-filled value stays editable. (Whether
-      to simulate an idealized exact scan is a per-run choice — set rays
-      per pulse to 1 — not a property of the instrument.)
+    - **Auto-fills the instrument-fixed parameters** — scan pattern,
+      per-channel beam elevations (for spinning sensors), and the maximum
+      angular sweep — from the manufacturer's datasheet. Resolution (point
+      counts) is yours to set, and every auto-filled value stays editable.
+
+    Picking a model also records that instrument's datasheet **return type and
+    beam optics** on the scan. Those are kept as the instrument's identity —
+    they travel with a Helios XML export — but they do **not** drive a
+    simulation: the return type and beam optics a run uses are chosen in
+    **Synthetic Scan Options**, once for the whole run.
 
     The RIEGL miniVUX-3UAV is the **single-channel** spinning case: one
     laser folded through a 45° rotating mirror that sweeps a flat 360°
@@ -163,45 +165,7 @@ You need geometry in the scene to scan: typically a generated
           [Moving-platform scans](#moving-platform-drone-robot-tractor-scans).
         - **Azimuth (φ) min / max** — horizontal bounds, as for raster.
 
-7. **Return type** — how many returns each pulse reports. Both types sample
-   the beam **cone** (set its width with the beam exit diameter + divergence
-   below); how *finely* the cone is sampled is the **rays per pulse** run
-   option set later. For an idealized **exact** scan (one ray per pulse, no
-   beam footprint), set rays per pulse to 1 at run time.
-
-    === "Single"
-
-        At most **one** return per pulse. One extra control:
-
-        - **Return selection** — which return to keep when the cone resolves
-          several: **strongest**, **first** (nearest), or **last** (farthest)
-
-        Models single-return instruments (Leica, FARO, single-return
-        spinning sensors).
-
-    === "Multi"
-
-        **All** detected returns up to a **max returns** cap — partial
-        penetration of foliage and porous canopy. One extra control:
-
-        - **Max returns** — cap on returns reported per pulse
-
-        Models full-waveform / multi-echo instruments (RIEGL VZ-400i,
-        miniVUX). Produces realistic returns from leaves.
-
-    Both types also expose **Beam exit diameter (m)** — note the unit is
-    **metres**, default `0.01` (i.e. 1 cm) — and **beam divergence**
-    (mrad). Together they define the cone the sub-rays sample.
-
-    !!! note "Behavior change since v0.34"
-
-        A single-return scan now samples the beam **cone** (at rays per pulse
-        > 1) rather than always firing one exact ray, so its output changes
-        slightly — it models the finite beam footprint. For the old exact
-        single-surface result, set **rays per pulse** to 1 when you run the
-        scan.
-
-8. **Scanner tilt** — residual lean of the scanner away from level, in
+7. **Scanner tilt** — residual lean of the scanner away from level, in
    degrees. Real terrestrial scanners are never perfectly plumb; a
    dual-axis inclinometer reports the lean as two angles:
     - **Roll** — applied first, about the scanner's lateral axis
@@ -213,7 +177,7 @@ You need geometry in the scene to scan: typically a generated
     <kbd>R</kbd> <kbd>X</kbd> and <kbd>R</kbd> <kbd>Y</kbd> on a selected
     scan set roll and pitch directly in the 3D view.
 
-9. **Scanner heading** — the initial azimuth the scanner faces in the
+8. **Scanner heading** — the initial azimuth the scanner faces in the
    horizontal plane, in degrees (`0` is the default heading; counter-clockwise
    positive). Like tilt, it's a property of the scan and editable later. The
    heading rotates both the scanner **marker** in the 3D view and the
@@ -221,7 +185,7 @@ You need geometry in the scene to scan: typically a generated
    axis so a partial-azimuth scan points where the marker faces. The field is
    stored and round-trips through XML (`<scanAzimuthOffset>`).
 
-10. Click **Add Scan** to place the scanner. A marker — the selected
+9. Click **Add Scan** to place the scanner. A marker — the selected
    instrument's shape, or a sphere for a generic scanner — appears in the
    3D view at the origin. To preview the scanner's angular coverage, enable
    **View → Show Scan Pattern Wireframes** — a faint shell (a partial sphere
@@ -425,10 +389,32 @@ remembered and pre-filled next time:
 - **Crop scan to grid** — restrict ray-tracing to the cells of a voxel
   grid. Enabled only when exactly one voxel grid is visible; the scan
   then ignores geometry outside that grid.
+- **Returns** — **return type**, and the one control that follows from it:
+
+    === "Single"
+
+        At most **one** return per pulse, chosen by **return selection** —
+        **strongest**, **first** (nearest), or **last** (farthest). Models
+        single-return instruments (Leica, FARO, single-return spinning
+        sensors).
+
+    === "Multi"
+
+        **All** detected returns up to a **max returns** cap — partial
+        penetration of foliage and porous canopy. Models full-waveform /
+        multi-echo instruments (RIEGL VZ-400i, miniVUX), and produces
+        realistic returns from leaves.
+
+    One setting applies to every scan position in the run, so a scene mixing
+    instruments is simulated with the same optics.
+
 - **Beam-cone sampling** — **rays per pulse** (sub-rays fired across each
-  pulse's beam cone) and **pulse distance threshold** (m, how close sub-ray
-  hits must be to merge into one return). Set **rays per pulse** to 1 for an
-  idealized exact scan (one ray per pulse, no beam footprint).
+  pulse's beam cone), **pulse distance threshold** (m, how close sub-ray
+  hits must be to merge into one return), and the cone's geometry: **beam
+  exit diameter** (m — note the unit; default `0.01`, i.e. 1 cm) and **beam
+  divergence** (mrad). Set **rays per pulse** to 1 for an idealized exact
+  scan — the cone collapses to one exact ray and the two beam-geometry
+  fields stop mattering.
 - **Retained per-hit fields** — which auto-generated per-hit scalars are
   kept on the resulting cloud and offered in the viewer's **Color by**
   list. Check **distance**, **timestamp**, **return index/count**, **pulse
