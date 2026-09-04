@@ -186,6 +186,28 @@ const treeisoExtraArgs = [
   '--add-data', `${join(backendDir, 'vendor', 'treeiso')}${sep}treeiso`,
 ];
 
+// The RIEGL reader. On macOS it runs inside the phytograph-riegl container and
+// none of this matters, but on Windows there is no container: the backend runs
+// rxp_reader as a child of itself (PHYTOGRAPH_RXP_READER re-entry in
+// backend_wrapper.py), so the module has to be IN the bundle.
+//
+// It lives in the Docker build context rather than backend-api/ because that
+// context is also what `docker build` ships to the image, and having two copies
+// of the reader would be worse than reaching across for one.
+//
+// rxp_shim.cpp and rxpshim.def travel as DATA, not code: they are the source of
+// the miss-recovery DLL, which is compiled on the user's machine on first use
+// because RIEGL's licence forbids redistributing a prebuilt copy (on Windows it
+// statically links their scanlib). _shim_source_dir() finds them beside
+// rxp_reader.py, which inside the bundle means sys._MEIPASS.
+const rieglDir = join(root, 'docker', 'riegl');
+const rieglExtraArgs = [
+  '--paths', rieglDir,
+  '--hidden-import', 'rxp_reader',
+  '--add-data', `${join(rieglDir, 'rxp_shim.cpp')}${sep}.`,
+  '--add-data', `${join(rieglDir, 'rxpshim.def')}${sep}.`,
+];
+
 // --onedir vs --onefile:
 //   --onefile produces a single self-extracting binary that unpacks ~300 MB
 //   to a temp dir on EVERY launch. Adds 5-8s of cold start.
@@ -204,6 +226,7 @@ const pyinstallerArgs = [
   ...collectAll.flatMap((m) => ['--collect-all', m]),
   ...pyheliosExtraArgs,
   ...treeisoExtraArgs,
+  ...rieglExtraArgs,
   'backend_wrapper.py',
 ];
 

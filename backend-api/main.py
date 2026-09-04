@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.80.0"
+BACKEND_VERSION = "0.81.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -498,6 +498,10 @@ class _SpawnResult:
         self.stderr = stderr
 
 
+# Captured before any test can patch it -- see the win32 branch below.
+_SUBPROCESS_RUN = subprocess.run
+
+
 def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
     """`subprocess.run(capture_output=True)` without the fork().
 
@@ -528,6 +532,23 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
     exe = shutil.which(argv[0]) if not os.path.dirname(argv[0]) else argv[0]
     if not exe:
         raise FileNotFoundError(argv[0])
+
+    if sys.platform == "win32":
+        # Windows has no fork() at all: subprocess goes through CreateProcess,
+        # which never duplicates the loaded image, so not one word of the
+        # hazard above applies here -- and os.posix_spawn does not exist to be
+        # called anyway.
+        #
+        # Routed through a reference captured at import time on purpose. This
+        # function IS the sanctioned chokepoint for probes, and the test that
+        # forbids raw subprocess use patches subprocess.run to catch NEW probes
+        # that bypass it; capturing here keeps that test meaningful instead of
+        # making it fail on the one call site it is meant to permit.
+        proc = _SUBPROCESS_RUN(
+            [exe] + list(argv[1:]),
+            capture_output=True, text=text, timeout=timeout,
+        )
+        return _SpawnResult(proc.returncode, proc.stdout, proc.stderr)
 
     with tempfile.TemporaryFile() as out:
         fd = out.fileno()
@@ -562,29 +583,88 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
 
 
 # ---------------------------------------------------------------------------
-# RIEGL .rxp capability (Docker + user-supplied RiVLib)
+# RIEGL .rxp capability (user-supplied RiVLib, run natively or in a container)
 # ---------------------------------------------------------------------------
 #
 # Reading RIEGL raw scanner data needs RIEGL's closed-source RiVLib, which ships
-# for Windows and Linux only. On macOS the only way to run it is inside a
-# linux/amd64 container, so the whole feature is gated on three things being
-# true at once: Docker is reachable, the user has supplied a RiVLib copy, and
-# the image has been built from it.
+# for Windows and Linux only. TWO RUNTIMES follow from that, and _riegl_runtime
+# is the single place that decides which one a host gets:
+#
+#   "docker" (macOS) — there is no Darwin build of RiVLib at all, so a container
+#       is the only way a Mac can decode .rxp. Gated on three things at once:
+#       Docker reachable, RiVLib supplied, image built from it.
+#   "native" (Windows) — RiVLib runs here directly, so a container would mean
+#       installing Docker Desktop to run an x86 Linux VM to call a library that
+#       is already native. The reader is the SAME rxp_reader.py, executed as a
+#       child process instead of an entrypoint; only path mapping differs.
+#
+# Linux has a RiVLib build too and would join "native" with little work, but is
+# deliberately left out until it can be verified against real scanner data.
 #
 # RiVLib is NEVER redistributed — its licence forbids it ("You may NOT
 # distribute or modify the software for the use in commercial applications
 # without the written consent of RLMS"), so the user downloads it with their own
 # RIEGL account and points Phytograph at it. That is why this is a runtime probe
-# and not a build-time feature flag.
-#
-# v1 scope is macOS only. Windows and Linux keep the RiSCAN-export route for
-# now; a native (non-container) RiVLib path can be dropped in behind this same
-# probe later without the UI or the endpoints changing.
+# and not a build-time feature flag. The same clause is why the native path
+# still compiles the miss-recovery shim on the user's machine: on Windows that
+# code statically links RIEGL's scanlib, so a prebuilt copy could not ship.
 
 import threading as _threading
 
 RIEGL_IMAGE = "phytograph-riegl:latest"
 _RIEGL_DOCKER_TIMEOUT_S = 10
+
+
+def _riegl_host_os() -> str:
+    """The host OS, lower-cased.
+
+    Routed through platform.system() rather than sys.platform because the tests
+    fake the OS by monkeypatching it, and every RIEGL probe has to agree about
+    which host it is answering for.
+    """
+    import platform as _platform
+
+    return _platform.system().lower()
+
+
+def _riegl_runtime(host_os: "str | None" = None) -> "str | None":
+    """Which reader runtime this host gets: "docker", "native", or None."""
+    system = host_os if host_os is not None else _riegl_host_os()
+    if system == "darwin":
+        return "docker"
+    if system == "windows":
+        return "native"
+    return None
+
+
+def _riegl_scanifc_names() -> tuple:
+    """The scanifc artifact this OS's RiVLib download carries.
+
+    Windows ships two builds of it. scanifc-mt-s.dll links the CRT statically
+    and imports only WS2_32 and KERNEL32, so it works on a machine that has
+    merely extracted the SDK; scanifc-mt.dll additionally needs MSVCP140 and
+    VCRUNTIME140 from the Visual C++ redistributable. Prefer the former and keep
+    the latter as a fallback, so an older or repackaged download still resolves.
+    """
+    if _riegl_runtime() == "native":
+        return ("scanifc-mt-s.dll", "scanifc-mt.dll")
+    return ("libscanifc.so",)
+
+
+def _riegl_default_rivlib_root() -> "str | None":
+    """The conventional place to extract RiVLib, where a convention exists.
+
+    Windows only, and it matches what the import workflow docs tell users to do,
+    so following the docs means never touching the folder picker. macOS has no
+    equivalent: the container reads RiVLib from wherever the user put it, and
+    there has never been a documented location to guess at.
+    """
+    if _riegl_runtime() != "native":
+        return None
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    return str(Path(local) / "Phytograph" / "rivlib")
 
 
 def _riegl_rivlib_path(override: "str | None" = None) -> "str | None":
@@ -596,18 +676,38 @@ def _riegl_rivlib_path(override: "str | None" = None) -> "str | None":
     stale the moment the user picked a different folder, forcing a restart to
     take effect. PHYTOGRAPH_RIVLIB_PATH remains as a fallback for tests and for
     driving the backend standalone.
+
+    The documented default location is consulted LAST and only when it actually
+    holds a RiVLib: an unset setting should not report a path that is not there,
+    or the status would blame the folder's contents instead of saying the folder
+    was never chosen.
     """
     if override:
         return override
     p = os.environ.get("PHYTOGRAPH_RIVLIB_PATH")
-    return p or None
+    if p:
+        return p
+    default = _riegl_default_rivlib_root()
+    if default and _riegl_rivlib_valid(default):
+        return default
+    return None
+
+
+def _riegl_scanifc_path(root: "str | None") -> "Optional[Path]":
+    """The scanifc library inside a RiVLib download, or None if absent."""
+    if not root:
+        return None
+    lib_dir = Path(root) / "lib"
+    for name in _riegl_scanifc_names():
+        candidate = lib_dir / name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _riegl_rivlib_valid(path: "str | None") -> bool:
-    """A RiVLib directory is usable when it carries the shared object we load."""
-    if not path:
-        return False
-    return (Path(path) / "lib" / "libscanifc.so").is_file()
+    """A RiVLib directory is usable when it carries the library we load."""
+    return _riegl_scanifc_path(path) is not None
 
 
 def _docker_present() -> bool:
@@ -761,32 +861,38 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
     together so the UI never has to reconstruct the explanation. Every probe is
     guarded: a broken probe reports "unavailable", never a 500.
     """
-    import platform as _platform
-    system = _platform.system().lower()
+    runtime = _riegl_runtime()
 
     rivlib_path = _riegl_rivlib_path(rivlib_override)
     rivlib_ok = _riegl_rivlib_valid(rivlib_path)
 
-    # Platform veto first, mirroring device_info's macOS check: on Windows and
-    # Linux the feature is simply not offered in v1, so don't shell out to
-    # docker at all.
-    if system != "darwin":
+    # Platform veto first, mirroring device_info's macOS check: a host with no
+    # runtime at all (Linux today) must not pay a docker subprocess timeout just
+    # to be told the feature isn't offered.
+    if runtime is None:
         return {
             "available": False,
             "platform_supported": False,
+            "runtime": None,
             "docker_present": False,
             "image_built": False,
             "image_stale": False,
             "image_stamp": None,
             "expected_stamp": None,
+            "toolchain_present": False,
+            "misses_available": False,
             "rivlib_path": rivlib_path,
             "rivlib_valid": rivlib_ok,
             "image": RIEGL_IMAGE,
             "reason": (
-                "RIEGL .rxp import is macOS-only in this release. On Windows and "
-                "Linux, export to LAS/E57 from RiSCAN PRO or RiPROCESS instead."
+                "RIEGL .rxp import is available on macOS and Windows in this "
+                "release. On Linux, export to LAS/E57 from RiSCAN PRO or "
+                "RiPROCESS instead."
             ),
         }
+
+    if runtime == "native":
+        return _riegl_status_native(rivlib_path, rivlib_ok)
 
     # Guard the probe CALLS, not just their internals. Each helper already
     # swallows its own subprocess errors, but an unexpected failure here (a
@@ -861,9 +967,14 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
     return {
         "available": bool(docker_ok and image_ok and rivlib_ok and not image_stale),
         "platform_supported": True,
+        "runtime": "docker",
         "docker_present": docker_ok,
         "image_built": image_ok,
         "image_stale": image_stale,
+        # The container carries g++ and builds the shim on first use, so miss
+        # recovery is available exactly when the image is.
+        "toolchain_present": image_ok,
+        "misses_available": image_ok,
         # Both stamps travel so a support question ("why does it think this is
         # old?") is answerable from the status alone rather than by rerunning
         # docker by hand.
@@ -872,6 +983,96 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
         "rivlib_path": rivlib_path,
         "rivlib_valid": rivlib_ok,
         "image": RIEGL_IMAGE,
+        "reason": reason,
+    }
+
+
+def _riegl_toolchain_present() -> bool:
+    """Whether a C++ compiler is available to build the miss-recovery shim.
+
+    Native runtimes only. Delegates to the reader so there is ONE definition of
+    "can we build the shim" rather than a probe here that can drift from the
+    build it is predicting.
+    """
+    try:
+        # Inject this process's subprocess policy. The reader defaults to
+        # subprocess.run, which is right when IT is the child (a container, or
+        # the spawned reader), but wrong in the backend, where a fork would
+        # duplicate an image holding libhelios, open3d and PROJ -- see
+        # _spawn_run. One definition of the probe, two ways to run it.
+        return _rxp_reader_module().find_msvc_vcvars(
+            run=lambda argv, timeout: _spawn_run(argv, timeout=timeout)
+        ) is not None
+    except Exception:
+        # A broken probe reports "no toolchain", never a 500: this is an
+        # optional capability, and the import degrades rather than failing.
+        return False
+
+
+def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
+    """Status for a host that runs RiVLib directly (Windows).
+
+    TWO TIERS, and the difference matters. Points, per-point attributes, GNSS,
+    SOPs and every coordinate frame need nothing but the RiVLib download — no
+    Docker, no compiler, not even a Visual C++ redistributable, because we load
+    the static-CRT scanifc build. So `available` turns on rivlib alone.
+
+    No-return (sky) shots are the exception: recovering them means subclassing a
+    C++ class that Windows RiVLib exposes only through a static archive, so the
+    shim has to be compiled here from the user's own copy — RIEGL's licence
+    rules out shipping it prebuilt. That is reported separately as
+    `misses_available` rather than folded into `available`, because refusing the
+    whole import over it would withhold a scan the user can perfectly well read.
+
+    There is no image, so `image_built` is True and `image_stale` is False by
+    construction: the reader ships inside the backend bundle and is covered by
+    its source hash, which is exactly the staleness problem the Docker path had
+    to solve with a build-context stamp.
+    """
+    toolchain = _riegl_toolchain_present() if rivlib_ok else False
+
+    if not rivlib_path:
+        reason = (
+            "RiVLib has not been configured. It is proprietary and cannot be "
+            "distributed with Phytograph — download it from RIEGL's members "
+            "area and select the folder in Settings."
+        )
+    elif not rivlib_ok:
+        reason = (
+            f"No lib\\{_riegl_scanifc_names()[0]} under {rivlib_path}. Select "
+            "the top level of the extracted RiVLib download (the folder "
+            "containing bin/, include/ and lib/)."
+        )
+    elif not toolchain:
+        # Deliberately worded as a limitation of an otherwise working feature.
+        # The scan imports; what it lacks is the sky shell, and naming the one
+        # analysis that needs it is more use than naming the missing compiler.
+        reason = (
+            "RIEGL .rxp import is ready, but no-return (sky) shots cannot be "
+            "read: that part of RiVLib is a static library, so it has to be "
+            "compiled once on this machine. Install the free Visual Studio "
+            "Build Tools with the \"Desktop development with C++\" workload to "
+            "enable them. Leaf Area Density needs them; nothing else does."
+        )
+    else:
+        reason = "RIEGL .rxp import is ready."
+
+    return {
+        "available": bool(rivlib_ok),
+        "platform_supported": True,
+        "runtime": "native",
+        # Docker is not consulted at all on this path, and saying "present" for
+        # something never probed would be a lie the UI might render.
+        "docker_present": False,
+        "image_built": True,
+        "image_stale": False,
+        "image_stamp": None,
+        "expected_stamp": None,
+        "toolchain_present": toolchain,
+        "misses_available": bool(rivlib_ok and toolchain),
+        "rivlib_path": rivlib_path,
+        "rivlib_valid": rivlib_ok,
+        "image": None,
         "reason": reason,
     }
 
@@ -956,6 +1157,17 @@ def riegl_image_build(request: RieglImageBuildRequest, http_request: Request):
     status = _riegl_status(request.rivlib_path)
     if not status["platform_supported"]:
         raise HTTPException(status_code=503, detail=status["reason"])
+    if status["runtime"] != "docker":
+        # Nothing to build on a native runtime: the reader ships inside the
+        # backend bundle. Answer plainly rather than letting the docker probes
+        # below fail with a message about a daemon this host never needed.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "There is no reader image to build on this platform — "
+                "Phytograph runs RiVLib directly here."
+            ),
+        )
     if not status["docker_present"]:
         raise HTTPException(status_code=503, detail=status["reason"])
     # Building without a usable RiVLib would "succeed" and still leave the
@@ -1696,6 +1908,136 @@ def _resolve_riegl_runtime(rivlib_override: "str | None" = None) -> dict:
     raise HTTPException(status_code=503, detail=status["reason"])
 
 
+_RXP_READER_MODULE = None
+
+
+def _rxp_reader_source_dir() -> "Optional[Path]":
+    """The dev-tree location of rxp_reader.py, or None in a packaged build.
+
+    PyInstaller compiles the reader into the bundle, so a packaged backend
+    imports it by name and re-enters itself to run it. This is the
+    `npm run dev` path, where the reader still lives in the Docker build
+    context beside its Dockerfile.
+    """
+    if getattr(sys, "frozen", False):
+        return None
+    candidate = Path(__file__).resolve().parent.parent / "docker" / "riegl"
+    return candidate if (candidate / "rxp_reader.py").is_file() else None
+
+
+def _rxp_reader_module():
+    """Import the reader for capability questions ONLY — never to decode with.
+
+    Decoding always happens in a child process (see _rxp_reader_command), so a
+    fault inside RiVLib cannot take the backend down with it. What is imported
+    here answers questions the reader owns, currently just "is there a C++
+    toolchain", so that there is one definition of it rather than a copy here
+    that can drift from the build it predicts.
+
+    Importing is cheap and side-effect-free: the module only computes some path
+    strings and asserts its ctypes struct sizes. It does not load RiVLib.
+    """
+    global _RXP_READER_MODULE
+    if _RXP_READER_MODULE is None:
+        import importlib
+
+        src = _rxp_reader_source_dir()
+        if src is not None and str(src) not in sys.path:
+            sys.path.insert(0, str(src))
+        _RXP_READER_MODULE = importlib.import_module("rxp_reader")
+    return _RXP_READER_MODULE
+
+
+def _rxp_reader_command() -> "List[str]":
+    """Argv prefix to run the reader as a child of THIS process.
+
+    Mirrors _seg_worker_command: when frozen, `sys.executable` IS the bundled
+    backend binary and backend_wrapper dispatches into the reader because
+    PHYTOGRAPH_RXP_READER is set in the child's environment; in dev,
+    `sys.executable` is the venv python and we hand it the script directly.
+
+    A CHILD PROCESS rather than an in-process call, deliberately. It keeps the
+    native path shaped exactly like the container path — one JSON document on
+    stdout, progress on stderr, arrays through an output directory — so the
+    streaming reader below has a single implementation. It also means a RiVLib
+    fault kills a child instead of the backend, and cancellation stays a kill
+    rather than a cooperative flag threaded through the decoder.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    src = _rxp_reader_source_dir()
+    if src is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The RIEGL reader (rxp_reader.py) could not be located. It "
+                "should be at docker/riegl/rxp_reader.py in a development "
+                "checkout, or compiled into the packaged backend."
+            ),
+        )
+    return [sys.executable, str(src / "rxp_reader.py")]
+
+
+def _riegl_reader_invocation(args: List[str], mounts: List[tuple]) -> tuple:
+    """Build the argv and environment to run the reader on this host.
+
+    `mounts` is the LOGICAL path map — (host_path, reader_path, mode) — and it
+    is what lets one call site serve both runtimes. Docker turns each entry into
+    a -v bind mount and the reader genuinely sees `/project`; native rewrites
+    those same reader paths back to host paths inside `args`, because without a
+    mount namespace `/project` means nothing.
+
+    The rewrite is by WHOLE ARGUMENT rather than substring: the reader paths are
+    passed as their own argv entries (`["stream", "/project", "--out", "/out"]`),
+    and a substring replacement would also corrupt any scan name or option value
+    that happened to contain one.
+
+    Returns (cmd, env, container_name); container_name is None on native, where
+    the child is in our own process tree and killing it is enough.
+    """
+    env = os.environ.copy()
+    # Scrub the loader paths a PyInstaller-bundled Python injects: they break
+    # any child that expects system libraries. Applies to both runtimes.
+    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(var, None)
+
+    if _riegl_runtime() == "native":
+        remap = {reader: str(host) for host, reader, _mode in mounts}
+        cmd = _rxp_reader_command() + [remap.get(a, a) for a in args]
+        rivlib_root = next(
+            (h for h, reader, _m in mounts if reader == "/rivlib"), None
+        )
+        if rivlib_root:
+            # The reader defaults to the container's /rivlib, so a native run
+            # has to say where RiVLib actually is. Both vars are set: the reader
+            # needs the ROOT for the shim's include/lib paths, not just the
+            # library file.
+            env["RIVLIB_ROOT"] = str(rivlib_root)
+            scanifc = _riegl_scanifc_path(rivlib_root)
+            if scanifc is not None:
+                env["RIVLIB_SO"] = str(scanifc)
+        # Dispatches backend_wrapper into the reader when frozen; harmless in
+        # dev, where the script path is explicit.
+        env["PHYTOGRAPH_RXP_READER"] = "1"
+        # The reader's progress must reach us as it happens rather than in a
+        # lump at exit — the Dockerfile sets this for the same reason.
+        env["PYTHONUNBUFFERED"] = "1"
+        return cmd, env, None
+
+    import uuid as _uuid
+
+    # Unique per run so a cancel can only ever target this container, even with
+    # several imports in flight (the backend is genuinely concurrent).
+    container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
+    cmd = ["docker", "run", "--rm", "--name", container_name,
+           "--platform", "linux/amd64"]
+    for host, container, mode in mounts:
+        cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
+                else f"{host}:{container}"]
+    cmd += [RIEGL_IMAGE] + list(args)
+    return cmd, env, container_name
+
+
 def _run_riegl_container(
     args: List[str],
     mounts: List[tuple],
@@ -1720,42 +2062,39 @@ def _run_riegl_container(
 
       * Scrub DYLD_/LD_LIBRARY_PATH — a PyInstaller-bundled Python injects
         these and they break any child expecting system libs.
-      * stderr goes to a LOG FILE, not a pipe. The reader streams per-scan
-        progress there, and a poll loop with PIPE and no reader deadlocks once
-        the child fills the ~64 KB buffer. stdout IS a pipe, but it only
-        receives one JSON document at the very end, so it cannot fill.
+      * BOTH stdout and stderr go to FILES, not pipes. A poll loop that does
+        not drain a pipe deadlocks the moment the child fills the buffer, and
+        the child then never exits, so `poll()` never returns and the whole
+        thing hangs until the timeout.
+
+        stdout used to be a pipe on the reasoning that it "only receives one
+        JSON document at the very end, so it cannot fill". That is false: an
+        `inspect` document is ~1.8 KB per scan position, so a 16-position
+        project emits ~29 KB. It survived only because macOS gives a pipe 64 KB
+        — Windows gives 4 KB, where this hung every time, and a project with
+        enough positions would have hung on macOS too.
       * Popen + poll rather than subprocess.run, because run() retains no
         handle and its child could never be cancelled.
     """
     import subprocess
     import tempfile
-    import uuid as _uuid
 
-    # Unique per run so a cancel can only ever target this container, even with
-    # several imports in flight (the backend is genuinely concurrent).
-    container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
-
-    env = os.environ.copy()
-    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
-        env.pop(var, None)
-
-    cmd = ["docker", "run", "--rm", "--name", container_name,
-           "--platform", "linux/amd64"]
-    for host, container, mode in mounts:
-        cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
-                else f"{host}:{container}"]
-    cmd += [RIEGL_IMAGE] + list(args)
+    cmd, env, container_name = _riegl_reader_invocation(args, mounts)
 
     with tempfile.NamedTemporaryFile(
         mode="w+", suffix=".riegl.log", delete=False
     ) as logf:
         log_path = logf.name
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".riegl.out", delete=False
+    ) as outf:
+        out_path = outf.name
 
     proc = None
     try:
-        with open(log_path, "w") as log_handle:
+        with open(log_path, "w") as log_handle, open(out_path, "w") as out_handle:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=log_handle,
+                cmd, stdout=out_handle, stderr=log_handle,
                 env=env, text=True,
             )
 
@@ -1775,7 +2114,13 @@ def _run_riegl_container(
                     )
                 time.sleep(poll)
 
-            stdout, _ = proc.communicate()
+            proc.wait()
+
+        try:
+            with open(out_path, encoding="utf-8", errors="replace") as fh:
+                stdout = fh.read()
+        except OSError:
+            stdout = ""
 
         if proc.returncode != 0:
             tail = ""
@@ -1802,10 +2147,11 @@ def _run_riegl_container(
     finally:
         if proc is not None and proc.poll() is None:
             _kill_riegl_container(container_name, proc)
-        try:
-            os.unlink(log_path)
-        except Exception:
-            pass
+        for path in (log_path, out_path):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
 
 
 def _stream_riegl_container(
@@ -1835,20 +2181,8 @@ def _stream_riegl_container(
     """
     import subprocess
     import tempfile
-    import uuid as _uuid
 
-    container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
-
-    env = os.environ.copy()
-    for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
-        env.pop(var, None)
-
-    cmd = ["docker", "run", "--rm", "--name", container_name,
-           "--platform", "linux/amd64"]
-    for host, container, mode in mounts:
-        cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
-                else f"{host}:{container}"]
-    cmd += [RIEGL_IMAGE] + list(args)
+    cmd, env, container_name = _riegl_reader_invocation(args, mounts)
 
     with tempfile.NamedTemporaryFile(
         mode="w+", suffix=".riegl-stream.log", delete=False
@@ -2104,21 +2438,26 @@ def _load_riegl_scan_arrays(scan_dir: Path) -> "Optional[dict]":
     return arrays
 
 
-def _kill_riegl_container(container_name: str, proc=None) -> None:
-    """Stop a running reader container and its client process.
+def _kill_riegl_container(container_name: "str | None", proc=None) -> None:
+    """Stop a running reader and its client process.
 
     `docker kill` targets the container by name because that is the only handle
     that reaches it — the daemon owns it, not us. The local CLI process is then
     terminated too so the poll loop's `communicate()` cannot block on a pipe
     that will never close.
+
+    A None name means the NATIVE runtime, where the reader is an ordinary child
+    of this process: there is no container, and killing the child is both
+    necessary and sufficient.
     """
-    try:
-        _spawn_run(
-            ["docker", "kill", container_name],
-            timeout=_RIEGL_DOCKER_TIMEOUT_S,
-        )
-    except Exception:
-        pass
+    if container_name is not None:
+        try:
+            _spawn_run(
+                ["docker", "kill", container_name],
+                timeout=_RIEGL_DOCKER_TIMEOUT_S,
+            )
+        except Exception:
+            pass
     if proc is not None:
         try:
             proc.kill()

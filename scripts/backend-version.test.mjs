@@ -67,6 +67,47 @@ describe('hashBackendSources', () => {
     expect(hashBackendSources()).toBe(before);
   });
 
+  it('changes when the RIEGL reader is edited', () => {
+    // The reader lives OUTSIDE backend-api/, in the Docker build context, but a
+    // native runtime compiles it into the bundle and runs it as a child of the
+    // backend — so an edit changes the shipped binary exactly like an edit to
+    // main.py does.
+    //
+    // It is called out separately because the directory walk above cannot see
+    // it, and the hole would be the precise shape this whole check exists to
+    // close: the stamp still matching after a reader change, `check:backend`
+    // printing a tick, and E2E passing against a bundle built from older code.
+    const reader = join(process.cwd(), 'docker', 'riegl', 'rxp_reader.py');
+    const before = hashBackendSources();
+    const orig = readFileSync(reader);
+    try {
+      writeFileSync(reader, Buffer.concat([orig, Buffer.from('\n# probe\n')]));
+      expect(hashBackendSources()).not.toBe(before);
+    } finally {
+      writeFileSync(reader, orig);
+    }
+    expect(hashBackendSources()).toBe(before);
+  });
+
+  it('changes when the miss-recovery shim sources are edited', () => {
+    // rxp_shim.cpp and rxpshim.def ship as bundle DATA and are compiled on the
+    // user's machine on first use. A stale bundle would hand them an older
+    // shim source than the reader expects, and the mismatch would surface as a
+    // missing ctypes symbol rather than as a staleness message.
+    for (const name of ['rxp_shim.cpp', 'rxpshim.def']) {
+      const f = join(process.cwd(), 'docker', 'riegl', name);
+      const before = hashBackendSources();
+      const orig = readFileSync(f);
+      try {
+        writeFileSync(f, Buffer.concat([orig, Buffer.from('\n; probe\n')]));
+        expect(hashBackendSources(), name).not.toBe(before);
+      } finally {
+        writeFileSync(f, orig);
+      }
+      expect(hashBackendSources(), name).toBe(before);
+    }
+  });
+
   it('ignores dev-only trees that never enter the bundle', () => {
     // research/ and tools/ are not compiled in, so hashing them would force
     // pointless 10-minute rebuilds for changes that cannot affect the binary.

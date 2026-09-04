@@ -21,13 +21,19 @@ this: export to LAS/LAZ or E57 and use the ordinary
 [import path](import-export.md). This feature exists for the case where the
 processing software isn't in the loop at all.
 
-!!! warning "macOS only, and it needs Docker"
+!!! info "What this needs, per platform"
     RIEGL's **RiVLib** — the only library that can read `.rxp` — ships for
-    Windows and Linux, not macOS. Phytograph therefore runs it inside a Linux
-    container, which means **Docker Desktop must be installed and running**.
+    Windows and Linux, not macOS. What that costs you depends on which you run:
 
-    On Windows and Linux this import is not offered in this release; export to
-    LAS/E57 from RiSCAN PRO or RiPROCESS instead.
+    | | What you need |
+    | --- | --- |
+    | **Windows** | The RiVLib download, and nothing else. It runs natively. |
+    | **macOS** | The RiVLib download **and Docker Desktop**, because there is no macOS build of RiVLib to run — Phytograph runs the Linux one in a container. |
+    | **Linux** | Not offered in this release; export to LAS/E57 from RiSCAN PRO or RiPROCESS instead. |
+
+    On Windows one optional extra buys you the sky/miss shell — see
+    [No-return shots need a C++ compiler on Windows](#no-return-shots-need-a-c-compiler-on-windows).
+    Everything else works without it.
 
 ## Before you start: install RiVLib
 
@@ -35,50 +41,116 @@ RiVLib is proprietary. Its licence forbids redistribution, so Phytograph
 **cannot ship it** — you download it yourself with your own RIEGL account, and
 Phytograph reads it from wherever you put it. Nothing is copied into the app.
 
-1. Sign in to RIEGL's members area and download **RiVLib Part 1** for
-   **`x86_64-linux-gcc9`**. The download page offers Parts 1–3 and several
-   compiler versions (gcc 5, 7, 9, 11, 13); Part 1 for gcc 9 is the only
-   combination Phytograph can use. Parts 2 and 3 are not needed.
+=== "Windows"
 
-    !!! note "Why the Linux build on a Mac?"
-        The library runs inside a Linux container, so it is the Linux build
-        that matters — not your Mac's architecture. The container is
-        `linux/amd64` regardless of whether you have Apple silicon.
+    1. Sign in to RIEGL's members area and download the **`x86_64-windows`**
+       build of RiVLib.
 
-    !!! warning "Why gcc 9 specifically"
-        RiVLib is distributed per compiler ABI, and the container it runs in is
-        pinned to a matching one (Debian bullseye, glibc 2.31). A build for
-        another gcc version will be *accepted* when you pick the folder — the
-        checklist only looks for `lib/libscanifc.so` — and then fail later,
-        when the reader tries to load it. If an import fails with a loader
-        error mentioning `GLIBC` or `libstdc++`, you have the wrong build:
-        download the gcc 9 one and point Phytograph at it instead.
+    2. Extract it to:
 
-2. Extract it. You want the folder that contains `bin/`, `include/` and `lib/`
-   — **not** `lib/` itself.
+        ```text
+        %LOCALAPPDATA%\Phytograph\rivlib
+        ```
 
-3. In Phytograph, open **Settings** (++cmd+comma++) and find
-   **RIEGL RiVLib folder**. Click **Choose…** and select that folder.
+        You want the folder that directly contains `bin/`, `include/` and
+        `lib/` — **not** `lib/` itself. Paste that path into File Explorer's
+        address bar to create or open it.
 
-4. The badge beside it should turn to **RIEGL ready**. If it doesn't, the
-   checklist below the setting names the missing piece:
+        !!! tip "Why that folder"
+            Phytograph looks there on its own, so extracting to it means you
+            can skip the Settings step entirely. Anywhere else works too — you
+            just have to point at it by hand.
 
-    | Checklist line | What to do |
-    | --- | --- |
-    | ✗ Docker running | Start Docker Desktop and reopen Settings |
-    | ✗ RiVLib folder | Choose the extracted folder (the one with `bin/`, `include/`, `lib/`) |
-    | ✗ Reader image up to date | Click **Build reader image** — a one-time step; the image is ~300 MB on disk once built |
+    3. Open **Settings** (++ctrl+comma++) and check the badge beside
+       **RIEGL RiVLib folder** reads **RIEGL ready**. If you extracted
+       somewhere else, click **Choose…** and select the folder first.
 
-    The image is always built locally from your own RiVLib copy; it is never
-    downloaded pre-made, because publishing it would mean redistributing RiVLib.
+    4. If the badge does not turn green, the checklist below the setting names
+       the missing piece:
 
-    After a Phytograph update the badge may read **RIEGL update pending**. That
-    is not something you need to act on: the reader inside the image travels
-    with the app, so an update can leave the image a version behind, and your
-    next import rebuilds it first — a second or two, since only the reader layer
-    changes and Docker already has the rest cached. It works offline. If you
-    would rather not wait mid-import, **Rebuild reader image** in Settings does
-    it now.
+        | Checklist line | What to do |
+        | --- | --- |
+        | ✗ RiVLib folder | Choose the extracted folder (the one with `bin/`, `include/`, `lib/`). Phytograph looks for `lib\scanifc-mt-s.dll` inside it. |
+        | ✗ No-return (sky) shots | Optional — see [below](#no-return-shots-need-a-c-compiler-on-windows). Scans import without it. |
+
+    There is no Docker, no image to build, and nothing to rebuild after a
+    Phytograph update.
+
+=== "macOS"
+
+    1. Sign in to RIEGL's members area and download **RiVLib Part 1** for
+       **`x86_64-linux-gcc9`**. The download page offers Parts 1–3 and several
+       compiler versions (gcc 5, 7, 9, 11, 13); Part 1 for gcc 9 is the only
+       combination Phytograph can use. Parts 2 and 3 are not needed.
+
+        !!! note "Why the Linux build on a Mac?"
+            The library runs inside a Linux container, so it is the Linux build
+            that matters — not your Mac's architecture. The container is
+            `linux/amd64` regardless of whether you have Apple silicon.
+
+        !!! warning "Why gcc 9 specifically"
+            RiVLib is distributed per compiler ABI, and the container it runs
+            in is pinned to a matching one (Debian bullseye, glibc 2.31). A
+            build for another gcc version will be *accepted* when you pick the
+            folder — the checklist only looks for `lib/libscanifc.so` — and
+            then fail later, when the reader tries to load it. If an import
+            fails with a loader error mentioning `GLIBC` or `libstdc++`, you
+            have the wrong build: download the gcc 9 one and point Phytograph
+            at it instead.
+
+    2. Extract it. You want the folder that contains `bin/`, `include/` and
+       `lib/` — **not** `lib/` itself.
+
+    3. In Phytograph, open **Settings** (++cmd+comma++) and find
+       **RIEGL RiVLib folder**. Click **Choose…** and select that folder.
+
+    4. The badge beside it should turn to **RIEGL ready**. If it doesn't, the
+       checklist below the setting names the missing piece:
+
+        | Checklist line | What to do |
+        | --- | --- |
+        | ✗ Docker running | Start Docker Desktop and reopen Settings |
+        | ✗ RiVLib folder | Choose the extracted folder (the one with `bin/`, `include/`, `lib/`) |
+        | ✗ Reader image up to date | Click **Build reader image** — a one-time step; the image is ~300 MB on disk once built |
+
+        The image is always built locally from your own RiVLib copy; it is
+        never downloaded pre-made, because publishing it would mean
+        redistributing RiVLib.
+
+        After a Phytograph update the badge may read **RIEGL update pending**.
+        That is not something you need to act on: the reader inside the image
+        travels with the app, so an update can leave the image a version
+        behind, and your next import rebuilds it first — a second or two, since
+        only the reader layer changes and Docker already has the rest cached.
+        It works offline. If you would rather not wait mid-import, **Rebuild
+        reader image** in Settings does it now.
+
+### No-return shots need a C++ compiler on Windows
+
+A laser shot that hits nothing is not stored in the `.rxp` as a point at all.
+Phytograph recovers those shots and places them on a far-field shell — they are
+what [Leaf Area Density](estimate-leaf-area-density.md) measures transmission
+against, and they are typically **30–45% of a scan**.
+
+Reading them uses a part of RiVLib that RIEGL ships on Windows only as a static
+library, which their licence does not let us distribute pre-built. So on
+Windows it is compiled once, on your machine, from your own RiVLib copy. That
+needs a C++ compiler:
+
+- Install the free **Visual Studio Build Tools** and select the
+  **Desktop development with C++** workload. (A full Visual Studio with that
+  workload works too.)
+- Nothing else to do: the next import builds it, in about two seconds, and
+  caches the result until you change RiVLib or update Phytograph.
+
+**Without it, scans still import** — points, reflectance, amplitude, deviation,
+returns, timestamps, GNSS and registration are all unaffected. What you lose is
+the sky shell, so the cloud has no **Miss** points under the Hit/Miss colour
+scheme and Leaf Area Density has nothing to work from. Settings shows this as
+its own checklist line rather than a failure, and an import that skipped them
+says so.
+
+macOS is unaffected: the container carries its own compiler.
 
 ## Import a project
 
@@ -259,6 +331,14 @@ Beer's-law transmission term.
 
 To see them, turn on **Show sky/miss points** for the scan.
 
+!!! warning "On Windows this needs a C++ compiler"
+    Reading these shots uses a part of RiVLib that RIEGL ships on Windows only
+    as a static library, so it has to be compiled once on your machine — see
+    [No-return shots need a C++ compiler on Windows](#no-return-shots-need-a-c-compiler-on-windows).
+    Without it the scan still imports, but with no sky shell at all, and Leaf
+    Area Density has nothing to measure transmission against. Phytograph says
+    so at import rather than leaving you to discover it later.
+
 ### What does come through
 
 | Field | Notes |
@@ -302,15 +382,27 @@ puts it back on the bounding box.
 
 ## Troubleshooting
 
-**"RIEGL .rxp import is macOS-only in this release."**
-: Expected on Windows and Linux. Export from RiSCAN PRO or RiPROCESS instead.
+**"RIEGL .rxp import is available on macOS and Windows in this release."**
+: Expected on Linux. Export from RiSCAN PRO or RiPROCESS instead.
 
-**"Docker is not running."**
+**"Docker is not running."** *(macOS)*
 : Start Docker Desktop. The badge re-checks on its own within a few seconds.
+  You will never see this on Windows — RiVLib runs natively there and Docker is
+  not consulted at all.
 
-**"No `lib/libscanifc.so` under …"**
+**"No `lib/libscanifc.so` under …"** *(macOS)* or
+**"No `lib\scanifc-mt-s.dll` under …"** *(Windows)*
 : The chosen folder isn't a RiVLib root. Pick the level containing `bin/`,
-  `include/` and `lib/`.
+  `include/` and `lib/`. The two platforms need *different downloads*, not just
+  different folders: macOS needs the Linux `x86_64-linux-gcc9` build (it runs in
+  a container), Windows the `x86_64-windows` one.
+
+**Windows: "no-return (sky) shots cannot be read".**
+: Install the free Visual Studio Build Tools with the **Desktop development with
+  C++** workload, then re-import — see
+  [above](#no-return-shots-need-a-c-compiler-on-windows). Scans imported before
+  you install it have no sky shell and need re-importing to gain one; the points
+  themselves are unaffected.
 
 **The folder is accepted, but the import fails with a `GLIBC` or `libstdc++`
 loader error.**
@@ -327,10 +419,12 @@ loader error.**
   absent" (and macOS reported as *"Python quit unexpectedly"*). Update, or
   restart the app if you are on the current version.
 
-**The import is slower than RiSCAN PRO.**
-: Expected. RiVLib runs natively there; here it runs under x86 emulation inside
-  a container, and Phytograph additionally builds a level-of-detail octree so
-  large scans stay interactive.
+**macOS: the import is slower than RiSCAN PRO, or than the same scan on
+Windows.**
+: Expected. RiVLib runs natively in both those cases; on macOS it runs under x86
+  emulation inside a container. Phytograph also builds a level-of-detail octree
+  either way so large scans stay interactive. For scale, one 22 M-point VZ-1000
+  position takes roughly a minute end to end on Windows.
 
 **Dropping the folder does nothing / files are rejected one by one.**
 : Make sure you are dropping the `.riproject` **folder**, not its contents. A

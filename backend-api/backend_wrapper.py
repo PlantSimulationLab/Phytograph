@@ -23,6 +23,21 @@ if _SEG_WORKER_DIR:
     sys.exit(seg_worker.run(_SEG_WORKER_DIR))
 
 
+# ==================== RIEGL reader re-entry ====================
+# Same trick, same reason. On a NATIVE runtime (Windows) there is no container
+# to be the reader's entrypoint, so the backend runs rxp_reader as a child
+# process — and in a packaged build `sys.executable` is this binary, which has
+# no script argument to give it. PHYTOGRAPH_RXP_READER is how the child knows
+# to be the reader instead of the server.
+#
+# Also at the very top: the reader needs numpy and ctypes, not uvicorn or
+# matplotlib, and an import it does not use is pure startup cost on a path that
+# runs once per scan position.
+if os.environ.get("PHYTOGRAPH_RXP_READER"):
+    import rxp_reader
+    sys.exit(rxp_reader.main(sys.argv[1:]))
+
+
 # When spawned with PHYTOGRAPH_IMPORT_SELFTEST set, import the third-party modules
 # that only some code paths reach, report what failed, and exit — do NOT start the
 # server. scripts/build-backend.mjs runs this against the freshly built bundle.

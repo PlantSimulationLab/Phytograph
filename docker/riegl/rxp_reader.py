@@ -54,13 +54,16 @@ from __future__ import annotations
 import argparse
 import ctypes
 import glob
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 
@@ -70,7 +73,56 @@ import numpy as np
 # ctypes bindings
 # ---------------------------------------------------------------------------
 
-_LIB_PATH = os.environ.get("RIVLIB_SO", "/rivlib/lib/libscanifc.so")
+# WHERE RiVLib IS. The container bind-mounts it at /rivlib, which is what the
+# POSIX defaults below encode and what the Dockerfile relies on. A NATIVE run
+# (Windows) has no fixed location, so the backend passes RIVLIB_ROOT/RIVLIB_SO
+# built from the folder the user chose in Settings.
+_RIVLIB_ROOT = os.environ.get("RIVLIB_ROOT", "/rivlib")
+
+# The Windows SDK ships scanifc as a DLL, and there are TWO of them. Prefer
+# scanifc-mt-s.dll: it links the CRT statically and imports only WS2_32 and
+# KERNEL32, so a user who has merely extracted the SDK can read scans with
+# nothing else installed. scanifc-mt.dll needs MSVCP140/VCRUNTIME140 from the
+# Visual C++ redistributable, so it is only the fallback.
+_WINDOWS_SCANIFC_DLLS = ("scanifc-mt-s.dll", "scanifc-mt.dll")
+
+
+def _default_lib_path() -> str:
+    """The scanifc library to load when RIVLIB_SO is not set."""
+    if sys.platform != "win32":
+        return os.path.join(_RIVLIB_ROOT, "lib", "libscanifc.so")
+    lib_dir = os.path.join(_RIVLIB_ROOT, "lib")
+    for name in _WINDOWS_SCANIFC_DLLS:
+        candidate = os.path.join(lib_dir, name)
+        if os.path.isfile(candidate):
+            return candidate
+    # Nothing found: name the preferred one so the error says what is missing.
+    return os.path.join(lib_dir, _WINDOWS_SCANIFC_DLLS[0])
+
+
+_LIB_PATH = os.environ.get("RIVLIB_SO") or _default_lib_path()
+
+
+def _add_rivlib_dll_directory(lib_path: str) -> None:
+    """Let Windows resolve scanifc's own dependencies.
+
+    Python 3.8 stopped searching PATH when loading a DLL's dependencies, and the
+    resulting failure names OUR library rather than the missing dependency --
+    a WinError 126 on scanifc-mt.dll that actually means "no Visual C++
+    redistributable". Registering the SDK's lib directory avoids it. The -s
+    build needs nothing but system DLLs, so this only matters for the fallback,
+    but it costs nothing to always do.
+
+    No-op off Windows, where the container sets LD_LIBRARY_PATH=/rivlib/lib.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        os.add_dll_directory(os.path.dirname(os.path.abspath(lib_path)))
+    except (AttributeError, OSError):
+        # Not fatal on its own: the load below may still succeed, and if it
+        # does not, its own error is the more useful one to surface.
+        pass
 
 # Batch size for point reads. 200k points is ~3.2 MB of xyz + ~3.2 MB of
 # attributes, which keeps the C->numpy copy amortised without a large resident
@@ -179,29 +231,271 @@ class RxpError(RuntimeError):
 # libscanifc.so, which is bind-mounted at run time because RIEGL's licence
 # forbids baking it into the image.
 
-_SHIM_SRC = "/opt/riegl/rxp_shim.cpp"
-_SHIM_SO = "/tmp/librxpshim.so"
-_RIVLIB_ROOT = os.environ.get("RIVLIB_ROOT", "/rivlib")
+# WHY WINDOWS NEEDS A COMPILER WHEN THE POINTS PATH DOES NOT. On Linux the shim
+# links -lscanifc, i.e. the very shared object the ctypes reader already loads,
+# because libscanifc.so exports the C++ pointcloud class alongside the flat C
+# API. The Windows build does not: dumpbin /exports on scanifc-mt.dll lists
+# exactly 21 flat C symbols and no C++ ones, and pointcloud lives only inside
+# scanlib-mt.lib, a static archive. So on Windows the shim STATICALLY links
+# RIEGL code -- which is also precisely why we cannot ship it prebuilt: the DLL
+# would contain RIEGL's own object code, and their licence forbids
+# redistributing that. Building from the user's own SDK copy keeps the same
+# licence posture the container was designed around.
+#
+# Two no-compiler routes were measured and rejected before settling on this.
+# The demultiplexer cannot help: on a VZ-1000 every shot is carried inside
+# packed_shot_echos_hr, a compressed record whose ASCII form is opaque packed
+# words, and the stream contains no laser_shot_* record at all (measured: a
+# selections= request for every laser_shot variant returned a header and
+# nothing else). scanifc_point3dstream_open_with_arg's arg parameter has no
+# option vocabulary anywhere in the DLL either.
+
+_SHIM_BASENAME = "rxpshim" if sys.platform == "win32" else "librxpshim"
+_SHIM_SUFFIX = ".dll" if sys.platform == "win32" else ".so"
+
+# The free Visual Studio Build Tools carry this; a full Visual Studio install
+# does too. Phrased around what the user loses rather than what failed, because
+# on a fresh Windows machine this is a normal state and not a defect.
+_MSVC_MISSING = (
+    "No C++ compiler was found, so no-return (sky) shots cannot be read from "
+    "this scan. RIEGL ships that part of RiVLib as a static library, which "
+    "cannot be redistributed pre-built, so it has to be compiled once on this "
+    'machine. Install the free Visual Studio Build Tools with the "Desktop '
+    'development with C++" workload and re-import. Points, reflectance, GNSS '
+    "and registration are unaffected and work without it."
+)
 
 
-def _build_shim() -> str:
-    """Compile the miss-recovery shim if it isn't already built."""
-    if os.path.exists(_SHIM_SO):
-        return _SHIM_SO
-    if not os.path.exists(_SHIM_SRC):
-        raise RxpError(f"miss-recovery shim source missing at {_SHIM_SRC}")
+class ShimUnavailable(RxpError):
+    """No miss recovery on this machine, but the scan is still readable.
+
+    Distinct from a plain RxpError so stream_scan can carry on with a warning
+    rather than failing an import outright: everything except the miss shell is
+    unaffected. A shim that exists but FAILS still raises RxpError, because that
+    is a real fault rather than a missing optional toolchain.
+    """
+
+
+def _shim_source_dir() -> str:
+    """Where rxp_shim.cpp (and, on Windows, rxpshim.def) live.
+
+    The container COPYs them to /opt/riegl. A native run finds them beside this
+    file -- which inside the PyInstaller bundle means sys._MEIPASS, because
+    build-backend.mjs adds them with --add-data.
+    """
+    override = os.environ.get("PHYTOGRAPH_RXP_SHIM_SRC")
+    if override:
+        return override
+    here = os.path.dirname(os.path.abspath(__file__))
+    if os.path.isfile(os.path.join(here, "rxp_shim.cpp")):
+        return here
+    return "/opt/riegl"
+
+
+def _shim_cache_dir() -> str:
+    """Where the built shim is cached.
+
+    /tmp in the container: it is thrown away with the container anyway, and a
+    rebuild costs about a second.
+
+    On Windows the app lives under Program Files, which is not writable, so the
+    DLL joins the other per-user Phytograph state in %LOCALAPPDATA%. It
+    deliberately survives app updates -- the build is quick but needs a C++
+    toolchain, and requiring that at every launch would be a worse trade than
+    keeping one small file.
+    """
+    if sys.platform != "win32":
+        return "/tmp"
+    root = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    path = os.path.join(root, "Phytograph", "riegl")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _shim_stamp(src_dir: str) -> str:
+    """Identity of the shim we WANT, so a stale one is never loaded.
+
+    Covers the shim sources AND the RiVLib root, because on Windows the DLL
+    statically links RIEGL's scanlib: pointing Settings at a different SDK must
+    produce a different binary rather than silently reusing the old one. Same
+    reasoning as the reader image's build-context hash (_riegl_expected_stamp in
+    the backend), and it prevents the same failure -- an artifact that exists
+    but is not the one this code expects. Because the stamp is in the FILENAME,
+    a change simply misses the cache instead of needing a staleness check.
+    """
+    h = hashlib.sha256()
+    h.update(_RIVLIB_ROOT.encode("utf-8", "replace"))
+    for name in ("rxp_shim.cpp", "rxpshim.def"):
+        h.update(name.encode())
+        try:
+            with open(os.path.join(src_dir, name), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            h.update(b"<missing>")
+    return h.hexdigest()[:16]
+
+
+def _default_run(argv, timeout):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def find_msvc_vcvars(run=None):
+    """Locate vcvars64.bat for an installed MSVC C++ toolchain, or None.
+
+    vswhere is the supported way to find Visual Studio and ships with every
+    installation since 2017, the Build Tools included. The -requires filter
+    keeps a Visual Studio carrying only the .NET workload reading as "no
+    compiler", rather than being found and then failing at cl.
+
+    `run(argv, timeout)` lets the caller supply its own subprocess policy. The
+    default is right when this module IS the child process, but the backend
+    imports this function to answer the same question in-process, where an
+    ordinary fork would duplicate an image holding libhelios/open3d/PROJ and
+    crash in the post-fork window. It passes its posix_spawn-based runner
+    instead. Anything returning an object with .returncode and .stdout works.
+    """
+    if sys.platform != "win32":
+        return None
+    override = os.environ.get("PHYTOGRAPH_VCVARS")
+    if override:
+        return override if os.path.isfile(override) else None
+    vswhere = os.path.join(
+        os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"),
+        "Microsoft Visual Studio", "Installer", "vswhere.exe",
+    )
+    if not os.path.isfile(vswhere):
+        return None
+    runner = run or _default_run
+    try:
+        proc = runner(
+            [vswhere, "-latest", "-products", "*",
+             "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-property", "installationPath"],
+            60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in (proc.stdout or "").splitlines():
+        root = line.strip()
+        if not root:
+            continue
+        bat = os.path.join(root, "VC", "Auxiliary", "Build", "vcvars64.bat")
+        if os.path.isfile(bat):
+            return bat
+    return None
+
+
+def _compile_shim_msvc(src_dir: str, src: str, out: str) -> None:
+    """Build rxpshim.dll from the user's own RiVLib copy.
+
+    /MT plus the -s (static-CRT) RiVLib variants are deliberate: the result then
+    imports only WS2_32 and KERNEL32, so the shim needs no Visual C++
+    redistributable either. ws2_32/wsock32 are scanlib's declared WIN32 system
+    dependencies -- RiVLib's own cmake/rivlib-config.cmake lists them.
+
+    A .def file rather than __declspec(dllexport) in the source, because
+    extern "C" alone does NOT export from a DLL. The first build here produced a
+    perfectly valid 529 KB DLL that exported nothing at all, and ctypes failed
+    with "function 'rxpshim_collect_misses' not found". Keeping the export list
+    in a separate file leaves rxp_shim.cpp byte-identical across platforms, so
+    the container build is untouched by any of this.
+
+    /bigobj because <riegl/scanlib.hpp> pulls in ridataspec.hpp, a 2.4 MB
+    generated header that overruns MSVC's default section limit.
+    """
+    vcvars = find_msvc_vcvars()
+    if vcvars is None:
+        raise ShimUnavailable(_MSVC_MISSING)
+    exports = os.path.join(src_dir, "rxpshim.def")
+    if not os.path.exists(exports):
+        raise RxpError(f"miss-recovery shim export list missing at {exports}")
+
+    # Build inside the cache directory so publishing is a same-volume rename:
+    # os.replace across volumes raises, and %TEMP% is not always on the same
+    # drive as %LOCALAPPDATA%.
+    work = tempfile.mkdtemp(prefix="rxpshim-build-", dir=os.path.dirname(out))
+    try:
+        built = os.path.join(work, "rxpshim.dll")
+        cl = " ".join([
+            "cl", "/nologo", "/LD", "/EHsc", "/O2", "/MT", "/bigobj",
+            "/std:c++14",
+            '/I"%s"' % os.path.join(_RIVLIB_ROOT, "include"),
+            '"%s"' % src,
+            '/Fe:"%s"' % built,
+            # No /Fo: the build runs with cwd=work, so objects land there
+            # anyway -- and a quoted directory path has to end in a backslash,
+            # which MSVC reads as escaping the closing quote, swallowing the
+            # rest of the command line.
+            "/link",
+            '/DEF:"%s"' % exports,
+            '/LIBPATH:"%s"' % os.path.join(_RIVLIB_ROOT, "lib"),
+            "scanlib-mt-s.lib", "ws2_32.lib", "wsock32.lib",
+        ])
+        # THE COMMAND GOES IN A .bat, not on `cmd /c`'s command line. cl needs
+        # the environment vcvars64.bat exports (INCLUDE, LIB, PATH), so the two
+        # must run in one shell -- but every path here can contain spaces, and
+        # Python's Windows argument quoting backslash-escapes the inner quotes
+        # of a `cmd /c "call ... && cl ..."` string, so cmd receives \"C:\Program
+        # Files\... and reports it as an unrecognised command. Writing the
+        # script to a file sidesteps cmd's quoting rules entirely.
+        script = os.path.join(work, "build_shim.bat")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(
+                "@echo off\r\n"
+                'call "%s" >nul\r\n'
+                "%s\r\n" % (vcvars, cl)
+            )
+        proc = subprocess.run(
+            ["cmd", "/c", script], capture_output=True, text=True, cwd=work,
+        )
+        if proc.returncode != 0 or not os.path.exists(built):
+            raise RxpError(
+                "could not build the miss-recovery shim: "
+                + (proc.stdout or proc.stderr or "no compiler output")[-800:]
+            )
+        # Atomic publish: a concurrent import may be running the same build, and
+        # a half-written DLL on the cache path would be loaded by both.
+        os.replace(built, out)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _compile_shim_gcc(src: str, out: str) -> None:
+    """Build librxpshim.so inside the container.
+
+    Unchanged from the original single-platform implementation: -lscanifc works
+    here because libscanifc.so exports the C++ class too.
+    """
     cmd = [
         "g++", "-std=c++11", "-O2", "-fPIC", "-shared",
-        f"-I{_RIVLIB_ROOT}/include", _SHIM_SRC,
-        f"-L{_RIVLIB_ROOT}/lib", "-lscanifc", "-o", _SHIM_SO,
+        f"-I{_RIVLIB_ROOT}/include", src,
+        f"-L{_RIVLIB_ROOT}/lib", "-lscanifc", "-o", out,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not os.path.exists(_SHIM_SO):
+    if proc.returncode != 0 or not os.path.exists(out):
         raise RxpError(
             "could not build the miss-recovery shim: "
             + (proc.stderr or proc.stdout or "no compiler output")[-800:]
         )
-    return _SHIM_SO
+
+
+def _build_shim() -> str:
+    """Compile the miss-recovery shim if it isn't already built."""
+    src_dir = _shim_source_dir()
+    src = os.path.join(src_dir, "rxp_shim.cpp")
+    if not os.path.exists(src):
+        raise RxpError(f"miss-recovery shim source missing at {src}")
+    out = os.path.join(
+        _shim_cache_dir(),
+        f"{_SHIM_BASENAME}-{_shim_stamp(src_dir)}{_SHIM_SUFFIX}",
+    )
+    if os.path.exists(out):
+        return out
+    if sys.platform == "win32":
+        _compile_shim_msvc(src_dir, src, out)
+    else:
+        _compile_shim_gcc(src, out)
+    return out
 
 
 def collect_misses(rxp_path: str) -> dict:
@@ -261,8 +555,11 @@ class _Scanifc:
         if not os.path.exists(lib_path):
             raise RxpError(
                 f"RiVLib not found at {lib_path}. The library is user-supplied "
-                "(RIEGL licence forbids redistribution); bind-mount it at /rivlib."
+                "(RIEGL licence forbids redistribution): the container "
+                "bind-mounts it at /rivlib, and a native run reads it from the "
+                "folder configured in Settings."
             )
+        _add_rivlib_dll_directory(lib_path)
         self.lib = ctypes.CDLL(lib_path)
 
     def _last_error(self) -> str:
@@ -1799,8 +2096,19 @@ def stream_scan(
         # miss — origin + unit_dir * _MISS_GAP_DISTANCE — so the far-field
         # shell, the hits-only octree and LAD all treat them identically.
         n_hits = total
-        miss_info = collect_misses(rxp_path)
-        n_miss = int(miss_info["times"].size)
+        # A MISSING TOOLCHAIN IS NOT A FAILED IMPORT, but it is never silent.
+        # Points, reflectance, GNSS and registration are all unaffected; what is
+        # lost is the sky/miss shell, i.e. the transmission term LAD needs. So
+        # the scan imports with has_misses=false and SAYS SO in its warning,
+        # rather than either failing an import the user has already committed to
+        # or quietly handing LAD a cloud whose misses were never recorded.
+        miss_warning = None
+        try:
+            miss_info = collect_misses(rxp_path)
+        except ShimUnavailable as exc:
+            miss_info = None
+            miss_warning = str(exc)
+        n_miss = 0 if miss_info is None else int(miss_info["times"].size)
         if n_miss:
             miss_xyz = miss_info["dirs"] * _MISS_GAP_DISTANCE
             xyz = np.concatenate([xyz, miss_xyz], axis=0)
@@ -1827,8 +2135,11 @@ def stream_scan(
         total = n_hits + n_miss
 
         # The counts must reconcile or something is being dropped: every shot
-        # either produced returns or was a miss.
-        if miss_info["shots"] != miss_info["hit_shots"] + n_miss:
+        # either produced returns or was a miss. Skipped when the shim was
+        # unavailable, since there are no shot counts to reconcile against.
+        if miss_info is not None and (
+            miss_info["shots"] != miss_info["hit_shots"] + n_miss
+        ):
             raise RxpError(
                 f"shot accounting does not reconcile for {rxp_path}: "
                 f"{miss_info['shots']} shots vs {miss_info['hit_shots']} with "
@@ -1876,14 +2187,22 @@ def stream_scan(
                 {"slug": slug, "label": label} for slug, label in _EXTRA_DIMS
             ],
         }
+        # Both warnings can apply at once, and the field is a single string the
+        # caller surfaces verbatim, so accumulate rather than letting whichever
+        # is checked last win.
+        warnings = []
+        if miss_warning:
+            warnings.append(miss_warning)
         if echo_mismatches:
-            result["warning"] = (
+            warnings.append(
                 f"{echo_mismatches} of {total} points disagree with RiVLib's echo "
                 "classification, so returns could not be grouped into pulses "
                 "reliably. target_index/target_count may be wrong; do not use "
                 "this scan for multi-return analysis."
             )
             result["echo_mismatches"] = echo_mismatches
+        if warnings:
+            result["warning"] = " ".join(warnings)
         return result
     finally:
         ifc.close(handle)
@@ -2083,7 +2402,7 @@ def _inspect_proj(args: argparse.Namespace, positions: list[dict]) -> tuple[list
 
 def _inspect_riproject(args, ifc, positions: list[dict]) -> tuple[list[dict], list]:
     """Metadata pass for a raw .riproject — needs a bounded decode per position."""
-    hk_dir = args.hk_dir or "/tmp"
+    hk_dir = args.hk_dir or tempfile.gettempdir()
     os.makedirs(hk_dir, exist_ok=True)
 
     scans: list[dict] = []
@@ -2216,7 +2535,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         positions = [p for p in positions if p["name"] in wanted]
 
     os.makedirs(args.out, exist_ok=True)
-    hk_dir = args.hk_dir or "/tmp"
+    hk_dir = args.hk_dir or tempfile.gettempdir()
     os.makedirs(hk_dir, exist_ok=True)
 
     scans: list[dict] = []
@@ -2354,7 +2673,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
     # or the same scan lands somewhere different depending on what it was
     # imported alongside. Pass 2 filters instead (see `selected` below).
 
-    hk_dir = args.hk_dir or "/tmp"
+    hk_dir = args.hk_dir or tempfile.gettempdir()
     os.makedirs(hk_dir, exist_ok=True)
 
     # Pass 1 (cheap): scan-pattern + instrument + GNSS + pose for every

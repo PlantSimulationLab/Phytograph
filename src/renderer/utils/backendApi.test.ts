@@ -1564,8 +1564,11 @@ describe('getRieglStatus', () => {
   const ready = {
     available: true,
     platform_supported: true,
+    runtime: 'docker',
     docker_present: true,
     image_built: true,
+    toolchain_present: true,
+    misses_available: true,
     rivlib_path: '/opt/rivlib',
     rivlib_valid: true,
     image: 'phytograph-riegl:latest',
@@ -1578,14 +1581,59 @@ describe('getRieglStatus', () => {
     expect(s).toEqual({
       available: true,
       platformSupported: true,
+      runtime: 'docker',
       dockerPresent: true,
       imageBuilt: true,
       imageStale: false,
+      toolchainPresent: true,
+      missesAvailable: true,
       rivlibPath: '/opt/rivlib',
       rivlibValid: true,
       image: 'phytograph-riegl:latest',
       reason: 'RIEGL .rxp import is ready.',
     });
+  });
+
+  it('maps a native runtime, where there is no Docker and no image', async () => {
+    mockFetchOk({
+      available: true,
+      platform_supported: true,
+      runtime: 'native',
+      docker_present: false,
+      image_built: true,
+      image_stale: false,
+      toolchain_present: true,
+      misses_available: true,
+      rivlib_path: 'C:\\rivlib',
+      rivlib_valid: true,
+      image: null,
+      reason: 'RIEGL .rxp import is ready.',
+    });
+    const s = await getRieglStatus('C:\\rivlib');
+    expect(s.runtime).toBe('native');
+    expect(s.dockerPresent).toBe(false);
+    expect(s.available).toBe(true);
+    // `image` is null on this path; the coercion must yield '' rather than
+    // letting null reach a component that renders it.
+    expect(s.image).toBe('');
+  });
+
+  it('reports an unknown runtime as null rather than passing it through', async () => {
+    // A backend that grows a third runtime must not have its name leak into UI
+    // that only branches on the two it knows.
+    mockFetchOk({ ...ready, runtime: 'wasm' });
+    const s = await getRieglStatus('/opt/rivlib');
+    expect(s.runtime).toBeNull();
+  });
+
+  it('defaults the sky-shot fields to false when the backend omits them', async () => {
+    // Safe default: claiming misses are available when we do not know would let
+    // Leaf Area Density run against a cloud with no transmission term.
+    const { toolchain_present, misses_available, ...older } = ready;
+    mockFetchOk(older);
+    const s = await getRieglStatus('/opt/rivlib');
+    expect(s.toolchainPresent).toBe(false);
+    expect(s.missesAvailable).toBe(false);
   });
 
   it('carries image staleness separately from image existence', async () => {

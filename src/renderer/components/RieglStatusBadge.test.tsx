@@ -8,8 +8,11 @@ import { getRieglStatus } from '../utils/backendApi';
 const READY = {
   available: true,
   platformSupported: true,
+  runtime: 'docker' as const,
   dockerPresent: true,
   imageBuilt: true,
+  toolchainPresent: true,
+  missesAvailable: true,
   rivlibPath: '/riv',
   rivlibValid: true,
   imageStale: false,

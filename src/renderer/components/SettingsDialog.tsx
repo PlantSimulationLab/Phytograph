@@ -113,6 +113,9 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   // redistributing RiVLib, which its licence forbids. Without this button a
   // fresh machine reaches "image not built" with no in-app way forward.
   const [rieglStatus, setRieglStatus] = useState<RieglStatus | null>(null);
+  // Null while the first probe is in flight, and while it is we say nothing
+  // platform-specific rather than guessing wrong for a second.
+  const rieglRuntime = rieglStatus?.runtime ?? null;
   const [buildingImage, setBuildingImage] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
 
@@ -136,6 +139,10 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   const canBuildImage =
     !!rieglStatus &&
     rieglStatus.platformSupported &&
+    // Docker only. A native runtime has no image to build — the reader ships
+    // inside the backend bundle — so offering the button there would promise a
+    // fix for a problem that does not exist.
+    rieglStatus.runtime === 'docker' &&
     rieglStatus.dockerPresent &&
     rieglStatus.rivlibValid &&
     // Missing OR out of date. Before the staleness probe existed this read
@@ -309,14 +316,25 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                   />
                 </div>
                 <p className="text-[11px] text-neutral-500 leading-snug">
-                  Needed to import RIEGL raw scanner projects (<code>.riproject</code>). RiVLib is
-                  proprietary and cannot be shipped with Phytograph &mdash; download{' '}
-                  <strong>Part 1</strong> for <code>x86_64-linux-gcc9</code> from RIEGL's members
-                  area (the Linux build is the one that matters &mdash; it runs inside a container,
-                  and no other gcc version will load) and select the extracted folder (the one
-                  containing <code>bin/</code>, <code>include/</code>, <code>lib/</code>). Nothing
-                  is copied; the folder is read directly. Requires Docker, and is macOS-only in this
-                  release.
+                  Needed to import RIEGL raw scanner projects (<code>.riproject</code>,{' '}
+                  <code>.PROJ</code>). RiVLib is proprietary and cannot be shipped with Phytograph
+                  &mdash; download it from RIEGL's members area and select the extracted folder (the
+                  one containing <code>bin/</code>, <code>include/</code>, <code>lib/</code>).
+                  Nothing is copied; the folder is read directly.
+                  {rieglRuntime === 'native' ? (
+                    <>
+                      {' '}Get the <code>x86_64-windows</code> build. Extracting it to{' '}
+                      <code>%LOCALAPPDATA%\Phytograph\rivlib</code> means you can skip choosing a
+                      folder entirely &mdash; Phytograph looks there on its own. No Docker needed.
+                    </>
+                  ) : rieglRuntime === 'docker' ? (
+                    <>
+                      {' '}Get <strong>Part 1</strong> for <code>x86_64-linux-gcc9</code> &mdash; the
+                      Linux build is the one that matters, because RiVLib has no macOS build and
+                      runs inside a container here, and no other gcc version will load. Requires
+                      Docker.
+                    </>
+                  ) : null}
                 </p>
                 {settings?.rivlibPath && (
                   <p
@@ -326,35 +344,54 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                     {settings.rivlibPath}
                   </p>
                 )}
-                {/* Setup has three independent prerequisites and the badge can
+                {/* Setup has several independent prerequisites and the badge can
                     only report one bit. Show them as a checklist so a failure
                     names WHICH step is unmet: a wrong RiVLib folder and an
                     unbuilt image otherwise look identical (both read
                     "unavailable", and a bad folder also hides the Build button
                     below, since building without RiVLib would succeed and still
-                    leave the feature off). */}
-                {rieglStatus && !rieglStatus.available && rieglStatus.platformSupported && (
+                    leave the feature off).
+
+                    Also shown when the feature IS available but sky shots are
+                    not, which only happens natively. That state is easy to miss
+                    precisely because import works: the scans come in, and only
+                    Leaf Area Density later fails for want of a shell nobody was
+                    told was absent. */}
+                {rieglStatus && rieglStatus.platformSupported &&
+                  (!rieglStatus.available || !rieglStatus.missesAvailable) && (
                   <ul
                     data-testid="settings-riegl-checklist"
                     className="mt-2 space-y-0.5 text-[11px]"
                   >
                     {(
-                      [
-                        ['docker', rieglStatus.dockerPresent, 'Docker running',
-                         'Start Docker Desktop'],
-                        ['rivlib', rieglStatus.rivlibValid, 'RiVLib folder',
-                         settings?.rivlibPath
-                           ? 'No lib/libscanifc.so here — pick the extracted folder'
-                           : 'Not set — choose the extracted Part 1 / x86_64-linux-gcc9 folder'],
-                        ['image',
-                         rieglStatus.imageBuilt && !rieglStatus.imageStale,
-                         'Reader image up to date',
-                         rieglStatus.imageStale
-                           ? 'Built by an older version — your next import updates it automatically'
-                           : rieglStatus.dockerPresent && rieglStatus.rivlibValid
-                             ? 'Use the button below'
-                             : 'Needs the steps above first'],
-                      ] as const
+                      rieglStatus.runtime === 'native'
+                        ? ([
+                            ['rivlib', rieglStatus.rivlibValid, 'RiVLib folder',
+                             settings?.rivlibPath
+                               ? 'No lib\\scanifc-mt-s.dll here — pick the extracted folder'
+                               : 'Not set — choose the extracted x86_64-windows folder'],
+                            ['toolchain', rieglStatus.toolchainPresent,
+                             'No-return (sky) shots',
+                             'Needs the free Visual Studio Build Tools with the "Desktop '
+                             + 'development with C++" workload. Scans import without them, '
+                             + 'but with no sky shell — Leaf Area Density needs it'],
+                          ] as const)
+                        : ([
+                            ['docker', rieglStatus.dockerPresent, 'Docker running',
+                             'Start Docker Desktop'],
+                            ['rivlib', rieglStatus.rivlibValid, 'RiVLib folder',
+                             settings?.rivlibPath
+                               ? 'No lib/libscanifc.so here — pick the extracted folder'
+                               : 'Not set — choose the extracted Part 1 / x86_64-linux-gcc9 folder'],
+                            ['image',
+                             rieglStatus.imageBuilt && !rieglStatus.imageStale,
+                             'Reader image up to date',
+                             rieglStatus.imageStale
+                               ? 'Built by an older version — your next import updates it automatically'
+                               : rieglStatus.dockerPresent && rieglStatus.rivlibValid
+                                 ? 'Use the button below'
+                                 : 'Needs the steps above first'],
+                          ] as const)
                     ).map(([key, ok, label, hint]) => (
                       <li
                         key={key}

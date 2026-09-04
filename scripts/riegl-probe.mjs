@@ -41,6 +41,29 @@ const IMAGE = 'phytograph-riegl:latest';
 const DOCKER_CONTEXT = join(repoRoot, 'docker', 'riegl');
 const PLATFORM = 'linux/amd64';
 
+// Two runtimes, same as the backend (_riegl_runtime in main.py). macOS has no
+// RiVLib build at all, so the reader runs in a container; Windows has one, so
+// the container would be pure overhead and the reader is run directly. Keeping
+// this harness able to drive BOTH is the point — otherwise a Windows developer
+// has no way to exercise the reader outside the app.
+const NATIVE = process.platform === 'win32';
+const READER = join(repoRoot, 'docker', 'riegl', 'rxp_reader.py');
+
+/** The scanifc artifact this platform's RiVLib download carries. */
+const SCANIFC_NAMES = NATIVE
+  ? ['scanifc-mt-s.dll', 'scanifc-mt.dll']
+  : ['libscanifc.so'];
+
+/** The python that can import numpy — the backend venv, or PYTHON. */
+function resolvePython() {
+  if (process.env.PYTHON) return process.env.PYTHON;
+  const venv = NATIVE
+    ? join(repoRoot, 'backend-api', 'venv', 'Scripts', 'python.exe')
+    : join(repoRoot, 'backend-api', 'venv', 'bin', 'python');
+  if (existsSync(venv)) return venv;
+  return NATIVE ? 'python' : 'python3';
+}
+
 function fail(message, hint) {
   console.error(`\nriegl-probe: ${message}`);
   if (hint) console.error(`\n${hint}`);
@@ -95,29 +118,70 @@ function checkDocker() {
   return version.stdout.trim();
 }
 
+function defaultRivlibRoot() {
+  // The location the docs tell Windows users to extract to; the app finds it
+  // on its own, so this harness should too.
+  if (!NATIVE || !process.env.LOCALAPPDATA) return null;
+  return join(process.env.LOCALAPPDATA, 'Phytograph', 'rivlib');
+}
+
 function resolveRivlib(explicit) {
-  const candidate = explicit ?? process.env.RIVLIB_PATH;
+  const candidate = explicit ?? process.env.RIVLIB_PATH ?? defaultRivlibRoot();
   if (!candidate) {
     fail(
       'RiVLib location not set.',
       'RiVLib is proprietary and user-supplied — its licence forbids us from\n' +
-        'shipping it. Download "RiVLib Part 1" for x86_64-linux-gcc9.5.0 from\n' +
-        'RIEGL\'s members area, then:\n\n' +
-        '  export RIVLIB_PATH=/path/to/rivlib-2.15.5-x86_64-linux-gcc9.5.0\n\n' +
-        'or pass --rivlib <path>.',
+        (NATIVE
+          ? 'shipping it. Download the x86_64-windows build from RIEGL\'s\n' +
+            'members area and extract it to\n\n' +
+            '  %LOCALAPPDATA%\\Phytograph\\rivlib\n\n' +
+            'which is found automatically, or pass --rivlib <path>.'
+          : 'shipping it. Download "RiVLib Part 1" for x86_64-linux-gcc9.5.0 from\n' +
+            'RIEGL\'s members area, then:\n\n' +
+            '  export RIVLIB_PATH=/path/to/rivlib-2.15.5-x86_64-linux-gcc9.5.0\n\n' +
+            'or pass --rivlib <path>.'),
     );
   }
   const dir = resolve(candidate);
-  const so = join(dir, 'lib', 'libscanifc.so');
-  if (!existsSync(so)) {
+  const found = SCANIFC_NAMES.map((n) => join(dir, 'lib', n)).find(existsSync);
+  if (!found) {
     fail(
-      `no libscanifc.so under ${dir}`,
-      'Expected <RIVLIB_PATH>/lib/libscanifc.so. Point RIVLIB_PATH at the\n' +
-        'top level of the extracted RiVLib download (the directory holding\n' +
+      `no ${SCANIFC_NAMES[0]} under ${dir}`,
+      `Expected <RIVLIB_PATH>/lib/${SCANIFC_NAMES[0]}. Point RIVLIB_PATH at\n` +
+        'the top level of the extracted RiVLib download (the directory holding\n' +
         'bin/, include/, lib/), not at lib/ itself.',
     );
   }
   return dir;
+}
+
+/**
+ * Build the argv+env for one reader invocation on whichever runtime we have.
+ *
+ * `mounts` is the logical path map, exactly as the backend passes it: docker
+ * turns each entry into a bind mount and the reader sees the container path,
+ * native rewrites those paths back to host paths because there is no mount
+ * namespace to make /project mean anything.
+ */
+function readerInvocation(readerArgs, mounts, rivlibDir) {
+  if (!NATIVE) {
+    const args = ['run', '--rm', '--platform', PLATFORM];
+    for (const [host, mount, mode] of mounts) {
+      args.push('-v', mode === 'ro' ? `${host}:${mount}:ro` : `${host}:${mount}`);
+    }
+    args.push(IMAGE, ...readerArgs);
+    return { cmd: 'docker', args, env: process.env };
+  }
+  const remap = new Map(mounts.map(([host, mount]) => [mount, host]));
+  return {
+    cmd: resolvePython(),
+    args: [READER, ...readerArgs.map((a) => remap.get(a) ?? a)],
+    env: {
+      ...process.env,
+      RIVLIB_ROOT: rivlibDir,
+      PYTHONUNBUFFERED: '1',
+    },
+  };
 }
 
 function imageExists() {
@@ -136,28 +200,22 @@ function buildImage() {
 }
 
 function runInspect(projectDir, rivlibDir, countPoints) {
-  const args = [
-    'run',
-    '--rm',
-    '--platform',
-    PLATFORM,
-    '-v',
-    `${rivlibDir}:/rivlib:ro`,
-    // The project is mounted read-only: this tool only ever reads scanner data,
-    // and a bug here must not be able to touch irreplaceable field captures.
-    '-v',
-    `${projectDir}:/project:ro`,
-    IMAGE,
-    'inspect',
-    '/project',
-  ];
-  if (countPoints) args.push('--count-points');
+  const readerArgs = ['inspect', '/project'];
+  if (countPoints) readerArgs.push('--count-points');
+  // The project is mounted read-only: this tool only ever reads scanner data,
+  // and a bug here must not be able to touch irreplaceable field captures.
+  const { cmd, args, env } = readerInvocation(
+    readerArgs,
+    [[rivlibDir, '/rivlib', 'ro'], [projectDir, '/project', 'ro']],
+    rivlibDir,
+  );
 
-  // Buffer stdout (it is JSON) but let stderr through so container errors and
+  // Buffer stdout (it is JSON) but let stderr through so reader errors and
   // progress are visible live. 1 GB cap: --count-points on a large project
   // still only emits a few KB of JSON, so hitting this means something is wrong.
-  const res = spawnSync('docker', args, {
+  const res = spawnSync(cmd, args, {
     encoding: 'utf8',
+    env,
     maxBuffer: 1024 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -174,44 +232,38 @@ function runInspect(projectDir, rivlibDir, countPoints) {
   if (parsed?.error) fail(parsed.error);
   if (res.status !== 0) {
     fail(
-      `container exited with status ${res.status}.`,
+      `reader exited with status ${res.status}.`,
       res.stdout.trim() ? res.stdout.slice(0, 2000) : undefined,
     );
   }
   if (parsed === null) {
-    fail('could not parse container output as JSON.', res.stdout.slice(0, 2000));
+    fail('could not parse reader output as JSON.', res.stdout.slice(0, 2000));
   }
   return parsed;
 }
 
 function runExtract(projectDir, rivlibDir, outDir, scans) {
-  const args = [
-    'run',
-    '--rm',
-    '--platform',
-    PLATFORM,
-    '-v',
-    `${rivlibDir}:/rivlib:ro`,
-    '-v',
-    `${projectDir}:/project:ro`,
-    // The only writable mount. Everything else is :ro so a bug here can never
-    // touch irreplaceable field data.
-    '-v',
-    `${outDir}:/out`,
-    IMAGE,
-    'extract',
-    '/project',
-    '--out',
-    '/out',
-  ];
-  if (scans?.length) args.push('--scans', ...scans);
+  const readerArgs = ['extract', '/project', '--out', '/out'];
+  if (scans?.length) readerArgs.push('--scans', ...scans);
+  // /out is the only writable mount. Everything else is :ro so a bug here can
+  // never touch irreplaceable field data.
+  const { cmd, args, env } = readerInvocation(
+    readerArgs,
+    [
+      [rivlibDir, '/rivlib', 'ro'],
+      [projectDir, '/project', 'ro'],
+      [outDir, '/out', 'rw'],
+    ],
+    rivlibDir,
+  );
 
   // Progress arrives on stderr as JSON lines while the result document comes
   // back on stdout, so the two never interleave. spawnSync can't stream, so
   // stderr is inherited: the reader's own progress lines land on the terminal
   // live and stdout is captured for parsing.
-  const res = spawnSync('docker', args, {
+  const res = spawnSync(cmd, args, {
     encoding: 'utf8',
+    env,
     maxBuffer: 1024 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -225,12 +277,12 @@ function runExtract(projectDir, rivlibDir, outDir, scans) {
   if (parsed?.error) fail(parsed.error);
   if (res.status !== 0) {
     fail(
-      `container exited with status ${res.status}.`,
+      `reader exited with status ${res.status}.`,
       res.stdout.trim() ? res.stdout.slice(0, 2000) : undefined,
     );
   }
   if (parsed === null) {
-    fail('could not parse container output as JSON.', res.stdout.slice(0, 2000));
+    fail('could not parse reader output as JSON.', res.stdout.slice(0, 2000));
   }
   return parsed;
 }
@@ -375,10 +427,12 @@ function main() {
   const projectDir = resolve(args.project);
   if (!existsSync(projectDir)) fail(`no such directory: ${projectDir}`);
 
-  checkDocker();
+  // Docker and the image only exist on the container runtime. On a native one
+  // there is nothing to start and nothing to build — probing anyway would fail
+  // on a machine where the feature works perfectly.
+  if (!NATIVE) checkDocker();
   const rivlibDir = resolveRivlib(args.rivlib);
-
-  if (process.env.FORCE === '1' || !imageExists()) buildImage();
+  if (!NATIVE && (process.env.FORCE === '1' || !imageExists())) buildImage();
 
   if (args.out) {
     const outDir = resolve(args.out);
