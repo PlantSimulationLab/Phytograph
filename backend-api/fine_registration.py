@@ -60,16 +60,34 @@ locally planar instead of only the target: measured on the UC Davis set,
 out of the same local fits a normal would have -- the extra cost is storage,
 a 3x3 covariance per point where a normal is three numbers.
 
-It costs time: measured end to end, the olive set goes from 53 s to 157 s and
-peach from 117 s to 357 s. Almost none of that is the ICP -- profiled on one
-olive pair, every level converged inside its first ten iterations and the whole
-six-level fit took 9 s. The cost is the per-point SURFACE pass, which is why a
-pyramid is built once per scan and reused across every pair it appears in, and
-why the two things worth optimising here were both in that pass rather than in
-the registration itself (see `median_spacing` and `_plane_shaped`).
+It costs time, and a later re-profile against ground truth found most of that
+cost was avoidable without touching the accuracy. Three things, in the order
+they matter:
 
-What each level buys, from that same profile (error against RiSCAN, starting
-from a coarse pose 2.4 cm out):
+1. THE ITERATION BUDGET WAS THE BIGGEST WASTE, and an earlier note here
+   claiming "every level converged inside its first ten iterations" had the
+   right observation and the wrong conclusion. It did converge -- but a level
+   can only be SEEN to converge between iteration batches, and at the old batch
+   of 10 the RMSE-plateau test needed two of them, putting a floor of 20
+   iterations under every level. Stepping one at a time on a real UCD pair,
+   level 1 moved 1.8 mm TOTAL over 20 iterations. See
+   `_MAX_ITERATIONS_PER_LEVEL` and `_ITERATION_BATCH`; together they cut
+   point-iterations 115.0M -> 19.4M on UCD and 235.6M -> 56.8M on olive, for a
+   displacement change of +0.01 cm and -0.01 cm respectively.
+
+2. THE WORKING COPIES WERE FINER THAN THE LADDER COULD READ, on a
+   heterogeneous set -- see `trim_to_anchor`.
+
+3. Of what remains, the per-point SURFACE pass is the cost, which is why a
+   pyramid is built once per scan and reused across every pair it appears in
+   (see `median_spacing` and `_plane_shaped`).
+
+The ICP itself was never the bottleneck people assumed, but neither was the
+fine stage as a whole: profiled end to end, the COARSE raster stage is 72-90 s
+of a 190 s UCD run and was 81% of the pipeline before this module existed.
+
+What each level buys (error against RiSCAN, starting from a coarse pose 2.4 cm
+out; the ladder here is the 6-level one a pairwise `refine` builds):
 
     level  voxel   points     -> translation error
       0    0.64 m     32 k       6.9 cm   (worse: a 1.9 m window on a 2.4 cm
@@ -77,15 +95,21 @@ from a coarse pose 2.4 cm out):
       2    0.16 m    177 k       2.1 cm    to lose -- it recovers below)
       3    0.08 m    354 k       1.1 cm
       4    0.04 m    762 k       0.27 cm
-      5    0.02 m   1765 k       0.29 cm  (halves the ROTATION error, 0.008 to
-                                           0.005 deg; translation is done)
+      5    0.02 m   1765 k       0.29 cm
 
 Two things to take from it. The accuracy is made in the last two levels, so
-`_MAX_POINTS_PER_LEVEL` and `_MIN_FINEST_VOXEL_M` are the dials that matter --
-and the finest level costs as much as the whole rest of the ladder for a
-rotation refinement only. And the coarsest level can move a good starting pose
-AWAY from the truth, which is the price of a window wide enough to rescue a bad
-one; the ladder is what makes that safe rather than fatal.
+`_MAX_POINTS_PER_LEVEL` and `_MIN_FINEST_VOXEL_M` are the dials that matter.
+And the coarsest level can move a good starting pose AWAY from the truth, which
+is the price of a window wide enough to rescue a bad one; the ladder is what
+makes that safe rather than fatal.
+
+DO NOT drop the finest level to save time, despite what that table suggests in
+isolation. It looks like a rotation-only refinement on this single pair and is
+not: removed, olive's median displacement doubles (0.46 -> 0.95 cm, worst 0.57
+-> 1.26 cm) and the UC Davis set's worst scan goes 1.68 -> 2.25 cm. Coarsening
+the ladder itself is likewise an accuracy trade rather than an optimisation
+(UCD anchor 0.0662 -> 0.10 m costs 1.64 -> 2.1 cm). The levels are not the
+place to look for speed; the iteration budget was.
 """
 
 from typing import List, Optional, Sequence, Tuple
@@ -145,7 +169,22 @@ _MAX_LEVELS = 6
 
 # Iterations a single level may spend. It converges long before this on real
 # data -- the cap is there so a pathological pair cannot run forever.
-_MAX_ITERATIONS_PER_LEVEL = 40
+# Iterations a single level may spend.
+#
+# FIVE, measured, not the 40 this started at. From a coarse pose the pull-in is
+# already done by the time a level starts, so what remains is small: stepping
+# one iteration at a time on a real UCD pair, level 1 moved the pose 1.8 mm
+# TOTAL over 20 iterations and level 2 moved 6.8 mm, dropping below 0.2 mm per
+# iteration after the fifth. The work saved is most of the stage --
+# point-iterations (sum over levels of points x iterations, which is what GICP
+# costs) fall 115.0M -> 19.4M on UCD and 235.6M -> 56.8M on olive, for a
+# displacement change against RiSCAN of 1.66 -> 1.67 cm and 0.46 -> 0.45 cm
+# respectively. Four still holds; three starts to degrade, so five is the floor
+# with a margin rather than the cliff edge.
+#
+# This is a CAP, not a target: `align` still stops early on `np.allclose` or an
+# RMSE plateau, and a level that needs fewer takes fewer.
+_MAX_ITERATIONS_PER_LEVEL = 5
 
 # A level stops when its RMSE improves by less than this, in metres. Absolute
 # rather than relative because what matters is whether the remaining motion is
@@ -172,7 +211,39 @@ _GICP_EPSILON = 1e-3
 # Iterations between cancellation checks. A level is one blocking C++ call, so
 # the batch size IS the interruption granularity; restarting GICP from its own
 # output costs only the correspondence search it would have redone anyway.
-_ITERATION_BATCH = 10
+#
+# EQUAL TO the per-level cap above, so a converged level costs exactly ONE
+# call. That is not an obvious choice and the obvious one is wrong, so:
+#
+# Open3D deep-copies both clouds on entry, which at the finest level measures
+# 1.13 s FIXED against 0.35 s per iteration. The cost of a level is therefore
+# `calls * 1.13 + iterations * 0.35`, and the two terms pull against each
+# other. Shrinking the batch to 1 to make the convergence test fire as early as
+# possible looks like the win -- it cuts iterations 210 -> 45 on the UC Davis
+# set -- and it is a LOSS, because it raises calls 21 -> 45 and the overhead
+# term swamps the saving. Measured end to end, that version ran 24.1 s against
+# the original 21.3 s: slower, having done a fifth of the iterations.
+#
+# Batching the whole level instead pays the overhead once. Measured on the same
+# pyramids (UC Davis, three pairs, seconds for the whole align stage):
+#
+#     batch  cap   calls  iters   secs   median error
+#        10   40      21    210   21.3       1.64 cm   <- original
+#         1    5      45     45   24.1       1.66 cm   <- WORSE than original
+#         5    5       9     45    8.4       1.66 cm   <- this
+#         8    8       9     72   11.1       1.64 cm
+#        20   20       9    180   14.1       1.64 cm
+#
+# So the saving needs BOTH halves: fewer iterations AND fewer calls. Counting
+# only iterations (or "point-iterations") makes the batch=1 row look like the
+# best of these, because that metric cannot see the per-call term at all.
+#
+# The price is cancellation latency: a cancel now waits for a whole level
+# rather than ten iterations, i.e. up to ~6 s at the finest level here. That is
+# a real regression on responsiveness and it is the deliberate trade -- it buys
+# 2.5x on the stage. If it needs revisiting, the fix is a batch of 2-3, not 1;
+# check the table above before assuming smaller is better.
+_ITERATION_BATCH = _MAX_ITERATIONS_PER_LEVEL
 
 # WHAT WAS TRIED AND REJECTED: gating each level down to its locally PLANAR
 # returns (surface variation lambda0/sum(lambda) below ~0.02), on the theory
@@ -254,6 +325,48 @@ def working_copy(points: np.ndarray,
         # 5% overshoot keeps this from needing a second pass in the common case.
         voxel *= float(np.sqrt(count / budget)) * 1.05
     return np.asarray(reduced.points), voxel
+
+
+def trim_to_anchor(points: np.ndarray, voxel: float,
+                   anchor: float) -> np.ndarray:
+    """Drop detail a working copy holds that its ladder can never read.
+
+    `working_copy` reduces each scan to ITS OWN finest voxel, but `plan_levels`
+    is anchored at the WIDEST such voxel across the set -- a level finer than
+    the sparsest cloud can populate buys that cloud nothing. On a heterogeneous
+    set those two disagree badly: on the UC Davis farm one 442 k-point scan
+    anchors the ladder at 0.0662 m while the three 6 M-point scans reduce to
+    0.020-0.027 m, so the finest LEVEL holds 1.25 M points while the working
+    copies feeding it hold 2.4 M. Roughly half of every copy was built, held,
+    and then discarded by the pyramid's own first downsample.
+
+    Reducing to the anchor first is therefore not a loss of information: the
+    points removed are exactly those `Pyramid` would merge anyway. Measured on
+    that set it takes the working set from 7.23 M points to 3.72 M for a
+    displacement change of 1.64 -> 1.66 cm against RiSCAN -- noise against a
+    truth recovered to 0.55 mm.
+
+    A no-op on a HOMOGENEOUS set, and deliberately so: every olive scan bottoms
+    out at `_MIN_FINEST_VOXEL_M`, so the anchor already equals each scan's own
+    voxel and there is nothing to trim.
+
+    Reducing here rather than passing the anchor into `working_copy` keeps
+    ingest's memory shape: the anchor is not knowable until every scan has been
+    measured, and deferring the reduction until then would mean holding every
+    full cloud at once -- the exact peak `working_copy` exists to bound.
+    """
+    import open3d as o3d
+
+    # `voxel_down_sample` returns cell CENTROIDS, so re-gridding a copy already
+    # on this grid would shift points slightly for no gain. Only act when the
+    # anchor is genuinely coarser; the 1% guard keeps float wobble in the
+    # measured voxel from triggering a pointless pass.
+    if not (anchor > voxel * 1.01):
+        return points
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(np.asarray(points,
+                                                         dtype=np.float64))
+    return np.asarray(cloud.voxel_down_sample(anchor).points)
 
 
 def plan_levels(finest: float, pull_in: float) -> List[Tuple[float, float]]:

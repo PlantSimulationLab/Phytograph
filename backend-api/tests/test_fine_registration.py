@@ -280,3 +280,100 @@ def test_supplied_covariances_mean_the_same_as_open3d_computing_them():
     assert ours["fitness"] > 0.5
     assert float(np.linalg.norm(difference[:3, 3])) < 0.01, (
         "supplied covariances gave a materially different pose from Open3D's")
+
+
+def test_a_level_costs_one_open3d_call():
+    """The cost that actually drives this stage is CALLS, not iterations.
+
+    Open3D deep-copies both clouds on entry to `registration_generalized_icp`,
+    so every extra call is ~1.13 s at the finest level against 0.35 s for an
+    extra iteration. A level that has converged must therefore not be split
+    across several calls to notice -- measured, doing exactly that (batch=1)
+    ran SLOWER than the unoptimised original.
+
+    Counts the real calls into Open3D rather than reading the constant, so it
+    fails if `align`'s loop is restructured in a way that reintroduces the
+    per-call cost by another route.
+    """
+    import open3d as o3d
+
+    rng = np.random.default_rng(29)
+    surface = _scene(rng, count=40_000)
+    target = _scan_from(surface, np.array([-5.0, -3.0, 2.0]), rng, count=40_000)
+    source = _scan_from(surface, np.array([6.0, 4.0, 2.0]), rng, count=40_000)
+
+    calls = {"n": 0}
+    real = o3d.pipelines.registration.registration_generalized_icp
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    levels = fr.plan_levels(0.2, pull_in=1.0)
+    o3d.pipelines.registration.registration_generalized_icp = counting
+    try:
+        outcome = fr.align(fr.Pyramid(target, levels), fr.Pyramid(source, levels),
+                           levels, init=np.eye(4))
+    finally:
+        o3d.pipelines.registration.registration_generalized_icp = real
+
+    assert outcome["fitness"] > 0.5, "the fit failed; the count means nothing"
+    assert calls["n"] <= len(levels), (
+        f"{calls['n']} Open3D calls for {len(levels)} levels -- each one "
+        "deep-copies both clouds, so a level must converge inside a single "
+        "call. Was _ITERATION_BATCH lowered below the per-level cap?")
+
+
+def test_the_iteration_budget_costs_one_call_per_level():
+    """Both constants are measurements, and the BATCH is the counter-intuitive
+    one -- see the table in `_ITERATION_BATCH`.
+
+    Open3D deep-copies both clouds per call (1.13 s at the finest level against
+    0.35 s per iteration), so a level's cost has a per-CALL term as well as a
+    per-iteration one. Shrinking the batch to make convergence fire earlier
+    cuts iterations and RAISES calls, and measured end to end that was slower
+    than the 40-iteration original it replaced. What wins is one call per
+    level.
+
+    Asserted as calls-per-level rather than as literal values, because that is
+    the property; the numbers may move again.
+    """
+    assert fr._MAX_ITERATIONS_PER_LEVEL <= 8, (
+        "measured: a level's pose stops moving after ~5 iterations")
+    assert fr._ITERATION_BATCH >= fr._MAX_ITERATIONS_PER_LEVEL, (
+        "a converged level must cost ONE call -- a smaller batch trades "
+        "0.35 s/iteration of work for 1.13 s/call of Open3D deep-copy "
+        "overhead, which measured SLOWER than doing nothing at all")
+
+
+def test_trim_to_anchor_drops_only_detail_the_ladder_cannot_read():
+    """The working copy must not be finer than the ladder's finest level.
+
+    `working_copy` reduces per scan; `plan_levels` anchors at the WIDEST voxel
+    in the set. On a heterogeneous set the dense scans therefore carry roughly
+    twice the points any level will ever read -- the pyramid's own first
+    downsample merges them away. Trimming first must (a) actually reduce a
+    finer copy, (b) leave a copy already at the anchor alone, and (c) not
+    change what the pyramid ends up holding.
+    """
+    rng = np.random.default_rng(31)
+    surface = _scene(rng, count=60_000)
+    dense = _scan_from(surface, np.array([0.0, 0.0, 2.0]), rng, count=60_000)
+
+    fine, coarse = 0.05, 0.20
+    on_fine_grid, _ = fr.working_copy(dense)
+    trimmed = fr.trim_to_anchor(on_fine_grid, fine, coarse)
+    assert len(trimmed) < len(on_fine_grid) * 0.75, (
+        "trimming a 0.05 m copy to a 0.20 m anchor barely reduced it")
+
+    # Already at the anchor: untouched, and the SAME ARRAY, since re-gridding
+    # would shift points to new cell centroids for no gain.
+    at_anchor = fr.trim_to_anchor(on_fine_grid, coarse, coarse)
+    assert at_anchor is on_fine_grid
+
+    # The pyramid is what consumes this, and it must not notice the trim.
+    levels = fr.plan_levels(coarse, pull_in=0.6)
+    assert fr.Pyramid(trimmed, levels).sizes == fr.Pyramid(on_fine_grid,
+                                                           levels).sizes, (
+        "trimming changed what the pyramid holds -- it must only remove points "
+        "the pyramid's own downsample would have merged")

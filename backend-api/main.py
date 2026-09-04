@@ -33220,6 +33220,21 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                     clouds[ref], _robust_cloud_diagonal(clouds[ref]))
                 levels = fine_registration.plan_levels(
                     max(v for _, v in working), pull_in)
+                # Now that the ladder is known, drop the detail each working
+                # copy holds BELOW its finest level -- the pyramid's own first
+                # downsample would merge those points away, so carrying them
+                # into every level costs time for nothing. A no-op when the set
+                # is homogeneous. See `fine_registration.trim_to_anchor`.
+                #
+                # Trimmed to the LADDER's finest voxel, not to the widest
+                # working voxel that was passed in: `plan_levels` clamps its
+                # argument to [_MIN_FINEST_VOXEL_M, _MAX_FINEST_VOXEL_M], so on
+                # a set whose budget pushed a voxel past the ceiling the two
+                # differ and only the ladder's own value is the grid the
+                # pyramid will actually build.
+                finest_voxel = levels[-1][0]
+                working = [(fine_registration.trim_to_anchor(pts, v, finest_voxel), v)
+                           for pts, v in working]
                 if progress is not None:
                     progress(0.79, "Preparing the reference scan")
                 # The reference's pyramid is reused by every pair; the others

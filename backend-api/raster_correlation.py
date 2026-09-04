@@ -97,6 +97,29 @@ _COARSE_STEP_DEG = 5.0
 _FINE_HALFWIDTH_DEG = 5.0
 _FINE_STEP_DEG = 0.5
 
+# Iterations the shortlist-ranking ICP in `_best_by_icp` may spend per
+# candidate. It only has to RANK candidates -- the fine stage recomputes the
+# winner -- so this is not the accuracy of the final pose.
+#
+# Kept at 60 after an attempt to halve it produced no measurable saving worth
+# the risk. Lowering it DOES change which candidate is ranked first: on the UC
+# Davis set, 60 and 30 agree while 20 and below pick a different index on two
+# of three pairs, because the leading candidates' RMSEs sit within 0.001 of
+# each other (0.3786 against 0.3778). But the index is not the answer -- those
+# near-tied candidates converge to EQUIVALENT poses, and measured against
+# RiSCAN the coarse pose lands at 0.07-0.13 m on every pair at every budget
+# from 60 down to 5, sometimes marginally better at the low end.
+#
+# So the ranking is not the fragile thing it looks like, and there is no
+# accuracy floor here to defend. There is also little to win: this ICP is ~59%
+# of a 2.9 s coarse call, and the coarse stage's real cost is that a 4-scan set
+# makes 24 such calls (6 graph edges x 4 variants), not that any one is slow.
+# Cutting the call count is the lever; cutting these iterations is noise.
+#
+# If you do revisit it, measure POSE ERROR against ground truth, not which
+# candidate index wins -- that was the trap the first time round.
+_RANK_ITERATIONS = 60
+
 # Grid side in cells. 180 keeps the FFT small (~32k cells) while resolving
 # plant-scale structure on plots from a few metres to a few hundred.
 _TARGET_CELLS = 180
@@ -321,7 +344,8 @@ def _best_by_icp(candidates, target: np.ndarray, source: np.ndarray):
             r = o3d.pipelines.registration.registration_icp(
                 src, tgt, 1.0, M,
                 o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=60))
+                o3d.pipelines.registration.ICPConvergenceCriteria(
+                    max_iteration=_RANK_ITERATIONS))
         except (RuntimeError, ValueError):
             continue
         # A zero-fitness result found NO correspondences, and its rmse is 0 --
