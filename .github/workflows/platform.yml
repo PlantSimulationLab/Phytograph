@@ -244,6 +244,33 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-backend.mjs
 
+      # The RIEGL reader against the fake RiVLib in
+      # backend-api/tests/fixtures/. ci.yml already runs this file on every
+      # push, but only on Linux, where the native runtime has to be forced and
+      # the library is a .so. Three things are only real on Windows and are
+      # exactly where this has broken before:
+      #
+      #   * loading a .dll, which needs os.add_dll_directory rather than PATH
+      #   * `file:C:\...` — the URI form real RiVLib accepts, backslashes and
+      #     all, where the file:// spelling is rejected
+      #   * building the miss-recovery shim with MSVC, located through vswhere
+      #
+      # It costs seconds and needs no secrets, because nothing here is RIEGL's:
+      # the stand-in is ~200 lines of our own C. The job that uses the REAL
+      # library is necessarily separate and credentialed.
+      #
+      # requirements.txt carries no test deps (it exists to feed PyInstaller),
+      # so they are installed here rather than widening the packaging install
+      # for every platform. pytest-asyncio because pytest.ini sets
+      # asyncio_mode = auto; httpx for TestClient; pytest-cov because the same
+      # pytest.ini passes --cov, which --no-cov then switches back off.
+      - name: RIEGL reader against the fake RiVLib (Windows)
+        if: runner.os == 'Windows'
+        working-directory: backend-api
+        run: |
+          pip install pytest pytest-cov pytest-asyncio httpx
+          python -m pytest tests/test_riegl_fake_rivlib.py tests/test_riegl_native_runtime.py -v --no-cov
+
       # PotreeConverter links Intel TBB. The Windows build vendors it and Linux
       # gets it from apt (see ci.yml's LINUX_DEPS), but the macOS runner ships
       # neither — without this the CMake configure fails on a cold potree cache.

@@ -480,7 +480,23 @@ def _compile_shim_gcc(src: str, out: str) -> None:
 
 
 def _build_shim() -> str:
-    """Compile the miss-recovery shim if it isn't already built."""
+    """Compile the miss-recovery shim if it isn't already built.
+
+    PHYTOGRAPH_RXP_SHIM supplies an already-built one and skips the compile.
+    CI needs it: building the real shim requires RiVLib's static archive, which
+    cannot be committed, so without this a runner that HAS a compiler but not
+    the SDK fails at the linker — an error, not the "no toolchain" state the
+    import knows how to degrade through. It is also the hook for an
+    organisation that would rather build the shim once and deploy it than have
+    every workstation carry a C++ toolchain.
+    """
+    prebuilt = os.environ.get("PHYTOGRAPH_RXP_SHIM")
+    if prebuilt:
+        if not os.path.isfile(prebuilt):
+            raise RxpError(
+                f"PHYTOGRAPH_RXP_SHIM points at no such file: {prebuilt}"
+            )
+        return prebuilt
     src_dir = _shim_source_dir()
     src = os.path.join(src_dir, "rxp_shim.cpp")
     if not os.path.exists(src):

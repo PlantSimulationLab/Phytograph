@@ -116,6 +116,46 @@ def test_a_windows_rivlib_is_not_a_container_one(monkeypatch, tmp_path):
     assert main._riegl_rivlib_valid(str(root)) is False
 
 
+def test_a_forced_native_runtime_on_linux_still_wants_the_so(monkeypatch, tmp_path):
+    """The combination CI runs on, and the reason the artifact follows the HOST.
+
+    PHYTOGRAPH_RIEGL_RUNTIME=native lets the Linux pytest job exercise the
+    native runner against the fake RiVLib — the path is otherwise reachable
+    only on Windows, which would leave it with no every-push coverage. Keying
+    the scanifc filename on the runtime instead of the host would send that job
+    looking for a .dll on Linux and skip silently.
+    """
+    _linux(monkeypatch)
+    monkeypatch.setenv("PHYTOGRAPH_RIEGL_RUNTIME", "native")
+    assert main._riegl_runtime() == "native"
+    assert main._riegl_scanifc_names() == ("libscanifc.so",)
+
+    root = _rivlib(tmp_path, "libscanifc.so")
+    assert main._riegl_rivlib_valid(str(root)) is True
+
+
+def test_macos_keeps_wanting_the_linux_so(monkeypatch, tmp_path):
+    """The docker runtime bind-mounts RiVLib INTO a Linux container.
+
+    So a Mac needs the Linux .so, not a Darwin build — there isn't one — which
+    is the other half of why the artifact name follows the host rather than the
+    runtime.
+    """
+    _mac(monkeypatch)
+    assert main._riegl_scanifc_names() == ("libscanifc.so",)
+
+
+def test_an_unknown_forced_runtime_is_ignored(monkeypatch):
+    """A typo must not silently disable the feature.
+
+    Falling through to the host's own answer means a bad value costs nothing;
+    honouring it would strand the user on a runtime that does not exist.
+    """
+    _win(monkeypatch)
+    monkeypatch.setenv("PHYTOGRAPH_RIEGL_RUNTIME", "wasm")
+    assert main._riegl_runtime() == "native"
+
+
 # ---------------------------------------------------------------------------
 # The documented default location
 # ---------------------------------------------------------------------------

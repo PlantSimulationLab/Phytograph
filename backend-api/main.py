@@ -628,7 +628,18 @@ def _riegl_host_os() -> str:
 
 
 def _riegl_runtime(host_os: "str | None" = None) -> "str | None":
-    """Which reader runtime this host gets: "docker", "native", or None."""
+    """Which reader runtime this host gets: "docker", "native", or None.
+
+    PHYTOGRAPH_RIEGL_RUNTIME forces one. That exists so CI can drive the native
+    runner on Linux against the fake RiVLib in tests/fixtures — the native path
+    is otherwise reachable only on Windows, which would leave the runner, the
+    path mapping and the transport with no every-push coverage at all. It is
+    also the switch a Linux user would flip once that path has been verified
+    against real scanner data.
+    """
+    forced = os.environ.get("PHYTOGRAPH_RIEGL_RUNTIME")
+    if forced in ("docker", "native"):
+        return forced
     system = host_os if host_os is not None else _riegl_host_os()
     if system == "darwin":
         return "docker"
@@ -640,13 +651,18 @@ def _riegl_runtime(host_os: "str | None" = None) -> "str | None":
 def _riegl_scanifc_names() -> tuple:
     """The scanifc artifact this OS's RiVLib download carries.
 
+    Keyed on the HOST, not the runtime, and the difference is load-bearing:
+    macOS runs the docker runtime and therefore needs the LINUX .so, because
+    that is what gets bind-mounted into the container. Keying on the runtime
+    would also mean a forced-native runtime on Linux went looking for a .dll.
+
     Windows ships two builds of it. scanifc-mt-s.dll links the CRT statically
     and imports only WS2_32 and KERNEL32, so it works on a machine that has
     merely extracted the SDK; scanifc-mt.dll additionally needs MSVCP140 and
     VCRUNTIME140 from the Visual C++ redistributable. Prefer the former and keep
     the latter as a fallback, so an older or repackaged download still resolves.
     """
-    if _riegl_runtime() == "native":
+    if _riegl_host_os() == "windows":
         return ("scanifc-mt-s.dll", "scanifc-mt.dll")
     return ("libscanifc.so",)
 
@@ -659,7 +675,7 @@ def _riegl_default_rivlib_root() -> "str | None":
     equivalent: the container reads RiVLib from wherever the user put it, and
     there has never been a documented location to guess at.
     """
-    if _riegl_runtime() != "native":
+    if _riegl_host_os() != "windows":
         return None
     local = os.environ.get("LOCALAPPDATA")
     if not local:

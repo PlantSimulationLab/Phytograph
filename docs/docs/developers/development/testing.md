@@ -11,6 +11,47 @@ Three layers, three frameworks:
 E2E prerequisites: `npm run build && npm run build:backend` must succeed
 first — the tests drive the real packaged app.
 
+## Testing code that needs a proprietary library
+
+RIEGL `.rxp` reading needs RiVLib, which cannot be committed (its licence
+forbids redistribution) and cannot be a CI secret (the useful subset is 55 MB
+against a 64 KB cap). Left alone, that puts the whole reader — the ctypes
+binding, the read loop, pulse grouping, column pruning, miss placement, the
+transport and the backend's native runner — beyond any automated test.
+
+`backend-api/tests/fixtures/fake_rivlib/` closes most of that gap. The reader
+binds exactly **seven** C functions, so the fixture implements those seven (and
+the eight the miss-recovery shim exports) in ~200 lines of our own C, emitting a
+deterministic synthetic scan. `RIVLIB_SO` and `PHYTOGRAPH_RXP_SHIM` point at the
+result, and `test_riegl_fake_rivlib.py` drives the real pipeline end to end
+against known counts — 1000 pulses, every fifth returning twice, 200 no-return
+shots, so 1200 echoes and 1400 points.
+
+It builds with whatever compiler is present (MSVC on Windows, `cc` elsewhere)
+and **skips** if there is none, so it needs no secrets and runs on fork PRs.
+
+Two limits are worth stating plainly:
+
+- **It proves nothing about RIEGL's behaviour.** If they reorder a struct, the
+  stub and the reader stay wrong together. It catches *our* regressions, which
+  is almost all of them, and a job using the real library has to be separate and
+  credentialed.
+- **The stub's struct layouts are load-bearing.** `scanifc_point3dstream_read`
+  writes by stride, so a layout disagreement does not raise — it silently yields
+  garbage attributes. A test asserts the C side against the same sizes the
+  reader asserts at import, so the fixture cannot drift into testing a fiction.
+
+Where it runs:
+
+| | |
+|---|---|
+| Every push | `ci.yml`'s pytest job (Linux). The native runtime is forced with `PHYTOGRAPH_RIEGL_RUNTIME=native`, since it is otherwise reachable only on Windows. |
+| Weekly, and as a release gate | `platform.yml` on Windows, for the three things only real there: loading a `.dll` via `os.add_dll_directory`, the `file:C:\…` URI form, and building the shim with MSVC. |
+
+The same shape applies to any future dependency that cannot be committed: stand
+in for the ABI, keep the stub honest with a layout assertion, and say out loud
+what the stub cannot prove.
+
 ## E2E rules (non-negotiable)
 
 These rules exist because the alternative — mocking the backend or
