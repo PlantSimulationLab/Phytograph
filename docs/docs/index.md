@@ -45,11 +45,12 @@ point clouds, meshes, skeletons, and procedural plant models.
     Paint your own classes with a lasso or brush to correct a classifier
     or build ground truth, with per-class counts and undo.
 
-- :material-vector-triangle: **Reconstruct meshes**
+- :material-angle-acute: **Measure leaf angles**
 
-    Triangulate point clouds with Delaunay, Ball Pivot, or Poisson — or run
-    multi-scan Helios triangulation for branch surfaces from terrestrial
-    LiDAR.
+    Triangulate a leaf-on scan into leaf surfaces and read their
+    orientations — inclination and azimuth distributions, canonical de Wit
+    fits, and the *G(θ)* that leaf area density depends on. The same
+    triangulation also reconstructs branch and canopy surfaces.
 
 - :material-tree: **Extract skeletons**
 
@@ -66,8 +67,14 @@ point clouds, meshes, skeletons, and procedural plant models.
 - :material-grid: **Measure canopy structure**
 
     Invert overlapping scans into a voxel grid of leaf area density
-    (m²/m³), fit crown shapes (ellipsoid, prism, cone, alpha shape) for
-    height and volume, and build DTM / DSM / canopy-height surfaces.
+    (m²/m³), and fit crown shapes (ellipsoid, prism, cone, alpha shape)
+    for height and volume.
+
+- :material-terrain: **Model the terrain**
+
+    Grid classified ground returns into a bare-earth DEM/DTM — with
+    hillshade, slope, and aspect layers — plus the top-of-canopy DSM and
+    the canopy height model that comes from subtracting them.
 
 - :material-sprout: **Generate procedural plants**
 

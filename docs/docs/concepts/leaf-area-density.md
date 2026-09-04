@@ -105,6 +105,42 @@ scan's parameters:
 You don't choose the algorithm directly — it follows each scan's
 **return type** (set in its [scan parameters](scans.md)).
 
+### Keep the later echoes if the instrument recorded them
+
+If your instrument records multiple echoes per pulse, **import in a way that
+preserves them**. Using only the first echo of each pulse — the "first-hits"
+method — biases LAD in a known direction: a beam that is partially intercepted
+before *and* after a voxel counts as zero transmission, so transmission is
+underestimated and LAD comes out **too high**.
+
+Kent and Bailey ([2024](https://doi.org/10.1016/j.rse.2024.114229)) quantified
+this against simulated scans with known leaf area. First-hits differed most from
+the reference of every method tested, consistently underestimating transmission
+and overestimating LAD — overestimating total leaf area by 149–266% in their
+most demanding case, against 80–122% for the equal-weighting method Phytograph
+uses for multi-return scans. (Their headline result is a separate question:
+intensity-based weighting of echoes did *not* reliably beat equal weighting, so
+equal weighting is "an acceptable choice" — which is why the multi-return path
+above weights each echo equally.)
+
+The practical consequence is about **file formats**, since a format that stores
+one point per beam leaves no later echoes to weight. Formats that keep them:
+
+- **[RIEGL `.riproject` / `.PROJ`](../workflows/import-riegl-project.md)** —
+  carries per-pulse target index and count directly.
+- **Structured `.e57`** — keeps every echo for a cell.
+- Any format retaining `timestamp`, `target_index`, and `target_count` as
+  columns (LAS/LAZ, PLY, or the text formats).
+
+**`.ptx` cannot** — it is a complete raster of one line per grid cell, so it
+collapses each pulse to a single echo and has no schema slot for those three
+columns. A multi-return scan re-imported from PTX is not a multi-return scan
+that quietly falls back; it *is* single-return, its **return type** field agrees,
+and no warning fires because nothing is inconsistent. The echoes are gone with
+nothing downstream able to tell you. PTX remains a perfectly good LAD input for
+genuinely single-return instruments, where it retains misses well (see
+[Sky/miss points](#skymiss-points-and-gapfilling)).
+
 ## Sky/miss points and gapfilling
 
 The inversion measures *gaps* — beams that passed through a voxel without a

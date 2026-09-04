@@ -50,29 +50,43 @@ and installs in place — no need to return here to re-download.
 
 ## What it does
 
-- **Import LiDAR scans** — drag and drop `.las`, `.laz`, `.xyz`, `.ply`, `.e57`,
-  or `.csv` point clouds into a 3D viewer that handles tens of millions of points.
-- **Reconstruct meshes** — triangulate point clouds with Delaunay, Ball Pivot,
-  or Poisson, or run multi-scan Helios triangulation for branch surfaces from
-  terrestrial LiDAR.
+- **Import LiDAR scans** — drag and drop `.las`, `.laz`, `.e57`, `.ptx`, `.ply`,
+  `.pcd`, or ASCII (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) point clouds into a
+  3D viewer that handles tens of millions of points. RIEGL `.riproject` and
+  `.PROJ` scanner projects import directly.
+- **Clean and prepare** — transform, crop, erase, filter, resample, and
+  cross-section a cloud, then backfill the sky/miss rays that leaf area density
+  depends on.
+- **Register and compare** — auto-register rotated scans, refine with ICP, and
+  stitch overlaps into one cloud, with cloud-to-mesh distance statistics (mean,
+  median, percentiles, and coverage at fractions of the bounding-box diagonal).
+- **Segment scans** — classify ground with a cloth simulation filter, separate
+  wood from leaf, and split a plot into individual trees, then carry the labels
+  through the rest of the pipeline.
+- **Label points by hand** — paint your own classes with a lasso or brush to
+  correct a classifier or build ground truth, with per-class counts and undo.
+- **Measure leaf angles** — triangulate a leaf-on scan into leaf surfaces and
+  read their orientations: inclination and azimuth distributions, canonical
+  de Wit fits, and the *G(θ)* that leaf area density depends on. The same
+  triangulation also reconstructs branch and canopy surfaces.
 - **Extract skeletons** — pull topological skeletons out of woody scans, with
-  branch order colored by Strahler number.
+  branch order colored by Strahler number and total length reported.
 - **Build QSMs** — reconstruct dormant trees as connected cylinders with fitted
   radii, segment continuous shoots, and classify them by shoot rank, with woody
-  volume, trunk diameter, and per-rank metrics.
-- **Segment** ground, leaf/wood, and individual trees.
-- **Generate terrain surfaces** — rasterize a DEM/DTM (bare earth), DSM
-  (top-of-canopy), and CHM (canopy height model) from a point cloud.
-- **Measure leaf angle distribution** — plot the area-weighted leaf inclination
-  and azimuth of a reconstructed canopy, with canonical de Wit distribution fits.
-- **Estimate leaf area density** from single- or multi-return scans.
+  volume, trunk diameter, and per-rank metrics. Add leaves by phyllotaxis and
+  match a measured leaf-angle distribution.
+- **Measure canopy structure** — invert overlapping scans into a voxel grid of
+  leaf area density (m²/m³), and fit crown shapes (ellipsoid, prism, cone,
+  alpha shape) for height and volume.
+- **Model the terrain** — grid classified ground returns into a bare-earth
+  DEM/DTM, with hillshade, slope, and aspect layers, plus the top-of-canopy DSM
+  and the canopy height model that comes from subtracting them.
 - **Generate procedural plants** — grow Helios plant models (trees, vines,
-  cereals, vegetables) to a target age, then morph their parameters interactively.
-- **Register and compare** — cloud-to-cloud, mesh-to-mesh, and cloud-to-mesh
-  ICP with RMSE, plus cloud-to-mesh distance statistics (mean / median /
-  percentiles and the share of points within 1 / 5 / 10 mm).
-- **Simulate a scan** — place virtual scanners (static or moving-platform) around
-  a plant and synthesize the point cloud they would produce.
+  cereals, vegetables, weeds) to a target age, then morph their parameters
+  interactively.
+- **Simulate a scan** — place virtual scanners (static or moving-platform)
+  around a plant and synthesize the point cloud they would produce, with full
+  control over beam geometry.
 
 See the **[User Guide](https://plantsimulationlab.github.io/Phytograph/guide/)**
 and **[Workflows](https://plantsimulationlab.github.io/Phytograph/workflows/)**

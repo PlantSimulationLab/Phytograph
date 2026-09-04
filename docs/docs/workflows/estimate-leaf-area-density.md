@@ -24,6 +24,14 @@ surface.
   misses silently — run **Backfill Misses** first when a scan has none (the
   dialog tells you and offers a button). A scan with no misses and no way to
   recover them can't be used until re-imported in a miss-retaining format.
+- **Later echoes, if the instrument recorded them.** Discarding all but the
+  first echo of each pulse biases LAD **high** (Kent and Bailey,
+  [2024](https://doi.org/10.1016/j.rse.2024.114229)). Import multi-return data
+  via [`.riproject` / `.PROJ`](import-riegl-project.md), a structured `.e57`, or
+  a format keeping `timestamp`, `target_index` and `target_count` — **not
+  `.ptx`**, which collapses each pulse to one echo and can't carry those
+  columns. See
+  [Single- vs multi-return scans](../concepts/leaf-area-density.md#single-vs-multi-return-scans).
 
 ## Steps
 
@@ -186,7 +194,7 @@ asks for a save location.
 
     A GeoTIFF is a regular, north-up lattice by definition. A
     [rotated](triangulate.md) voxel box doesn't lie on one, and a
-    [terrain-following](#terrain-following--snap-the-grid-to-the-ground) grid
+    [terrain-following](#terrain-following-snap-the-grid-to-the-ground) grid
     gives every column its own starting height — so writing either as a raster
     would produce a confidently *mis-georeferenced* file. The GeoTIFF button is
     disabled for those grids; export **CSV** or **.vox** instead, which store

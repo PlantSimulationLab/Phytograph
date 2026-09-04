@@ -8,7 +8,7 @@
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
 | `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and colour. Export writes a **structured** file whenever the scan has a grid to write — either the instrument's own row/column indices or a declared Ntheta × Nphi sweep to bin against — and marks misses with the format's own `cartesianInvalidState` flag, so an exported scan re-imports as scan data rather than as a cloud of far-field points. Points are written in the scanner's local frame with its pose in the scan header, as scanners themselves do. |
 | `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** writes only x/y/z + optional RGB. Structured/organized PLYs recover sky/miss points (see below). |
-| `.ptx` | ✅ | ✅ | Leica Cyclone's structured-scan ASCII format (also written by RiSCAN and FARO). A **multi-block** `.ptx` imports as one scan per block, each with its own pose. Carries intensity and RGB, and recovers **sky/miss points** from the grid (see below), so LAD works. Export is per-object via the batch export's **Data only** mode; PTX always writes the full grid with no-return cells left empty, so misses round-trip whether or not the *write misses* box is ticked. |
+| `.ptx` | ✅ | ✅ | Leica Cyclone's structured-scan ASCII format (also written by RiSCAN and FARO). A **multi-block** `.ptx` imports as one scan per block, each with its own pose. Carries intensity and RGB, and recovers **sky/miss points** from the grid (see below), so **single-return** LAD works. **Not for multi-return data:** one line per grid cell means each pulse is collapsed to a single echo, and the fixed schema has no room for `timestamp` / `target_index` / `target_count`, so the scan re-imports as genuinely single-return with no warning — which biases LAD high ([see below](#multi-return-data-and-ptx)). Export is per-object via the batch export's **Data only** mode; PTX always writes the full grid with no-return cells left empty, so misses round-trip whether or not the *write misses* box is ticked. |
 | `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL), ASCII. Parsed via Open3D, which drops non-standard scalar fields — so **export carries position and colour only** and shows no field picker. Colour is packed into a single `rgb` field, as the format requires. Use `.ply` or `.las` to keep intensity and scalars. |
 | `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. macOS only, and needs Docker plus a user-supplied RiVLib: see **[Import a RIEGL project](../workflows/import-riegl-project.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**, though each position can be **levelled** using the instrument's own inclinometer (tilt only — not aligned to north or to each other); sky/miss points are recovered from the scanner's per-shot record, so LAD works. |
 | `.PROJ` | ✅ | — | RIEGL **on-instrument project** from a newer scanner (e.g. VZ-2000i) — also a *directory*. Same requirements and same columns as `.riproject`, but it also carries the instrument's **own registration**, so scans can land already aligned, level and north-oriented. Registration is often partial; each position reports whether it was registered or only placed from a metre-level prior. The `.rdbx` files beside each `.rxp` are not used. |
@@ -175,6 +175,27 @@ defines, so a round-trip through Phytograph doesn't lose them:
 Every other format carries misses as an ordinary `is_miss` column, which only
 some readers understand — so prefer PTX or E57 when the misses matter.
 
+### Multi-return data and PTX
+
+Retaining misses is one axis; retaining **echoes** is another, and PTX scores
+well on the first while failing the second. Because it writes exactly one line
+per grid cell, a pulse with several echoes must be collapsed to one — and its
+fixed schema has no column for `timestamp`, `target_index` or `target_count`,
+which is what
+[multi-return LAD](../concepts/leaf-area-density.md#single-vs-multi-return-scans)
+needs. Structured E57 keeps every echo for a cell; PTX cannot.
+
+This matters because using only first echoes biases LAD **high** — Kent and
+Bailey ([2024](https://doi.org/10.1016/j.rse.2024.114229)) found it the most
+biased of every weighting method they tested. And the loss is unflagged: a
+multi-return scan exported to PTX and re-imported *is* a single-return scan, its
+**return type** agrees, and the usual "marked multi-return but the columns are
+missing" warning never fires. **So export multi-return scans to E57, not PTX**,
+and import RIEGL data as a
+[`.riproject` / `.PROJ`](../workflows/import-riegl-project.md) rather than via a
+PTX export from RiSCAN PRO. For genuinely single-return instruments — which is
+what PTX was designed around — none of this applies.
+
 Recovered misses are tagged with an `is_miss` flag (0 = hit, 1 = miss) and kept
 in the scan. Because their true coordinates are ~20 km away, they are **excluded
 from the viewer's octree** (so they don't wreck camera framing) and **hidden by
@@ -263,7 +284,7 @@ result is a 3D voxel grid, and exports in four formats (all export-only):
 
 Coordinates are always written in true world coordinates, so a raster
 georeferences correctly even for a cloud imported with a
-[global shift](#large--projected-coordinates).
+[global shift](#large-projected-coordinates).
 
 The voxel CSV's column order is a stable contract — new fields are only ever
 appended:

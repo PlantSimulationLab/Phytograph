@@ -267,6 +267,16 @@ classification, the toast shown when the import finishes says how many positions
 were affected, and those two columns should not be trusted for multi-return work
 on those scans — the points themselves are unaffected.
 
+!!! tip "This is the right path for multi-return LAD"
+    Importing the project directly preserves every echo. Going through a PTX
+    export from RiSCAN PRO does not: PTX stores one point per grid cell, so each
+    pulse is collapsed to a single echo and the per-pulse columns above are lost.
+    That biases LAD **high** (Kent and Bailey,
+    [2024](https://doi.org/10.1016/j.rse.2024.114229)) and does so silently — the
+    re-imported scan is genuinely single-return, so nothing downstream can warn
+    you. If you must go through an intermediate file, use a structured `.e57`.
+    See [Single- vs multi-return scans](../concepts/leaf-area-density.md#single-vs-multi-return-scans).
+
 That same toast says how the scans were placed — how many were registered, how
 many came from a prior and still want ICP, or that they are unregistered
 altogether.
