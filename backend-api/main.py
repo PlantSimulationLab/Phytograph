@@ -726,6 +726,112 @@ def _riegl_rivlib_valid(path: "str | None") -> bool:
     return _riegl_scanifc_path(path) is not None
 
 
+# The static archive the miss-recovery shim links against. Windows ships the
+# C++ pointcloud class only here — see _compile_shim_msvc in the reader.
+_RIEGL_SCANLIB_ARCHIVE = "scanlib-mt-s.lib"
+
+# PE machine types, from winnt.h. We only care whether it is the one this
+# 64-bit process can load.
+_PE_MACHINE_AMD64 = 0x8664
+_PE_MACHINE_NAMES = {0x014C: "32-bit x86", 0xAA64: "ARM64", 0x8664: "x86_64"}
+
+
+def _pe_machine(path: Path) -> "Optional[int]":
+    """The architecture a PE binary declares, or None if it is not a PE at all.
+
+    Reading the header rather than loading the library: the status endpoint is
+    polled by a badge on every mount, and dlopen'ing a user-supplied DLL into
+    the backend to answer it would be both slower and harder to undo. This
+    catches the two failures that actually happen — the wrong architecture and
+    a truncated download — for the cost of two seeks.
+    """
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(2) != b"MZ":
+                return None
+            fh.seek(0x3C)
+            offset = int.from_bytes(fh.read(4), "little")
+            fh.seek(offset)
+            if fh.read(4) != b"PE\0\0":
+                return None
+            return int.from_bytes(fh.read(2), "little")
+    except (OSError, ValueError):
+        return None
+
+
+# ELF header fields, for the .so the container loads. e_machine sits at 0x12,
+# and byte order is declared at EI_DATA (0x05).
+_ELF_MACHINE_X86_64 = 0x3E
+_ELF_MACHINE_NAMES = {
+    0x03: "32-bit x86", 0x28: "32-bit ARM", 0xB7: "ARM64", 0x3E: "x86_64",
+}
+
+
+def _elf_machine(path: Path) -> "Optional[int]":
+    """The architecture an ELF shared object declares, or None if not an ELF."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return None
+    order = "little" if head[5] == 1 else "big"
+    return int.from_bytes(head[18:20], order)
+
+
+def _riegl_rivlib_unloadable(path: "str | None") -> "str | None":
+    """Why this RiVLib will fail to load, or None if it looks fine.
+
+    Exists because "the file is present" is not "the file works", and the gap
+    between them was the worst state the setup could reach: the badge went
+    green, the scan picker opened, and the import then died on a loader error
+    that named neither RiVLib nor the fix.
+
+    Dispatches on the ARTIFACT, not the host, so it covers both runtimes: a
+    Windows .dll gets a PE check, and the .so a Mac bind-mounts into its
+    container gets an ELF one. The container is linux/amd64 regardless of
+    whether the Mac is Apple silicon, so x86_64 is the answer either way.
+
+    What it deliberately does NOT catch is a Linux build for the wrong gcc ABI.
+    That is invisible in the header — it only shows up as a GLIBC/libstdc++
+    error when the loader resolves symbols — so it stays documented in the
+    import workflow rather than half-guessed at here.
+    """
+    scanifc = _riegl_scanifc_path(path)
+    if scanifc is None:
+        return None
+
+    if scanifc.name.endswith(".dll"):
+        machine, want = _pe_machine(scanifc), _PE_MACHINE_AMD64
+        names, kind = _PE_MACHINE_NAMES, "Windows library"
+        remedy = (
+            "Phytograph needs the 64-bit (x86_64) RiVLib — download that one "
+            "and select it instead."
+        )
+    else:
+        machine, want = _elf_machine(scanifc), _ELF_MACHINE_X86_64
+        names, kind = _ELF_MACHINE_NAMES, "Linux shared library"
+        remedy = (
+            "Phytograph runs RiVLib inside a linux/amd64 container, so it "
+            "needs the x86_64 Linux build — download that one and select it "
+            "instead. This is about the library, not about your Mac: Apple "
+            "silicon runs the same container."
+        )
+
+    if machine is None:
+        return (
+            f"{scanifc.name} is not a valid {kind} — the download may not have "
+            "completed. Re-download RiVLib and select the folder again."
+        )
+    if machine != want:
+        return (
+            f"{scanifc.name} is a {names.get(machine, hex(machine))} build. "
+            + remedy
+        )
+    return None
+
+
 def _docker_present() -> bool:
     """Best-effort probe for a reachable Docker daemon.
 
@@ -931,6 +1037,11 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
     # pointing at a Settings button that was hidden precisely because the image
     # existed. So compare what the image was built from against what is on disk
     # now, and treat a difference as its own state.
+    # Same check the native path makes: a .so that cannot load is not a usable
+    # RiVLib, and finding that out at import time means finding it out after
+    # the user has already built an image from it.
+    rivlib_unloadable = _riegl_rivlib_unloadable(rivlib_path) if rivlib_ok else None
+
     expected_stamp = _riegl_expected_stamp()
     image_stamp = None
     if image_ok:
@@ -962,6 +1073,8 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
             "the extracted RiVLib download (the folder containing bin/, "
             "include/ and lib/)."
         )
+    elif rivlib_unloadable:
+        reason = rivlib_unloadable
     elif not image_ok:
         reason = (
             "The RIEGL reader image has not been built yet. Build it from your "
@@ -981,16 +1094,20 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
         reason = "RIEGL .rxp import is ready."
 
     return {
-        "available": bool(docker_ok and image_ok and rivlib_ok and not image_stale),
+        "available": bool(
+            docker_ok and image_ok and rivlib_ok and not image_stale
+            and not rivlib_unloadable
+        ),
         "platform_supported": True,
         "runtime": "docker",
         "docker_present": docker_ok,
         "image_built": image_ok,
         "image_stale": image_stale,
-        # The container carries g++ and builds the shim on first use, so miss
-        # recovery is available exactly when the image is.
+        # The container carries g++ AND the shim links the same libscanifc.so
+        # the reader already loads, so there is no separate static archive to
+        # be missing here: miss recovery is available exactly when the image is.
         "toolchain_present": image_ok,
-        "misses_available": image_ok,
+        "misses_available": bool(image_ok and not rivlib_unloadable),
         # Both stamps travel so a support question ("why does it think this is
         # old?") is answerable from the status alone rather than by rerunning
         # docker by hand.
@@ -1046,6 +1163,13 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
     to solve with a build-context stamp.
     """
     toolchain = _riegl_toolchain_present() if rivlib_ok else False
+    unloadable = _riegl_rivlib_unloadable(rivlib_path) if rivlib_ok else None
+    # The shim links this archive, so without it no compiler in the world
+    # produces miss recovery from this folder.
+    has_archive = bool(
+        rivlib_path
+        and (Path(rivlib_path) / "lib" / _RIEGL_SCANLIB_ARCHIVE).is_file()
+    )
 
     if not rivlib_path:
         reason = (
@@ -1058,6 +1182,18 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
             f"No lib\\{_riegl_scanifc_names()[0]} under {rivlib_path}. Select "
             "the top level of the extracted RiVLib download (the folder "
             "containing bin/, include/ and lib/)."
+        )
+    elif unloadable:
+        reason = unloadable
+    elif not has_archive:
+        # A partial download: the DLLs are there, so points import fine, but
+        # the archive the shim links is not. Reported here rather than left to
+        # surface as a linker error partway through an import.
+        reason = (
+            "RIEGL .rxp import is ready, but no-return (sky) shots cannot be "
+            f"read: this RiVLib has no lib\\{_RIEGL_SCANLIB_ARCHIVE}. Download "
+            "the full RiVLib package rather than a runtime-only one. Leaf Area "
+            "Density needs those shots; nothing else does."
         )
     elif not toolchain:
         # Deliberately worded as a limitation of an otherwise working feature.
@@ -1074,7 +1210,9 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
         reason = "RIEGL .rxp import is ready."
 
     return {
-        "available": bool(rivlib_ok),
+        # A library that cannot load is not a usable RiVLib, whatever the
+        # directory listing says.
+        "available": bool(rivlib_ok and not unloadable),
         "platform_supported": True,
         "runtime": "native",
         # Docker is not consulted at all on this path, and saying "present" for
@@ -1085,7 +1223,9 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
         "image_stamp": None,
         "expected_stamp": None,
         "toolchain_present": toolchain,
-        "misses_available": bool(rivlib_ok and toolchain),
+        "misses_available": bool(
+            rivlib_ok and toolchain and has_archive and not unloadable
+        ),
         "rivlib_path": rivlib_path,
         "rivlib_valid": rivlib_ok,
         "image": None,

@@ -366,15 +366,28 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                     {(
                       rieglStatus.runtime === 'native'
                         ? ([
-                            ['rivlib', rieglStatus.rivlibValid, 'RiVLib folder',
-                             settings?.rivlibPath
-                               ? 'No lib\\scanifc-mt-s.dll here — pick the extracted folder'
-                               : 'Not set — choose the extracted x86_64-windows folder'],
-                            ['toolchain', rieglStatus.toolchainPresent,
+                            // `available` rather than `rivlibValid`: a folder can
+                            // hold the right filename and still be unusable — a
+                            // 32-bit build, or a download that stopped early —
+                            // and the reason carries which.
+                            ['rivlib', rieglStatus.available, 'RiVLib folder',
+                             !settings?.rivlibPath
+                               ? 'Not set — choose the extracted x86_64-windows folder'
+                               : rieglStatus.rivlibValid
+                                 ? rieglStatus.reason
+                                 : 'No lib\\scanifc-mt-s.dll here — pick the extracted folder'],
+                            // Keyed on missesAvailable, NOT toolchainPresent: a
+                            // compiler is necessary but not sufficient, since the
+                            // shim also needs a static library a runtime-only
+                            // download leaves out. Keying on the compiler put a
+                            // tick here while sky shots were unavailable.
+                            ['toolchain', rieglStatus.missesAvailable,
                              'No-return (sky) shots',
-                             'Needs the free Visual Studio Build Tools with the "Desktop '
-                             + 'development with C++" workload. Scans import without them, '
-                             + 'but with no sky shell — Leaf Area Density needs it'],
+                             rieglStatus.toolchainPresent
+                               ? rieglStatus.reason
+                               : 'Needs the free Visual Studio Build Tools with the "Desktop '
+                                 + 'development with C++" workload. Scans import without them, '
+                                 + 'but with no sky shell — Leaf Area Density needs it'],
                           ] as const)
                         : ([
                             ['docker', rieglStatus.dockerPresent, 'Docker running',

@@ -41,11 +41,55 @@ def _linux(monkeypatch):
     monkeypatch.setattr(_platform, "system", lambda: "Linux")
 
 
-def _rivlib(tmp_path, name):
-    """A RiVLib download carrying `name` as its scanifc library."""
+PE_AMD64 = 0x8664
+PE_I386 = 0x014C
+
+
+def _pe(machine: int = PE_AMD64) -> bytes:
+    """The smallest byte string that reads as a PE binary of `machine`."""
+    header_at = 0x80
+    buf = bytearray(header_at + 8)
+    buf[0:2] = b"MZ"
+    buf[0x3C:0x40] = header_at.to_bytes(4, "little")
+    buf[header_at:header_at + 4] = b"PE\0\0"
+    buf[header_at + 4:header_at + 6] = machine.to_bytes(2, "little")
+    return bytes(buf)
+
+
+ELF_X86_64 = 0x3E
+ELF_AARCH64 = 0xB7
+
+
+def _elf(machine: int = ELF_X86_64) -> bytes:
+    """The smallest byte string that reads as a 64-bit ELF shared object."""
+    buf = bytearray(20)
+    buf[0:4] = b"\x7fELF"
+    buf[4] = 2  # 64-bit
+    buf[5] = 1  # little-endian
+    buf[16:18] = (3).to_bytes(2, "little")  # ET_DYN
+    buf[18:20] = machine.to_bytes(2, "little")
+    return bytes(buf)
+
+
+def _rivlib(tmp_path, name, *, machine=None, archive=True):
+    """A RiVLib download carrying `name` as its scanifc library.
+
+    Real headers for both artifact kinds, because the status no longer trusts
+    the filename — an empty placeholder would now (correctly) read as a
+    download that did not complete. `archive` controls whether the static
+    library the miss-recovery shim links is present, which is what separates a
+    complete Windows download from a runtime-only one; it has no meaning on the
+    container path, where the shim links libscanifc.so itself.
+    """
     root = tmp_path / "rivlib"
     (root / "lib").mkdir(parents=True, exist_ok=True)
-    (root / "lib" / name).write_bytes(b"")
+    if name.endswith(".dll"):
+        body = _pe(PE_AMD64 if machine is None else machine)
+    else:
+        body = _elf(ELF_X86_64 if machine is None else machine)
+    (root / "lib" / name).write_bytes(body)
+    if archive:
+        (root / "lib" / "scanlib-mt-s.lib").write_bytes(b"")
     return root
 
 
@@ -154,6 +198,175 @@ def test_an_unknown_forced_runtime_is_ignored(monkeypatch):
     _win(monkeypatch)
     monkeypatch.setenv("PHYTOGRAPH_RIEGL_RUNTIME", "wasm")
     assert main._riegl_runtime() == "native"
+
+
+# ---------------------------------------------------------------------------
+# A RiVLib that is present but wrong
+# ---------------------------------------------------------------------------
+#
+# RIEGL ship several builds per release — per OS, per compiler ABI, per
+# architecture, and split across packages. Picking the wrong one is the most
+# likely setup mistake there is, and the states below were all silently
+# "ready" until they were tried against a real project.
+
+
+def test_a_32_bit_rivlib_is_refused_with_the_reason(client, monkeypatch, tmp_path):
+    """The worst state this setup could reach, before it was caught.
+
+    A 32-bit download passes every filename check, so the badge went green and
+    the picker opened — and the import then died on a bare
+    `OSError: [WinError 193] %1 is not a valid Win32 application`, which names
+    neither RiVLib nor the fix.
+    """
+    _win(monkeypatch)
+    root = _rivlib(tmp_path, "scanifc-mt-s.dll", machine=PE_I386)
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": str(root)}).json()
+
+    assert b["available"] is False
+    assert b["misses_available"] is False
+    # The file IS there — the folder is a RiVLib, it is just the wrong one.
+    assert b["rivlib_valid"] is True
+    assert "32-bit" in b["reason"]
+    assert "x86_64" in b["reason"]
+
+
+def test_a_truncated_download_is_refused_with_the_reason(
+    client, monkeypatch, tmp_path
+):
+    _win(monkeypatch)
+    root = _rivlib(tmp_path, "scanifc-mt-s.dll")
+    # An MZ stub with no PE header: what a half-finished download looks like.
+    (root / "lib" / "scanifc-mt-s.dll").write_bytes(b"MZ" + bytes(200))
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": str(root)}).json()
+
+    assert b["available"] is False
+    assert "not a valid Windows library" in b["reason"]
+    assert "not have completed" in b["reason"]
+
+
+def test_a_64_bit_rivlib_passes_the_header_check(monkeypatch, tmp_path):
+    _win(monkeypatch)
+    root = _rivlib(tmp_path, "scanifc-mt-s.dll")
+    assert main._riegl_rivlib_unloadable(str(root)) is None
+
+
+def test_the_check_covers_the_container_library_too(monkeypatch, tmp_path):
+    """A .so gets an ELF check, not a PE one — the two runtimes are symmetric.
+
+    macOS had the same green-badge gap: any file named libscanifc.so passed,
+    and a wrong or truncated one failed only when the container tried to load
+    it, well after the user had built an image from it.
+    """
+    _mac(monkeypatch)
+    root = _rivlib(tmp_path, "libscanifc.so")
+    assert main._riegl_rivlib_unloadable(str(root)) is None
+
+
+def test_an_arm_linux_rivlib_is_refused_on_a_mac(client, monkeypatch, tmp_path):
+    """Apple silicon does not mean an ARM RiVLib.
+
+    The container is linux/amd64 whatever the Mac is, so the x86_64 Linux build
+    is the right one — and reaching for an ARM build is the obvious mistake to
+    make on an M-series machine.
+    """
+    _mac(monkeypatch)
+    monkeypatch.setattr(main, "_docker_present", lambda: True)
+    monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
+    root = _rivlib(tmp_path, "libscanifc.so", machine=ELF_AARCH64)
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": str(root)}).json()
+
+    assert b["available"] is False
+    assert b["misses_available"] is False
+    assert "ARM64" in b["reason"]
+    assert "linux/amd64" in b["reason"]
+    # Says the quiet part out loud, because the instinct is to blame the Mac.
+    assert "Apple silicon" in b["reason"]
+
+
+def test_a_truncated_so_is_refused_on_a_mac(client, monkeypatch, tmp_path):
+    _mac(monkeypatch)
+    monkeypatch.setattr(main, "_docker_present", lambda: True)
+    monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
+    root = _rivlib(tmp_path, "libscanifc.so")
+    (root / "lib" / "libscanifc.so").write_bytes(b"")
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": str(root)}).json()
+
+    assert b["available"] is False
+    assert "not a valid Linux shared library" in b["reason"]
+
+
+def test_the_wrong_gcc_abi_is_NOT_claimed_to_be_caught(monkeypatch, tmp_path):
+    """The limit of a header check, pinned so nobody assumes otherwise.
+
+    A gcc 11 or 13 build of RiVLib is a perfectly valid x86_64 ELF; what makes
+    it unusable is symbol versioning the loader resolves at run time. Claiming
+    to catch it here would be worse than not catching it, because the badge
+    would go green on a folder we had "checked".
+    """
+    _mac(monkeypatch)
+    root = _rivlib(tmp_path, "libscanifc.so")
+    assert main._riegl_rivlib_unloadable(str(root)) is None
+
+
+def test_a_partial_download_costs_only_the_sky_shots(client, monkeypatch, tmp_path):
+    """DLLs but no static archive: points import, misses cannot.
+
+    The shim links scanlib-mt-s.lib, so no compiler on earth produces miss
+    recovery from this folder. Left unreported it surfaced as a linker error
+    partway through an import the user had already committed to.
+    """
+    _win(monkeypatch)
+    monkeypatch.setattr(main, "_riegl_toolchain_present", lambda: True)
+    root = _rivlib(tmp_path, "scanifc-mt-s.dll", archive=False)
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": str(root)}).json()
+
+    # Readable — this is not a broken setup, just an incomplete one.
+    assert b["available"] is True
+    assert b["misses_available"] is False
+    assert b["toolchain_present"] is True
+    assert main._RIEGL_SCANLIB_ARCHIVE in b["reason"]
+
+
+def test_a_complete_sdk_reports_sky_shots_available(client, monkeypatch, tmp_path):
+    _win(monkeypatch)
+    monkeypatch.setattr(main, "_riegl_toolchain_present", lambda: True)
+    root = _rivlib(tmp_path, "scanifc-mt-s.dll")
+
+    b = client.get("/api/riegl/status", params={"rivlib_path": str(root)}).json()
+
+    assert b["available"] is True
+    assert b["misses_available"] is True
+    assert b["reason"] == "RIEGL .rxp import is ready."
+
+
+def test_a_failed_shim_build_degrades_rather_than_failing_the_import():
+    """The distinction that decides whether a scan is thrown away.
+
+    A shim that cannot be BUILT means this RiVLib cannot supply miss
+    recovery — the same thing to the user as having no compiler, and the
+    import continues without a sky shell. A shim that builds and then FAILS at
+    run time is a real fault and still raises RxpError.
+    """
+    reader = main._rxp_reader_module()
+    assert issubclass(reader.ShimUnavailable, reader.RxpError)
+    with pytest.raises(reader.ShimUnavailable):
+        reader._build_shim.__wrapped__ if False else None
+        import os as _os
+
+        old = _os.environ.get("PHYTOGRAPH_RXP_SHIM")
+        _os.environ["PHYTOGRAPH_RXP_SHIM"] = r"C:\nope\missing-shim.dll"
+        try:
+            reader._build_shim()
+        finally:
+            if old is None:
+                _os.environ.pop("PHYTOGRAPH_RXP_SHIM", None)
+            else:
+                _os.environ["PHYTOGRAPH_RXP_SHIM"] = old
 
 
 # ---------------------------------------------------------------------------

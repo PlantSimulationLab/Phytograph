@@ -121,6 +121,50 @@ describe('SettingsDialog — RIEGL on a native runtime', () => {
     expect(screen.queryByTestId('settings-riegl-build-image')).toBeNull();
   });
 
+  it('does not tick sky shots just because a compiler exists', async () => {
+    // A runtime-only RiVLib download: the compiler is there, but the static
+    // library the miss-recovery helper links is not, so no compiler on earth
+    // produces sky shots from this folder. Keying the row on the toolchain put
+    // a tick here while they were unavailable.
+    nextStatus = {
+      ...NATIVE,
+      available: true,
+      toolchainPresent: true,
+      missesAvailable: false,
+      reason:
+        'RIEGL .rxp import is ready, but no-return (sky) shots cannot be read: '
+        + 'this RiVLib has no lib\scanlib-mt-s.lib.',
+    };
+    open();
+
+    const row = await screen.findByTestId('settings-riegl-check-toolchain');
+    expect(row.dataset.ok).toBe('false');
+    // And it says which cause applies, rather than sending the user after a
+    // compiler they already have.
+    expect(row.textContent).toMatch(/scanlib-mt-s\.lib/);
+    expect(row.textContent).not.toMatch(/Build Tools/);
+  });
+
+  it('reports a RiVLib that is present but cannot load', async () => {
+    // The 32-bit download: every filename check passes, so this used to read
+    // as ready right up until the import died on a Windows loader error.
+    nextStatus = {
+      ...NATIVE,
+      available: false,
+      rivlibValid: true,
+      missesAvailable: false,
+      reason:
+        'scanifc-mt-s.dll is a 32-bit x86 build. Phytograph needs the 64-bit '
+        + '(x86_64) RiVLib — download that one and select it instead.',
+    };
+    open();
+
+    const row = await screen.findByTestId('settings-riegl-check-rivlib');
+    expect(row.dataset.ok).toBe('false');
+    expect(row.textContent).toMatch(/32-bit/);
+    expect(row.textContent).toMatch(/x86_64/);
+  });
+
   it('shows nothing to fix when a native host is fully ready', async () => {
     nextStatus = NATIVE;
     open();

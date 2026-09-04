@@ -44,7 +44,10 @@ Phytograph reads it from wherever you put it. Nothing is copied into the app.
 === "Windows"
 
     1. Sign in to RIEGL's members area and download the **`x86_64-windows`**
-       build of RiVLib.
+       build of RiVLib — the **64-bit** one, and the full package rather than a
+       runtime-only variant. RIEGL ship several builds per release; a 32-bit
+       library, or one carrying only the DLLs, has all the right filenames and
+       Phytograph will tell you which is wrong when you select it.
 
     2. Extract it to:
 
@@ -404,13 +407,34 @@ puts it back on the bounding box.
   you install it have no sky shell and need re-importing to gain one; the points
   themselves are unaffected.
 
-**The folder is accepted, but the import fails with a `GLIBC` or `libstdc++`
-loader error.**
-: You have a RiVLib built for the wrong compiler. Phytograph needs **Part 1**
-  for **`x86_64-linux-gcc9`** — the folder check only looks for
-  `lib/libscanifc.so`, which every variant has, so a gcc 11 or 13 build passes
-  the check and only fails when the library is actually loaded. Download the
-  gcc 9 build and re-select it in Settings.
+**Windows: "this RiVLib has no `lib\scanlib-mt-s.lib`".**
+: You have a runtime-only or partial download — the DLLs are there, so points,
+  reflectance, GNSS and registration all work, but the library the sky-shot
+  helper is built from is missing. Download the full RiVLib package and select
+  it again. Nothing else changes; the import still runs, just without a sky
+  shell.
+
+**"…is a 32-bit x86 build" / "…is an ARM64 build" / "…is not a valid
+Windows library" / "…is not a valid Linux shared library".**
+: RIEGL ship several builds per release and it is easy to take the wrong one.
+  Phytograph checks the library's own header when you select the folder, so
+  these are caught before you import rather than partway through.
+
+    - **Windows** needs the **64-bit (`x86_64`)** Windows build.
+    - **macOS** needs the **`x86_64` Linux** build — *not* an ARM one, even on
+      Apple silicon. The container is `linux/amd64` regardless of your Mac; the
+      architecture that matters is the library's, not the machine's.
+    - "not a valid … library" means the file is not a usable library at all,
+      which almost always means a download that stopped early.
+
+    Re-download the right build and select the folder again.
+
+**macOS: the folder is accepted but the import fails with a `GLIBC` or
+`libstdc++` error.**
+: The one mis-download Phytograph *cannot* catch up front. A gcc 11 or 13 build
+  is a perfectly valid `x86_64` library; what makes it unusable is symbol
+  versioning the loader only resolves at run time. Download **Part 1** for
+  **`x86_64-linux-gcc9`** and re-select it.
 
 **"Docker is not running" while Docker Desktop is clearly up.**
 : Fixed in v0.68.0. Older builds probed Docker with a call that forked the

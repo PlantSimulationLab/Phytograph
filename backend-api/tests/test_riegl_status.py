@@ -54,6 +54,24 @@ def test_status_shape_and_invariants(client):
             assert b["docker_present"] is False
 
 
+def _elf(machine: int = 0x3E) -> bytes:
+    """The smallest byte string that reads as a 64-bit ELF shared object.
+
+    The status now checks that the library could plausibly LOAD, not merely
+    that the filename is right — so an empty placeholder correctly reads as a
+    download that did not finish. Fixtures that mean "a working RiVLib" have to
+    look like one. 0x3E is EM_X86_64, which is what the linux/amd64 container
+    needs whatever the host is.
+    """
+    buf = bytearray(20)
+    buf[0:4] = b"ELF"
+    buf[4] = 2  # 64-bit
+    buf[5] = 1  # little-endian
+    buf[16:18] = (3).to_bytes(2, "little")  # ET_DYN
+    buf[18:20] = machine.to_bytes(2, "little")
+    return bytes(buf)
+
+
 def _mac(monkeypatch):
     import platform as _platform
     monkeypatch.setattr(_platform, "system", lambda: "Darwin")
@@ -65,7 +83,7 @@ def test_available_when_everything_is_present(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -101,7 +119,7 @@ def test_unavailable_when_docker_is_down(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_docker_present", lambda: False)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -150,7 +168,7 @@ def test_unavailable_when_image_not_built(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_riegl_image_built", lambda: False)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -245,7 +263,7 @@ def test_failure_states_stay_individually_distinguishable(
 def _valid_rivlib(tmp_path):
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
     return rivlib
 
 
@@ -822,7 +840,7 @@ def test_per_request_path_overrides_environment(client, monkeypatch, tmp_path):
     monkeypatch.setenv("PHYTOGRAPH_RIVLIB_PATH", "/stale/from/launch")
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -1219,7 +1237,7 @@ def _built_with(monkeypatch, tmp_path, stamp):
     monkeypatch.setattr(main, "_riegl_image_stamp", lambda: stamp)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
     return str(rivlib)
 
 
@@ -1406,7 +1424,7 @@ def _healable(monkeypatch, tmp_path):
 
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
     return str(rivlib), builds
 
 

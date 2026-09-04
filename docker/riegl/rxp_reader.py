@@ -449,9 +449,18 @@ def _compile_shim_msvc(src_dir: str, src: str, out: str) -> None:
             ["cmd", "/c", script], capture_output=True, text=True, cwd=work,
         )
         if proc.returncode != 0 or not os.path.exists(built):
-            raise RxpError(
-                "could not build the miss-recovery shim: "
-                + (proc.stdout or proc.stderr or "no compiler output")[-800:]
+            # ShimUnavailable, NOT RxpError. A build that fails here almost
+            # always means the RiVLib copy cannot supply what the shim needs --
+            # a partial download with the DLLs but not scanlib-mt-s.lib is the
+            # common one, and it fails at the linker. That is the same thing to
+            # the user as having no compiler: the scan is perfectly readable,
+            # it just cannot carry its sky shell. Failing the whole import over
+            # it would throw away a scan they can use, after they have already
+            # waited for the decode.
+            raise ShimUnavailable(
+                "No-return (sky) shots cannot be read: the miss-recovery "
+                "helper could not be built from this RiVLib copy. "
+                + (proc.stdout or proc.stderr or "no compiler output")[-500:]
             )
         # Atomic publish: a concurrent import may be running the same build, and
         # a half-written DLL on the cache path would be loaded by both.
@@ -493,7 +502,7 @@ def _build_shim() -> str:
     prebuilt = os.environ.get("PHYTOGRAPH_RXP_SHIM")
     if prebuilt:
         if not os.path.isfile(prebuilt):
-            raise RxpError(
+            raise ShimUnavailable(
                 f"PHYTOGRAPH_RXP_SHIM points at no such file: {prebuilt}"
             )
         return prebuilt
@@ -576,7 +585,33 @@ class _Scanifc:
                 "folder configured in Settings."
             )
         _add_rivlib_dll_directory(lib_path)
-        self.lib = ctypes.CDLL(lib_path)
+        try:
+            self.lib = ctypes.CDLL(lib_path)
+        except OSError as exc:
+            # The file exists but will not load. Untranslated this surfaces as
+            # a bare OSError and a traceback -- and the most likely cause has a
+            # specific, actionable fix, so say it. WinError 193 is Windows'
+            # way of saying "wrong architecture", which is what downloading the
+            # 32-bit RiVLib onto 64-bit Python gets you.
+            if sys.platform == "win32":
+                cause = (
+                    "The usual cause is the wrong build: Phytograph needs the "
+                    "64-bit (x86_64) Windows RiVLib."
+                )
+            else:
+                # In the container. The overwhelmingly common cause here is a
+                # build for the wrong compiler ABI, which no header check can
+                # see -- it only fails when the loader resolves symbols, and it
+                # says so with a GLIBC or libstdc++ error.
+                cause = (
+                    "The usual cause is a build for the wrong compiler: "
+                    "Phytograph needs Part 1 for x86_64-linux-gcc9. A GLIBC or "
+                    "libstdc++ message above is exactly that."
+                )
+            raise RxpError(
+                f"RiVLib at {lib_path} could not be loaded: {exc}. {cause} A "
+                "download that did not finish looks the same way."
+            ) from exc
 
     def _last_error(self) -> str:
         buf = ctypes.create_string_buffer(1024)
