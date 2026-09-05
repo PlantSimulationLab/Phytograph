@@ -45,13 +45,25 @@ import { SettingsDialog } from './SettingsDialog';
 const BASE: RieglStatus = {
   available: true,
   platformSupported: true,
+  runtime: 'docker',
   dockerPresent: true,
   imageBuilt: true,
   imageStale: false,
+  toolchainPresent: true,
+  missesAvailable: true,
   rivlibPath: '/opt/rivlib',
   rivlibValid: true,
   image: 'phytograph-riegl:latest',
   reason: 'RIEGL .rxp import is ready.',
+};
+
+/** A ready Windows host: RiVLib found, no Docker anywhere in sight. */
+const NATIVE: RieglStatus = {
+  ...BASE,
+  runtime: 'native',
+  dockerPresent: false,
+  image: '',
+  rivlibPath: String.raw`C:\Users\x\AppData\Local\Phytograph\rivlib`,
 };
 
 beforeEach(() => {
@@ -60,6 +72,107 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 const open = () => render(<SettingsDialog isOpen onClose={() => {}} />);
+
+describe('SettingsDialog — RIEGL on a native runtime', () => {
+  it('shows no Docker row and no build button when RiVLib runs natively', async () => {
+    // The whole point of the native path: there is no daemon to start and no
+    // image to build. Rendering either would send the user after a prerequisite
+    // this platform does not have.
+    nextStatus = { ...NATIVE, available: false, rivlibValid: false };
+    open();
+
+    await screen.findByTestId('settings-riegl-checklist');
+    expect(screen.queryByTestId('settings-riegl-check-docker')).toBeNull();
+    expect(screen.queryByTestId('settings-riegl-check-image')).toBeNull();
+    expect(screen.queryByTestId('settings-riegl-build-image')).toBeNull();
+
+    const rivlib = screen.getByTestId('settings-riegl-check-rivlib');
+    expect(rivlib.dataset.ok).toBe('false');
+    // Names the artifact this platform actually looks for. Telling a Windows
+    // user their folder lacks libscanifc.so would send them hunting for a file
+    // the Windows download does not contain.
+    expect(rivlib.textContent).toMatch(/scanifc-mt-s\.dll/i);
+    expect(rivlib.textContent).not.toMatch(/libscanifc\.so/i);
+  });
+
+  it('reports missing sky shots even though the import itself is ready', async () => {
+    // The state that is easy to miss BECAUSE it works: scans import fine, and
+    // only Leaf Area Density later fails for want of a shell nobody flagged.
+    // So the checklist must appear on an `available` status too.
+    nextStatus = {
+      ...NATIVE,
+      available: true,
+      toolchainPresent: false,
+      missesAvailable: false,
+      reason: 'RIEGL .rxp import is ready, but no-return (sky) shots cannot be read…',
+    };
+    open();
+
+    await screen.findByTestId('settings-riegl-checklist');
+    expect(
+      screen.getByTestId('settings-riegl-check-rivlib').dataset.ok,
+    ).toBe('true');
+    const toolchain = screen.getByTestId('settings-riegl-check-toolchain');
+    expect(toolchain.dataset.ok).toBe('false');
+    expect(toolchain.textContent).toMatch(/build tools/i);
+    // Says what is actually lost, so the user can judge whether to install 3 GB
+    // of compiler for it.
+    expect(toolchain.textContent).toMatch(/leaf area density/i);
+    expect(screen.queryByTestId('settings-riegl-build-image')).toBeNull();
+  });
+
+  it('does not tick sky shots just because a compiler exists', async () => {
+    // A runtime-only RiVLib download: the compiler is there, but the static
+    // library the miss-recovery helper links is not, so no compiler on earth
+    // produces sky shots from this folder. Keying the row on the toolchain put
+    // a tick here while they were unavailable.
+    nextStatus = {
+      ...NATIVE,
+      available: true,
+      toolchainPresent: true,
+      missesAvailable: false,
+      reason:
+        'RIEGL .rxp import is ready, but no-return (sky) shots cannot be read: '
+        + 'this RiVLib has no lib\scanlib-mt-s.lib.',
+    };
+    open();
+
+    const row = await screen.findByTestId('settings-riegl-check-toolchain');
+    expect(row.dataset.ok).toBe('false');
+    // And it says which cause applies, rather than sending the user after a
+    // compiler they already have.
+    expect(row.textContent).toMatch(/scanlib-mt-s\.lib/);
+    expect(row.textContent).not.toMatch(/Build Tools/);
+  });
+
+  it('reports a RiVLib that is present but cannot load', async () => {
+    // The 32-bit download: every filename check passes, so this used to read
+    // as ready right up until the import died on a Windows loader error.
+    nextStatus = {
+      ...NATIVE,
+      available: false,
+      rivlibValid: true,
+      missesAvailable: false,
+      reason:
+        'scanifc-mt-s.dll is a 32-bit x86 build. Phytograph needs the 64-bit '
+        + '(x86_64) RiVLib — download that one and select it instead.',
+    };
+    open();
+
+    const row = await screen.findByTestId('settings-riegl-check-rivlib');
+    expect(row.dataset.ok).toBe('false');
+    expect(row.textContent).toMatch(/32-bit/);
+    expect(row.textContent).toMatch(/x86_64/);
+  });
+
+  it('shows nothing to fix when a native host is fully ready', async () => {
+    nextStatus = NATIVE;
+    open();
+    await screen.findByTestId('settings-rivlib-path');
+    expect(screen.queryByTestId('settings-riegl-checklist')).toBeNull();
+    expect(screen.queryByTestId('settings-riegl-build-image')).toBeNull();
+  });
+});
 
 describe('SettingsDialog — RIEGL reader image', () => {
   it('offers no build button when the image is current', async () => {

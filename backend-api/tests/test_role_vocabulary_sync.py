@@ -40,7 +40,7 @@ _BACKEND_RGB = {"r255", "g255", "b255"}
 
 
 def _wizard_roles() -> set:
-    src = _WIZARD.read_text()
+    src = _WIZARD.read_text(encoding="utf-8")
     block = src.split("const ROLE_OPTIONS")[1].split("];")[0]
     roles = set(re.findall(r"value: '([a-z_0-9]+)'", block))
     assert roles, "could not parse ROLE_OPTIONS — did the declaration change?"

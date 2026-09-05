@@ -1,0 +1,21 @@
+; Export list for rxpshim.dll (Windows only).
+;
+; On Windows, `extern "C"` is NOT enough to export a symbol from a DLL -- it
+; only fixes the name mangling. Without an export list the shim compiles and
+; links cleanly and produces a DLL that exports nothing at all, and the failure
+; surfaces much later as ctypes' "function 'rxpshim_collect_misses' not found".
+;
+; This lives in a .def rather than as __declspec(dllexport) in rxp_shim.cpp so
+; that the shim source stays byte-identical across platforms: the Linux/macOS
+; container build relies on default ELF visibility and must not change.
+;
+; Keep in sync with the extern "C" block at the bottom of rxp_shim.cpp.
+EXPORTS
+rxpshim_collect_misses
+rxpshim_error
+rxpshim_miss_count
+rxpshim_shot_count
+rxpshim_hit_shot_count
+rxpshim_echo_count
+rxpshim_copy
+rxpshim_free

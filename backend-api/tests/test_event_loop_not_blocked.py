@@ -31,7 +31,7 @@ def _route_handlers():
     Read from source rather than from `app.routes` because what matters is how
     the handler is *declared* — `async def` vs `def` is exactly the bug.
     """
-    lines = MAIN_PY.read_text().split("\n")
+    lines = MAIN_PY.read_text(encoding="utf-8").split("\n")
     out = []
     i = 0
     while i < len(lines):

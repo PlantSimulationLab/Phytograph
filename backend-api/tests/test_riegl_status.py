@@ -36,12 +36,40 @@ def test_status_shape_and_invariants(client):
     assert isinstance(b["image_built"], bool)
     assert b["reason"]  # always explains the verdict
     # The one-way invariant: "available" is only ever reported when every
-    # prerequisite actually holds.
+    # prerequisite actually holds. WHICH prerequisites depends on the runtime --
+    # a native host reads RiVLib directly and has no Docker or image to require,
+    # so asserting docker_present there would be asserting the old design
+    # rather than the current one.
     if b["available"]:
         assert b["platform_supported"] is True
-        assert b["docker_present"] is True
-        assert b["image_built"] is True
         assert b["rivlib_valid"] is True
+        assert b["runtime"] in ("docker", "native")
+        if b["runtime"] == "docker":
+            assert b["docker_present"] is True
+            assert b["image_built"] is True
+            assert b["image_stale"] is False
+        else:
+            # Nothing to build and nothing to start: the reader ships inside the
+            # backend bundle, so RiVLib alone decides.
+            assert b["docker_present"] is False
+
+
+def _elf(machine: int = 0x3E) -> bytes:
+    """The smallest byte string that reads as a 64-bit ELF shared object.
+
+    The status now checks that the library could plausibly LOAD, not merely
+    that the filename is right — so an empty placeholder correctly reads as a
+    download that did not finish. Fixtures that mean "a working RiVLib" have to
+    look like one. 0x3E is EM_X86_64, which is what the linux/amd64 container
+    needs whatever the host is.
+    """
+    buf = bytearray(20)
+    buf[0:4] = b"ELF"
+    buf[4] = 2  # 64-bit
+    buf[5] = 1  # little-endian
+    buf[16:18] = (3).to_bytes(2, "little")  # ET_DYN
+    buf[18:20] = machine.to_bytes(2, "little")
+    return bytes(buf)
 
 
 def _mac(monkeypatch):
@@ -55,7 +83,7 @@ def test_available_when_everything_is_present(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -91,7 +119,7 @@ def test_unavailable_when_docker_is_down(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_docker_present", lambda: False)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -140,7 +168,7 @@ def test_unavailable_when_image_not_built(client, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_riegl_image_built", lambda: False)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -235,7 +263,7 @@ def test_failure_states_stay_individually_distinguishable(
 def _valid_rivlib(tmp_path):
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
     return rivlib
 
 
@@ -812,7 +840,7 @@ def test_per_request_path_overrides_environment(client, monkeypatch, tmp_path):
     monkeypatch.setenv("PHYTOGRAPH_RIVLIB_PATH", "/stale/from/launch")
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
 
     b = client.get(
         "/api/riegl/status", params={"rivlib_path": str(rivlib)}
@@ -838,7 +866,18 @@ def test_per_request_path_overrides_environment(client, monkeypatch, tmp_path):
 
 
 def _forbid_fork(monkeypatch):
-    """Make any fork-based subprocess launch an immediate, loud failure."""
+    """Fail loudly if a probe launches a subprocess outside `_spawn_run`.
+
+    The rule being enforced is "every probe goes through _spawn_run", and the
+    reason is the fork() hazard documented on that function: forking a process
+    holding libhelios, open3d and PROJ crashes in the post-fork window.
+
+    `_spawn_run` itself is therefore EXEMPT, and has to be -- on Windows it is
+    implemented with subprocess, because that platform has no fork() for the
+    hazard to exist in. Exempting it by tracking re-entry (rather than by not
+    patching subprocess at all) keeps this test meaningful on Windows: a new
+    probe that calls subprocess directly still trips, which is the whole point.
+    """
     import subprocess as _sp
 
     # BaseException, not AssertionError: every probe wraps its call in a bare
@@ -847,16 +886,39 @@ def _forbid_fork(monkeypatch):
     class _Forked(BaseException):
         pass
 
-    def _boom(*a, **k):
-        raise _Forked(
-            "probe used a fork()-based subprocess; must use _spawn_run"
-        )
+    real_run, real_popen = _sp.run, _sp.Popen
+    real_spawn_run = main._spawn_run
+    depth = {"n": 0}
+
+    def _spawn_run_spy(*a, **k):
+        depth["n"] += 1
+        try:
+            return real_spawn_run(*a, **k)
+        finally:
+            depth["n"] -= 1
+
+    def _guard(real):
+        def _inner(*a, **k):
+            if depth["n"]:
+                return real(*a, **k)
+            raise _Forked(
+                "probe launched a subprocess directly; must use _spawn_run"
+            )
+        return _inner
 
     monkeypatch.setattr(main, "_ForkGuard", _Forked, raising=False)
+    monkeypatch.setattr(main, "_spawn_run", _spawn_run_spy)
 
-    monkeypatch.setattr(_sp, "run", _boom)
-    monkeypatch.setattr(_sp, "Popen", _boom)
-    monkeypatch.setattr(os, "fork", _boom, raising=False)
+    monkeypatch.setattr(_sp, "run", _guard(real_run))
+    monkeypatch.setattr(_sp, "Popen", _guard(real_popen))
+    # os.fork must never be reached, from anywhere, including _spawn_run.
+    monkeypatch.setattr(
+        os, "fork",
+        lambda *a, **k: (_ for _ in ()).throw(
+            _Forked("probe used os.fork(); must use _spawn_run")
+        ),
+        raising=False,
+    )
 
 
 def test_docker_probe_does_not_fork(monkeypatch):
@@ -1175,7 +1237,7 @@ def _built_with(monkeypatch, tmp_path, stamp):
     monkeypatch.setattr(main, "_riegl_image_stamp", lambda: stamp)
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
     return str(rivlib)
 
 
@@ -1314,7 +1376,7 @@ def test_dockerfile_declares_the_stamp_below_every_run(tmp_path):
         Path(main.__file__).resolve().parent.parent
         / "docker" / "riegl" / "Dockerfile"
     )
-    lines = dockerfile.read_text().splitlines()
+    lines = dockerfile.read_text(encoding="utf-8").splitlines()
 
     arg_idx = [
         i for i, ln in enumerate(lines)
@@ -1362,7 +1424,7 @@ def _healable(monkeypatch, tmp_path):
 
     rivlib = tmp_path / "rivlib"
     (rivlib / "lib").mkdir(parents=True)
-    (rivlib / "lib" / "libscanifc.so").write_bytes(b"")
+    (rivlib / "lib" / "libscanifc.so").write_bytes(_elf())
     return str(rivlib), builds
 
 
@@ -1504,7 +1566,7 @@ def test_heal_uses_a_tighter_timeout_than_the_manual_build(monkeypatch, tmp_path
 def _extraresources_docker_dest():
     """Where electron-builder actually puts docker/riegl, per package.json."""
     repo_root = Path(main.__file__).resolve().parent.parent
-    pkg = json.loads((repo_root / "package.json").read_text())
+    pkg = json.loads((repo_root / "package.json").read_text(encoding="utf-8"))
     for entry in pkg["build"]["extraResources"]:
         if entry.get("from") == "docker":
             return entry.get("to", "docker")

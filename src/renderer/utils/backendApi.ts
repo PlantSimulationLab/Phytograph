@@ -377,20 +377,32 @@ export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
  * Whether RIEGL raw-project (.riproject / .rxp) import is available here, and
  * why not when it isn't.
  *
- * Reading .rxp needs RIEGL's closed-source RiVLib, which has no macOS build, so
- * Phytograph runs it inside a linux/amd64 container. That makes the feature
- * conditional on three things at once — Docker reachable, the user's own RiVLib
- * supplied, and the image built from it — and RiVLib's licence forbids us from
- * shipping it, so this is a runtime probe rather than a build-time flag.
- * See /api/riegl/status.
+ * Reading .rxp needs RIEGL's closed-source RiVLib, whose licence forbids us
+ * from shipping it — so this is a runtime probe rather than a build-time flag.
+ * What else is required depends on `runtime`; see /api/riegl/status.
  */
+export type RieglRuntime = 'docker' | 'native' | null;
+
 export interface RieglStatus {
   available: boolean;
   platformSupported: boolean;
+  /**
+   * How this machine reads .rxp, and therefore which other fields mean
+   * anything.
+   *
+   * 'docker'  — macOS. RiVLib has no Darwin build at all, so the reader runs in
+   *             a linux/amd64 container: Docker must be reachable and the image
+   *             built. `dockerPresent`/`imageBuilt`/`imageStale` apply.
+   * 'native'  — Windows. RiVLib runs directly, so there is no daemon and no
+   *             image; RiVLib alone decides `available`, and the docker fields
+   *             are inert (false/true placeholders, never rendered).
+   * null      — no runtime on this OS (Linux today).
+   */
+  runtime: RieglRuntime;
   dockerPresent: boolean;
   imageBuilt: boolean;
   /**
-   * The image exists but was built by an earlier Phytograph.
+   * The image exists but was built by an earlier Phytograph. Docker only.
    *
    * Distinct from `!imageBuilt` because the remedy differs in kind: an import
    * heals this one itself (the rebuild is one cached layer, ~2s), whereas a
@@ -399,6 +411,18 @@ export interface RieglStatus {
    * this flag to tell "needs setting up" apart from "will sort itself out".
    */
   imageStale: boolean;
+  /**
+   * A C++ toolchain is available to build the miss-recovery shim.
+   *
+   * Native only, and deliberately NOT part of `available`. Points, attributes,
+   * GNSS and registration need no compiler; only no-return (sky) shots do,
+   * because on Windows that part of RiVLib is a static library RIEGL's licence
+   * forbids us shipping pre-linked. Withholding the whole import over it would
+   * refuse a scan the user can read perfectly well.
+   */
+  toolchainPresent: boolean;
+  /** Whether an import will carry its sky/miss shell — what LAD needs. */
+  missesAvailable: boolean;
   rivlibPath: string | null;
   rivlibValid: boolean;
   image: string;
@@ -668,9 +692,13 @@ export async function getRieglStatus(
   return {
     available: j.available === true,
     platformSupported: j.platform_supported === true,
+    runtime:
+      j.runtime === 'docker' || j.runtime === 'native' ? j.runtime : null,
     dockerPresent: j.docker_present === true,
     imageBuilt: j.image_built === true,
     imageStale: j.image_stale === true,
+    toolchainPresent: j.toolchain_present === true,
+    missesAvailable: j.misses_available === true,
     rivlibPath: typeof j.rivlib_path === 'string' ? j.rivlib_path : null,
     rivlibValid: j.rivlib_valid === true,
     image: typeof j.image === 'string' ? j.image : '',

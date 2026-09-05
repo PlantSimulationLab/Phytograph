@@ -89,6 +89,25 @@ const LIBHELIOS_NAME =
     : process.platform === 'darwin' ? 'libhelios.dylib'
       : 'libhelios.so';
 
+// Bundled sources that do NOT live under backend-api/. The RIEGL reader sits in
+// the Docker build context (it is also what `docker build` ships), but on a
+// native runtime it is compiled into the bundle and executed as a child of the
+// backend — so an edit to it changes the shipped binary exactly like an edit to
+// main.py does.
+//
+// This has to be here or the hash has a hole in precisely the shape this check
+// exists to catch: the stamp would still match after a reader change, E2E would
+// print a tick, and the suite would pass having exercised a bundle built from
+// older code. The .cpp/.def are included because they ship as data and define
+// the miss-recovery DLL built on the user's machine.
+//
+// Paths are relative to the repo root, and hashed under that spelling.
+const BUNDLED_EXTRA_SOURCES = [
+  'docker/riegl/rxp_reader.py',
+  'docker/riegl/rxp_shim.cpp',
+  'docker/riegl/rxpshim.def',
+];
+
 export function backendBundleDir() {
   return join(root, 'resources', 'phytograph_backend');
 }
@@ -160,6 +179,10 @@ export function hashLibhelios() {
  */
 export function hashBackendSources() {
   const backendDir = join(root, 'backend-api');
+  // [label, absolutePath]. The label is what gets hashed alongside the bytes,
+  // so it must be stable across platforms and independent of where the repo
+  // lives. Files under backend-api/ keep their historical backend-relative
+  // spelling, so this change does not invalidate every existing stamp.
   const files = [];
   for (const rel of BUNDLED_SOURCE_DIRS) {
     const dir = rel ? join(backendDir, ...rel.split('/')) : backendDir;
@@ -168,15 +191,20 @@ export function hashBackendSources() {
       if (!name.endsWith('.py')) continue;
       const full = join(dir, name);
       if (!statSync(full).isFile()) continue;
-      files.push(full);
+      files.push([relative(backendDir, full).split(pathSep).join('/'), full]);
     }
+  }
+  for (const rel of BUNDLED_EXTRA_SOURCES) {
+    const full = join(root, ...rel.split('/'));
+    if (!existsSync(full) || !statSync(full).isFile()) continue;
+    files.push([rel, full]);
   }
   // Normalise separators so a Windows build and a macOS build of identical
   // sources produce identical digests.
-  files.sort();
+  files.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const h = createHash('sha256');
-  for (const full of files) {
-    h.update(relative(backendDir, full).split(pathSep).join('/'));
+  for (const [label, full] of files) {
+    h.update(label);
     h.update('\0');
     h.update(readFileSync(full));
     h.update('\0');
