@@ -16,6 +16,7 @@
 // callers compare that stamp against the source of truth BEFORE launching
 // anything. Reading a file costs nothing and the diagnosis is exact.
 
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep as pathSep } from 'node:path';
@@ -41,6 +42,11 @@ export const BACKEND_STAMP_FILE = 'phytograph_backend_version.txt';
 // Observed exactly that way: a bundle built 2026-08-22 sailed through
 // `check:backend` against sources edited 2026-08-23, and would have run the
 // whole E2E suite without exercising a single one of the day's backend changes.
+//
+// "Sources" means every input that lands in the bundle, not only Python: the
+// backend .py tree AND PyHelios (its submodule pins plus the compiled
+// libhelios). See PYHELIOS_SUBMODULES below for why a submodule bump was
+// invisible here until it wasn't.
 export const BACKEND_SOURCE_HASH_FILE = 'phytograph_backend_sources.sha256';
 
 // Directories whose .py files are compiled INTO the bundle. `research/`,
@@ -48,6 +54,40 @@ export const BACKEND_SOURCE_HASH_FILE = 'phytograph_backend_sources.sha256';
 // change there cannot affect the shipped binary, and hashing them would demand
 // pointless 10-minute rebuilds.
 const BUNDLED_SOURCE_DIRS = ['', 'qsm', 'qsm/validation', 'vendor/treeiso'];
+
+// The THIRD input to the bundle, and the one this hash was originally blind to:
+// PyHelios. `--collect-all pyhelios` pulls the submodule's Python package AND
+// the compiled `libhelios` into resources/phytograph_backend/, but pyhelios/ is
+// a SIBLING of backend-api/, so the walk above never visits it — and it filters
+// to `.py`, so the native library could not be hashed even if it did.
+//
+// That is not a hypothetical gap. Bumping the submodule to PyHelios v0.1.31
+// (helios-core v1.3.84) and rebuilding libhelios changed neither
+// BACKEND_VERSION nor any backend-api/*.py, so `check:backend` printed a tick
+// while the bundle still contained the PREVIOUS PyHelios and its old dylib —
+// exactly the silent-green failure the source hash exists to prevent, arriving
+// through a path it wasn't watching. A submodule bump is precisely when you
+// most want the warning, since the payload is a native library no Python hash
+// can see.
+//
+// Hashing the submodule's whole source tree would be wrong: it contains
+// pyhelios_build/ (a multi-GB CMake tree that changes on every compile) and
+// helios-core's own vendored libraries, so the digest would churn constantly
+// and cost seconds. Two precise signals cost microseconds instead:
+//
+//   1. The two submodule commit SHAs, read from .git — these move if and only
+//      if the pinned PyHelios / helios-core source moves.
+//   2. The compiled libhelios's own content hash — this catches a LOCAL
+//      recompile (editing the Helios C++ and restarting, which the backend does
+//      automatically) that leaves both SHAs untouched.
+//
+// Together they cover "the pin moved" and "the same pin was rebuilt", which are
+// the only two ways the bundled native code can diverge from the tree.
+const PYHELIOS_SUBMODULES = ['pyhelios', 'pyhelios/helios-core'];
+const LIBHELIOS_NAME =
+  process.platform === 'win32' ? 'libhelios.dll'
+    : process.platform === 'darwin' ? 'libhelios.dylib'
+      : 'libhelios.so';
 
 export function backendBundleDir() {
   return join(root, 'resources', 'phytograph_backend');
@@ -71,15 +111,52 @@ export function readExpectedBackendVersion() {
 }
 
 /**
- * SHA-256 over every bundled Python source, plus the paths themselves.
+ * The checked-out commit of each PyHelios submodule, as `path=sha` lines.
+ *
+ * Uses `git rev-parse HEAD` rather than reading .git/HEAD directly: a submodule
+ * may be on a branch (a symbolic ref), detached (a raw SHA), or have its refs
+ * packed, and git resolves all three. A submodule that isn't initialised, or a
+ * tree with no git at all (an unpacked source tarball), yields 'absent' — a
+ * stable value, so the digest stays deterministic instead of throwing.
+ */
+export function pyheliosSubmoduleRevisions() {
+  return PYHELIOS_SUBMODULES.map((rel) => {
+    const dir = join(root, ...rel.split('/'));
+    if (!existsSync(dir)) return `${rel}=absent`;
+    const r = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const sha = r.status === 0 ? r.stdout.trim() : '';
+    return `${rel}=${/^[0-9a-f]{40}$/.test(sha) ? sha : 'absent'}`;
+  });
+}
+
+/**
+ * SHA-256 of the compiled libhelios, or null when it hasn't been built yet.
+ *
+ * Catches the case the commit SHAs cannot: editing the Helios C++ in place and
+ * recompiling (which `backend-api/main.py` does automatically on startup when
+ * the lib is stale) leaves both submodule pointers untouched while changing the
+ * native code the bundle ships.
+ */
+export function hashLibhelios() {
+  const lib = join(root, 'pyhelios', 'pyhelios_build', 'build', 'lib', LIBHELIOS_NAME);
+  if (!existsSync(lib)) return null;
+  return createHash('sha256').update(readFileSync(lib)).digest('hex');
+}
+
+/**
+ * SHA-256 over every input that lands in the bundle: the bundled Python sources
+ * (plus their paths), the PyHelios submodule pins, and the compiled libhelios.
  *
  * Path-sensitive on purpose: hashing contents alone would miss a file being
  * added, deleted, or renamed, which changes the bundle just as surely as an
  * edit. Sorted with a fixed separator so the digest is stable across platforms
  * and filesystem enumeration order.
  *
- * Reads ~2 MB of text and takes single-digit milliseconds — the whole point of
- * this check is that it costs nothing next to a 10-minute rebuild.
+ * Reads ~2 MB of text, hashes one dylib, and runs two `git rev-parse` calls —
+ * tens of milliseconds, the whole point being that it costs nothing next to a
+ * 10-minute rebuild.
  */
 export function hashBackendSources() {
   const backendDir = join(root, 'backend-api');
@@ -104,6 +181,22 @@ export function hashBackendSources() {
     h.update(readFileSync(full));
     h.update('\0');
   }
+
+  // PyHelios's contribution (see PYHELIOS_SUBMODULES above). Namespaced and
+  // appended rather than mixed into the file loop, so a submodule bump reads as
+  // a distinct input and can never collide with a backend-api path.
+  for (const rev of pyheliosSubmoduleRevisions()) {
+    h.update('pyhelios-rev:');
+    h.update(rev);
+    h.update('\0');
+  }
+  const libHash = hashLibhelios();
+  // 'unbuilt' is a value like any other: a tree with no compiled lib hashes
+  // consistently, and the digest changes the moment one appears.
+  h.update('libhelios:');
+  h.update(libHash ?? 'unbuilt');
+  h.update('\0');
+
   return h.digest('hex');
 }
 
@@ -231,12 +324,14 @@ export function checkBackendBundle({ allowUnstamped = true } = {}) {
       reason: 'stale-sources',
       bundleVersion: stamp,
       message:
-        `Stale backend bundle — it was built from DIFFERENT Python sources than ` +
-        `the ones on disk.\n` +
+        `Stale backend bundle — it was built from DIFFERENT sources than the ` +
+        `ones on disk.\n` +
         `The version matches (${stamp}), so the app will start and E2E will look ` +
         `green — while testing the OLD backend code.\n` +
         `  bundle built from sources sha256 = ${builtHash.slice(0, 16)}…\n` +
-        `  backend-api/*.py currently       = ${currentHash.slice(0, 16)}…\n` +
+        `  current sources                  = ${currentHash.slice(0, 16)}…\n` +
+        `Covers backend-api/*.py (+ qsm, vendor/treeiso), the PyHelios submodule ` +
+        `pins, and the compiled libhelios.\n` +
         `Fix: npm run build:backend`,
     };
   }

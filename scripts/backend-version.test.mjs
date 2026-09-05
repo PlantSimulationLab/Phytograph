@@ -11,10 +11,11 @@
 // that way: a bundle built 2026-08-22 sailed through the check against sources
 // edited 2026-08-23.
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { hashBackendSources } from './backend-version.mjs';
+import { hashBackendSources, pyheliosSubmoduleRevisions } from './backend-version.mjs';
 
 const MAIN_PY = join(process.cwd(), 'backend-api', 'main.py');
 
@@ -86,5 +87,98 @@ describe('hashBackendSources', () => {
 
   it('returns a full sha256 hex digest', () => {
     expect(hashBackendSources()).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// PyHelios is the THIRD input to the bundle (`--collect-all pyhelios` pulls in
+// the submodule's package and the compiled libhelios), and it was invisible to
+// the hash above until 2026-09: pyhelios/ is a sibling of backend-api/, so the
+// directory walk never reached it, and the walk filters to `.py`, so the native
+// library could not have been hashed even if it had.
+//
+// The real miss: bumping the submodule to PyHelios v0.1.31 / helios-core
+// v1.3.84 and rebuilding libhelios moved neither BACKEND_VERSION nor any
+// backend-api/*.py, so `check:backend` printed a tick against a bundle that
+// still held the PREVIOUS PyHelios — the exact silent-green failure this file
+// exists to prevent, through a path it wasn't watching.
+describe('hashBackendSources — PyHelios inputs', () => {
+  const LIB = join(
+    process.cwd(), 'pyhelios', 'pyhelios_build', 'build', 'lib',
+    process.platform === 'win32' ? 'libhelios.dll'
+      : process.platform === 'darwin' ? 'libhelios.dylib' : 'libhelios.so',
+  );
+
+  it('changes when the compiled libhelios changes', () => {
+    // Catches what the submodule pins cannot: editing the Helios C++ in place
+    // and recompiling (main.py does this automatically when the lib is stale)
+    // leaves both pins untouched while changing the shipped native code.
+    if (!existsSync(LIB)) {
+      // A tree that has never run build-pyhelios has nothing to perturb; the
+      // 'unbuilt' branch is covered by the determinism test below.
+      return;
+    }
+    const before = hashBackendSources();
+    const orig = readFileSync(LIB);
+    try {
+      writeFileSync(LIB, Buffer.concat([orig, Buffer.from([0])]));
+      expect(hashBackendSources()).not.toBe(before);
+    } finally {
+      writeFileSync(LIB, orig);
+    }
+    // Restored byte-for-byte, so the digest must return to its original value.
+    expect(hashBackendSources()).toBe(before);
+  });
+
+  it('reports a 40-hex commit for each initialised submodule', () => {
+    // `git rev-parse` rather than reading .git/HEAD, so a branch (symbolic
+    // ref), a detached HEAD (raw SHA), and packed refs all resolve.
+    const revs = pyheliosSubmoduleRevisions();
+    expect(revs).toHaveLength(2);
+    expect(revs[0]).toMatch(/^pyhelios=([0-9a-f]{40}|absent)$/);
+    expect(revs[1]).toMatch(/^pyhelios\/helios-core=([0-9a-f]{40}|absent)$/);
+  });
+
+  it('changes when the submodule pin moves', () => {
+    // The bump case itself, driven through the REAL git state rather than a
+    // reconstructed string — a test that rebuilt the digest by hand would pass
+    // even if hashBackendSources() ignored the revisions entirely.
+    //
+    // `git checkout` on the submodule's PARENT commit moves HEAD without
+    // touching backend-api/ at all, which is precisely the shape that used to
+    // slip through. Restored in `finally`, and the digest must come back.
+    const sub = join(process.cwd(), 'pyhelios');
+    if (!existsSync(sub)) return; // submodule not initialised
+
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: sub, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const parent = spawnSync('git', ['rev-parse', 'HEAD~1'], {
+      cwd: sub, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (head.status !== 0 || parent.status !== 0) return; // shallow / no history
+
+    // Remember how to get back: a branch name if we're on one, else the SHA.
+    const branch = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      cwd: sub, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const restoreTo = branch.status === 0 ? branch.stdout.trim() : head.stdout.trim();
+
+    const before = hashBackendSources();
+    try {
+      const co = spawnSync('git', ['checkout', '--quiet', parent.stdout.trim()], {
+        cwd: sub, encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      if (co.status !== 0) return; // dirty tree — don't fight it, just skip
+      expect(hashBackendSources()).not.toBe(before);
+    } finally {
+      spawnSync('git', ['checkout', '--quiet', restoreTo], {
+        cwd: sub, encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'],
+      });
+    }
+    expect(hashBackendSources()).toBe(before);
+  });
+
+  it('is deterministic — the same tree hashes identically', () => {
+    expect(hashBackendSources()).toBe(hashBackendSources());
   });
 });
