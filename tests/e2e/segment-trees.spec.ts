@@ -27,6 +27,41 @@ let session: LaunchedApp;
 test.beforeAll(async () => {
   session = await launchApp();
 });
+
+// Click Run with "split into per-tree clouds" ticked, wait for the run to
+// FINISH, and return how many per-tree child rows it produced.
+//
+// Completion is read from the success toast, not from the scalar overlay. With
+// the split on, the handler adds the children and then HIDES the source scan
+// (leaving it visible drew the whole cloud on top of the pieces), and the
+// legend overlay only reports a scalar for a VISIBLE cloud — so
+// `data-active-scalar="tree_instance"` exists for the few hundred ms between
+// "parent recoloured" and "parent hidden". Waiting on it was a race: it passed
+// when the poll happened to land in that window (a cold octree build) and
+// timed out at 3 min when the split completed first (a cached one), which is
+// how the second run of the split-distance test failed both on CI and locally.
+// The toast is emitted after the children are added and the parent hidden, so
+// once it is up the row count is final.
+async function runAndCountTrees(
+  page: LaunchedApp['page'],
+  childRows: ReturnType<LaunchedApp['page']['locator']>,
+): Promise<number> {
+  const doneToasts = page
+    .locator('[data-testid="toast-success"]')
+    .filter({ hasText: 'Tree Segmentation Complete' });
+  // Close any earlier completion toast first, so the wait below is simply "a
+  // completion toast exists". Success toasts auto-dismiss after ~4 s, so a
+  // "one more than before" count could race the old one's dismissal against
+  // the new one's arrival and never see the count rise.
+  const closers = doneToasts.getByTestId('toast-close');
+  while (await closers.count() > 0) await closers.first().click();
+  await expect(doneToasts).toHaveCount(0);
+  await page.getByTestId('tree-segment-run-button').click();
+  await expect(doneToasts.first()).toBeVisible({ timeout: 180_000 });
+  const n = await childRows.count();
+  expect(n, 'the split produced no per-tree clouds').toBeGreaterThan(0);
+  return n;
+}
 test.afterAll(async () => {
   await session?.close();
 });
@@ -255,13 +290,8 @@ test('the split distance is editable and changes how many trees come out', async
   // it is the same clamped run.
   await gapField.fill('0.4');
   await gapField.blur();
-  await page.getByTestId('tree-segment-run-button').click();
-  await expect(page.getByTestId('scalar-overlay'))
-    .toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 180_000 });
   const childRows = page.locator('[data-testid="scan-row"][data-scan-name*="(tree "]');
-  await expect.poll(async () => childRows.count(), { timeout: 60_000 })
-    .toBeGreaterThan(0);
-  const tightCount = await childRows.count();
+  const tightCount = await runAndCountTrees(page, childRows);
 
   // Start over and run the same cloud at the default distance.
   await resetToFreshScene(session.app, session.page);
@@ -272,12 +302,7 @@ test('the split distance is editable and changes how many trees come out', async
   await expect(page.getByTestId('tree-segment-panel')).toBeVisible();
   await page.getByTestId('tree-split-clouds').check();
   await expect(page.getByTestId('tree-max-outlier-gap')).toHaveValue('0.65');
-  await page.getByTestId('tree-segment-run-button').click();
-  await expect(page.getByTestId('scalar-overlay'))
-    .toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 180_000 });
-  await expect.poll(async () => childRows.count(), { timeout: 60_000 })
-    .toBeGreaterThan(0);
-  const defaultCount = await childRows.count();
+  const defaultCount = await runAndCountTrees(page, childRows);
 
   // The tighter setting must produce strictly MORE instances. This is the
   // assertion that fails if the parameter is ignored again: an inert knob makes

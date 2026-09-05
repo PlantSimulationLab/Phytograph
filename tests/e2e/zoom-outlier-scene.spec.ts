@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { wheelNotches } from './helpers/wheel';
 
 // The reported failure, reproduced on the scene shape that caused it: a small
 // dense plot plus a handful of stray returns ~500 m out.
@@ -121,7 +122,7 @@ test('you can zoom right into the content and still pan — the view never freez
 
   // Zoom hard, aimed at the middle of the viewport where the plot is drawn.
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 30; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -30);
   await page.waitForTimeout(300);
 
   const zoomed = await readState();
@@ -208,7 +209,7 @@ test('pan sensitivity scales with zoom — a drag moves the same fraction of the
 
   // Zoom well in, then sample again.
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 20; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -20);
   await page.waitForTimeout(250);
   const close = await sample();
 
@@ -282,7 +283,7 @@ test('zooming at empty sky converges on the scene instead of flying off', async 
   // converge on the content — an early version flew straight through the scene
   // and accelerated away, because its anchor sat a fixed distance ahead forever.
   await page.mouse.move(box.x + box.width * 0.06, box.y + box.height * 0.08);
-  for (let i = 0; i < 30; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -30);
   await page.waitForTimeout(300);
 
   const after = await readState();
@@ -435,9 +436,11 @@ test('zoom stays responsive after a deep zoom — no permanent freeze', async ()
   // Drive in deep. This is what used to re-seat the orbit target closer than
   // OrbitControls' own minDistance, after which update() clamped the spherical
   // radius and shoved the camera straight back out — cancelling every
-  // subsequent dolly permanently.
+  // subsequent dolly permanently. (Batched — see helpers/wheel.ts; still
+  // several events land AFTER the clamp engages, which is where the bug bit.
+  // 50 single-notch events put this test at 2.7 min of its 3 min CI budget.)
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 40; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -40);
   await page.waitForTimeout(300);
 
   const deep = await readState();
@@ -455,7 +458,7 @@ test('zoom stays responsive after a deep zoom — no permanent freeze', async ()
   // without needing an orbit first to unstick it.
   const before = distToContent(deep);
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 10; i++) await page.mouse.wheel(0, 120);
+  await wheelNotches(page, 10);
   await page.waitForTimeout(300);
   const after = distToContent(await readState());
   expect(after).toBeGreaterThan(before);

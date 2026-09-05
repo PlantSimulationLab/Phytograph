@@ -3,6 +3,7 @@ import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { Potree, PointSizeType, type PointCloudOctree } from 'potree-core';
 import { MISS_ATTRIBUTE } from '../../../lib/classification';
+import { denormalizeWideAttributes } from '../../../lib/octreeWideAttributes';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import {
   ORIG_INTENSITY_ATTRIBUTE,
@@ -205,6 +206,12 @@ export function PointPicker({ octrees, getCloudData, onPick }: PointPickerProps)
       const values: Record<string, unknown> = { ...hit };
       delete values.pointCloud;
       delete values.position;
+      // potree stores any attribute wider than a float32 (the double `gps-time`)
+      // pre-normalised to 0..1 in the GPU buffer, and its picker reads that
+      // buffer back verbatim — so a timestamp of 105 arrived here as 0.033898.
+      // Map wide entries back onto their real range before anything formats
+      // them (see lib/octreeWideAttributes.ts).
+      denormalizeWideAttributes(owner.octree, values);
       // Undo the scalar-colour alias: while `colorMode === 'scalar'` the tile's
       // `intensity` slot points at the selected scalar's buffer, so the pick's
       // `intensity` would be that scalar's value under the wrong name. The real

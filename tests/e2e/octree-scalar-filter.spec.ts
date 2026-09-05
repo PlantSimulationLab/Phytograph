@@ -64,15 +64,20 @@ test('filters an octree-backed cloud by an imported scalar attribute', async () 
   const fieldSelect = page.getByTestId('filter-field-select');
   await expect(fieldSelect).toBeVisible();
 
-  // The imported scalar must be an option (the bug this feature fixed: octree
-  // clouds previously listed only X/Y/Z). Builtin LAS attrs must not leak in.
+  // The imported scalars must be options (the bug this feature fixed: octree
+  // clouds previously listed only X/Y/Z). The time column appears under its
+  // octree buffer key `gps-time` — it rides the LAS standard gps_time field —
+  // because on this fixture it carries real data; only the all-zero schema
+  // padding PotreeConverter writes for every LAS dimension must stay out.
   const optionValues = await fieldSelect
     .locator('option')
     .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value));
   expect(optionValues).toContain('scalar:Deviation');
+  expect(optionValues).toContain('scalar:gps-time');
   for (const v of optionValues) {
     expect(v.toLowerCase()).not.toContain('source id');
-    expect(v.toLowerCase()).not.toContain('gps');
+    expect(v.toLowerCase()).not.toContain('return');
+    expect(v.toLowerCase()).not.toContain('scan angle');
   }
 
   // Keep only Deviation in [0, 2] → 36 of 60 survive. No Apply button — the
@@ -86,6 +91,33 @@ test('filters an octree-backed cloud by an imported scalar attribute', async () 
     const n = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
     expect(n).toBe(36);
   }).toPass({ timeout: 30_000 });
+});
+
+test('filters an octree-backed cloud by its time column', async () => {
+  // The time column is the one scalar that does NOT live in the session's
+  // float32 extras — it rides the float64 gps_time field for precision — and
+  // the filter worker used to resolve slugs against the extras alone. So the
+  // picker offered "Timestamp" and the backend answered "Unknown scalar
+  // attribute: 'gps-time'". Timestamps run 100, 102.5, …, 247.5, so keeping
+  // [100, 150] leaves exactly the first 21 rows.
+  const { app, page } = session;
+  const cloudRow = await importAndSelect(app, page);
+  expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
+
+  await page.getByTestId('tool-filter').click();
+  const fieldSelect = page.getByTestId('filter-field-select');
+  await expect(fieldSelect).toBeVisible();
+  await fieldSelect.selectOption('scalar:gps-time');
+  await page.getByTestId('filter-min-input').fill('100');
+  await page.getByTestId('filter-max-input').fill('150');
+  await page.getByTestId('filter-remove').click();
+
+  await expect(async () => {
+    const n = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
+    expect(n).toBe(21);
+  }).toPass({ timeout: 30_000 });
+  // A rejected filter surfaces as an error toast; a real one does not.
+  await expect(page.locator('[data-testid="toast-error"]')).toHaveCount(0);
 });
 
 test('segments an octree cloud into in-range + out-of-range clouds', async () => {

@@ -124,6 +124,18 @@ their own app instance, backend port, and octree cache directory, so a
 test must never assume a fixed port or that it is the only running
 instance.
 
+### 7. Budget ~4 s per wheel event on CI
+
+On the headless Linux runner every `page.mouse.wheel` call takes roughly
+4 s (locally ~20 ms), so a "zoom all the way in" loop of 40 single
+notches ran to 2.9 min of a 3 min test budget and timed out on a slow
+day. Drive zoom bursts through `wheelNotches`
+(`tests/e2e/helpers/wheel.ts`), which sends five notches per event —
+OrbitControls' dolly is linear in `deltaY`, so the travel is identical.
+The exception is a spec that samples the camera *between* notches (the
+per-notch trajectory tests in `zoom-outlier-scene.spec.ts`); those must
+keep stepping one notch at a time, and should stay short.
+
 ## Why E2E launches a cloned Electron bundle (macOS)
 
 On macOS the suite does **not** run

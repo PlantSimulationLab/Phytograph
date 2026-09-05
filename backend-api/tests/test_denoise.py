@@ -224,14 +224,27 @@ def test_ror_matches_query_ball_point_except_on_exact_ties():
     """
     from scipy.spatial import cKDTree
 
+    # Integer coordinates, deliberately. The first version of these fixtures
+    # was the same geometry at a 0.01 m pitch, and its ties existed only by
+    # rounding luck: on arm64 the compiler fuses cKDTree's squared-distance
+    # accumulation into FMAs, on x86-64 it does not, so the same pair distance
+    # rounds differently per architecture and the exact ties this test is
+    # about appeared on an Apple Silicon dev machine and never on the Linux CI
+    # runner (`fixtures no longer exercise the exact-tie boundary`). With
+    # integer coordinates every squared distance is an exact small integer, so
+    # a neighbour at `radius` is a tie on every IEEE-754 machine by
+    # construction: sqrt(1), sqrt(4), sqrt(9) are exact, and sqrt(3)**2 rounds
+    # to 2.9999999999999996 (< 3) everywhere, which is precisely the case where
+    # the squared-radius and correctly-rounded-sqrt paths disagree. The
+    # algorithm is scale-invariant, so nothing about the property changes.
     rng = np.random.default_rng(1)
-    g = np.arange(6) * 0.01
+    g = np.arange(6, dtype=np.float64)
     clouds = {
         "lattice": np.array(np.meshgrid(g, g, g)).reshape(3, -1).T.astype(np.float64),
-        "random": rng.random((4000, 3)) * 0.1,
-        "quantised": np.round(rng.random((4000, 3)) * 0.1, 2),
+        "random": rng.random((4000, 3)) * 10.0,
+        "quantised": np.round(rng.random((4000, 3)) * 20.0),
     }
-    radii = (0.005, 0.01, np.sqrt(2) * 0.01, np.sqrt(3) * 0.01, 0.02, 0.03, 0.05)
+    radii = (0.5, 1.0, np.sqrt(2), np.sqrt(3), 2.0, 3.0, 5.0)
     seen_a_tie = False
     for name, points in clouds.items():
         kd = cKDTree(points)

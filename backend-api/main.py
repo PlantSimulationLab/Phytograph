@@ -25593,6 +25593,18 @@ def _run_potree_converter(
             _kill_seg_worker(proc)
             proc.wait()
 
+    # A cancel that landed during the LAST poll interval — after the final
+    # check in the loop, before the child exited — must still be a cancel.
+    # Without this the loop fell through as a clean exit and
+    # `_build_octree_from_las` installed the finished octree of an import the
+    # user had already abandoned: the renderer had dropped the scan, only the
+    # cache grew, and import-cancel.spec.ts caught it as a one-in-N flake on a
+    # fast machine, where a 1 M-point conversion is short enough for the click
+    # to land in that window. The caller's staging cleanup discards the output.
+    # Pinned by tests/test_converter_cancel_last_interval.py.
+    if cancel_event is not None and cancel_event.is_set():
+        raise ScanCancelled()
+
     if returncode != 0:
         # Surface the converter's output tail directly so failures are debuggable.
         try:
@@ -27061,6 +27073,37 @@ def _resolve_scalar_filter(f: dict) -> tuple:
     if vals:
         return float("-inf"), float("inf"), {int(round(float(v))) for v in vals}
     return float(f.get("min", float("-inf"))), float(f.get("max", float("inf"))), None
+
+
+def _session_scalar_column(sess, slug: str) -> "Optional[np.ndarray]":
+    """The per-point column a renderer scalar slug names on a session, or None.
+
+    Extras resolve by slug. The time column resolves under EITHER spelling to
+    the float64 `timestamps` field: the renderer's Color-by / Filter pickers key
+    it by the octree BUFFER name, `gps-time` (PotreeConverter's name for the LAS
+    gps_time dimension the import writes it to), while export and compute use
+    the canonical `timestamp`. It is not in `extras` on purpose — a float32
+    extra dim quantises GPS-magnitude times to 32 s — so a filter that only
+    looked there answered "Unknown scalar attribute" for a column the picker
+    had just offered. Same (N,) alignment as every extra, so callers index it
+    identically.
+    """
+    col = sess.extras.get(slug)
+    if col is not None:
+        return col
+    if slug in (_OCTREE_GPS_TIME_ATTRIBUTE, "timestamp"):
+        ts = getattr(sess, "timestamps", None)
+        if ts is not None:
+            return ts
+    return None
+
+
+def _session_scalar_slugs(sess) -> "List[str]":
+    """Every slug `_session_scalar_column` would resolve, for error messages."""
+    slugs = list(sess.extras)
+    if getattr(sess, "timestamps", None) is not None:
+        slugs.append(_OCTREE_GPS_TIME_ATTRIBUTE)
+    return slugs
 
 
 def _scalar_filter_mask(vals: "np.ndarray", lo: float, hi: float,
@@ -30318,10 +30361,11 @@ def session_split(session_id: str, request: SessionSplitRequest):
         pos = sess.positions[surv]
         keep = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
         for f in (request.scalar_filters or []):
-            if f.slug not in sess.extras:
+            col = _session_scalar_column(sess, f.slug)
+            if col is None:
                 raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
             lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
-            keep &= _scalar_filter_mask(sess.extras[f.slug][surv], lo, hi, value_set)
+            keep &= _scalar_filter_mask(col[surv], lo, hi, value_set)
 
         # NEVER move sky/miss points to the leftover side. A split region is drawn
         # around hits, but a miss sits ~1 km out along its beam, so it falls
@@ -30402,10 +30446,11 @@ def session_extract(session_id: str, request: SessionExtractRequest):
         pos = sess.positions[surv]
         sel = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
         for f in (request.scalar_filters or []):
-            if f.slug not in sess.extras:
+            col = _session_scalar_column(sess, f.slug)
+            if col is None:
                 raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {f.slug!r}.")
             lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
-            sel &= _scalar_filter_mask(sess.extras[f.slug][surv], lo, hi, value_set)
+            sel &= _scalar_filter_mask(col[surv], lo, hi, value_set)
 
         # Carry sky/miss points into the child. They sit ~1 km out along their
         # beams, so a hit-shaped region never selects them (and misses default to
@@ -31775,10 +31820,11 @@ def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=
         keep = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
         for f in (request.scalar_filters or []):
             slug = f.slug
-            if slug not in sess.extras:
-                raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {slug!r}. Available: {sorted(sess.extras)}")
+            col = _session_scalar_column(sess, slug)
+            if col is None:
+                raise HTTPException(status_code=400, detail=f"Unknown scalar attribute: {slug!r}. Available: {sorted(_session_scalar_slugs(sess))}")
             lo, hi, value_set = _resolve_scalar_filter(f.model_dump())
-            keep &= _scalar_filter_mask(sess.extras[slug][surv], lo, hi, value_set)
+            keep &= _scalar_filter_mask(col[surv], lo, hi, value_set)
 
         # `kept_count` counts the HITS the user's filter kept — it drives the
         # "you filtered everything away" guard below, so it is measured BEFORE

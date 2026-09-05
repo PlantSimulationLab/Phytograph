@@ -58,22 +58,30 @@ test('colors an octree-backed cloud by an imported scalar attribute', async () =
     const optionLabels = await colorMode
       .locator('optgroup[label="Scalar fields"] option')
       .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).textContent));
-    expect(optionValues).toContain('scalar:timestamp');
+    // The time column's option value is its octree BUFFER key — PotreeConverter's
+    // `gps-time`, because the import writes it to the LAS standard float64
+    // gps_time field rather than a float32 extra dim (which quantises
+    // GPS-magnitude times to 32 s). It is offered because it carries REAL data
+    // here; a plain XYZ import's all-zero gps-time is filtered out (the
+    // degenerate-range rule in octreeScalarFieldOptions), and that is what the
+    // legacy "no gps in the picker" assertion used to guard. The user-facing
+    // name is still "Timestamp", asserted on the label.
+    expect(optionValues).toContain('scalar:gps-time');
     expect(optionValues).toContain('scalar:Deviation');
     expect(optionValues).toContain('scalar:target_index');
     expect(optionLabels).toContain('Timestamp');
     expect(optionLabels).toContain('Target Index');
-    // No builtin LAS attributes leaked into the picker.
+    // No builtin LAS schema padding leaked into the picker.
     for (const v of optionValues) {
       expect(v.toLowerCase()).not.toContain('source id');
       expect(v.toLowerCase()).not.toContain('scan angle');
       expect(v.toLowerCase()).not.toContain('user data');
-      expect(v.toLowerCase()).not.toContain('gps');
+      expect(v.toLowerCase()).not.toContain('return');
     }
 
     // Select Timestamp and assert the picker drives scalar mode.
-    await colorMode.selectOption('scalar:timestamp');
-    await expect(colorMode).toHaveValue('scalar:timestamp');
+    await colorMode.selectOption('scalar:gps-time');
+    await expect(colorMode).toHaveValue('scalar:gps-time');
 
     // The colormap picker only renders for continuous scalar modes.
     await expect(page.getByTestId('display-colormap')).toBeVisible();

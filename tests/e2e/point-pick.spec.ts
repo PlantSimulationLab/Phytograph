@@ -279,7 +279,10 @@ test.describe('point picker', () => {
     await session.page.getByRole('button', { name: 'Display' }).click();
     const colorMode = session.page.getByTestId('display-color-mode');
     await expect(colorMode).toBeVisible();
-    await colorMode.selectOption('scalar:timestamp');
+    // Colour by the time column. Its option value is the octree BUFFER key
+    // (`gps-time`, the LAS standard field it rides); the picker bubble still
+    // reports it under Phytograph's `timestamp` slug, asserted below.
+    await colorMode.selectOption('scalar:gps-time');
     // The octree remounts with a fresh material on a colour-mode change.
     await session.page.waitForTimeout(1500);
     await waitForCameraSettled();

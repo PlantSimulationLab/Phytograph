@@ -24,11 +24,26 @@ export async function resetToFreshScene(app: ElectronApplication, page: Page): P
 
   // Fire File → New — the same `menu:command { kind: 'new' }` IPC the native
   // menu sends (the menu itself is inert under E2E) — then confirm for real.
-  await app.evaluate(({ BrowserWindow }) => {
+  const sendNew = () => app.evaluate(({ BrowserWindow }) => {
     BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'new' });
   });
   const dialog = page.getByTestId('new-confirm-dialog');
-  await expect(dialog).toBeVisible();
+
+  // Re-send until the dialog answers, rather than sending once and waiting.
+  // The renderer only subscribes to `menu:command` in an App.tsx effect, and
+  // launchApp() returns as soon as the BACKEND serves /version — which on a
+  // slow CI runner is before that effect has run. So the first reset of a
+  // shared session (beforeEach of the file's first test) could send `new` to
+  // nobody and then wait out a 15 s toBeVisible on a dialog that was never
+  // asked to open: auto-register-clouds, grid-snap-roundtrip and
+  // ground-outliers all failed exactly this way on CI, always on the first
+  // test of the file and never locally. Opening the dialog is idempotent
+  // (`setNewConfirmOpen(true)`), so a duplicate send once the listener is up
+  // is harmless.
+  await expect.poll(async () => {
+    await sendNew();
+    return dialog.isVisible();
+  }, { intervals: [250, 500, 1000, 1000, 2000], timeout: 30_000 }).toBe(true);
   await page.getByTestId('new-confirm-clear').click();
 
   // Back to the fresh empty state: hint visible, zero layer rows of any kind.

@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { wheelNotches } from './helpers/wheel';
 
 const FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -200,9 +201,11 @@ test('a moved scene origin stays reachable: zoom in fully, then pan still moves 
 
   // Zoom all the way in — far more notches than it takes to bottom out against
   // the surface clamp. The reported bug was that once fully zoomed the view
-  // froze: panning stopped moving anything, so you were stuck.
+  // froze: panning stopped moving anything, so you were stuck. (Batched: see
+  // helpers/wheel.ts — 50 single-notch events put this test at 2.9 min of its
+  // 3 min budget on CI.)
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 40; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -40);
   await page.waitForTimeout(300);
 
   const pinned = await readState();
@@ -239,7 +242,7 @@ test('a moved scene origin stays reachable: zoom in fully, then pan still moves 
 
   // And zooming back out from the pinned-in state still works.
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 10; i++) await page.mouse.wheel(0, 120);
+  await wheelNotches(page, 10);
   await page.waitForTimeout(250);
   expect(distToScene(await readState())).toBeGreaterThan(distPinned);
 });

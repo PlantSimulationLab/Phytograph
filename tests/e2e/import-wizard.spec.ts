@@ -183,7 +183,11 @@ test('unticking Import drops an ASCII column from the imported cloud', async () 
   // would also pass if the import had silently carried no scalars at all.
   // (Target Index is pinned to its canonical lower-case slug by the backend.)
   expect(options).toContain('scalar:target_index');
-  expect(options).toContain('scalar:timestamp');
+  // The time column rides the LAS standard gps_time field (float64, for
+  // precision — a float32 extra dim quantises GPS-magnitude times to 32 s), so
+  // its octree BUFFER key is PotreeConverter's `gps-time`; the picker shows it
+  // under the "Timestamp" label. The option value is that buffer key.
+  expect(options).toContain('scalar:gps-time');
 });
 
 test('unticking Import drops a field from an in-file format (PLY)', async () => {

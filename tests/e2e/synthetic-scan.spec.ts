@@ -189,14 +189,18 @@ test('retained per-hit fields appear in Color by even when constant', async () =
     .locator('optgroup[label="Scalar fields"] option')
     .evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value));
 
-  // The retained (constant) timestamp must now be selectable…
-  expect(optionValues).toContain('scalar:timestamp');
+  // The retained (constant) timestamp must now be selectable. Its option value
+  // is the octree BUFFER key, PotreeConverter's `gps-time`: the time column is
+  // written to the LAS standard float64 gps_time field rather than a float32
+  // extra dim (which quantises GPS-magnitude times to 32 s), and the picker
+  // labels that buffer "Timestamp".
+  expect(optionValues).toContain('scalar:gps-time');
   // …and the unchecked target_count must NOT be.
   expect(optionValues).not.toContain('scalar:target_count');
 
   // It's actually usable as a color mode (no crash on a constant range).
-  await colorMode.selectOption('scalar:timestamp');
-  await expect(colorMode).toHaveValue('scalar:timestamp');
+  await colorMode.selectOption('scalar:gps-time');
+  await expect(colorMode).toHaveValue('scalar:gps-time');
 });
 
 // Return type end-to-end: a 'multi' (full-waveform) scan of the same plant from

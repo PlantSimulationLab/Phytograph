@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { wheelNotches } from './helpers/wheel';
 
 // Zoom-to-cursor must keep working while a TOOL OVERLAY is on screen.
 //
@@ -69,7 +70,7 @@ async function zoomInAtCentre(notches: number): Promise<number> {
   const dBefore = distToCloud(before);
 
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < notches; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -notches);
   await page.waitForTimeout(250);
 
   const after = await readState();
@@ -112,7 +113,7 @@ test('the crop box does not become the zoom anchor: the camera ends up inside it
 
   const box = (await page.locator('canvas').first().boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  for (let i = 0; i < 25; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -25);
   await page.waitForTimeout(300);
 
   const after = await readState();
@@ -166,7 +167,7 @@ test('pan stays proportional to zoom depth inside the crop preview', async () =>
   const wide = await sample();
 
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 15; i++) await page.mouse.wheel(0, -120);
+  await wheelNotches(page, -15);
   await page.waitForTimeout(250);
   const close = await sample();
 

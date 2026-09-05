@@ -40,15 +40,18 @@ re-import the scan in a format that keeps them (E57 / structured PLY).
     A **moving-platform** scan is the exception: its per-beam emission origins
     come from the trajectory, so it doesn't depend on a single static apex.
 
-!!! note "A `Timestamp` entry in Color-by doesn't always mean the data is there"
+!!! note "Where the time column lives"
 
     `gps_time` is a standard LAS dimension, so it exists on every imported
     cloud whether or not the source ever recorded per-pulse time — on a plain
     `x y z r g b intensity` file it is present but entirely zero. Backfill
     Misses judges a scan by whether the column actually **varies**, not by
-    whether it exists, so such a scan is correctly listed as ineligible even
-    though the Color-by picker offers a "Timestamp" entry that renders as a
-    flat, single-valued field.
+    whether it exists, and the Color-by and Filter pickers apply the same
+    rule: an all-zero time column is hidden, a real one is offered as
+    **Timestamp**. A time column imported from ASCII or PLY is stored in that
+    same LAS field (at full float64 precision — a float32 column would round
+    GPS-magnitude times to about 32 s), so it shows up as **Timestamp** in the
+    pickers, the point picker and exports whatever the source file called it.
 
 ## Steps
 

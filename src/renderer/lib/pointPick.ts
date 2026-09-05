@@ -15,7 +15,7 @@ import {
   type CategoricalScheme,
 } from './classification';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
-import { OCTREE_BUILTIN_ATTRIBUTES } from './pointCloudHelpers';
+import { OCTREE_BUILTIN_ATTRIBUTES, octreeAttributeSlug } from './pointCloudHelpers';
 
 export type Vec3 = [number, number, number];
 
@@ -347,14 +347,20 @@ export function buildAttributeRows(
   for (const key of Object.keys(values)) {
     if (!isPickerAttribute(key)) continue;
     const raw = values[key];
-    const label = ctx.labels?.[key] ?? key;
+    // `key` is the octree BUFFER name; the row is keyed by Phytograph's
+    // canonical slug so the bubble and its CSV copy name the time column
+    // `timestamp`, like the export picker and the Scans panel do, rather than
+    // leaking PotreeConverter's LAS spelling (`gps-time`). The label map is
+    // keyed by the buffer name, so it is looked up before the rename.
+    const slug = octreeAttributeSlug(key);
+    const label = ctx.labels?.[key] ?? slug;
 
     if (Array.isArray(raw) || ArrayBuffer.isView(raw)) {
       if (!RGBA_KEYS.has(key.toLowerCase())) continue;
       const comps = Array.from(raw as ArrayLike<number>).slice(0, 3);
       if (comps.length < 3 || comps.some((c) => typeof c !== 'number')) continue;
       rows.push({
-        slug: key,
+        slug,
         label,
         // Colour has no single numeric value; carry the red channel so the CSV
         // column is at least well-typed, and let `display` hold the triplet.
@@ -366,7 +372,7 @@ export function buildAttributeRows(
 
     if (typeof raw !== 'number' || Number.isNaN(raw)) continue;
     const scheme = categoricalSchemeForRange(key, rangeFor(key, ctx.ranges));
-    rows.push({ slug: key, label, value: raw, display: formatAttributeValue(raw, scheme) });
+    rows.push({ slug, label, value: raw, display: formatAttributeValue(raw, scheme) });
   }
   return rows.sort((a, b) => a.label.localeCompare(b.label));
 }

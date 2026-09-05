@@ -6,6 +6,7 @@ import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { PointCloudData } from '../../../lib/pointCloudTypes';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
+import { isWideOctreeAttribute } from '../../../lib/octreeWideAttributes';
 import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
 import { applyOctreePose } from './octreePose';
 import {
@@ -212,22 +213,10 @@ function swapScalarIntoIntensity(geometry: any, field: string): boolean {
   return true;
 }
 
-// True when the octree attribute is WIDER than a float32 (a `double` gps-time,
-// an int64 …), which is exactly the condition under which potree's decoder
-// pre-normalises the values into 0..1 before they reach the GPU buffer. See the
-// long note at the intensityRange assignment for why that matters.
-//
-// Read from potree's OWN parsed attribute table rather than the backend
-// metadata: it is the same object the decoder branched on, so the two can never
-// disagree, and it needs no extra plumbing through the octree ref.
-function isWideOctreeAttribute(octree: any, field: string): boolean {
-  const attrs = octree?.pcoGeometry?.pointAttributes?.attributes
-    ?? octree?.geometry?.pointAttributes?.attributes
-    ?? octree?.octreeGeometry?.pointAttributes?.attributes;
-  if (!Array.isArray(attrs)) return false;
-  const a = attrs.find((x: any) => x?.name === field);
-  return typeof a?.type?.size === 'number' && a.type.size > 4;
-}
+// `isWideOctreeAttribute` (a `double` gps-time, an int64 …) lives in
+// lib/octreeWideAttributes.ts, shared with the point picker: potree
+// pre-normalises those buffers into 0..1, and every reader has to undo it the
+// same way. See the long note at the intensityRange assignment below.
 
 // Walk an octree's currently-loaded tiles and apply the scalar→intensity
 // buffer swap to each. Tiles stream in asynchronously, so this is called both

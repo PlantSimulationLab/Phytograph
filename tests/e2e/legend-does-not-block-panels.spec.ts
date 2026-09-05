@@ -32,7 +32,9 @@ test('a legend card cannot swallow a tool panel button', async () => {
 
     // Colour by a scalar so the continuous colorbar actually renders.
     await page.getByRole('button', { name: 'Display' }).click();
-    await page.getByTestId('display-color-mode').selectOption('scalar:timestamp');
+    // `gps-time` is the octree buffer key of the Timestamp column (it rides the
+    // LAS standard gps_time field); the option value is that key.
+    await page.getByTestId('display-color-mode').selectOption('scalar:gps-time');
     await expect(page.getByTestId('legend-stack')).toBeVisible({ timeout: 10_000 });
 
     // Toasts are a separate full-height blocker; clear them so this spec is
