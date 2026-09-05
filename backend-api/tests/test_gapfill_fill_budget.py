@@ -1,19 +1,25 @@
-"""The row/column gap-fill must refuse an unaffordable raster instead of dying in malloc.
+"""The row/column gap-fill must survive a scanner's native raster without exhausting memory.
 
-`gapfillMisses_rowcolumn` emits one hit point per EMPTY cell of the scan's declared
+`gapfillMisses` conceptually emits one miss per EMPTY cell of the scan's declared
 Ntheta x Nphi grid, so its cost is set by what `addScan()` was told — not by how many
-returns came back. At ~100 bytes per stored hit (the contiguous HitPoint vector plus
-its per-label data columns), a scanner's native raster reaches double-digit GB, and on
-Windows that has to be served as a SINGLE contiguous block. It surfaced in the field as
-`std::bad_alloc` -> "bad allocation", from a scan that had merely been imported at its
-true resolution. The timestamp path has always capped its own fill (Ngap_max); this
-path had no bound at all.
+returns came back. At ~100 bytes per stored hit, a scanner's native raster reaches
+double-digit GB, and on Windows that has to be served as a SINGLE contiguous block. It
+surfaced in the field as `std::bad_alloc` -> "bad allocation", from a scan that had
+merely been imported at its true resolution.
 
-The cap refuses UP FRONT with a message naming the real numbers, rather than filling
-partially: a truncated raster would hand the leaf-area inversion a hit/miss ratio that
-is wrong in a way nothing downstream could detect.
+Helios v1.3.84 fixed this by VIRTUALIZING the miss population: the misses are stored as
+one bit per grid cell plus the fitted angular model, rather than as a HitPoint and a row
+across every hit-data column each. The misses stay visible through `getHitCount()` and
+the index-based accessors, so nothing downstream changes — but a raster that used to
+need ~10 GB now needs ~12 MB.
 
-Native tests — a stubbed cloud cannot exercise a C++ allocation guard.
+(An earlier Phytograph-local Helios patch instead REFUSED an oversized raster up front,
+via a `HELIOS_GAPFILL_MAX_POINTS` budget. Virtualization supersedes it: filling the
+raster is now cheap, so refusing it would reject valid work. These tests pin the
+property that mattered — a full-resolution raster fills, and stays affordable — rather
+than the mechanism that used to deliver it.)
+
+Native tests — a stubbed cloud cannot exercise real allocation behaviour.
 """
 
 import os
@@ -28,21 +34,17 @@ pytestmark = pytest.mark.skipif(
     reason="needs the real native libhelios, not the mock",
 )
 
-# Deliberately far below the 60M default so the test never allocates real memory:
-# it must prove the REFUSAL happens, not survive a 6 GB fill.
-_TINY_BUDGET = "1000"
-
 _CHILD = textwrap.dedent(
     """
-    import math, sys
+    import math, sys, resource
     import numpy as np
     from pyhelios import LiDARCloud
 
     n_theta, n_phi = int(sys.argv[1]), int(sys.argv[2])
 
     # A handful of returns spread over >=2 rows with >=4 returns each, so the
-    # row/column model fits and we reach the FILL step (which is what is capped)
-    # rather than bailing out earlier on "too few populated scan rows".
+    # row/column model fits and we reach the FILL step rather than bailing out
+    # earlier on "too few populated scan rows".
     rows, cols, pts = [], [], []
     origin = np.zeros(3)
     for row in range(4):
@@ -67,22 +69,20 @@ _CHILD = textwrap.dedent(
     cloud.addHitPointsWithData(sid, xyz, dirs, ["row", "column"], vals)
     try:
         cloud.gapfillMisses()
-        print("OK", int(cloud.getHitCount()))
+        # Peak RSS in MB (ru_maxrss is bytes on macOS, KB on Linux).
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        peak_mb = peak / (1024*1024) if sys.platform == "darwin" else peak / 1024
+        print("OK", int(cloud.getHitCount()), round(peak_mb))
     except Exception as exc:
         print("RAISED", str(exc).replace("\\n", " "))
     """
 )
 
 
-def _run(n_theta, n_phi, budget=None):
-    env = dict(os.environ)
-    if budget is not None:
-        env["HELIOS_GAPFILL_MAX_POINTS"] = budget
-    else:
-        env.pop("HELIOS_GAPFILL_MAX_POINTS", None)
+def _run(n_theta, n_phi):
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD, str(n_theta), str(n_phi)],
-        capture_output=True, text=True, timeout=300, env=env,
+        capture_output=True, text=True, timeout=600,
     )
     assert proc.returncode == 0, f"child crashed: {proc.stderr[-2000:]}"
     line = [l for l in proc.stdout.splitlines() if l.startswith(("OK", "RAISED"))]
@@ -90,39 +90,28 @@ def _run(n_theta, n_phi, budget=None):
     return line[0]
 
 
-def test_oversized_raster_is_refused_with_a_diagnostic():
-    """A raster larger than the budget raises, naming the numbers — not bad_alloc."""
-    verdict = _run(200, 200, budget=_TINY_BUDGET)  # 40,000 cells vs a 1,000 budget
-    assert verdict.startswith("RAISED"), f"expected a refusal, got: {verdict}"
-    # The message has to be actionable: the grid, the shortfall, and the way out.
-    for token in ("gap-fill", "200", "budget", "HELIOS_GAPFILL_MAX_POINTS"):
-        assert token in verdict, f"message missing {token!r}: {verdict}"
-
-
-def test_raster_within_budget_still_fills():
-    """The guard must not become a blanket refusal — an affordable raster still fills.
-
-    Without this, raising the cap to 0 (or deleting the check) would leave the
-    suite green, so the refusal test alone would not pin the behaviour.
-    """
-    verdict = _run(20, 20, budget=_TINY_BUDGET)  # 400 cells, comfortably under
+def test_small_raster_fills_every_empty_cell():
+    """The baseline: every empty cell of the declared grid becomes a miss."""
+    verdict = _run(20, 20)  # 400 cells, 32 of them with returns
     assert verdict.startswith("OK"), f"expected a successful fill, got: {verdict}"
     filled = int(verdict.split()[1])
-    assert filled > 32, f"expected gapfilled misses on top of the 32 returns, got {filled}"
+    assert filled == 400, f"expected one hit per grid cell (400), got {filled}"
 
 
-def test_default_budget_admits_a_real_terrestrial_raster():
-    """The shipped default must not reject scans that legitimately work.
+def test_full_resolution_raster_fills_without_exhausting_memory():
+    """A scanner-native raster must fill, and must stay affordable while doing it.
 
-    5313 x 18029 is the real raster of the RIEGL VZ-600i export from issue #5:
-    95.8M cells, ~50.1M of them empty. That scan completed in 235 s at 5.8 GB, so
-    the default budget has to admit it — a cap that fixed the crash by rejecting
-    valid work would be a regression, not a fix. Asserted on the ARITHMETIC rather
-    than by running the 6 GB fill, so the test stays cheap.
+    2000 x 4000 = 8M cells. Materialized at ~100 bytes/point that is ~800 MB (and the
+    real VZ-600i raster from issue #5 is 95.8M cells, i.e. ~10 GB — the allocation that
+    actually died on Windows). Virtualized it is ~1 MB of bitset. The memory ceiling
+    here is what makes this a regression test rather than a slow smoke test: if the
+    misses are ever materialized again, peak RSS blows straight through it.
     """
-    from_default = 60000000  # LIDAR_GAPFILL_MAX_POINTS
-    cells_to_fill = 5313 * 18029 - 45678141
-    assert cells_to_fill == 50109936, "raster arithmetic drifted from the measured scan"
-    assert cells_to_fill <= from_default, (
-        f"the default budget ({from_default:,}) would reject the issue-#5 scan "
-        f"({cells_to_fill:,} cells to fill), which is known to succeed")
+    verdict = _run(2000, 4000)
+    assert verdict.startswith("OK"), f"expected a successful fill, got: {verdict}"
+    _, count, peak_mb = verdict.split()
+    assert int(count) == 2000 * 4000, (
+        f"expected the full raster to be gap-filled (8,000,000), got {int(count):,}")
+    assert int(peak_mb) < 600, (
+        f"peak RSS {peak_mb} MB for an 8M-cell raster — the misses look materialized "
+        f"again rather than virtualized (~800 MB of HitPoints at ~100 bytes each)")

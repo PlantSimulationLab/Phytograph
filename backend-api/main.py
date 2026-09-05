@@ -9692,7 +9692,10 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             cloud.addGrid(center=grid_center, size=grid_size,
                           ndiv=[grid_nx, grid_ny, grid_nz],
                           rotation=grid_rotation_deg,
-                          column_offsets=column_offsets)
+                          # Upstream named this column_z_offsets when the terrain-following
+                          # overload landed in PyHelios master (it was column_offsets on the
+                          # Phytograph branch it came from).
+                          column_z_offsets=column_offsets)
         else:
             cloud.addGrid(center=grid_center, size=grid_size,
                           ndiv=[grid_nx, grid_ny, grid_nz],
@@ -9898,7 +9901,12 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         # Per-cell hit counts: Helios exposes no getter, so bin the points into
         # the grid AABBs ourselves. Reads each scan file once (positions only).
         n_cells = cloud.getGridCellCount()
-        cell_centers = [cloud.getCellCenter(i) for i in range(n_cells)]
+        # UNROTATED (axis-aligned lattice) centers, deliberately: _count_points_per_cell
+        # inverse-rotates the POINTS into the lattice frame rather than rotating the
+        # cells, and the renderer likewise rotates the whole voxel group itself using
+        # the echoed grid_rotation. Helios's getCellCenter() applies the rotation (since
+        # helios-core v1.3.84), so using it here would rotate the lattice twice.
+        cell_centers = [cloud.getCellCenterUnrotated(i) for i in range(n_cells)]
         cell_sizes = [cloud.getCellSize(i) for i in range(n_cells)]
         hit_counts = _count_points_per_cell(scan_xyz_for_counts, cell_centers, cell_sizes,
                                             grid_rotation_rad,
@@ -10081,9 +10089,10 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
     inverse-rotating the POINTS about the grid center into the axis-aligned cell
     frame before binning — the same convention Helios uses internally
     (getContainingGridCell inverse-rotates the query point by -rotation). NOTE:
-    Helios's getCellCenter returns the UNROTATED lattice center (the rotation is
-    stored per-cell, not baked into the center), so the cell centers here are
-    already axis-aligned and must NOT be rotated.
+    the ``cell_centers`` passed in must be UNROTATED (axis-aligned lattice) centers
+    and must NOT be rotated here. Since helios-core v1.3.84 ``getCellCenter()``
+    BAKES the azimuthal rotation into the returned center, so the caller must use
+    ``getCellCenterUnrotated()`` — passing rotated centers rotates the lattice twice.
 
     Terrain following: when ``column_z_offsets`` (length nx*ny, row-major [j*nx+i])
     and ``ndiv``=(nx,ny,nz) are given, each voxel column was shifted vertically by
@@ -17258,14 +17267,15 @@ def create_plant_session(request: PlantSessionCreateRequest):
         # Load and build plant
         plantarch.loadPlantModelFromLibrary(request.plant_type)
 
-        build_params = {}
+        # Reproducibility comes from the Context RNG, NOT a build parameter:
+        # no plant model reads a 'random_seed' build parameter, and since
+        # PyHelios v0.1.30 passing one raises rather than being ignored.
         if request.random_seed is not None:
-            build_params['random_seed'] = request.random_seed
+            context.seedRandomGenerator(request.random_seed)
 
         plant_id = plantarch.buildPlantInstanceFromLibrary(
             base_position=vec3(request.position_x, request.position_y, request.position_z),
             age=request.initial_age,
-            build_parameters=build_params if build_params else None
         )
 
         height = plantarch.getPlantHeight(plant_id)
@@ -17890,16 +17900,17 @@ def generate_plant_model(request: PlantGenerationRequest):
                 # Load plant model
                 plantarch.loadPlantModelFromLibrary(request.plant_type)
 
-                # Build plant instance with optional build_parameters
-                build_params = {}
+                # Reproducibility comes from the Context RNG, NOT a build
+                # parameter: no plant model reads a 'random_seed' build
+                # parameter, and since PyHelios v0.1.30 passing one raises
+                # rather than being silently ignored.
                 if request.random_seed is not None:
-                    build_params['random_seed'] = request.random_seed
+                    context.seedRandomGenerator(request.random_seed)
                     print(f"[Plant Generation] Using random_seed={request.random_seed} for reproducibility")
 
                 plant_id = plantarch.buildPlantInstanceFromLibrary(
                     base_position=vec3(request.position_x, request.position_y, request.position_z),
                     age=request.age,
-                    build_parameters=build_params if build_params else None
                 )
 
                 # Get plant height
@@ -18354,9 +18365,10 @@ def generate_plant_canopy(request: PlantCanopyRequest):
 
                 plantarch.loadPlantModelFromLibrary(request.plant_type)
 
-                build_params = {}
+                # Seed the Context RNG, not a build parameter — see the note in
+                # /api/plant/generate.
                 if request.random_seed is not None:
-                    build_params['random_seed'] = request.random_seed
+                    context.seedRandomGenerator(request.random_seed)
 
                 plant_ids = plantarch.buildPlantCanopyFromLibrary(
                     canopy_center=vec3(request.center_x, request.center_y, request.center_z),
@@ -18364,7 +18376,6 @@ def generate_plant_canopy(request: PlantCanopyRequest):
                     plant_count=int2(request.count_x, request.count_y),
                     age=request.age,
                     germination_rate=request.germination_rate,
-                    build_parameters=build_params if build_params else None,
                 )
 
                 if not plant_ids:
@@ -18506,9 +18517,10 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
 
             plantarch.loadPlantModelFromLibrary(request.plant_type)
 
-            build_params = {}
+            # Seed the Context RNG, not a build parameter — see the note in
+            # /api/plant/generate.
             if request.random_seed is not None:
-                build_params['random_seed'] = request.random_seed
+                context.seedRandomGenerator(request.random_seed)
 
             # Growth progress (C++ advanceTime) → 0–0.6. The callback fires on a
             # native thread; just enqueue, never touch the event loop here.
@@ -18527,7 +18539,6 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                     plant_count=int2(request.count_x, request.count_y),
                     age=request.age,
                     germination_rate=request.germination_rate,
-                    build_parameters=build_params if build_params else None,
                 )
                 # A cancelled canopy can return early with few/no plants — report
                 # that as cancellation, not a germination failure.
@@ -18542,7 +18553,6 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
                 primary_id = plantarch.buildPlantInstanceFromLibrary(
                     base_position=vec3(request.position_x, request.position_y, request.position_z),
                     age=request.age,
-                    build_parameters=build_params if build_params else None,
                 )
                 plant_ids = [primary_id]
 

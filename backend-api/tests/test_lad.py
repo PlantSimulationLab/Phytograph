@@ -58,7 +58,12 @@ class _FakeCloud:
     def addHitPointsWithData(self, scanID, xyz, dirs, labels, vals):
         self.calls.append(("addHitPointsWithData", scanID, len(xyz), tuple(labels or [])))
 
-    def addGrid(self, center, size, ndiv, rotation=0.0, column_offsets=None):
+    # Keyword name mirrors the real LiDARCloud.addGrid EXACTLY (PyHelios master
+    # calls it column_z_offsets; the Phytograph Helios branch it came from used
+    # column_offsets). A stub that keeps the old spelling would swallow the
+    # rename and keep passing while the shipped call raises TypeError.
+    def addGrid(self, center, size, ndiv, rotation=0.0, column_z_offsets=None):
+        column_offsets = column_z_offsets
         self.calls.append(("addGrid", tuple(center), tuple(size), tuple(ndiv), rotation,
                            tuple(column_offsets) if column_offsets is not None else None))
         # Mimic Helios's k-major (for k: for j: for i) cell ordering so the result
@@ -110,6 +115,13 @@ class _FakeCloud:
         z = 0.5 + k * 1.0
         off = (self._column_offsets[rem] if getattr(self, "_column_offsets", None) else 0.0)
         return main_vec(-0.5 * nx + ii + 0.5, -0.5 * ny + j + 0.5, z + off)
+
+    # The production code reads UNROTATED lattice centers (helios-core >= v1.3.84 bakes
+    # the azimuthal rotation into getCellCenter(); the binning here inverse-rotates the
+    # POINTS instead). This stub only ever models the un-rotated lattice, so the two
+    # accessors coincide — the alias keeps the fake in step with the real API surface.
+    def getCellCenterUnrotated(self, i):
+        return self.getCellCenter(i)
 
     def getCellSize(self, i):
         return main_vec(1.0, 1.0, 1.0)
