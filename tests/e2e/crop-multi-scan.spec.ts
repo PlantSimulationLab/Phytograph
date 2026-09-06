@@ -275,3 +275,52 @@ test('crop panel × button dismisses without applying', async () => {
   // Cloud's point count is untouched — no rows deleted, no crop applied.
   await expect(row).toHaveAttribute('data-point-count', '60');
 });
+
+test('two sequentially imported scans get different palette colours', async () => {
+  // Regression: both imports came out #3b82f6 (the first palette entry), so a
+  // two-scan scene rendered in one colour and per-scan colouring was useless.
+  //
+  // Worth stating the cause, because the obvious reading of the old code says
+  // it cannot happen: the seed WAS `scans.map(s => s.color)`, with `scans`
+  // correctly listed in the callback's dependency array. The trap is that
+  // `scene.state` only LOOKS like a live read — the context value is memoised
+  // on the reducer state, so an import callback seeds from whatever `scene` it
+  // captured, and the dependency array cannot help because the read happens
+  // before React re-renders. Probed on this exact flow: the reclaim pass saw
+  // `scene: ["#3b82f6"]` at the same moment the next allocator, reading
+  // `scene.state.scans`, still saw `[]`. The fix is a ref (scansRef in
+  // App.tsx) that always holds the current list.
+  //
+  // Two SEPARATE imports is the whole point of the test. A single multi-scan
+  // file has always worked (one allocator spans its positions), which is
+  // exactly why this survived — it needs two independent import runs to show.
+  const { app, page } = session;
+
+  // Deliberately NO wait for the first scan's row between the two imports.
+  // Waiting for it is what lets the first import's commit land, and that alone
+  // makes the seed correct — the bug only appears when the second import is
+  // started while the first is still in flight, which is what a user doing two
+  // File→Imports in a row actually produces. A `toBeVisible` here would make
+  // this test pass against the unfixed code.
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+
+  await importFiles(app, page, 'import-auto', TINY_OFFSET);
+  await completeImportWizard(page);
+
+  const tinyRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const offsetRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset"]');
+  await expect(tinyRow).toBeVisible({ timeout: 20_000 });
+  await expect(offsetRow).toBeVisible({ timeout: 20_000 });
+
+  // Exact hexes, not merely "they differ": pinning the SET to the first two
+  // palette entries also catches a second import that starts handing out some
+  // off-palette colour, which an inequality check alone would accept. As a set
+  // rather than per-row, because which scan claims blue depends on which import
+  // commits first — that ordering is not what this test is about.
+  const swatches = await page
+    .locator('[data-testid="scan-row"]')
+    .evaluateAll((rows) => rows.map((r) => r.getAttribute('data-scan-color') ?? ''));
+  expect(swatches).toHaveLength(2);
+  expect([...swatches].sort(), `swatches: ${swatches.join(', ')}`).toEqual(['#22c55e', '#3b82f6']);
+});

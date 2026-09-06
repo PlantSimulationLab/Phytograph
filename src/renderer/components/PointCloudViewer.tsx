@@ -3674,11 +3674,17 @@ export default function PointCloudViewer({
     const derivedCounts: number[] = [];
     // Number of new "(segment)" clouds added this apply — drives the toast.
     let segmentedCount = 0;
-    // Note: derived clouds (segment / retained crop) inherit their SOURCE
-    // scan's color rather than taking a new palette entry — a crop output is
-    // the same scan's points, and the scene list reads better when the family
-    // shares a swatch. They're told apart by their "(segment)"/"(cropped)"
-    // label, not by colour.
+    // Derived clouds (segment / retained crop) take a FRESH palette colour, the
+    // same as any other newly created scan. Inheriting the source's swatch (the
+    // old behaviour) made a segment indistinguishable from its parent in the
+    // viewer, which is precisely the thing a segment exists to separate.
+    //
+    // An ALLOCATOR, not a one-shot allocateScanColor: one apply can span several
+    // selected clouds, each contributing a child, and those children are added
+    // across awaits — a per-call read of the scan list would hand out the same
+    // colour to every child added before React commits. Seeded from the live
+    // scans (via the ref, not the closure's stale snapshot).
+    const nextDerivedColor = createScanColorAllocator(scansRef.current.map(s => s.color));
 
     const finishUp = () => {
       if (touchedCloudIds.length > 0) {
@@ -3927,11 +3933,9 @@ export default function PointCloudViewer({
                   'cropped',
                 ),
                 visible: true,
-                // Inherit the source scan's color. A cropped cloud is the same
-                // scan's points, so a fresh palette entry would break the visual
-                // link to its parent (and in a multi-scan crop, hand each child a
-                // colour belonging to a DIFFERENT source scan).
-                color: cloud.color,
+                // Fresh palette colour, like any newly created scan — see
+                // nextDerivedColor.
+                color: nextDerivedColor(),
                 data,
                 // A crop is a subset of the SAME scanner's returns, so the beam
                 // apex is still valid — keep the origin (deep-cloned so the two
@@ -3991,7 +3995,7 @@ export default function PointCloudViewer({
                   id: segmentId,
                   data: leftoverData,
                   visible: true,
-                  color: cloud.color,
+                  color: nextDerivedColor(),
                 });
                 segmentedCount++;
               }
@@ -4173,7 +4177,7 @@ export default function PointCloudViewer({
             id: segmentId,
             data: { ...inverseData, fileName: `${src.fileName ?? cloud.id} (segment)` },
             visible: true,
-            color: cloud.color,
+            color: nextDerivedColor(),
           });
           segmentedCount++;
         }
@@ -4205,8 +4209,8 @@ export default function PointCloudViewer({
             'cropped',
           ),
           visible: true,
-          // Inherit the source scan's color — see the octree path above.
-          color: cloud.color,
+          // Fresh palette colour — see the octree path above.
+          color: nextDerivedColor(),
           data: keptData,
           params: cloud.params
             ? { ...cloud.params, origin: { ...cloud.params.origin } }
@@ -6168,6 +6172,11 @@ export default function PointCloudViewer({
     const emptied: { id: string; name: string }[] = [];
     let leftoverCount = 0;
     let failed = 0;
+    // Fresh palette colour per leftover cloud, same as the crop tool's segment
+    // (see nextDerivedColor in handleApplyCrop): a segment that keeps its
+    // parent's swatch is invisible as a separate scan. Allocator rather than a
+    // one-shot, because this loop adds a child per selected scan across awaits.
+    const nextLeftoverColor = createScanColorAllocator(scansRef.current.map(s => s.color));
 
     try {
       for (const target of targets) {
@@ -6212,7 +6221,7 @@ export default function PointCloudViewer({
                 id: crypto.randomUUID(),
                 data: leftoverData,
                 visible: true,
-                color: cloud.color,
+                color: nextLeftoverColor(),
               });
               leftoverCount++;
             }
@@ -6242,7 +6251,7 @@ export default function PointCloudViewer({
         touched.push(cloud.id);
         if (leftoverData) {
           leftoverData.fileName = leftoverName;
-          onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: cloud.color });
+          onAddCloud({ id: crypto.randomUUID(), data: leftoverData, visible: true, color: nextLeftoverColor() });
           leftoverCount++;
         }
       }

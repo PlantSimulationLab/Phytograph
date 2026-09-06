@@ -16,11 +16,13 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 //     Fixed by registering derived ids in suppressFrameCloudIdsRef before the
 //     add (the same opt-out tree segmentation already used).
 //
-//  2. Derived clouds must inherit the SOURCE scan's colour. Segment outputs
-//     took a hardcoded amber and retained crops took the next free palette
-//     entry, so a crop output looked unrelated to its parent — and in a
-//     multi-scan crop a child could take a colour belonging to a DIFFERENT
-//     source scan. Fixed by copying cloud.color at all derived-cloud sites.
+//  2. Derived clouds must take a NEW palette colour, like any other newly
+//     created scan. They briefly inherited the source's swatch instead, which
+//     made a segment indistinguishable from the parent it was just separated
+//     from — the one thing a segment exists to show. Fixed by allocating from
+//     createScanColorAllocator at every derived-cloud site (an allocator, not a
+//     one-shot, so a multi-scan apply gives each child a distinct colour rather
+//     than the same one).
 //
 // Per CLAUDE.md Testing rules: live backend, real UI, concrete assertions
 // (exact camera vector equality, exact hex colour) rather than "didn't throw".
@@ -125,7 +127,7 @@ test('applying a Segment crop leaves the camera exactly where it was', async () 
   }
 });
 
-test('a Segment cloud inherits its source scan colour', async () => {
+test('a Segment cloud takes a new palette colour, not its source scan colour', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-auto', TINY);
@@ -148,13 +150,17 @@ test('a Segment cloud inherits its source scan colour', async () => {
   const segmentRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny (segment)"]');
   await expect(segmentRow).toBeVisible({ timeout: 10_000 });
 
-  // Regression: this was a hardcoded amber (#f59e0b) regardless of the parent.
-  await expect(segmentRow).toHaveAttribute('data-scan-color', sourceColor!);
-  // The source keeps its own colour too (the split doesn't recolour the parent).
+  // Blue is taken by the parent, so the allocator hands out the next free
+  // palette entry (green). Asserting the exact hex — not merely "differs from
+  // the parent" — is what pins it to the shared scan palette: a hardcoded
+  // one-off colour (the ORIGINAL bug here was a hardcoded amber) would satisfy
+  // an inequality check while still not being an allocated scan colour.
+  await expect(segmentRow).toHaveAttribute('data-scan-color', '#22c55e', { timeout: 10_000 });
+  // The source keeps its own colour (the split doesn't recolour the parent).
   await expect(tinyRow).toHaveAttribute('data-scan-color', sourceColor!);
 });
 
-test('a retained crop inherits its source scan colour', async () => {
+test('a retained crop takes a new palette colour, not its source scan colour', async () => {
   const { app, page } = session;
 
   await importFiles(app, page, 'import-auto', TINY);
@@ -180,7 +186,7 @@ test('a retained crop inherits its source scan colour', async () => {
 
   const croppedRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny (cropped)"]');
   await expect(croppedRow).toBeVisible({ timeout: 10_000 });
-  // Regression: this took allocateScanColor's next free entry (green) instead
-  // of the parent's blue.
-  await expect(croppedRow).toHaveAttribute('data-scan-color', sourceColor!);
+  // Same as the segment case: the parent holds blue, so the child gets green.
+  await expect(croppedRow).toHaveAttribute('data-scan-color', '#22c55e', { timeout: 10_000 });
+  await expect(tinyRow).toHaveAttribute('data-scan-color', sourceColor!);
 });

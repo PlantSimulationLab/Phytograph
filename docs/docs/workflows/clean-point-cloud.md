@@ -295,9 +295,10 @@ new **"… (segment)"** cloud is added to the scene holding the cropped-out
 points. No points are lost. It works with all three shapes — **Box**,
 **Rect**, and **Polygon**.
 
-The new cloud inherits the colour of the scan it came from, so the two halves
-read as one family in the scan list — tell them apart by the **"… (segment)"**
-name. Recolour or rename it from the scan list like any other scan. It's handy
+The new cloud is given its own colour from the scan palette, the same as any
+newly created scan, so the two halves are immediately distinguishable in the
+viewport — the **"… (segment)"** name tells you where it came from. Recolour or
+rename it from the scan list like any other scan. It's handy
 for separating a plant from its ground, or splitting one scan into named
 regions without re-importing.
 
@@ -318,8 +319,8 @@ will **not** bring them back.
 Tick **Keep original cloud** to crop non-destructively. The source scan stays
 in the scene untouched (just hidden, so the viewport looks the same as a
 normal crop) and the kept points are added as a new **"… (cropped)"** cloud,
-which inherits the source scan's colour. Click the eye icon next to the
-original to show it again.
+which takes its own colour from the scan palette. Click the eye icon next to
+the original to show it again.
 
 Because nothing is destroyed, a retained crop **is** undoable — one
 <kbd>⌘/Ctrl</kbd>+<kbd>Z</kbd> removes the new cloud and leaves the original
@@ -458,9 +459,10 @@ Then choose how to commit (there is no separate Apply step):
   might want the excluded points later.
 - **Segment (split into two clouds)** — keeps the in-range points on the
   original cloud and adds the out-of-range points as a **second cloud**
-  (`<name> (filtered out)`). Nothing is discarded; the two clouds
-  together equal the original. Handy for separating, say, a canopy from
-  the rest by height without losing the rest.
+  (`<name> (filtered out)`), given its own colour from the scan palette so
+  the two halves are distinguishable in the viewport. Nothing is discarded;
+  the two clouds together equal the original. Handy for separating, say, a
+  canopy from the rest by height without losing the rest.
 
 If a filter excludes every point, you're offered the chance to delete the
 cloud instead.
