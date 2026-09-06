@@ -37,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 
 _CHILD = textwrap.dedent(
     """
-    import math, os, sys, resource
+    import ctypes, math, os, sys
     import numpy as np
     from pyhelios import LiDARCloud
 
@@ -69,10 +69,46 @@ _CHILD = textwrap.dedent(
                         exit_diameter=0.0, beam_divergence=0.0)
     cloud.addHitPointsWithData(sid, xyz, dirs, ["row", "column"], vals)
 
-    def peak_rss_mb():
-        # ru_maxrss is bytes on macOS, KB on Linux.
-        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return peak / (1024*1024) if sys.platform == "darwin" else peak / 1024
+    if sys.platform == "win32":
+        # psapi. The types are load-bearing: GetCurrentProcess returns the
+        # pseudo-handle (HANDLE)-1, which the default c_int restype mangles on
+        # x64 and the call then fails outright.
+        class _PMC(ctypes.Structure):
+            _fields_ = [("cb", ctypes.c_uint32), ("PageFaultCount", ctypes.c_uint32),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                        ("PrivateUsage", ctypes.c_size_t)]
+        _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        _k32.GetCurrentProcess.restype = ctypes.c_void_p
+        _psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p,
+                                                ctypes.POINTER(_PMC),
+                                                ctypes.c_uint32]
+
+        def _pmc():
+            c = _PMC()
+            c.cb = ctypes.sizeof(_PMC)
+            if not _psapi.GetProcessMemoryInfo(_k32.GetCurrentProcess(),
+                                               ctypes.byref(c), c.cb):
+                raise OSError("GetProcessMemoryInfo failed: %d"
+                              % ctypes.get_last_error())
+            return c
+
+        def peak_rss_mb():
+            return _pmc().PeakWorkingSetSize / (1024*1024)
+    else:
+        import resource
+
+        def peak_rss_mb():
+            # ru_maxrss is bytes on macOS, KB on Linux.
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return peak / (1024*1024) if sys.platform == "darwin" else peak / 1024
 
     def current_rss_mb():
         # What the process holds RIGHT NOW, before the fill. The absolute peak
@@ -84,16 +120,29 @@ _CHILD = textwrap.dedent(
             with open("/proc/self/statm") as f:
                 pages = int(f.read().split()[1])
             return pages * os.sysconf("SC_PAGE_SIZE") / (1024*1024)
+        if sys.platform == "win32":
+            return _pmc().WorkingSetSize / (1024*1024)
         # macOS has no cheap current-RSS; the peak so far is a fair proxy, since
         # nothing large has happened yet.
         return peak_rss_mb()
 
     try:
         before = current_rss_mb()
+        # The peak the process had ALREADY reached before the fill ran. Without
+        # it, `peak - before` silently charges the fill for every transient
+        # allocation that happened during setup -- and setup is not small here:
+        # addScan on a 95.8M-cell raster is hundreds of MB on its own.
+        before_peak = peak_rss_mb()
         cloud.gapfillMisses()
         peak = peak_rss_mb()
         added = max(0.0, peak - before)
-        print("OK", int(cloud.getHitCount()), round(added), round(peak), round(before))
+        # `added` stays first for compatibility; `transient` is the honest
+        # measure of what the FILL itself peaked at, and `resident` of what it
+        # kept.
+        transient = max(0.0, peak - before_peak)
+        resident = max(0.0, current_rss_mb() - before)
+        print("OK", int(cloud.getHitCount()), round(added), round(peak),
+              round(before), round(transient), round(resident))
     except Exception as exc:
         print("RAISED", str(exc).replace("\\n", " "))
     """
@@ -160,7 +209,7 @@ def test_full_resolution_raster_fill_is_virtualized():
     """
     verdict = _full_raster_verdict()
     assert verdict.startswith("OK"), f"expected a successful fill, got: {verdict}"
-    _, _count, added_mb, peak_mb, before_mb = verdict.split()
+    _, _count, added_mb, peak_mb, before_mb, transient_mb, resident_mb = verdict.split()
     # Budget the fill's OWN footprint (peak after minus resident before), not the
     # absolute peak: the process baseline is what the interpreter and libhelios
     # cost on that platform and says nothing about whether misses were materialized.
