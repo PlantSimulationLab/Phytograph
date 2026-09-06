@@ -48,6 +48,11 @@ export const BACKEND_STAMP_FILE = 'phytograph_backend_version.txt';
 // libhelios). See PYHELIOS_SUBMODULES below for why a submodule bump was
 // invisible here until it wasn't.
 export const BACKEND_SOURCE_HASH_FILE = 'phytograph_backend_sources.sha256';
+// Third stamp: the compiled libhelios that went into the bundle. Kept apart
+// from the sources digest so a checkout that has not compiled the lib (every
+// CI E2E shard) can still verify the sources, and only a checkout that HAS one
+// compares it. See the note at the end of hashBackendSources().
+export const BACKEND_LIBHELIOS_HASH_FILE = 'phytograph_backend_libhelios.sha256';
 
 // Directories whose .py files are compiled INTO the bundle. `research/`,
 // `tools/`, `scripts/` and `tests/` are dev-only and deliberately excluded — a
@@ -218,14 +223,29 @@ export function hashBackendSources() {
     h.update(rev);
     h.update('\0');
   }
-  const libHash = hashLibhelios();
-  // 'unbuilt' is a value like any other: a tree with no compiled lib hashes
-  // consistently, and the digest changes the moment one appears.
-  h.update('libhelios:');
-  h.update(libHash ?? 'unbuilt');
-  h.update('\0');
+  // The compiled libhelios is deliberately NOT part of this digest. It is
+  // compared separately by `checkBackendBundle` (see BACKEND_LIBHELIOS_HASH_FILE)
+  // because it is a build ARTIFACT, not a source: the machine that built the
+  // bundle has one, and a machine that merely restored the bundle may not. In
+  // CI the `prepare` job compiles libhelios and stamps the bundle, while the
+  // E2E shards restore that bundle from cache and never compile — so a digest
+  // that included the lib could never agree between the two, and the first CI
+  // run of this check failed every shard at `check:backend` on an identical
+  // commit. Sources and pins are the same on every checkout of a commit; the
+  // lib is not.
 
   return h.digest('hex');
+}
+
+/**
+ * The libhelios digest recorded at build time, or null when the bundle predates
+ * that stamp or was built on a tree with no compiled lib.
+ */
+export function readBundleLibheliosHash() {
+  const f = join(backendBundleDir(), BACKEND_LIBHELIOS_HASH_FILE);
+  if (!existsSync(f)) return null;
+  const v = readFileSync(f, 'utf8').trim();
+  return /^[0-9a-f]{64}$/.test(v) ? v : null;
 }
 
 /**
@@ -358,8 +378,33 @@ export function checkBackendBundle({ allowUnstamped = true } = {}) {
         `green — while testing the OLD backend code.\n` +
         `  bundle built from sources sha256 = ${builtHash.slice(0, 16)}…\n` +
         `  current sources                  = ${currentHash.slice(0, 16)}…\n` +
-        `Covers backend-api/*.py (+ qsm, vendor/treeiso), the PyHelios submodule ` +
-        `pins, and the compiled libhelios.\n` +
+        `Covers backend-api/*.py (+ qsm, vendor/treeiso), the RIEGL reader sources ` +
+        `and the PyHelios submodule pins.\n` +
+        `Fix: npm run build:backend`,
+    };
+  }
+
+  // The compiled libhelios, compared ONLY when this checkout has one to compare.
+  // It catches what the submodule pins cannot — the Helios C++ edited in place
+  // and recompiled (main.py does that automatically on startup), which changes
+  // the native code the bundle ships while moving no pin and no .py. A checkout
+  // with no compiled lib (a CI E2E shard restoring the bundle from cache) has
+  // nothing to disagree with; the bundle's own copy is then the only one.
+  const treeLib = hashLibhelios();
+  const builtLib = readBundleLibheliosHash();
+  if (treeLib !== null && builtLib !== null && treeLib !== builtLib) {
+    return {
+      ok: false,
+      reason: 'stale-libhelios',
+      bundleVersion: stamp,
+      message:
+        `Stale backend bundle — the compiled libhelios on disk is not the one ` +
+        `that was bundled.\n` +
+        `The Python sources and submodule pins match (${stamp}), so this is a ` +
+        `recompiled Helios (an in-place C++ edit, or the automatic rebuild on ` +
+        `backend startup) that never reached the bundle.\n` +
+        `  bundled libhelios sha256 = ${builtLib.slice(0, 16)}…\n` +
+        `  compiled libhelios       = ${treeLib.slice(0, 16)}…\n` +
         `Fix: npm run build:backend`,
     };
   }

@@ -48,14 +48,21 @@ is the one that bites. It only changes when someone runs `npm run build:backend`
 so editing `main.py` leaves a stale binary on disk while all three source
 declarations still agree with each other.
 
-The build therefore writes **two** stamps into the bundle directory, and
-`npm run check:backend` compares both without launching anything (it is a file
+The build therefore writes **three** stamps into the bundle directory, and
+`npm run check:backend` compares them without launching anything (it is a file
 read plus a hash of ~2 MB of Python — single-digit milliseconds):
 
 | Stamp | Catches |
 |---|---|
 | `phytograph_backend_version.txt` | The bundle was built from a **different `BACKEND_VERSION`** |
-| `phytograph_backend_sources.sha256` | The bundle was built from **different Python**, at the same version |
+| `phytograph_backend_sources.sha256` | The bundle was built from **different Python or PyHelios submodule pins**, at the same version |
+| `phytograph_backend_libhelios.sha256` | The bundle ships a **different compiled `libhelios`** than the one on disk — the same pin, recompiled |
+
+The third is compared only by a checkout that actually has a compiled
+`libhelios` (a dev machine, or the CI job that built the bundle). A checkout
+that merely restored the bundle — every CI E2E shard — has nothing to compare
+it with, and must not fail on its absence; that is why the library is a
+separate stamp rather than an input to the sources digest.
 
 The second one exists because the first has a blind spot that is the *common*
 case, not an exotic one. `BACKEND_VERSION` only moves when a change breaks the

@@ -25,9 +25,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyDropboxIgnores } from './dropbox-ignore.mjs';
 import {
+  BACKEND_LIBHELIOS_HASH_FILE,
   BACKEND_SOURCE_HASH_FILE,
   BACKEND_STAMP_FILE,
   hashBackendSources,
+  hashLibhelios,
   readBackendVersionFromSource,
 } from './backend-version.mjs';
 
@@ -293,9 +295,16 @@ proc.on('exit', (code) => {
   const builtHash = hashBackendSources();
   writeFileSync(
     join(distPath, 'phytograph_backend', BACKEND_SOURCE_HASH_FILE), `${builtHash}\n`);
+  // Third stamp: the compiled libhelios that `--collect-all pyhelios` just
+  // shipped. Separate from the sources digest so a checkout without a compiled
+  // lib (a CI E2E shard) can still verify the sources — see backend-version.mjs.
+  const builtLib = hashLibhelios();
+  writeFileSync(
+    join(distPath, 'phytograph_backend', BACKEND_LIBHELIOS_HASH_FILE),
+    `${builtLib ?? 'unbuilt'}\n`);
   console.log(
     `[build-backend] stamped bundle as version ${builtVersion} ` +
-    `(sources ${builtHash.slice(0, 16)}…)`);
+    `(sources ${builtHash.slice(0, 16)}…, libhelios ${(builtLib ?? 'unbuilt').slice(0, 16)}…)`);
   // Prove the bundle can actually IMPORT what the lazily-imported code paths need.
   // PyInstaller only bundles what static analysis sees, so a function-local import
   // in a rarely-hit endpoint is silently dropped — `sklearn.mixture` shipped

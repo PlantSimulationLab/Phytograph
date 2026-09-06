@@ -36,7 +36,7 @@ pytestmark = pytest.mark.skipif(
 
 _CHILD = textwrap.dedent(
     """
-    import math, sys, resource
+    import math, os, sys, resource
     import numpy as np
     from pyhelios import LiDARCloud
 
@@ -67,12 +67,32 @@ _CHILD = textwrap.dedent(
                         phi_range=(0.0, 2*math.pi),
                         exit_diameter=0.0, beam_divergence=0.0)
     cloud.addHitPointsWithData(sid, xyz, dirs, ["row", "column"], vals)
-    try:
-        cloud.gapfillMisses()
-        # Peak RSS in MB (ru_maxrss is bytes on macOS, KB on Linux).
+
+    def peak_rss_mb():
+        # ru_maxrss is bytes on macOS, KB on Linux.
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        peak_mb = peak / (1024*1024) if sys.platform == "darwin" else peak / 1024
-        print("OK", int(cloud.getHitCount()), round(peak_mb))
+        return peak / (1024*1024) if sys.platform == "darwin" else peak / 1024
+
+    def current_rss_mb():
+        # What the process holds RIGHT NOW, before the fill. The absolute peak
+        # is useless as a budget because the baseline is platform-dependent:
+        # this identical child measured 109 MB peak on macOS (fill added 2 MB
+        # over a 107 MB baseline) and 1268 MB on the Linux CI runner, where
+        # nothing about the fill itself differs. The fill's own cost is the DELTA.
+        if sys.platform.startswith("linux"):
+            with open("/proc/self/statm") as f:
+                pages = int(f.read().split()[1])
+            return pages * os.sysconf("SC_PAGE_SIZE") / (1024*1024)
+        # macOS has no cheap current-RSS; the peak so far is a fair proxy, since
+        # nothing large has happened yet.
+        return peak_rss_mb()
+
+    try:
+        before = current_rss_mb()
+        cloud.gapfillMisses()
+        peak = peak_rss_mb()
+        added = max(0.0, peak - before)
+        print("OK", int(cloud.getHitCount()), round(added), round(peak), round(before))
     except Exception as exc:
         print("RAISED", str(exc).replace("\\n", " "))
     """
@@ -109,9 +129,14 @@ def test_full_resolution_raster_fills_without_exhausting_memory():
     """
     verdict = _run(2000, 4000)
     assert verdict.startswith("OK"), f"expected a successful fill, got: {verdict}"
-    _, count, peak_mb = verdict.split()
+    _, count, added_mb, peak_mb, before_mb = verdict.split()
     assert int(count) == 2000 * 4000, (
         f"expected the full raster to be gap-filled (8,000,000), got {int(count):,}")
-    assert int(peak_mb) < 600, (
-        f"peak RSS {peak_mb} MB for an 8M-cell raster — the misses look materialized "
-        f"again rather than virtualized (~800 MB of HitPoints at ~100 bytes each)")
+    # Budget the fill's OWN footprint (peak after minus resident before), not the
+    # absolute peak: the process baseline is platform-dependent (109 MB total on
+    # macOS against 1268 MB on the Linux CI runner for this same child, with a
+    # 2 MB fill) and says nothing about whether the misses were materialized.
+    assert int(added_mb) < 600, (
+        f"gap-filling an 8M-cell raster added {added_mb} MB (peak {peak_mb} MB over a "
+        f"{before_mb} MB baseline) — the misses look materialized again rather than "
+        f"virtualized (~800 MB of HitPoints at ~100 bytes each)")

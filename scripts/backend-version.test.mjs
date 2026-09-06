@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { hashBackendSources, pyheliosSubmoduleRevisions } from './backend-version.mjs';
+import { hashBackendSources, hashLibhelios, pyheliosSubmoduleRevisions } from './backend-version.mjs';
 
 const MAIN_PY = join(process.cwd(), 'backend-api', 'main.py');
 
@@ -149,25 +149,38 @@ describe('hashBackendSources — PyHelios inputs', () => {
       : process.platform === 'darwin' ? 'libhelios.dylib' : 'libhelios.so',
   );
 
-  it('changes when the compiled libhelios changes', () => {
-    // Catches what the submodule pins cannot: editing the Helios C++ in place
-    // and recompiling (main.py does this automatically when the lib is stale)
-    // leaves both pins untouched while changing the shipped native code.
+  it('tracks the compiled libhelios in its OWN digest, not in the sources digest', () => {
+    // The lib catches what the submodule pins cannot: editing the Helios C++ in
+    // place and recompiling (main.py does this automatically when the lib is
+    // stale) leaves both pins untouched while changing the shipped native code.
+    //
+    // But it must stay OUT of hashBackendSources(). The first version folded it
+    // in, and the first CI run failed every E2E shard at check:backend on an
+    // identical commit: the `prepare` job compiles libhelios and stamps the
+    // bundle, the shards restore that bundle from cache and never compile, so
+    // "sources + lib" could not agree between the two machines. The sources
+    // digest has to be a function of the CHECKOUT alone; the lib is compared
+    // separately, and only by a checkout that has one.
     if (!existsSync(LIB)) {
       // A tree that has never run build-pyhelios has nothing to perturb; the
-      // 'unbuilt' branch is covered by the determinism test below.
+      // no-lib branch is exactly the CI-shard case, covered by the stability
+      // test below (the digest must not depend on the lib's absence either).
+      expect(hashLibhelios()).toBeNull();
       return;
     }
-    const before = hashBackendSources();
+    const sourcesBefore = hashBackendSources();
+    const libBefore = hashLibhelios();
+    expect(libBefore).toMatch(/^[0-9a-f]{64}$/);
     const orig = readFileSync(LIB);
     try {
       writeFileSync(LIB, Buffer.concat([orig, Buffer.from([0])]));
-      expect(hashBackendSources()).not.toBe(before);
+      expect(hashLibhelios()).not.toBe(libBefore);
+      expect(hashBackendSources()).toBe(sourcesBefore);
     } finally {
       writeFileSync(LIB, orig);
     }
-    // Restored byte-for-byte, so the digest must return to its original value.
-    expect(hashBackendSources()).toBe(before);
+    // Restored byte-for-byte, so the lib digest must return to its original value.
+    expect(hashLibhelios()).toBe(libBefore);
   });
 
   it('reports a 40-hex commit for each initialised submodule', () => {
