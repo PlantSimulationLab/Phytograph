@@ -67,11 +67,14 @@ permissions:
 
 env:
   # GL/X11/GLU headers for the PyHelios visualizer/lidar plugin; TBB for the
-  # PotreeConverter build AND its runtime linkage; xvfb as a virtual display for
+  # PotreeConverter build AND its runtime linkage; patchelf to repoint the built
+  # PotreeConverter at its bundled libs (without it the binary keeps CMake's
+  # build-tree RUNPATH, which the E2E jobs don't restore — they cache
+  # resources/potree_converter, not tmp/); xvfb as a virtual display for
   # the headless Electron app and libhelios's GL symbols at runtime. Shared by
   # every Linux job so a new dependency can't be added to one and forgotten in
   # another.
-  LINUX_DEPS: libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb
+  LINUX_DEPS: libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev patchelf xvfb
 
 jobs:
   # --------------------------------------------------------------------------

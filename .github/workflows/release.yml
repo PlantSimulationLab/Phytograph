@@ -175,10 +175,13 @@ jobs:
           # libgl1-mesa-dev + xorg-dev: build-time GL/X11 headers (above).
           # libglu1-mesa-dev: GLU headers (GL/glu.h) — the visualizer plugin's
           # bundled glew pulls it in, and it's a separate package from libgl.
+          # patchelf: repoints the built PotreeConverter at the libs bundled
+          # beside it; without it the binary keeps CMake's build-tree RUNPATH
+          # and breaks as soon as it's packaged away from tmp/.
           # xvfb: a virtual X display for the runtime backend smoke test —
           # importing libhelios links the visualizer's GL symbols, so give it a
           # framebuffer in case the load path touches a display on a headless runner.
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb libfuse2t64
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev patchelf xvfb libfuse2t64
 
       # Pin the cache to the exact PyHelios + helios-core commits so bumping
       # either submodule rebuilds the bundled native library.
@@ -411,13 +414,15 @@ jobs:
       - name: Re-install GL/X11 dev headers after CUDA (Linux)
         if: runner.os == 'Linux' && steps.backend-cache.outputs.cache-hit != 'true' && !inputs.signing_test
         # Re-install the SAME set the "Install Linux build dependencies" step did
-        # (CUDA's apt transaction removed them). Must include xvfb + libtbb-dev,
-        # not just the GL headers: xvfb-run wraps the packaged-backend smoke test
-        # (its removal made that step fail with "xvfb-run: command not found",
-        # misreported as a backend crash-on-startup), and libtbb-dev is a build dep.
+        # (CUDA's apt transaction removed them). Must include xvfb, libtbb-dev
+        # and patchelf, not just the GL headers: xvfb-run wraps the
+        # packaged-backend smoke test (its removal made that step fail with
+        # "xvfb-run: command not found", misreported as a backend
+        # crash-on-startup), while libtbb-dev and patchelf are both
+        # PotreeConverter build deps.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev xvfb libfuse2t64
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libtbb-dev patchelf xvfb libfuse2t64
 
       # Compile the PyHelios native library (libhelios) and editable-install the
       # package so PyInstaller's collect-all picks it up. plantarchitecture +

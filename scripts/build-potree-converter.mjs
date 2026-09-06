@@ -14,7 +14,8 @@
 // Prerequisites:
 //   macOS / Linux: cmake, a C++20 compiler, Intel TBB
 //     - macOS: brew install cmake tbb
-//     - Linux: apt install cmake libtbb-dev
+//     - Linux: apt install cmake libtbb-dev patchelf   (patchelf makes the
+//       installed binary find its bundled libs — see install())
 //   Windows: Visual Studio 2019+, CMake. TBB is pulled via vcpkg if present.
 
 import { spawnSync } from 'node:child_process';
@@ -81,6 +82,13 @@ function preflight() {
   } else if (platform() === 'linux') {
     if (spawnSync('pkg-config', ['--exists', 'tbb'], { stdio: 'ignore' }).status !== 0) {
       throw new Error('Intel TBB headers/lib not found via pkg-config. Run `apt install libtbb-dev` or your distro equivalent.');
+    }
+    // patchelf is what makes the installed binary relocatable (see install()).
+    // Check it HERE rather than discovering it missing after the build: without
+    // it the binary still builds, still passes outputUsable(), and is broken
+    // everywhere except this machine.
+    if (spawnSync('patchelf', ['--version'], { stdio: 'ignore' }).status !== 0) {
+      throw new Error('patchelf not found on PATH. Needed to point the binary at its bundled libs. Run `apt install patchelf` or your distro equivalent.');
     }
   }
 
@@ -206,8 +214,22 @@ function install() {
     }
   } else if (platform() === 'linux') {
     bundleSiblings((f) => f.includes('.so'));
-    // $ORIGIN lets the ELF binary load siblings from its own directory.
-    spawnSync('patchelf', ['--set-rpath', '$ORIGIN', dstBin], { stdio: 'inherit' });
+    // $ORIGIN lets the ELF binary load siblings from its own directory, and
+    // REPLACES the build-tree RUNPATH CMake baked in — same reasoning as the
+    // -delete_rpath above, and the same slippery failure if it doesn't happen:
+    // the stale path still resolves here, so the binary tests fine on the build
+    // machine and is broken the moment `tmp/` is cleaned or it ships.
+    //
+    // So a failure is fatal, not advisory. preflight() already refuses to start
+    // without patchelf; this catches the rarer case where it exists but errors.
+    const r = spawnSync('patchelf', ['--set-rpath', '$ORIGIN', dstBin], { encoding: 'utf8' });
+    if (r.error || r.status !== 0) {
+      const why = r.error?.message ?? (r.stderr ?? '').trim() ?? '';
+      throw new Error(
+        `patchelf --set-rpath failed on ${dstBin}: ${why || 'exit ' + r.status}\n` +
+        "The binary would keep CMake's build-tree RUNPATH and break once tmp/ is cleaned.",
+      );
+    }
   } else if (platform() === 'win32') {
     // Windows searches the executable's own directory for DLLs, so just copy
     // any sibling DLLs next to the .exe.

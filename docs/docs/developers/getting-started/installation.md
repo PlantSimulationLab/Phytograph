@@ -22,8 +22,8 @@ CUDA ray-tracing path still compiles if a CUDA toolkit is present — see the
 GPU note below). The `lidar` plugin
 transitively builds the `visualizer` (OpenGL) plugin — fine on macOS and
 Windows with no extra packages; on Linux you'd also need `libgl1-mesa-dev`,
-`xorg-dev`, and `libtbb-dev` (the last for PotreeConverter):
-`sudo apt-get install -y libgl1-mesa-dev xorg-dev libtbb-dev`.
+`xorg-dev`, and — both for PotreeConverter — `libtbb-dev` and `patchelf`:
+`sudo apt-get install -y libgl1-mesa-dev xorg-dev libtbb-dev patchelf`.
 
 !!! note "GPU acceleration is decided at build time"
     The `lidar`/`collisiondetection` plugin compiles a CUDA ray-tracing path
