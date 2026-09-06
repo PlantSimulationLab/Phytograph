@@ -316,6 +316,13 @@ jobs:
       # `--require-gpu` exists to prevent. Keep the GLOBS identical to
       # release.yml (that part does matter, so both hash the same inputs); keep
       # the suffixes distinct.
+      #
+      # The globs must cover EVERYTHING `scripts/backend-version.mjs` folds into
+      # the bundle's source stamp, plus the two scripts that build and stamp it.
+      # The RIEGL reader sources (bundled via --add-data) and the scripts were
+      # missing: a change to the stamp FORMULA then restored a bundle stamped
+      # under the old formula, and `check:backend` failed `prepare` on a bundle
+      # whose contents were correct. The stamp is part of the artifact.
       - name: Compute cache keys
         id: keys
         shell: bash
