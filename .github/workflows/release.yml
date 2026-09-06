@@ -214,7 +214,7 @@ jobs:
           # If a new top-level package under backend-api/ is imported by the
           # backend, ADD IT HERE — omitting it would restore a stale binary
           # built from different sources, which is far worse than a cache miss.
-          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda
+          key: backend-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt', 'docker/riegl/rxp_reader.py', 'docker/riegl/rxp_shim.cpp', 'docker/riegl/rxpshim.def', 'scripts/build-backend.mjs', 'scripts/backend-version.mjs') }}-pyhelios-${{ steps.submodules.outputs.sha }}-cuda
           # No fallback on purpose: a partial-match restore would ship a backend
           # built from different sources than the commit being released. Better
           # to pay the rebuild than to publish a stale binary.

@@ -328,7 +328,7 @@ jobs:
         shell: bash
         run: |
           sha="$(git -C pyhelios rev-parse HEAD)-$(git -C pyhelios/helios-core rev-parse HEAD)"
-          echo "backend=backend-${{ runner.os }}-x64-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt') }}-pyhelios-${sha}" >> "$GITHUB_OUTPUT"
+          echo "backend=backend-${{ runner.os }}-x64-${{ hashFiles('backend-api/*.py', 'backend-api/qsm/**/*.py', 'backend-api/vendor/**/*.py', 'backend-api/requirements.txt', 'docker/riegl/rxp_reader.py', 'docker/riegl/rxp_shim.cpp', 'docker/riegl/rxpshim.def', 'scripts/build-backend.mjs', 'scripts/backend-version.mjs') }}-pyhelios-${sha}" >> "$GITHUB_OUTPUT"
           if command -v sha256sum >/dev/null; then h=$(sha256sum scripts/build-potree-converter.mjs | cut -d' ' -f1); else h=$(shasum -a 256 scripts/build-potree-converter.mjs | cut -d' ' -f1); fi
           echo "potree=potree-${{ runner.os }}-x64-pr686-${h}" >> "$GITHUB_OUTPUT"
 
