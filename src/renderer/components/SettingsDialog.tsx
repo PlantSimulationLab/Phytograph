@@ -116,6 +116,13 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   // Null while the first probe is in flight, and while it is we say nothing
   // platform-specific rather than guessing wrong for a second.
   const rieglRuntime = rieglStatus?.runtime ?? null;
+  // 'native' covers Windows AND Linux, and almost nothing they need is the
+  // same: a different RiVLib download, a different conventional folder, a
+  // different compiler, a different library filename. Taken from the backend's
+  // status rather than process.platform, because the backend is the single
+  // authority on which host every RIEGL probe answered for.
+  const rieglHostOs = rieglStatus?.hostOs ?? null;
+  const rieglNativeLinux = rieglRuntime === 'native' && rieglHostOs === 'linux';
   const [buildingImage, setBuildingImage] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
 
@@ -321,7 +328,16 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                   &mdash; download it from RIEGL's members area and select the extracted folder (the
                   one containing <code>bin/</code>, <code>include/</code>, <code>lib/</code>).
                   Nothing is copied; the folder is read directly.
-                  {rieglRuntime === 'native' ? (
+                  {rieglNativeLinux ? (
+                    <>
+                      {' '}Get <strong>Part 1</strong> for <code>x86_64-linux-gcc9</code> &mdash; it
+                      loads on any host with glibc 2.17 or newer, so it is the safe choice; a build
+                      for a newer gcc works only if this machine's <code>libstdc++</code> is at
+                      least that new. Extracting it to{' '}
+                      <code>~/.local/share/Phytograph/rivlib</code> means you can skip choosing a
+                      folder entirely &mdash; Phytograph looks there on its own. No Docker needed.
+                    </>
+                  ) : rieglRuntime === 'native' ? (
                     <>
                       {' '}Get the <code>x86_64-windows</code> build. Extracting it to{' '}
                       <code>%LOCALAPPDATA%\Phytograph\rivlib</code> means you can skip choosing a
@@ -372,22 +388,33 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                             // and the reason carries which.
                             ['rivlib', rieglStatus.available, 'RiVLib folder',
                              !settings?.rivlibPath
-                               ? 'Not set — choose the extracted x86_64-windows folder'
+                               ? (rieglNativeLinux
+                                   ? 'Not set — choose the extracted x86_64-linux-gcc9 folder'
+                                   : 'Not set — choose the extracted x86_64-windows folder')
                                : rieglStatus.rivlibValid
                                  ? rieglStatus.reason
-                                 : 'No lib\\scanifc-mt-s.dll here — pick the extracted folder'],
-                            // Keyed on missesAvailable, NOT toolchainPresent: a
-                            // compiler is necessary but not sufficient, since the
-                            // shim also needs a static library a runtime-only
-                            // download leaves out. Keying on the compiler put a
-                            // tick here while sky shots were unavailable.
+                                 : (rieglNativeLinux
+                                     ? 'No lib/libscanifc.so here — pick the extracted folder'
+                                     : 'No lib\\scanifc-mt-s.dll here — pick the extracted folder')],
+                            // Keyed on missesAvailable, NOT toolchainPresent. On
+                            // Windows a compiler is necessary but not sufficient,
+                            // since the shim also needs a static library a
+                            // runtime-only download leaves out; keying on the
+                            // compiler put a tick here while sky shots were
+                            // unavailable. On Linux it IS sufficient (the class
+                            // is inside libscanifc.so), but the same key stays
+                            // right there and keeps this one row honest on both.
                             ['toolchain', rieglStatus.missesAvailable,
                              'No-return (sky) shots',
                              rieglStatus.toolchainPresent
                                ? rieglStatus.reason
-                               : 'Needs the free Visual Studio Build Tools with the "Desktop '
-                                 + 'development with C++" workload. Scans import without them, '
-                                 + 'but with no sky shell — Leaf Area Density needs it'],
+                               : rieglNativeLinux
+                                 ? 'Needs a C++ compiler (sudo apt install g++, or '
+                                   + 'sudo dnf install gcc-c++). Scans import without one, '
+                                   + 'but with no sky shell — Leaf Area Density needs it'
+                                 : 'Needs the free Visual Studio Build Tools with the "Desktop '
+                                   + 'development with C++" workload. Scans import without them, '
+                                   + 'but with no sky shell — Leaf Area Density needs it'],
                           ] as const)
                         : ([
                             ['docker', rieglStatus.dockerPresent, 'Docker running',

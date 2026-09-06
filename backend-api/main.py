@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.81.0"
+BACKEND_VERSION = "0.82.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -502,7 +502,7 @@ class _SpawnResult:
 _SUBPROCESS_RUN = subprocess.run
 
 
-def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
+def _spawn_run(argv, timeout: float = 10.0, text: bool = True, env=None):
     """`subprocess.run(capture_output=True)` without the fork().
 
     Why this exists: the backend process has libhelios (GLFW via the
@@ -526,6 +526,14 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
     file actions have no pipe-buffer draining, so a pipe could deadlock on a
     chatty child. Returns a `_SpawnResult`; raises on a missing executable or a
     blown timeout, exactly as `subprocess.run` would.
+
+    `env` defaults to this process's own, which is right for every probe that
+    just asks whether a tool answers. It is overridable because one probe must
+    run its child under the SAME loader environment the real invocation will
+    use: in a packaged build this process carries PyInstaller's bundled
+    libstdc++ on LD_LIBRARY_PATH, while _riegl_reader_invocation scrubs that for
+    the reader -- so probing without the override can answer for a compiler the
+    actual build never sees.
     """
     import tempfile
 
@@ -546,14 +554,15 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
         # making it fail on the one call site it is meant to permit.
         proc = _SUBPROCESS_RUN(
             [exe] + list(argv[1:]),
-            capture_output=True, text=text, timeout=timeout,
+            capture_output=True, text=text, timeout=timeout, env=env,
         )
         return _SpawnResult(proc.returncode, proc.stdout, proc.stderr)
 
     with tempfile.TemporaryFile() as out:
         fd = out.fileno()
         pid = os.posix_spawn(
-            exe, [exe] + list(argv[1:]), os.environ,
+            exe, [exe] + list(argv[1:]),
+            os.environ if env is None else env,
             file_actions=[
                 (os.POSIX_SPAWN_DUP2, fd, 1),
                 (os.POSIX_SPAWN_DUP2, fd, 2),
@@ -593,13 +602,26 @@ def _spawn_run(argv, timeout: float = 10.0, text: bool = True):
 #   "docker" (macOS) — there is no Darwin build of RiVLib at all, so a container
 #       is the only way a Mac can decode .rxp. Gated on three things at once:
 #       Docker reachable, RiVLib supplied, image built from it.
-#   "native" (Windows) — RiVLib runs here directly, so a container would mean
-#       installing Docker Desktop to run an x86 Linux VM to call a library that
-#       is already native. The reader is the SAME rxp_reader.py, executed as a
-#       child process instead of an entrypoint; only path mapping differs.
+#   "native" (Windows, and x86_64 Linux) — RiVLib runs here directly, so a
+#       container would mean installing Docker Desktop to run an x86 Linux VM to
+#       call a library that is already native. The reader is the SAME
+#       rxp_reader.py, executed as a child process instead of an entrypoint;
+#       only path mapping differs.
 #
-# Linux has a RiVLib build too and would join "native" with little work, but is
-# deliberately left out until it can be verified against real scanner data.
+# Linux was withheld from "native" until it could be verified against real
+# scanner data, which it now has been: RiVLib 2.15.5 x86_64-linux-gcc9.5.0 on
+# glibc 2.35 / gcc 11.4, against a VZ-1000 .riproject. The C++ miss-recovery
+# shim reconciles exactly there (20,149,924 shots == 10,596,198 hit shots +
+# 9,553,726 misses), which is the invariant the shim exists to satisfy.
+#
+# x86_64 ONLY, and the arch check is load-bearing rather than defensive. RIEGL
+# ships no arm64 Linux build at all (the Dockerfile pins linux/amd64 for the
+# same reason), and unlike Windows-on-ARM there is no emulation to fall back on.
+# Without the check an aarch64 host would get runtime="native", and
+# _riegl_rivlib_unloadable compares against a hardcoded ELF x86_64 — so a
+# PERFECTLY CORRECT x86_64 download would pass the header check, turn the badge
+# green, and die at dlopen. That is exactly the "present but unusable" state
+# _riegl_rivlib_unloadable exists to prevent, so it is closed at the gate.
 #
 # RiVLib is NEVER redistributed — its licence forbids it ("You may NOT
 # distribute or modify the software for the use in commercial applications
@@ -627,15 +649,33 @@ def _riegl_host_os() -> str:
     return _platform.system().lower()
 
 
+def _riegl_host_machine() -> str:
+    """The host CPU architecture, lower-cased.
+
+    Routed through platform.machine() for the same reason _riegl_host_os goes
+    through platform.system(): the tests fake it, and every RIEGL probe has to
+    agree about which machine it is answering for.
+    """
+    import platform as _platform
+
+    return _platform.machine().lower()
+
+
+# RiVLib is published for x86_64 only. Both spellings appear in the wild
+# (platform.machine() says "x86_64" on Linux and "AMD64" on Windows).
+_RIEGL_NATIVE_MACHINES = ("x86_64", "amd64")
+
+
 def _riegl_runtime(host_os: "str | None" = None) -> "str | None":
     """Which reader runtime this host gets: "docker", "native", or None.
 
     PHYTOGRAPH_RIEGL_RUNTIME forces one. That exists so CI can drive the native
     runner on Linux against the fake RiVLib in tests/fixtures — the native path
     is otherwise reachable only on Windows, which would leave the runner, the
-    path mapping and the transport with no every-push coverage at all. It is
-    also the switch a Linux user would flip once that path has been verified
-    against real scanner data.
+    path mapping and the transport with no every-push coverage at all. Linux now
+    takes the native path unforced, so the override's remaining jobs are to
+    force NATIVE on macOS (which the fake-RiVLib suite relies on) and to force
+    DOCKER on a Linux host that would rather run the container.
     """
     forced = os.environ.get("PHYTOGRAPH_RIEGL_RUNTIME")
     if forced in ("docker", "native"):
@@ -645,6 +685,15 @@ def _riegl_runtime(host_os: "str | None" = None) -> "str | None":
         return "docker"
     if system == "windows":
         return "native"
+    if system == "linux":
+        # See the arch note in the section header: no arm64 RiVLib exists, and
+        # the ELF check downstream would wave a correct x86_64 download through.
+        # Checked AFTER the forced short-circuit so PHYTOGRAPH_RIEGL_RUNTIME
+        # still drives the native path on Apple silicon, which is how the
+        # fake-RiVLib suite covers it.
+        if _riegl_host_machine() in _RIEGL_NATIVE_MACHINES:
+            return "native"
+        return None
     return None
 
 
@@ -670,17 +719,26 @@ def _riegl_scanifc_names() -> tuple:
 def _riegl_default_rivlib_root() -> "str | None":
     """The conventional place to extract RiVLib, where a convention exists.
 
-    Windows only, and it matches what the import workflow docs tell users to do,
-    so following the docs means never touching the folder picker. macOS has no
-    equivalent: the container reads RiVLib from wherever the user put it, and
-    there has never been a documented location to guess at.
+    NATIVE HOSTS ONLY, and each matches what the import workflow docs tell users
+    to do, so following the docs means never touching the folder picker. macOS
+    has no equivalent: the container reads RiVLib from wherever the user put it,
+    and there has never been a documented location to guess at.
+
+    The Linux base mirrors _riegl_extract_dir()'s exactly, so the two agree
+    about what "Phytograph's per-user data directory" means on this OS rather
+    than inventing a second convention for the same idea.
     """
-    if _riegl_host_os() != "windows":
-        return None
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        return None
-    return str(Path(local) / "Phytograph" / "rivlib")
+    host = _riegl_host_os()
+    if host == "windows":
+        local = os.environ.get("LOCALAPPDATA")
+        if not local:
+            return None
+        return str(Path(local) / "Phytograph" / "rivlib")
+    if host == "linux":
+        base = os.environ.get("XDG_DATA_HOME")
+        root = Path(base) if base else Path.home() / ".local" / "share"
+        return str(root / "Phytograph" / "rivlib")
+    return None
 
 
 def _riegl_rivlib_path(override: "str | None" = None) -> "str | None":
@@ -729,6 +787,25 @@ def _riegl_rivlib_valid(path: "str | None") -> bool:
 # The static archive the miss-recovery shim links against. Windows ships the
 # C++ pointcloud class only here — see _compile_shim_msvc in the reader.
 _RIEGL_SCANLIB_ARCHIVE = "scanlib-mt-s.lib"
+
+
+def _riegl_scanlib_archive() -> "str | None":
+    """The static archive the shim links, where one is needed at all.
+
+    Windows only, and None elsewhere is not a shrug -- it means "no second
+    artifact can be missing". `dumpbin /exports` on scanifc-mt.dll lists 21 flat
+    C symbols and no C++ ones, so scanlib::pointcloud lives only inside
+    scanlib-mt-s.lib. The Linux libscanifc.so exports the class itself (2,774
+    scanlib:: symbols on 2.15.5, pointcloud among them), so the shim links
+    -lscanifc against the very library the reader already loads.
+
+    Testing for the archive unconditionally is not a harmless extra check: it
+    reads as absent on every Linux host, which would report "no-return (sky)
+    shots cannot be read" against a COMPLETE download and pin misses_available
+    false forever -- i.e. Leaf Area Density dead on Linux, blamed on the user's
+    RiVLib copy.
+    """
+    return _RIEGL_SCANLIB_ARCHIVE if _riegl_host_os() == "windows" else None
 
 # PE machine types, from winnt.h. We only care whether it is the one this
 # 64-bit process can load.
@@ -840,13 +917,18 @@ def _riegl_rivlib_unloadable(path: "str | None") -> "str | None":
     bind-mounts it into a linux/amd64 container — that is the answer regardless
     of whether the Mac is Apple silicon.
 
-    The exception is a forced-native runtime on a non-Linux host: there is no
-    container, the reader dlopens the file into THIS process, and so it has to
-    match this machine rather than the container. That combination is reachable
-    only through PHYTOGRAPH_RIEGL_RUNTIME, which is how the fake-RiVLib tests
-    drive the native path off Windows; keying on the extension alone rejected
-    the host-native stand-in they build as a corrupt download, since a macOS
+    The exception is a native runtime on macOS: there is no container, the
+    reader dlopens the file into THIS process, and so it has to match this
+    machine rather than the container. That combination is reachable only
+    through PHYTOGRAPH_RIEGL_RUNTIME, which is how the fake-RiVLib tests drive
+    the native path off Windows; keying on the extension alone rejected the
+    host-native stand-in they build as a corrupt download, since a macOS
     compiler emits Mach-O under the .so name the host asks for.
+
+    Native LINUX needs no such exception, because there the ELF x86_64 check is
+    already the right question -- it is both what the container would load and
+    what this process will. Only the REMEDY differs, since a native host has no
+    container to explain and no Mac to reassure.
 
     What it deliberately does NOT catch is a Linux build for the wrong gcc ABI.
     That is invisible in the header — it only shows up as a GLIBC/libstdc++
@@ -874,12 +956,23 @@ def _riegl_rivlib_unloadable(path: "str | None") -> "str | None":
     else:
         machine, want = _elf_machine(scanifc), _ELF_MACHINE_X86_64
         names, kind = _ELF_MACHINE_NAMES, "Linux shared library"
-        remedy = (
-            "Phytograph runs RiVLib inside a linux/amd64 container, so it "
-            "needs the x86_64 Linux build — download that one and select it "
-            "instead. This is about the library, not about your Mac: Apple "
-            "silicon runs the same container."
-        )
+        if _riegl_runtime() == "native":
+            # A native Linux host loads this .so into the reader process
+            # itself, so "the container is amd64" is the wrong story entirely.
+            # An arm64 machine never reaches here (_riegl_runtime vetoes it),
+            # so the only thing left to say is which download to get.
+            remedy = (
+                "This machine loads RiVLib directly, so it needs the x86_64 "
+                "Linux build - download that one and select it instead. RIEGL "
+                "publishes no arm64 Linux build."
+            )
+        else:
+            remedy = (
+                "Phytograph runs RiVLib inside a linux/amd64 container, so it "
+                "needs the x86_64 Linux build - download that one and select "
+                "it instead. This is about the library, not about your Mac: "
+                "Apple silicon runs the same container."
+            )
 
     if machine is None:
         return (
@@ -1051,12 +1144,15 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
     rivlib_ok = _riegl_rivlib_valid(rivlib_path)
 
     # Platform veto first, mirroring device_info's macOS check: a host with no
-    # runtime at all (Linux today) must not pay a docker subprocess timeout just
-    # to be told the feature isn't offered.
+    # runtime at all must not pay a docker subprocess timeout just to be told
+    # the feature isn't offered. Still reachable after Linux joined "native":
+    # arm64 Linux (RIEGL publishes no arm64 build, so there is nothing to run)
+    # and any OS that is neither darwin, windows nor linux.
     if runtime is None:
         return {
             "available": False,
             "platform_supported": False,
+            "host_os": _riegl_host_os(),
             "runtime": None,
             "docker_present": False,
             "image_built": False,
@@ -1068,10 +1164,17 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
             "rivlib_path": rivlib_path,
             "rivlib_valid": rivlib_ok,
             "image": RIEGL_IMAGE,
+            # Deliberately NOT a list of supported platforms. That spelling
+            # is the one that had to be edited when Linux was added, and an
+            # open-ended phrasing will not need editing next time.
             "reason": (
-                "RIEGL .rxp import is available on macOS and Windows in this "
-                "release. On Linux, export to LAS/E57 from RiSCAN PRO or "
-                "RiPROCESS instead."
+                (
+                    "RIEGL .rxp import needs an x86_64 machine - RIEGL "
+                    "publishes no arm64 build of RiVLib."
+                    if _riegl_host_os() == "linux"
+                    else "RIEGL .rxp import is not available on this platform."
+                )
+                + " Export to LAS/E57 from RiSCAN PRO or RiPROCESS instead."
             ),
         }
 
@@ -1161,6 +1264,7 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
             and not rivlib_unloadable
         ),
         "platform_supported": True,
+        "host_os": _riegl_host_os(),
         "runtime": "docker",
         "docker_present": docker_ok,
         "image_built": image_ok,
@@ -1187,7 +1291,9 @@ def _riegl_toolchain_present() -> bool:
 
     Native runtimes only. Delegates to the reader so there is ONE definition of
     "can we build the shim" rather than a probe here that can drift from the
-    build it is predicting.
+    build it is predicting. find_cxx_toolchain is the reader's single entry
+    point for that question and picks MSVC or a POSIX compiler itself, so the
+    platform branch stays in the process that will actually run the build.
     """
     try:
         # Inject this process's subprocess policy. The reader defaults to
@@ -1195,8 +1301,18 @@ def _riegl_toolchain_present() -> bool:
         # the spawned reader), but wrong in the backend, where a fork would
         # duplicate an image holding libhelios, open3d and PROJ -- see
         # _spawn_run. One definition of the probe, two ways to run it.
-        return _rxp_reader_module().find_msvc_vcvars(
-            run=lambda argv, timeout: _spawn_run(argv, timeout=timeout)
+        #
+        # The env scrub is the other half of "no drift": _riegl_reader_invocation
+        # strips these before spawning the reader, so a compiler probed WITH a
+        # PyInstaller loader path could be one the real build never gets. Same
+        # variables, same reason, and it is what makes the answer honest in a
+        # packaged app rather than merely true of this process.
+        env = os.environ.copy()
+        for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+                    "LD_LIBRARY_PATH"):
+            env.pop(var, None)
+        return _rxp_reader_module().find_cxx_toolchain(
+            run=lambda argv, timeout: _spawn_run(argv, timeout=timeout, env=env)
         ) is not None
     except Exception:
         # A broken probe reports "no toolchain", never a 500: this is an
@@ -1204,20 +1320,84 @@ def _riegl_toolchain_present() -> bool:
         return False
 
 
+def _riegl_lib_sep() -> str:
+    """The path separator to show in a message about RiVLib's lib directory.
+
+    Keyed on the RIEGL host rather than os.sep so it stays right under the
+    monkeypatched-OS tests, which is the only way the Windows wording is
+    exercised at all off Windows.
+    """
+    return "\\" if _riegl_host_os() == "windows" else "/"
+
+
+def _riegl_compiler_remedy() -> str:
+    """How to get a C++ compiler on this host, and why it is needed here.
+
+    The REASON differs per platform and must not be merged into one sentence.
+    On Windows the class lives only in a static archive, so the shim links
+    RIEGL object code and could not be shipped prebuilt whatever we did. On
+    Linux the class is inside libscanifc.so; a compiler is still required
+    because receiving on_shot_end means subclassing with a vtable, which ctypes
+    cannot construct, and the result is ABI-tied to this machine's libstdc++.
+    Saying "static library" on Linux would be telling the user a false thing
+    about their own system.
+    """
+    if _riegl_host_os() == "windows":
+        return (
+            "that part of RiVLib is a static library, so it has to be "
+            "compiled once on this machine. Install the free Visual Studio "
+            'Build Tools with the "Desktop development with C++" workload to '
+            "enable them."
+        )
+    return (
+        "reading them means subclassing a C++ class from RiVLib, so it has to "
+        "be compiled once on this machine. Install a C++ compiler "
+        "(sudo apt install g++ on Debian/Ubuntu, sudo dnf install gcc-c++ on "
+        "Fedora/RHEL) to enable them."
+    )
+
+
+def _riegl_reader_update_hint() -> str:
+    """What to do about a reader speaking the wrong contract version.
+
+    Runtime-dependent, because the reader lives somewhere different on each. In
+    the container it is a user-built image that nothing else updates, so a
+    rebuild is the remedy and Settings has the button. On a native runtime the
+    reader is compiled INTO the backend bundle and version-locked to it, so a
+    mismatch means the bundle is not the one this code shipped with -- a stale
+    `npm run build:backend` in a dev checkout, or a damaged install. Sending
+    that user to a rebuild button that does not exist would be worse than
+    saying nothing.
+    """
+    if _riegl_runtime() == "docker":
+        return "Rebuild it: Settings -> RIEGL RiVLib folder -> Build reader image."
+    return (
+        "The bundled reader does not match this backend. In a development "
+        "checkout run `npm run build:backend`; in an installed copy, reinstall "
+        "or update Phytograph."
+    )
+
+
 def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
-    """Status for a host that runs RiVLib directly (Windows).
+    """Status for a host that runs RiVLib directly (Windows, or x86_64 Linux).
 
     TWO TIERS, and the difference matters. Points, per-point attributes, GNSS,
-    SOPs and every coordinate frame need nothing but the RiVLib download — no
-    Docker, no compiler, not even a Visual C++ redistributable, because we load
-    the static-CRT scanifc build. So `available` turns on rivlib alone.
+    SOPs and every coordinate frame need nothing but the RiVLib download - no
+    Docker, no compiler, and on Windows not even a Visual C++ redistributable,
+    because we load the static-CRT scanifc build. So `available` turns on rivlib
+    alone.
 
-    No-return (sky) shots are the exception: recovering them means subclassing a
-    C++ class that Windows RiVLib exposes only through a static archive, so the
-    shim has to be compiled here from the user's own copy — RIEGL's licence
-    rules out shipping it prebuilt. That is reported separately as
-    `misses_available` rather than folded into `available`, because refusing the
-    whole import over it would withhold a scan the user can perfectly well read.
+    No-return (sky) shots are the exception on BOTH hosts, for reasons that only
+    half overlap. Recovering them means subclassing scanlib::pointcloud and
+    overriding its virtuals, which ctypes cannot do, so something has to be
+    compiled either way. Where the base class comes from then differs: Windows
+    RiVLib exposes it only through a static archive, so the shim links RIEGL
+    object code and their licence rules out shipping it prebuilt; Linux exports
+    it from libscanifc.so, so no archive is involved and the only obstacle is
+    that the result is ABI-tied to this machine. Either way it is reported
+    separately as `misses_available` rather than folded into `available`,
+    because refusing the whole import over it would withhold a scan the user can
+    perfectly well read.
 
     There is no image, so `image_built` is True and `image_stale` is False by
     construction: the reader ships inside the backend bundle and is covered by
@@ -1227,10 +1407,14 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
     toolchain = _riegl_toolchain_present() if rivlib_ok else False
     unloadable = _riegl_rivlib_unloadable(rivlib_path) if rivlib_ok else None
     # The shim links this archive, so without it no compiler in the world
-    # produces miss recovery from this folder.
-    has_archive = bool(
-        rivlib_path
-        and (Path(rivlib_path) / "lib" / _RIEGL_SCANLIB_ARCHIVE).is_file()
+    # produces miss recovery from this folder -- WHERE ONE IS NEEDED AT ALL.
+    # On Linux the C++ class is inside libscanifc.so, so there is no second
+    # file to be missing and this is satisfied by construction; testing for it
+    # anyway would report a complete download as broken. See
+    # _riegl_scanlib_archive.
+    archive = _riegl_scanlib_archive()
+    has_archive = archive is None or bool(
+        rivlib_path and (Path(rivlib_path) / "lib" / archive).is_file()
     )
 
     if not rivlib_path:
@@ -1241,9 +1425,9 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
         )
     elif not rivlib_ok:
         reason = (
-            f"No lib\\{_riegl_scanifc_names()[0]} under {rivlib_path}. Select "
-            "the top level of the extracted RiVLib download (the folder "
-            "containing bin/, include/ and lib/)."
+            f"No lib{_riegl_lib_sep()}{_riegl_scanifc_names()[0]} under "
+            f"{rivlib_path}. Select the top level of the extracted RiVLib "
+            "download (the folder containing bin/, include/ and lib/)."
         )
     elif unloadable:
         reason = unloadable
@@ -1253,7 +1437,7 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
         # surface as a linker error partway through an import.
         reason = (
             "RIEGL .rxp import is ready, but no-return (sky) shots cannot be "
-            f"read: this RiVLib has no lib\\{_RIEGL_SCANLIB_ARCHIVE}. Download "
+            f"read: this RiVLib has no lib{_riegl_lib_sep()}{archive}. Download "
             "the full RiVLib package rather than a runtime-only one. Leaf Area "
             "Density needs those shots; nothing else does."
         )
@@ -1263,10 +1447,8 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
         # analysis that needs it is more use than naming the missing compiler.
         reason = (
             "RIEGL .rxp import is ready, but no-return (sky) shots cannot be "
-            "read: that part of RiVLib is a static library, so it has to be "
-            "compiled once on this machine. Install the free Visual Studio "
-            "Build Tools with the \"Desktop development with C++\" workload to "
-            "enable them. Leaf Area Density needs them; nothing else does."
+            "read: " + _riegl_compiler_remedy() + " Leaf Area Density needs "
+            "them; nothing else does."
         )
     else:
         reason = "RIEGL .rxp import is ready."
@@ -1276,6 +1458,7 @@ def _riegl_status_native(rivlib_path: "str | None", rivlib_ok: bool) -> dict:
         # directory listing says.
         "available": bool(rivlib_ok and not unloadable),
         "platform_supported": True,
+        "host_os": _riegl_host_os(),
         "runtime": "native",
         # Docker is not consulted at all on this path, and saying "present" for
         # something never probed would be a lie the UI might render.
@@ -1580,10 +1763,9 @@ def _require_reader_version(doc: dict) -> None:
     raise HTTPException(
         status_code=500,
         detail=(
-            "The RIEGL reader image is out of date (reports version "
+            "The RIEGL reader is out of date (reports version "
             f"{version if version is not None else 'none'}, needs "
-            f"{_RIEGL_MIN_READER_VERSION}). Rebuild it: Settings -> RIEGL "
-            "RiVLib folder -> Build reader image."
+            f"{_RIEGL_MIN_READER_VERSION}). " + _riegl_reader_update_hint()
         ),
     )
 
@@ -2598,8 +2780,8 @@ def _read_riegl_header(stream) -> dict:
             status_code=500,
             detail=(
                 f"RIEGL reader stream version {version} is not supported "
-                f"(expected {_RIEGL_STREAM_VERSION}). Rebuild the reader image "
-                "(Settings -> RIEGL RiVLib folder -> Build reader image)."
+                f"(expected {_RIEGL_STREAM_VERSION}). "
+                + _riegl_reader_update_hint()
             ),
         )
     return json.loads(_read_exactly(stream, hdr_len).decode("utf-8"))

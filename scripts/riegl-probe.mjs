@@ -31,6 +31,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -42,26 +43,38 @@ const DOCKER_CONTEXT = join(repoRoot, 'docker', 'riegl');
 const PLATFORM = 'linux/amd64';
 
 // Two runtimes, same as the backend (_riegl_runtime in main.py). macOS has no
-// RiVLib build at all, so the reader runs in a container; Windows has one, so
-// the container would be pure overhead and the reader is run directly. Keeping
-// this harness able to drive BOTH is the point — otherwise a Windows developer
-// has no way to exercise the reader outside the app.
-const NATIVE = process.platform === 'win32';
+// RiVLib build at all, so the reader runs in a container; Windows and Linux
+// have one, so the container would be pure overhead and the reader is run
+// directly. Keeping this harness able to drive BOTH is the point — otherwise a
+// developer on a native host has no way to exercise the container, and vice
+// versa — so PHYTOGRAPH_RIEGL_RUNTIME overrides here exactly as it does in the
+// backend.
+const WINDOWS = process.platform === 'win32';
+const NATIVE =
+  process.env.PHYTOGRAPH_RIEGL_RUNTIME === 'native' ||
+  (process.env.PHYTOGRAPH_RIEGL_RUNTIME !== 'docker' &&
+    process.platform !== 'darwin');
 const READER = join(repoRoot, 'docker', 'riegl', 'rxp_reader.py');
 
+// EVERY line below keys on WINDOWS, not on NATIVE, and the distinction is the
+// whole reason they are separate constants. NATIVE says how the reader runs;
+// WINDOWS says what this operating system's files are called. They coincided
+// while Windows was the only native host, and conflating them sent a Linux
+// native run looking for a .dll under venv/Scripts/python.exe.
+
 /** The scanifc artifact this platform's RiVLib download carries. */
-const SCANIFC_NAMES = NATIVE
+const SCANIFC_NAMES = WINDOWS
   ? ['scanifc-mt-s.dll', 'scanifc-mt.dll']
   : ['libscanifc.so'];
 
 /** The python that can import numpy — the backend venv, or PYTHON. */
 function resolvePython() {
   if (process.env.PYTHON) return process.env.PYTHON;
-  const venv = NATIVE
+  const venv = WINDOWS
     ? join(repoRoot, 'backend-api', 'venv', 'Scripts', 'python.exe')
     : join(repoRoot, 'backend-api', 'venv', 'bin', 'python');
   if (existsSync(venv)) return venv;
-  return NATIVE ? 'python' : 'python3';
+  return WINDOWS ? 'python' : 'python3';
 }
 
 function fail(message, hint) {
@@ -112,17 +125,26 @@ function checkDocker() {
     fail(
       'the Docker daemon is not reachable.',
       'Start Docker Desktop and try again. On macOS the container is the only\n' +
-        'way to run RiVLib, since RIEGL ships no macOS build.',
+        'way to run RiVLib, since RIEGL ships no macOS build. On Windows and\n' +
+        'Linux the reader runs natively — unset PHYTOGRAPH_RIEGL_RUNTIME=docker\n' +
+        'to use that instead.',
     );
   }
   return version.stdout.trim();
 }
 
 function defaultRivlibRoot() {
-  // The location the docs tell Windows users to extract to; the app finds it
-  // on its own, so this harness should too.
-  if (!NATIVE || !process.env.LOCALAPPDATA) return null;
-  return join(process.env.LOCALAPPDATA, 'Phytograph', 'rivlib');
+  // The location the docs tell users of each native host to extract to; the app
+  // finds it on its own (_riegl_default_rivlib_root in main.py), so this harness
+  // should too. macOS has no convention: the container reads RiVLib from
+  // wherever the user put it.
+  if (WINDOWS) {
+    if (!process.env.LOCALAPPDATA) return null;
+    return join(process.env.LOCALAPPDATA, 'Phytograph', 'rivlib');
+  }
+  if (process.platform === 'darwin') return null;
+  const base = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+  return join(base, 'Phytograph', 'rivlib');
 }
 
 function resolveRivlib(explicit) {
@@ -131,15 +153,20 @@ function resolveRivlib(explicit) {
     fail(
       'RiVLib location not set.',
       'RiVLib is proprietary and user-supplied — its licence forbids us from\n' +
-        (NATIVE
+        (WINDOWS
           ? 'shipping it. Download the x86_64-windows build from RIEGL\'s\n' +
             'members area and extract it to\n\n' +
             '  %LOCALAPPDATA%\\Phytograph\\rivlib\n\n' +
             'which is found automatically, or pass --rivlib <path>.'
-          : 'shipping it. Download "RiVLib Part 1" for x86_64-linux-gcc9.5.0 from\n' +
-            'RIEGL\'s members area, then:\n\n' +
-            '  export RIVLIB_PATH=/path/to/rivlib-2.15.5-x86_64-linux-gcc9.5.0\n\n' +
-            'or pass --rivlib <path>.'),
+          : process.platform === 'darwin'
+            ? 'shipping it. Download "RiVLib Part 1" for x86_64-linux-gcc9.5.0 from\n' +
+              'RIEGL\'s members area, then:\n\n' +
+              '  export RIVLIB_PATH=/path/to/rivlib-2.15.5-x86_64-linux-gcc9.5.0\n\n' +
+              'or pass --rivlib <path>.'
+            : 'shipping it. Download "RiVLib Part 1" for x86_64-linux-gcc9.5.0 from\n' +
+              'RIEGL\'s members area and extract it to\n\n' +
+              '  ~/.local/share/Phytograph/rivlib\n\n' +
+              'which is found automatically, or pass --rivlib <path>.'),
     );
   }
   const dir = resolve(candidate);
@@ -173,14 +200,17 @@ function readerInvocation(readerArgs, mounts, rivlibDir) {
     return { cmd: 'docker', args, env: process.env };
   }
   const remap = new Map(mounts.map(([host, mount]) => [mount, host]));
+  // Both vars, matching _riegl_reader_invocation. RIVLIB_ROOT is what the shim
+  // build uses for its -I/-L; RIVLIB_SO names the library to dlopen. Setting
+  // only the root left the reader to guess the filename, which is the one thing
+  // that differs between the two native hosts.
+  const scanifc = SCANIFC_NAMES.map((n) => join(rivlibDir, 'lib', n)).find(existsSync);
+  const env = { ...process.env, RIVLIB_ROOT: rivlibDir, PYTHONUNBUFFERED: '1' };
+  if (scanifc) env.RIVLIB_SO = scanifc;
   return {
     cmd: resolvePython(),
     args: [READER, ...readerArgs.map((a) => remap.get(a) ?? a)],
-    env: {
-      ...process.env,
-      RIVLIB_ROOT: rivlibDir,
-      PYTHONUNBUFFERED: '1',
-    },
+    env,
   };
 }
 

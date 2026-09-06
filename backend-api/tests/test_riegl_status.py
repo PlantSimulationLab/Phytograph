@@ -93,14 +93,30 @@ def test_available_when_everything_is_present(client, monkeypatch, tmp_path):
     assert "ready" in b["reason"].lower()
 
 
-def test_unavailable_and_docker_not_probed_off_macos(client, monkeypatch):
-    """Windows/Linux are out of scope in v1, and must not shell out to docker.
+@pytest.mark.parametrize(
+    "system,machine",
+    [
+        # No RiVLib for this OS at all.
+        ("FreeBSD", "amd64"),
+        # Linux, but an architecture RIEGL publishes no build for. Vetoed at
+        # the gate because the ELF check downstream compares against a
+        # hardcoded x86_64 and would wave a correct download through.
+        ("Linux", "aarch64"),
+    ],
+)
+def test_an_unsupported_platform_is_vetoed_without_probing_docker(
+    client, monkeypatch, system, machine
+):
+    """A host with no runtime must not shell out to docker to find that out.
 
     The platform veto comes first so a machine without Docker doesn't pay a
-    subprocess timeout just to be told the feature isn't offered.
+    subprocess timeout just to be told the feature isn't offered. That still
+    matters now that Linux is a native runtime: the veto did not go away, it
+    just applies to a smaller set of hosts.
     """
     import platform as _platform
-    monkeypatch.setattr(_platform, "system", lambda: "Linux")
+    monkeypatch.setattr(_platform, "system", lambda: system)
+    monkeypatch.setattr(_platform, "machine", lambda: machine)
 
     called = []
     monkeypatch.setattr(
@@ -112,6 +128,9 @@ def test_unavailable_and_docker_not_probed_off_macos(client, monkeypatch):
     assert b["platform_supported"] is False
     assert called == [], "docker must not be probed on an unsupported platform"
     assert "riscan" in b["reason"].lower() or "riprocess" in b["reason"].lower()
+    # The reason must not go back to naming the supported platforms: that is
+    # the spelling that had to be edited when Linux was added.
+    assert "macos and windows" not in b["reason"].lower()
 
 
 def test_unavailable_when_docker_is_down(client, monkeypatch, tmp_path):
@@ -1152,20 +1171,28 @@ def test_a_levelling_matrix_takes_the_same_path_as_a_sop():
     assert res.positions[m] - scanner == pytest.approx(rotated * 20000.0, rel=1e-9)
 
 
-def test_a_stale_reader_image_is_named_as_the_problem():
-    """An old image reports a .PROJ as empty, which reads as broken data.
+@pytest.mark.parametrize(
+    "runtime,expected",
+    [("docker", "Build reader image"), ("native", "build:backend")],
+)
+def test_a_stale_reader_is_named_as_the_problem(monkeypatch, runtime, expected):
+    """An old reader reports a .PROJ as empty, which reads as broken data.
 
-    The reader is baked into a container the user builds by hand and nothing
-    rebuilds automatically, so this is the likely first experience of the
-    feature. The version check is what turns "no scan positions found" into a
-    message with a fix in it.
+    The version check is what turns "no scan positions found" into a message
+    with a fix in it -- and the fix DIFFERS by runtime, so the message has to.
+    On docker the reader is baked into a container the user builds by hand and
+    nothing rebuilds automatically. On a native runtime it is compiled into the
+    backend bundle and version-locked to it, so a mismatch means a stale bundle;
+    sending that user to a Settings button that does not exist would be worse
+    than saying nothing.
     """
+    monkeypatch.setenv("PHYTOGRAPH_RIEGL_RUNTIME", runtime)
     main._require_reader_version({"reader_version": main._RIEGL_MIN_READER_VERSION})
     for doc in ({}, {"reader_version": 2}, {"reader_version": None}):
         with pytest.raises(HTTPException) as exc:
             main._require_reader_version(doc)
         assert exc.value.status_code == 500
-        assert "Build reader image" in str(exc.value.detail)
+        assert expected in str(exc.value.detail)
 
 
 def test_both_project_suffixes_are_previewable(tmp_path):

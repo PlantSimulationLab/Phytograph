@@ -16,6 +16,39 @@ if str(BACKEND_DIR) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def _riegl_host_state_is_not_the_developers(monkeypatch, tmp_path_factory):
+    """Keep RIEGL probes off the machine running pytest.
+
+    Two settings resolve from the environment and would otherwise let a
+    developer's own setup decide what a test sees:
+
+    PHYTOGRAPH_RIVLIB_PATH / PHYTOGRAPH_RIEGL_RUNTIME are direct overrides. A
+    shell that exported either -- which is exactly what someone debugging the
+    native path does -- silently rewrites the answer for every test that does
+    not set them itself.
+
+    XDG_DATA_HOME / LOCALAPPDATA are subtler and now matter much more.
+    _riegl_default_rivlib_root() consults them, so once the docs tell Linux
+    users to extract RiVLib to ~/.local/share/Phytograph/rivlib, a developer who
+    FOLLOWS THEIR OWN DOCS turns the unmocked status test into a host-dependent
+    one that shells out to a compiler. The same two vars root
+    _riegl_extract_dir(), which several tests call with its override deleted,
+    and which then creates directories in the developer's real home -- on this
+    project's HPC checkout that meant `Disk quota exceeded` on a full /home,
+    surfacing as a RIEGL bug rather than a disk one.
+
+    Pointing all of it at a tmp dir makes both hermetic. Autouse fixtures at the
+    same scope set up before non-autouse ones, so a test or fixture that sets
+    these itself (test_riegl_fake_rivlib's `native`) still wins.
+    """
+    monkeypatch.delenv("PHYTOGRAPH_RIVLIB_PATH", raising=False)
+    monkeypatch.delenv("PHYTOGRAPH_RIEGL_RUNTIME", raising=False)
+    base = tmp_path_factory.mktemp("userdata")
+    monkeypatch.setenv("XDG_DATA_HOME", str(base))
+    monkeypatch.setenv("LOCALAPPDATA", str(base))
+
+
+@pytest.fixture(autouse=True)
 def _riegl_image_stamp_is_current(monkeypatch):
     """Keep the RIEGL image-staleness probe out of the test machine's Docker.
 

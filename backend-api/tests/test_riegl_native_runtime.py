@@ -27,6 +27,7 @@ def _win(monkeypatch):
     import platform as _platform
 
     monkeypatch.setattr(_platform, "system", lambda: "Windows")
+    monkeypatch.setattr(_platform, "machine", lambda: "AMD64")
 
 
 def _mac(monkeypatch):
@@ -35,10 +36,17 @@ def _mac(monkeypatch):
     monkeypatch.setattr(_platform, "system", lambda: "Darwin")
 
 
-def _linux(monkeypatch):
+def _linux(monkeypatch, machine: str = "x86_64"):
+    """Pretend to be Linux, on a stated architecture.
+
+    The arch is faked too, and is not optional decoration: _riegl_runtime gates
+    Linux on it (RIEGL publishes no arm64 build), so a test that left it to the
+    real host would answer differently on an arm64 runner than on an x86_64 one.
+    """
     import platform as _platform
 
     monkeypatch.setattr(_platform, "system", lambda: "Linux")
+    monkeypatch.setattr(_platform, "machine", lambda: machine)
 
 
 PE_AMD64 = 0x8664
@@ -104,14 +112,44 @@ def test_runtime_is_docker_on_macos_and_native_on_windows(monkeypatch):
     assert main._riegl_runtime() == "native"
 
 
-def test_linux_has_no_runtime_yet(monkeypatch):
-    """RiVLib ships a Linux build, but it is not wired up or verified.
+def test_x86_64_linux_reads_rxp_natively(monkeypatch):
+    """Linux runs RiVLib directly, like Windows and unlike macOS.
 
-    Reported as no runtime at all rather than as a broken one, so the status
-    takes the platform veto and never shells out to docker.
+    Verified against real scanner data before being switched on: RiVLib 2.15.5
+    x86_64-linux-gcc9.5.0 decoding a VZ-1000 .riproject, with the C++ shim
+    reconciling exactly (shots == hit shots + misses).
     """
     _linux(monkeypatch)
+    assert main._riegl_runtime() == "native"
+    # The artifact follows the HOST, so a Linux native host wants the .so.
+    assert main._riegl_scanifc_names() == ("libscanifc.so",)
+
+
+@pytest.mark.parametrize("machine", ["aarch64", "arm64", "armv7l"])
+def test_arm_linux_has_no_runtime(monkeypatch, machine):
+    """RIEGL publishes no arm64 Linux RiVLib, so there is nothing to run.
+
+    Vetoed at the GATE rather than left to the library check downstream, and
+    that placement is the whole point. _riegl_rivlib_unloadable compares against
+    a hardcoded ELF x86_64, so on an arm64 host a perfectly CORRECT x86_64
+    download passes the header check -- the badge would go green and the import
+    would die at dlopen, which is the "present but unusable" state that check
+    exists to prevent.
+    """
+    _linux(monkeypatch, machine)
     assert main._riegl_runtime() is None
+
+
+def test_the_arch_veto_does_not_block_a_forced_runtime(monkeypatch):
+    """The arch check sits AFTER the env override, deliberately.
+
+    PHYTOGRAPH_RIEGL_RUNTIME=native is how the fake-RiVLib suite drives the
+    native path, including on Apple silicon, where the stand-in library is
+    built for the host rather than for x86_64.
+    """
+    _linux(monkeypatch, "aarch64")
+    monkeypatch.setenv("PHYTOGRAPH_RIEGL_RUNTIME", "native")
+    assert main._riegl_runtime() == "native"
 
 
 # ---------------------------------------------------------------------------
@@ -160,16 +198,16 @@ def test_a_windows_rivlib_is_not_a_container_one(monkeypatch, tmp_path):
     assert main._riegl_rivlib_valid(str(root)) is False
 
 
-def test_a_forced_native_runtime_on_linux_still_wants_the_so(monkeypatch, tmp_path):
-    """The combination CI runs on, and the reason the artifact follows the HOST.
+def test_a_forced_native_runtime_on_macos_still_wants_the_so(monkeypatch, tmp_path):
+    """The override's remaining job, and the reason the artifact follows the HOST.
 
-    PHYTOGRAPH_RIEGL_RUNTIME=native lets the Linux pytest job exercise the
-    native runner against the fake RiVLib — the path is otherwise reachable
-    only on Windows, which would leave it with no every-push coverage. Keying
-    the scanifc filename on the runtime instead of the host would send that job
-    looking for a .dll on Linux and skip silently.
+    Linux now takes the native path unforced, so PHYTOGRAPH_RIEGL_RUNTIME is no
+    longer what gives that path coverage. What it still does is force NATIVE on
+    macOS, which is how the fake-RiVLib suite exercises the runner on a
+    developer's Mac. Keying the scanifc filename on the runtime rather than the
+    host would send that run looking for a .dll and skip silently.
     """
-    _linux(monkeypatch)
+    _mac(monkeypatch)
     monkeypatch.setenv("PHYTOGRAPH_RIEGL_RUNTIME", "native")
     assert main._riegl_runtime() == "native"
     assert main._riegl_scanifc_names() == ("libscanifc.so",)
@@ -412,6 +450,117 @@ def test_macos_has_no_default_location(monkeypatch, tmp_path):
     _mac(monkeypatch)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert main._riegl_default_rivlib_root() is None
+
+
+def test_linux_default_location_follows_xdg(monkeypatch, tmp_path):
+    """The Linux twin of the Windows convention, and it must match the docs.
+
+    Mirrors _riegl_extract_dir()'s base so there is ONE idea of "Phytograph's
+    per-user data directory on Linux" rather than two that can drift.
+    """
+    _linux(monkeypatch)
+    monkeypatch.delenv("PHYTOGRAPH_RIVLIB_PATH", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    root = tmp_path / "Phytograph" / "rivlib"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "libscanifc.so").write_bytes(_elf())
+
+    assert main._riegl_default_rivlib_root() == str(root)
+    assert main._riegl_rivlib_path() == str(root)
+
+
+def test_linux_default_location_falls_back_to_dot_local(monkeypatch, tmp_path):
+    """XDG_DATA_HOME is frequently unset; ~/.local/share is its defined default.
+
+    Without the fallback the convention would only work for users whose desktop
+    environment happens to export the variable, which is precisely the set of
+    users least likely to notice it had not.
+    """
+    _linux(monkeypatch)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setattr(main.Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert main._riegl_default_rivlib_root() == str(
+        tmp_path / ".local" / "share" / "Phytograph" / "rivlib"
+    )
+
+
+def test_linux_default_location_is_ignored_when_it_holds_no_rivlib(
+    monkeypatch, tmp_path
+):
+    """Same rule as Windows: "not set" must not be reported as "folder broken"."""
+    _linux(monkeypatch)
+    monkeypatch.delenv("PHYTOGRAPH_RIVLIB_PATH", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert main._riegl_rivlib_path() is None
+
+
+# ---------------------------------------------------------------------------
+# What a Linux native host needs, and what it does NOT
+# ---------------------------------------------------------------------------
+
+def test_linux_needs_no_static_archive(monkeypatch, tmp_path):
+    """The false negative that would have killed LAD on Linux.
+
+    Windows keeps scanlib::pointcloud in scanlib-mt-s.lib, so a runtime-only
+    download imports points but cannot recover the sky shell. Linux exports the
+    class from libscanifc.so itself, so there is no second file to be missing --
+    and testing for one anyway reports a COMPLETE download as defective, pins
+    misses_available false forever, and blames the user's RiVLib copy for it.
+    """
+    _linux(monkeypatch)
+    root = _rivlib(tmp_path, "libscanifc.so")  # no scanlib-mt-s.lib
+    monkeypatch.setattr(main, "_riegl_toolchain_present", lambda: True)
+
+    body = main._riegl_status(str(root))
+    assert body["runtime"] == "native"
+    assert body["available"] is True
+    assert body["misses_available"] is True
+    assert main._RIEGL_SCANLIB_ARCHIVE not in body["reason"]
+    assert main._riegl_scanlib_archive() is None
+
+
+def test_linux_reasons_name_linux_things(monkeypatch, tmp_path):
+    """Remediation must name files and products that exist on this platform.
+
+    A Linux user told to find lib\\scanifc-mt-s.dll, or to install Visual Studio
+    Build Tools, is being sent after things their system does not have -- worse
+    than no hint, because it reads as authoritative.
+    """
+    _linux(monkeypatch)
+    empty = tmp_path / "not-rivlib"
+    (empty / "lib").mkdir(parents=True)
+    reason = main._riegl_status(str(empty))["reason"]
+    assert "libscanifc.so" in reason
+    assert "\\" not in reason
+    assert "scanifc-mt-s.dll" not in reason
+
+    root = _rivlib(tmp_path, "libscanifc.so")
+    monkeypatch.setattr(main, "_riegl_toolchain_present", lambda: False)
+    body = main._riegl_status(str(root))
+    # Still imports: only the sky shell is lost.
+    assert body["available"] is True
+    assert body["misses_available"] is False
+    assert "g++" in body["reason"]
+    assert "Visual Studio" not in body["reason"]
+    # And it must not repeat the Windows CAUSE, which is false here: on Linux
+    # the class is in the .so, not in a static library.
+    assert "static library" not in body["reason"]
+
+
+def test_linux_unloadable_remedy_mentions_no_container_and_no_mac(
+    monkeypatch, tmp_path
+):
+    """A native host has no container to explain and no Mac to reassure."""
+    _linux(monkeypatch)
+    root = _rivlib(tmp_path, "libscanifc.so", machine=ELF_AARCH64)
+    why = main._riegl_rivlib_unloadable(str(root))
+    assert why is not None
+    assert "container" not in why.lower()
+    # "your Mac" / "Apple silicon", not the "machine" in "this machine".
+    assert "your mac" not in why.lower()
+    assert "apple" not in why.lower()
+    assert "x86_64" in why
 
 
 # ---------------------------------------------------------------------------
@@ -784,3 +933,173 @@ def test_reader_reports_a_missing_toolchain_as_its_own_kind_of_error(platform_na
     """
     reader = _reader()
     assert issubclass(reader.ShimUnavailable, reader.RxpError)
+
+
+# ---------------------------------------------------------------------------
+# Building the shim on a real host
+#
+# _compile_shim_gcc had NO coverage at all, and that is exactly why its
+# missing-rpath bug survived: the fake-RiVLib suite hands over a PREBUILT shim
+# via PHYTOGRAPH_RXP_SHIM, and the container hid the same bug behind its own
+# LD_LIBRARY_PATH. A successful compile still cannot be tested here -- the fake
+# RiVLib ships an EMPTY include/ and rxp_shim.cpp needs <riegl/scanlib.hpp>,
+# which cannot be committed -- so these cover the command that gets composed and
+# every way the build is allowed to fail. The real compile is verified against a
+# real RiVLib by hand; see the workflow docs.
+# ---------------------------------------------------------------------------
+
+def _fake_cxx(tmp_path, *, exit_code=0, name="cxx"):
+    """A stand-in compiler that records its argv and then does as it is told."""
+    log = tmp_path / f"{name}.argv"
+    script = tmp_path / name
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" >> "{log}"\n'
+        # -dumpversion is the probe; always answer it so the probe succeeds
+        # independently of whether the BUILD is meant to.
+        'case "$1" in -dumpversion) echo 11.4.0; exit 0;; esac\n'
+        f"exit {exit_code}\n"
+    )
+    script.chmod(0o755)
+    return script, log
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shim build")
+def test_the_shim_build_bakes_in_an_rpath(monkeypatch, tmp_path):
+    """Without this the built shim cannot find libscanifc at load time.
+
+    RiVLib sets SONAME libscanifc.so.2, so the shim records that as DT_NEEDED
+    and nothing says where it lives: the container supplies
+    LD_LIBRARY_PATH=/rivlib/lib, but _riegl_reader_invocation deliberately
+    SCRUBS that for the native reader. Verified against the real library --
+    ctypes.CDLL failed with "libscanifc.so.2: cannot open shared object file"
+    until this flag was added.
+    """
+    reader = _reader()
+    cxx, log = _fake_cxx(tmp_path)
+    monkeypatch.setenv("PHYTOGRAPH_CXX", str(cxx))
+    monkeypatch.setattr(reader, "_RIVLIB_ROOT", "/opt/rivlib")
+
+    out = tmp_path / "librxpshim.so"
+    # The fake compiler writes no output, so the build fails AFTER composing
+    # the command -- which is the part under test.
+    with pytest.raises(reader.ShimUnavailable):
+        reader._compile_shim_gcc(str(tmp_path / "rxp_shim.cpp"), str(out))
+
+    argv = log.read_text().split("\n")
+    assert "-Wl,-rpath,/opt/rivlib/lib" in argv
+    assert "-L/opt/rivlib/lib" in argv
+    assert "-lscanifc" in argv
+    # And it links the shared library, never a static archive: that is a
+    # Windows-only concept and there is none in a Linux download.
+    assert not any(a.endswith(".lib") for a in argv)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shim build")
+def test_the_shim_build_uses_the_compiler_the_probe_found(monkeypatch, tmp_path):
+    """One definition of "can we build the shim", shared with the status badge.
+
+    Hardcoding g++ in the build while the probe answered for something else
+    would let Settings report a green toolchain row that the import then cannot
+    use -- the exact drift find_msvc_vcvars exists to prevent on Windows.
+    """
+    reader = _reader()
+    cxx, log = _fake_cxx(tmp_path, name="my-weird-cxx")
+    monkeypatch.setenv("PHYTOGRAPH_CXX", str(cxx))
+
+    assert reader.find_cxx_toolchain() == str(cxx)
+    with pytest.raises(reader.ShimUnavailable):
+        reader._compile_shim_gcc(
+            str(tmp_path / "rxp_shim.cpp"), str(tmp_path / "out.so")
+        )
+    assert log.exists(), "the build must invoke the compiler the probe found"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shim build")
+def test_a_missing_compiler_costs_the_sky_shell_not_the_import(monkeypatch, tmp_path):
+    """The regression: this used to be an uncaught FileNotFoundError.
+
+    subprocess.run raises before returncode is ever read, so it escaped both
+    stream_scan's `except ShimUnavailable` and main()'s `except RxpError` and
+    killed the reader with a traceback -- losing a decode the user had already
+    waited minutes for, over a shell they were willing to do without.
+    """
+    reader = _reader()
+    monkeypatch.setenv("PHYTOGRAPH_CXX", str(tmp_path / "does-not-exist"))
+    with pytest.raises(reader.ShimUnavailable):
+        reader._compile_shim_gcc(
+            str(tmp_path / "rxp_shim.cpp"), str(tmp_path / "out.so")
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shim build")
+def test_a_failed_build_costs_the_sky_shell_not_the_import(monkeypatch, tmp_path):
+    """ShimUnavailable, not RxpError -- matching what MSVC already chose.
+
+    A build that fails almost always means this RiVLib copy cannot supply what
+    the shim needs (a wrong-ABI download is the Linux case). That costs the sky
+    shell; failing the whole import throws away a readable scan.
+    """
+    reader = _reader()
+    cxx, _ = _fake_cxx(tmp_path, exit_code=1)
+    monkeypatch.setenv("PHYTOGRAPH_CXX", str(cxx))
+    with pytest.raises(reader.ShimUnavailable):
+        reader._compile_shim_gcc(
+            str(tmp_path / "rxp_shim.cpp"), str(tmp_path / "out.so")
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shim build")
+def test_a_failed_build_leaves_nothing_in_the_cache(monkeypatch, tmp_path):
+    """Publishing is atomic, so a broken shim can never be cached.
+
+    _build_shim short-circuits on `if os.path.exists(out)`, so a half-linked or
+    unloadable artifact at the cache path would be returned forever after,
+    re-failing with no diagnosis. Linking straight onto that path also raced two
+    concurrent imports, which the container never had to care about because its
+    cache died with it.
+    """
+    reader = _reader()
+    cxx, _ = _fake_cxx(tmp_path, exit_code=1)
+    monkeypatch.setenv("PHYTOGRAPH_CXX", str(cxx))
+    out = tmp_path / "librxpshim.so"
+    with pytest.raises(reader.ShimUnavailable):
+        reader._compile_shim_gcc(str(tmp_path / "rxp_shim.cpp"), str(out))
+    assert not out.exists()
+    assert not list(tmp_path.glob("rxpshim-build-*")), "temp build dir leaked"
+
+
+def test_an_unloadable_shim_costs_the_sky_shell_not_the_import(tmp_path):
+    """The catch-all for ABI failures no header check can predict.
+
+    A RiVLib built for the wrong gcc, or a shim whose compiler was newer than
+    the libstdc++ that wins the loader path (PyInstaller's bundle leads
+    LD_LIBRARY_PATH in a packaged app and beats DT_RUNPATH), fails only at
+    dlopen. That used to escape as an OSError and kill the import.
+    """
+    reader = _reader()
+    not_a_library = tmp_path / "librxpshim.so"
+    not_a_library.write_text("this is not an ELF object")
+    with pytest.raises(reader.ShimUnavailable):
+        reader._load_shim(str(not_a_library))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX cache dir")
+def test_the_shim_cache_is_per_user_not_world_writable(monkeypatch, tmp_path):
+    """/tmp is right for a container and wrong for a workstation.
+
+    Not merely because it is swept: it is world-writable at a PREDICTABLE
+    filename, since the stamp hashes only public inputs. Another user on a
+    shared machine could plant the .so we are about to dlopen. Per-user data
+    removes that, and the container keeps /tmp by saying so itself.
+    """
+    reader = _reader()
+    monkeypatch.delenv("PHYTOGRAPH_RXP_SHIM_CACHE", raising=False)
+    monkeypatch.delenv("PHYTOGRAPH_RXP_CONTAINER", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    if sys.platform != "darwin":
+        assert reader._shim_cache_dir() == str(tmp_path / "Phytograph" / "riegl")
+    assert not reader._shim_cache_dir().startswith("/tmp/Phytograph")
+
+    monkeypatch.setenv("PHYTOGRAPH_RXP_CONTAINER", "1")
+    assert reader._shim_cache_dir() == "/tmp"

@@ -82,6 +82,21 @@ COPY rxp_reader.py /opt/riegl/rxp_reader.py
 # rather than in a lump when the process exits.
 ENV PYTHONUNBUFFERED=1
 
+# THIS reader is the containerised one. The reader also runs natively now
+# (Windows, and Linux), and two of its decisions differ between the two while
+# sys.platform cannot tell them apart -- the container and a native Linux host
+# are both "linux". Namely: the built shim is cached in a throwaway /tmp here
+# but in per-user application data on a real host (where /tmp is swept AND
+# world-writable at a predictable filename), and a RiVLib that fails to load is
+# blamed on the wrong gcc build here (this base image is pinned to a matching
+# glibc, so gcc9 is mandatory) versus on a libstdc++ too old for it natively
+# (where gcc9 is merely the safe floor). Declared rather than sniffed for.
+#
+# Placed with the other ENVs, below every RUN and every COPY, so it costs one
+# trivial layer and leaves the pip/apt/reader layers cached -- the same
+# constraint the ARG at the bottom documents.
+ENV PHYTOGRAPH_RXP_CONTAINER=1
+
 WORKDIR /opt/riegl
 ENTRYPOINT ["python", "/opt/riegl/rxp_reader.py"]
 

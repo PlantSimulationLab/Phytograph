@@ -45,9 +45,18 @@ Where it runs:
 
 | | |
 |---|---|
-| Every push | `ci.yml`'s pytest job (Linux). The native runtime is forced with `PHYTOGRAPH_RIEGL_RUNTIME=native`, since it is otherwise reachable only on Windows. |
-| Weekly, and as a release gate | `platform.yml` on Windows, for the three things only real there: loading a `.dll` via `os.add_dll_directory`, the `file:C:\…` URI form, and building the shim with MSVC. |
-| Locally on macOS | `npm run test:backend`, same forced-native switch. Note that the fixture's library is named `libscanifc.so` (the name a Mac's own docker runtime expects) but is built Mach-O by the host compiler, so `_riegl_rivlib_unloadable` checks Mach-O rather than ELF for the darwin+native combination alone. A Mac's real, unforced runtime is still docker and still requires a Linux x86_64 `.so`. |
+| Every push | `ci.yml`'s pytest job (Linux), where the native runtime is now the **unforced** one — Linux runs RiVLib directly. This is also the only place `_compile_shim_gcc` is exercised: its command composition (notably `-Wl,-rpath`, without which the built shim cannot find `libscanifc.so.2`) and every way the build is allowed to fail. |
+| Weekly, and as a release gate | `platform.yml` on **Windows, macOS and Linux**. Windows for the three things only real there: loading a `.dll` via `os.add_dll_directory`, the `file:C:\…` URI form, and building the shim with MSVC. Linux for the other native host. macOS for the Mach-O branch below, which otherwise had no CI at all. |
+| Locally on macOS | `npm run test:backend` with `PHYTOGRAPH_RIEGL_RUNTIME=native`. Note that the fixture's library is named `libscanifc.so` (the name a Mac's own docker runtime expects) but is built Mach-O by the host compiler, so `_riegl_rivlib_unloadable` checks Mach-O rather than ELF for the darwin+native combination alone. A Mac's real, unforced runtime is still docker and still requires a Linux x86_64 `.so`. |
+
+What the stub **cannot** prove, and is therefore verified by hand against a real
+RiVLib: that `rxp_shim.cpp` actually compiles and loads. The fixture ships an
+**empty** `include/` and builds its shim stand-in from a separate C file, while
+the real shim includes `<riegl/scanlib.hpp>` and subclasses
+`scanlib::pointcloud` — and RIEGL's headers cannot be committed. The
+fake-RiVLib tests therefore hand over a *prebuilt* shim via
+`PHYTOGRAPH_RXP_SHIM`, which is precisely why the missing-`-Wl,-rpath` bug
+survived until a native Linux run hit it.
 
 The same shape applies to any future dependency that cannot be committed: stand
 in for the ABI, keep the stub honest with a layout assertion, and say out loud

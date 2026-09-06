@@ -45,6 +45,7 @@ import { SettingsDialog } from './SettingsDialog';
 const BASE: RieglStatus = {
   available: true,
   platformSupported: true,
+  hostOs: 'darwin',
   runtime: 'docker',
   dockerPresent: true,
   imageBuilt: true,
@@ -60,10 +61,26 @@ const BASE: RieglStatus = {
 /** A ready Windows host: RiVLib found, no Docker anywhere in sight. */
 const NATIVE: RieglStatus = {
   ...BASE,
+  hostOs: 'windows',
   runtime: 'native',
   dockerPresent: false,
   image: '',
   rivlibPath: String.raw`C:\Users\x\AppData\Local\Phytograph\rivlib`,
+};
+
+/**
+ * The other native host. Same runtime, and almost nothing else in common: a
+ * different download, a different conventional folder, a different library
+ * filename and a different compiler. `runtime` alone cannot tell them apart,
+ * which is why the status carries `hostOs`.
+ */
+const NATIVE_LINUX: RieglStatus = {
+  ...BASE,
+  hostOs: 'linux',
+  runtime: 'native',
+  dockerPresent: false,
+  image: '',
+  rivlibPath: '/home/x/.local/share/Phytograph/rivlib',
 };
 
 beforeEach(() => {
@@ -93,6 +110,50 @@ describe('SettingsDialog — RIEGL on a native runtime', () => {
     // the Windows download does not contain.
     expect(rivlib.textContent).toMatch(/scanifc-mt-s\.dll/i);
     expect(rivlib.textContent).not.toMatch(/libscanifc\.so/i);
+  });
+
+  it('names the Linux artifact and compiler, not the Windows ones', async () => {
+    // The regression this guards: `runtime === 'native'` used to imply Windows,
+    // so a Linux host was told to find lib\\scanifc-mt-s.dll in an
+    // x86_64-windows download and to install Visual Studio Build Tools. Every
+    // one of those is a file or a product that does not exist on this platform,
+    // which is worse than no hint at all.
+    nextStatus = {
+      ...NATIVE_LINUX,
+      available: false,
+      rivlibValid: false,
+      missesAvailable: false,
+      toolchainPresent: false,
+    };
+    open();
+
+    await screen.findByTestId('settings-riegl-checklist');
+    // Still a native runtime, so still no daemon and no image.
+    expect(screen.queryByTestId('settings-riegl-check-docker')).toBeNull();
+    expect(screen.queryByTestId('settings-riegl-check-image')).toBeNull();
+    expect(screen.queryByTestId('settings-riegl-build-image')).toBeNull();
+
+    const rivlib = screen.getByTestId('settings-riegl-check-rivlib');
+    expect(rivlib.textContent).toMatch(/libscanifc\.so/i);
+    expect(rivlib.textContent).not.toMatch(/scanifc-mt-s\.dll/i);
+
+    const toolchain = screen.getByTestId('settings-riegl-check-toolchain');
+    expect(toolchain.textContent).toMatch(/g\+\+/i);
+    expect(toolchain.textContent).not.toMatch(/visual studio/i);
+  });
+
+  it('tells a Linux host which RiVLib to download and where to put it', async () => {
+    // The conventional folder is the whole reason most users never touch the
+    // picker, so naming the Windows one on Linux costs a working default.
+    nextStatus = NATIVE_LINUX;
+    open();
+
+    await screen.findByTestId('riegl-status-badge');
+    const body = document.body.textContent ?? '';
+    expect(body).toMatch(/x86_64-linux-gcc9/);
+    expect(body).toMatch(/~\/\.local\/share\/Phytograph\/rivlib/);
+    expect(body).not.toMatch(/x86_64-windows/);
+    expect(body).not.toMatch(/LOCALAPPDATA/);
   });
 
   it('reports missing sky shots even though the import itself is ready', async () => {

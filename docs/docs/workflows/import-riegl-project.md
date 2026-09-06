@@ -28,11 +28,11 @@ processing software isn't in the loop at all.
     | | What you need |
     | --- | --- |
     | **Windows** | The RiVLib download, and nothing else. It runs natively. |
+    | **Linux** | The RiVLib download, and nothing else. It runs natively. **x86_64 only** — RIEGL publishes no arm64 build. |
     | **macOS** | The RiVLib download **and Docker Desktop**, because there is no macOS build of RiVLib to run — Phytograph runs the Linux one in a container. |
-    | **Linux** | Not offered in this release; export to LAS/E57 from RiSCAN PRO or RiPROCESS instead. |
 
-    On Windows one optional extra buys you the sky/miss shell — see
-    [No-return shots need a C++ compiler on Windows](#no-return-shots-need-a-c-compiler-on-windows).
+    On Windows and Linux one optional extra buys you the sky/miss shell — see
+    [No-return shots need a C++ compiler (Windows and Linux)](#no-return-shots-need-a-c-compiler-windows-and-linux).
     Everything else works without it.
 
 ## Before you start: install RiVLib
@@ -74,7 +74,7 @@ Phytograph reads it from wherever you put it. Nothing is copied into the app.
         | Checklist line | What to do |
         | --- | --- |
         | ✗ RiVLib folder | Choose the extracted folder (the one with `bin/`, `include/`, `lib/`). Phytograph looks for `lib\scanifc-mt-s.dll` inside it. |
-        | ✗ No-return (sky) shots | Optional — see [below](#no-return-shots-need-a-c-compiler-on-windows). Scans import without it. |
+        | ✗ No-return (sky) shots | Optional — see [below](#no-return-shots-need-a-c-compiler-windows-and-linux). Scans import without it. |
 
     There is no Docker, no image to build, and nothing to rebuild after a
     Phytograph update.
@@ -128,23 +128,107 @@ Phytograph reads it from wherever you put it. Nothing is copied into the app.
         It works offline. If you would rather not wait mid-import, **Rebuild
         reader image** in Settings does it now.
 
-### No-return shots need a C++ compiler on Windows
+=== "Linux"
+
+    1. Sign in to RIEGL's members area and download **RiVLib Part 1** for
+       **`x86_64-linux-gcc9`**. The download page offers Parts 1–3 and several
+       compiler versions (gcc 5, 7, 9, 11, 13); Part 1 is the only part
+       Phytograph uses.
+
+        !!! tip "Why gcc 9 rather than a newer one"
+            This build needs only glibc 2.17 and up, so it loads on essentially
+            any current distribution — it is the safe choice, not a
+            restriction. A build for a newer gcc works too, but only if your
+            system's `libstdc++` is at least that new, and when it isn't the
+            failure is a loader error mentioning `GLIBC` or `libstdc++` rather
+            than anything that names RiVLib.
+
+        !!! note "x86_64 only"
+            RIEGL publishes no arm64 Linux build, so `.rxp` import is not
+            offered on aarch64 machines. Phytograph says so rather than
+            accepting a folder it cannot use.
+
+    2. Extract it to:
+
+        ```text
+        ~/.local/share/Phytograph/rivlib
+        ```
+
+        You want the folder that directly contains `bin/`, `include/` and
+        `lib/` — **not** `lib/` itself. For example:
+
+        ```bash
+        mkdir -p ~/.local/share/Phytograph
+        tar xf rivlib-2.15.5-x86_64-linux-gcc9.5.0.tar.gz \
+          -C ~/.local/share/Phytograph
+        mv ~/.local/share/Phytograph/rivlib-2.15.5-x86_64-linux-gcc9.5.0 \
+           ~/.local/share/Phytograph/rivlib
+        ```
+
+        !!! tip "Why that folder"
+            Phytograph looks there on its own, so extracting to it means you
+            can skip the Settings step entirely. Anywhere else works too — you
+            just have to point at it by hand. If you set `XDG_DATA_HOME`,
+            Phytograph looks under that instead.
+
+    3. Open **Settings** (++ctrl+comma++) and check the badge beside
+       **RIEGL RiVLib folder** reads **RIEGL ready**. If you extracted
+       somewhere else, click **Choose…** and select the folder first.
+
+    4. If the badge does not turn green, the checklist below the setting names
+       the missing piece:
+
+        | Checklist line | What to do |
+        | --- | --- |
+        | ✗ RiVLib folder | Choose the extracted folder (the one with `bin/`, `include/`, `lib/`). Phytograph looks for `lib/libscanifc.so` inside it. |
+        | ✗ No-return (sky) shots | Optional — see [below](#no-return-shots-need-a-c-compiler-windows-and-linux). Scans import without it. |
+
+    There is no Docker, no image to build, and nothing to rebuild after a
+    Phytograph update.
+
+### No-return shots need a C++ compiler (Windows and Linux)
 
 A laser shot that hits nothing is not stored in the `.rxp` as a point at all.
 Phytograph recovers those shots and places them on a far-field shell — they are
 what [Leaf Area Density](estimate-leaf-area-density.md) measures transmission
 against, and they are typically **30–45% of a scan**.
 
-Reading them uses a part of RiVLib that RIEGL ships on Windows only as a static
-library, which their licence does not let us distribute pre-built. So on
-Windows it is compiled once, on your machine, from your own RiVLib copy. That
-needs a C++ compiler:
+Reading them means using a C++ class from RiVLib rather than its plain C
+interface, and that cannot be done from Python alone. So a small helper is
+compiled once, on your machine, from your own RiVLib copy. That needs a C++
+compiler:
 
-- Install the free **Visual Studio Build Tools** and select the
-  **Desktop development with C++** workload. (A full Visual Studio with that
-  workload works too.)
-- Nothing else to do: the next import builds it, in about two seconds, and
-  caches the result until you change RiVLib or update Phytograph.
+=== "Windows"
+
+    Install the free **Visual Studio Build Tools** and select the
+    **Desktop development with C++** workload. (A full Visual Studio with that
+    workload works too.)
+
+    RIEGL ships the class Windows needs only as a *static library*, which their
+    licence does not let us distribute pre-built — so even in principle this
+    could not ship ready-made.
+
+=== "Linux"
+
+    Install a C++ compiler:
+
+    ```bash
+    sudo apt install g++          # Debian/Ubuntu
+    sudo dnf install gcc-c++      # Fedora/RHEL
+    ```
+
+    Here the class is inside `libscanifc.so` itself, so nothing of RIEGL's is
+    linked into the helper — but the result is tied to the exact `libstdc++`
+    and RiVLib copy it was built against, so it still has to be built here
+    rather than shipped.
+
+    If the helper fails to build or load, the message says so and the scan
+    still imports. The usual cause is a RiVLib built for a newer gcc than your
+    system's `libstdc++`; the `x86_64-linux-gcc9` build avoids it. You can also
+    point Phytograph at a specific compiler with `PHYTOGRAPH_CXX=/usr/bin/g++-11`.
+
+Nothing else to do on either: the next import builds it, in about two seconds,
+and caches the result until you change RiVLib or update Phytograph.
 
 **Without it, scans still import** — points, reflectance, amplitude, deviation,
 returns, timestamps, GNSS and registration are all unaffected. What you lose is
@@ -334,13 +418,14 @@ Beer's-law transmission term.
 
 To see them, turn on **Show sky/miss points** for the scan.
 
-!!! warning "On Windows this needs a C++ compiler"
-    Reading these shots uses a part of RiVLib that RIEGL ships on Windows only
-    as a static library, so it has to be compiled once on your machine — see
-    [No-return shots need a C++ compiler on Windows](#no-return-shots-need-a-c-compiler-on-windows).
+!!! warning "On Windows and Linux this needs a C++ compiler"
+    Reading these shots uses a C++ class from RiVLib, so a small helper has to
+    be compiled once on your machine — see
+    [No-return shots need a C++ compiler (Windows and Linux)](#no-return-shots-need-a-c-compiler-windows-and-linux).
     Without it the scan still imports, but with no sky shell at all, and Leaf
     Area Density has nothing to measure transmission against. Phytograph says
-    so at import rather than leaving you to discover it later.
+    so at import rather than leaving you to discover it later. macOS is
+    unaffected: the container carries its own compiler.
 
 ### What does come through
 
@@ -385,34 +470,42 @@ puts it back on the bounding box.
 
 ## Troubleshooting
 
-**"RIEGL .rxp import is available on macOS and Windows in this release."**
-: Expected on Linux. Export from RiSCAN PRO or RiPROCESS instead.
+**"RIEGL .rxp import needs an x86_64 machine."**
+: RIEGL publishes no arm64 build of RiVLib, so raw `.rxp` cannot be read on an
+  aarch64 Linux machine at all. Export to LAS/E57 from RiSCAN PRO or RiPROCESS
+  instead.
+
+**"RIEGL .rxp import is not available on this platform."**
+: Phytograph found no way to run RiVLib here. Export from RiSCAN PRO or
+  RiPROCESS instead.
 
 **"Docker is not running."** *(macOS)*
 : Start Docker Desktop. The badge re-checks on its own within a few seconds.
-  You will never see this on Windows — RiVLib runs natively there and Docker is
-  not consulted at all.
+  You will never see this on Windows or Linux — RiVLib runs natively there and
+  Docker is not consulted at all.
 
-**"No `lib/libscanifc.so` under …"** *(macOS)* or
+**"No `lib/libscanifc.so` under …"** *(macOS, Linux)* or
 **"No `lib\scanifc-mt-s.dll` under …"** *(Windows)*
 : The chosen folder isn't a RiVLib root. Pick the level containing `bin/`,
-  `include/` and `lib/`. The two platforms need *different downloads*, not just
-  different folders: macOS needs the Linux `x86_64-linux-gcc9` build (it runs in
-  a container), Windows the `x86_64-windows` one.
+  `include/` and `lib/`. The platforms need *different downloads*, not just
+  different folders: Windows needs `x86_64-windows`; Linux and macOS both need
+  the `x86_64-linux-gcc9` build — Linux because it runs it directly, macOS
+  because it runs it in a container.
 
-**Windows: "no-return (sky) shots cannot be read".**
-: Install the free Visual Studio Build Tools with the **Desktop development with
-  C++** workload, then re-import — see
-  [above](#no-return-shots-need-a-c-compiler-on-windows). Scans imported before
-  you install it have no sky shell and need re-importing to gain one; the points
-  themselves are unaffected.
+**"No-return (sky) shots cannot be read".** *(Windows, Linux)*
+: Install a C++ compiler and re-import — the free Visual Studio Build Tools with
+  the **Desktop development with C++** workload on Windows, `g++` on Linux. See
+  [above](#no-return-shots-need-a-c-compiler-windows-and-linux). Scans imported
+  before you install it have no sky shell and need re-importing to gain one; the
+  points themselves are unaffected.
 
 **Windows: "this RiVLib has no `lib\scanlib-mt-s.lib`".**
 : You have a runtime-only or partial download — the DLLs are there, so points,
   reflectance, GNSS and registration all work, but the library the sky-shot
   helper is built from is missing. Download the full RiVLib package and select
   it again. Nothing else changes; the import still runs, just without a sky
-  shell.
+  shell. **Windows only**: on Linux that class lives inside `libscanifc.so`, so
+  there is no second file that can be missing.
 
 **"…is a 32-bit x86 build" / "…is an ARM64 build" / "…is not a valid
 Windows library" / "…is not a valid Linux shared library".**
@@ -421,6 +514,10 @@ Windows library" / "…is not a valid Linux shared library".**
   these are caught before you import rather than partway through.
 
     - **Windows** needs the **64-bit (`x86_64`)** Windows build.
+    - **Linux** needs the **`x86_64` Linux** build, and the machine must be
+      x86_64 too — RIEGL publishes no arm64 build, so Phytograph reports an
+      aarch64 machine as unsupported rather than accepting a folder it could
+      never load.
     - **macOS** needs the **`x86_64` Linux** build — *not* an ARM one, even on
       Apple silicon. The container is `linux/amd64` regardless of your Mac; the
       architecture that matters is the library's, not the machine's.
@@ -429,12 +526,26 @@ Windows library" / "…is not a valid Linux shared library".**
 
     Re-download the right build and select the folder again.
 
-**macOS: the folder is accepted but the import fails with a `GLIBC` or
+**macOS or Linux: the folder is accepted but the import fails with a `GLIBC` or
 `libstdc++` error.**
 : The one mis-download Phytograph *cannot* catch up front. A gcc 11 or 13 build
   is a perfectly valid `x86_64` library; what makes it unusable is symbol
   versioning the loader only resolves at run time. Download **Part 1** for
   **`x86_64-linux-gcc9`** and re-select it.
+
+    The rule differs slightly between the two. On **macOS** gcc 9 is *required*,
+    because the container is pinned to a matching glibc. On **Linux** it is the
+    safe floor rather than a mandate: a newer build works if your own
+    `libstdc++` is at least as new.
+
+**Linux: the scan imports, but says the sky-shot helper could not be built or
+loaded.**
+: The points are all there; only the sky shell is missing. Either no C++
+  compiler was found (`sudo apt install g++`), or the helper was built but could
+  not load — usually a RiVLib for a newer gcc than your `libstdc++`, or, in a
+  packaged build, a system compiler newer than the one Phytograph ships
+  libraries for. Pick the `x86_64-linux-gcc9` RiVLib, or name a specific
+  compiler with `PHYTOGRAPH_CXX=/usr/bin/g++-11` and re-import.
 
 **"Docker is not running" while Docker Desktop is clearly up.**
 : Fixed in v0.68.0. Older builds probed Docker with a call that forked the
@@ -444,8 +555,8 @@ Windows library" / "…is not a valid Linux shared library".**
   restart the app if you are on the current version.
 
 **macOS: the import is slower than RiSCAN PRO, or than the same scan on
-Windows.**
-: Expected. RiVLib runs natively in both those cases; on macOS it runs under x86
+Windows or Linux.**
+: Expected. RiVLib runs natively in those cases; on macOS it runs under x86
   emulation inside a container. Phytograph also builds a level-of-detail octree
   either way so large scans stay interactive. For scale, one 22 M-point VZ-1000
   position takes roughly a minute end to end on Windows.

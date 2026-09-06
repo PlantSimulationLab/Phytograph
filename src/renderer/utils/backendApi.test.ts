@@ -1576,6 +1576,7 @@ describe('getRieglStatus', () => {
   const ready = {
     available: true,
     platform_supported: true,
+    host_os: 'darwin',
     runtime: 'docker',
     docker_present: true,
     image_built: true,
@@ -1593,6 +1594,7 @@ describe('getRieglStatus', () => {
     expect(s).toEqual({
       available: true,
       platformSupported: true,
+      hostOs: 'darwin',
       runtime: 'docker',
       dockerPresent: true,
       imageBuilt: true,
@@ -1636,6 +1638,31 @@ describe('getRieglStatus', () => {
     mockFetchOk({ ...ready, runtime: 'wasm' });
     const s = await getRieglStatus('/opt/rivlib');
     expect(s.runtime).toBeNull();
+  });
+
+  it('reports an unknown or absent host OS as null', async () => {
+    // The UI picks remediation prose off this, so a value it cannot interpret
+    // must degrade to "say the generic thing" rather than fall through to
+    // whichever branch happens to be last. An older backend omits it entirely.
+    mockFetchOk({ ...ready, host_os: 'plan9' });
+    expect((await getRieglStatus('/opt/rivlib')).hostOs).toBeNull();
+
+    const { host_os, ...older } = ready;
+    mockFetchOk(older);
+    expect((await getRieglStatus('/opt/rivlib')).hostOs).toBeNull();
+  });
+
+  it('maps a native Linux host without inventing Windows fields', async () => {
+    // Both native hosts share a runtime and nothing else about their setup.
+    mockFetchOk({
+      ...ready, host_os: 'linux', runtime: 'native', docker_present: false,
+      image: null, rivlib_path: '/home/x/.local/share/Phytograph/rivlib',
+    });
+    const s = await getRieglStatus('/opt/rivlib');
+    expect(s.hostOs).toBe('linux');
+    expect(s.runtime).toBe('native');
+    expect(s.dockerPresent).toBe(false);
+    expect(s.image).toBe('');
   });
 
   it('defaults the sky-shot fields to false when the backend omits them', async () => {

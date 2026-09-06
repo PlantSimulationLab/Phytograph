@@ -75,8 +75,8 @@ import numpy as np
 
 # WHERE RiVLib IS. The container bind-mounts it at /rivlib, which is what the
 # POSIX defaults below encode and what the Dockerfile relies on. A NATIVE run
-# (Windows) has no fixed location, so the backend passes RIVLIB_ROOT/RIVLIB_SO
-# built from the folder the user chose in Settings.
+# (Windows or Linux) has no fixed location, so the backend passes
+# RIVLIB_ROOT/RIVLIB_SO built from the folder the user chose in Settings.
 _RIVLIB_ROOT = os.environ.get("RIVLIB_ROOT", "/rivlib")
 
 # The Windows SDK ships scanifc as a DLL, and there are TWO of them. Prefer
@@ -113,7 +113,10 @@ def _add_rivlib_dll_directory(lib_path: str) -> None:
     build needs nothing but system DLLs, so this only matters for the fallback,
     but it costs nothing to always do.
 
-    No-op off Windows, where the container sets LD_LIBRARY_PATH=/rivlib/lib.
+    No-op off Windows, where scanifc is loaded by ABSOLUTE path (RIVLIB_SO),
+    so nothing has to be searched for. Its own dependencies are all system
+    libraries; the container additionally sets LD_LIBRARY_PATH=/rivlib/lib, and
+    a native Linux run relies on the RUNPATH baked into the shim instead.
     """
     if sys.platform != "win32":
         return
@@ -231,13 +234,27 @@ class RxpError(RuntimeError):
 # libscanifc.so, which is bind-mounted at run time because RIEGL's licence
 # forbids baking it into the image.
 
-# WHY WINDOWS NEEDS A COMPILER WHEN THE POINTS PATH DOES NOT. On Linux the shim
-# links -lscanifc, i.e. the very shared object the ctypes reader already loads,
-# because libscanifc.so exports the C++ pointcloud class alongside the flat C
-# API. The Windows build does not: dumpbin /exports on scanifc-mt.dll lists
-# exactly 21 flat C symbols and no C++ ones, and pointcloud lives only inside
-# scanlib-mt.lib, a static archive. So on Windows the shim STATICALLY links
-# RIEGL code -- which is also precisely why we cannot ship it prebuilt: the DLL
+# WHY A COMPILER IS NEEDED AT ALL WHEN THE POINTS PATH IS NOT. Both native
+# hosts compile this, and it is worth being exact about why, because the reason
+# DIFFERS and the remedies differ with it.
+#
+# Every host: reaching a no-return shot means receiving on_shot_end, which means
+# SUBCLASSING scanlib::pointcloud and overriding its virtuals. ctypes cannot
+# build a C++ vtable, so there has to be a compiled object either way. What
+# changes per platform is where the base class comes from, and therefore whether
+# we could legally ship the result prebuilt.
+#
+# Linux: libscanifc.so exports the C++ pointcloud class alongside the flat C API
+# (2,774 scanlib:: symbols on 2.15.5), so the shim links -lscanifc -- the very
+# shared object the ctypes reader already loads. No static archive is involved,
+# so a Linux RiVLib download can never be "missing" the piece the shim needs.
+# What we still cannot do is ship it prebuilt: the result is ABI-tied to the
+# libstdc++ and the RiVLib copy it was built against, so it has to be built here.
+#
+# Windows: dumpbin /exports on scanifc-mt.dll lists exactly 21 flat C symbols
+# and no C++ ones, and pointcloud lives only inside scanlib-mt.lib, a static
+# archive. So the Windows shim STATICALLY links RIEGL code -- which is also
+# precisely why we could not ship it prebuilt even setting ABI aside: the DLL
 # would contain RIEGL's own object code, and their licence forbids
 # redistributing that. Building from the user's own SDK copy keeps the same
 # licence posture the container was designed around.
@@ -263,6 +280,19 @@ _MSVC_MISSING = (
     'machine. Install the free Visual Studio Build Tools with the "Desktop '
     'development with C++" workload and re-import. Points, reflectance, GNSS '
     "and registration are unaffected and work without it."
+)
+
+# The POSIX twin. Same shape and same framing -- what is lost, not what failed --
+# because a workstation without a C++ compiler is a normal state on Linux too.
+# Deliberately does NOT repeat the Windows "static library" reason, which is
+# false here: the class is inside libscanifc.so. See the block above.
+_CXX_MISSING = (
+    "No C++ compiler was found, so no-return (sky) shots cannot be read from "
+    "this scan. Reading them means subclassing a C++ class from RiVLib, which "
+    "has to be compiled once on this machine. Install a C++ compiler "
+    "(sudo apt install g++ on Debian/Ubuntu, sudo dnf install gcc-c++ on "
+    "Fedora/RHEL) and re-import, or set PHYTOGRAPH_CXX to one. Points, "
+    "reflectance, GNSS and registration are unaffected and work without it."
 )
 
 
@@ -292,23 +322,64 @@ def _shim_source_dir() -> str:
     return "/opt/riegl"
 
 
+def _in_container() -> bool:
+    """Whether this reader is the containerised one.
+
+    Set by the Dockerfile. sys.platform cannot answer it -- the container and a
+    native Linux host are both "linux" -- and the two want opposite behaviour in
+    two places: where the built shim is cached, and what a load failure should
+    blame. An explicit marker states the intent rather than inferring it from
+    something that happens to correlate.
+    """
+    return os.environ.get("PHYTOGRAPH_RXP_CONTAINER") == "1"
+
+
 def _shim_cache_dir() -> str:
     """Where the built shim is cached.
 
-    /tmp in the container: it is thrown away with the container anyway, and a
-    rebuild costs about a second.
+    Per-user application data on every real host, and /tmp ONLY in the
+    container, which says so itself via PHYTOGRAPH_RXP_CONTAINER (see
+    _in_container). PHYTOGRAPH_RXP_SHIM_CACHE overrides the location outright
+    and is the seam the tests use.
+
+    /tmp is right in the container: it is thrown away with the container anyway,
+    and a rebuild costs about a second. On a real Linux host it is wrong twice
+    over. It is swept, so the cache silently stops working -- and, worse, it is
+    WORLD-WRITABLE with a predictable filename: the stamp is a hash of public
+    inputs, so another user on a shared machine can plant a .so at the path we
+    are about to dlopen. Per-user data removes that outright.
 
     On Windows the app lives under Program Files, which is not writable, so the
     DLL joins the other per-user Phytograph state in %LOCALAPPDATA%. It
     deliberately survives app updates -- the build is quick but needs a C++
     toolchain, and requiring that at every launch would be a worse trade than
-    keeping one small file.
+    keeping one small file. The same reasoning gives Linux $XDG_DATA_HOME, the
+    base _riegl_extract_dir() in the backend already resolves.
     """
-    if sys.platform != "win32":
+    override = os.environ.get("PHYTOGRAPH_RXP_SHIM_CACHE")
+    if override:
+        root = override
+    elif _in_container():
         return "/tmp"
-    root = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    elif sys.platform == "win32":
+        root = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    elif sys.platform == "darwin":
+        root = os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support"
+        )
+    else:
+        root = os.environ.get("XDG_DATA_HOME") or os.path.join(
+            os.path.expanduser("~"), ".local", "share"
+        )
     path = os.path.join(root, "Phytograph", "riegl")
-    os.makedirs(path, exist_ok=True)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        # A read-only or quota-full home must cost the sky shell at worst, never
+        # the import. Fall back to a temp dir rather than raising out of a
+        # function whose callers only expect a string.
+        path = os.path.join(tempfile.gettempdir(), "Phytograph", "riegl")
+        os.makedirs(path, exist_ok=True)
     return path
 
 
@@ -383,6 +454,66 @@ def find_msvc_vcvars(run=None):
         if os.path.isfile(bat):
             return bat
     return None
+
+
+# Tried in order when neither PHYTOGRAPH_CXX nor CXX names one. g++ first
+# because that is what RiVLib itself is built with and what the container uses.
+_CXX_CANDIDATES = ("g++", "c++", "clang++")
+
+
+def find_cxx_compiler(run=None):
+    """Locate a working C++ compiler on a POSIX host, or None.
+
+    PHYTOGRAPH_CXX is the escape hatch, mirroring PHYTOGRAPH_VCVARS. It exists
+    for a real failure that has no other cure: the shim is compiled by the
+    HOST's compiler but, in a packaged build, loaded by a process whose
+    LD_LIBRARY_PATH leads with PyInstaller's bundled libstdc++. A host g++ newer
+    than that bundle produces a shim the bundle cannot satisfy, and pointing
+    this at an older compiler is the fix.
+
+    RUNS the candidate rather than trusting shutil.which, because `which` cannot
+    see the three false positives that actually occur: a dangling symlink from a
+    removed toolchain, a conda/Nix wrapper on PATH that fails to exec, and a
+    clang++ that cannot start because it links a libstdc++ older than its own
+    needs. `-dumpversion` is one token, understood by both gcc and clang,
+    locale-independent, and compiles nothing -- the right cost for a probe the
+    Settings badge polls on every mount.
+
+    `run(argv, timeout)` is the same injection seam find_msvc_vcvars has, and
+    for the same reason: the backend answers this question in-process, where an
+    ordinary fork would duplicate an image holding libhelios/open3d/PROJ.
+    """
+    if sys.platform == "win32":
+        return None
+    runner = run or _default_run
+    explicit = os.environ.get("PHYTOGRAPH_CXX") or os.environ.get("CXX")
+    candidates = (explicit,) if explicit else _CXX_CANDIDATES
+    for name in candidates:
+        if not name:
+            continue
+        exe = name if os.path.dirname(name) else shutil.which(name)
+        if not exe or not os.path.isfile(exe):
+            continue
+        try:
+            proc = runner([exe, "-dumpversion"], 60)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            return exe
+    return None
+
+
+def find_cxx_toolchain(run=None):
+    """Whether this host can build the shim, and with what.
+
+    The ONE entry point the backend calls, so the platform branch lives in the
+    process that will actually run the build and knows its own platform for
+    real. Returns an opaque truthy handle (a vcvars path, or a compiler path) --
+    callers only ever test it against None.
+    """
+    if sys.platform == "win32":
+        return find_msvc_vcvars(run=run)
+    return find_cxx_compiler(run=run)
 
 
 def _compile_shim_msvc(src_dir: str, src: str, out: str) -> None:
@@ -470,22 +601,139 @@ def _compile_shim_msvc(src_dir: str, src: str, out: str) -> None:
 
 
 def _compile_shim_gcc(src: str, out: str) -> None:
-    """Build librxpshim.so inside the container.
+    """Build librxpshim.so, in the container or natively on Linux.
 
-    Unchanged from the original single-platform implementation: -lscanifc works
-    here because libscanifc.so exports the C++ class too.
+    -lscanifc works because libscanifc.so exports the C++ class too, so unlike
+    Windows there is no static archive a download could be missing.
+
+    FOUR THINGS HERE EXIST ONLY BECAUSE THIS ALSO RUNS ON A REAL HOST. In a
+    throwaway container each was harmless; none is harmless on a workstation.
+
+    1. -Wl,-rpath. The linked shim carries DT_NEEDED libscanifc.so.2 (RiVLib
+       sets that SONAME), and nothing tells the loader where that lives: the
+       container supplies LD_LIBRARY_PATH=/rivlib/lib, but the backend
+       deliberately SCRUBS that variable from the reader's environment
+       (_riegl_reader_invocation) precisely so a PyInstaller-injected loader
+       path cannot break children. So a native ctypes.CDLL of this shim failed
+       with "libscanifc.so.2: cannot open shared object file" -- verified, and
+       verified fixed by this flag.
+
+       An rpath rather than putting the directory back on LD_LIBRARY_PATH, for
+       three reasons. That variable is inherited by GRANDchildren, so it would
+       put RiVLib's gcc-9-era world ahead of the system path for g++ itself.
+       It would reverse a documented decision that applies to both runtimes.
+       And an rpath is COUPLED TO THE CACHE KEY: _shim_stamp already hashes
+       _RIVLIB_ROOT, so a shim built for one SDK has both a different filename
+       and a RUNPATH naming that SDK -- whereas an env-var fix would let a
+       cached shim silently bind a different RiVLib after the user re-points
+       Settings. Plain -rpath (i.e. DT_RUNPATH) is deliberate: losing to
+       LD_LIBRARY_PATH is correct, since it lets an operator override a broken
+       RiVLib without recompiling.
+
+       NOT -static-libstdc++, which looks like it would also solve the ABI skew
+       below and would instead break this quietly: MissCollector derives from
+       scanlib::pointcloud and std::string/typeinfo cross the boundary, so two
+       libstdc++ copies give two layouts -- a wrong answer or a crash inside
+       RIEGL's code, not a link error.
+
+    2. A caught OSError. A missing compiler raises FileNotFoundError out of
+       subprocess.run BEFORE returncode is read, and neither stream_scan (which
+       catches ShimUnavailable) nor main() (which catches RxpError) sees it. The
+       reader died with a traceback mid-import instead of degrading.
+
+    3. ShimUnavailable, not RxpError, on a failed build -- adopting
+       _compile_shim_msvc's choice for the reason it gives: a build that fails
+       almost always means this RiVLib copy cannot supply what the shim needs,
+       which costs the sky shell, not the scan. Failing the whole import throws
+       away a decode the user has already waited for.
+
+    4. Build in a temp dir and os.replace into place. Linking straight onto the
+       cache path is fine when the cache dies with the container; once it is a
+       stable per-user file, two concurrent imports (the backend is genuinely
+       concurrent) race and the loser dlopens a half-linked .so.
     """
-    cmd = [
-        "g++", "-std=c++11", "-O2", "-fPIC", "-shared",
-        f"-I{_RIVLIB_ROOT}/include", src,
-        f"-L{_RIVLIB_ROOT}/lib", "-lscanifc", "-o", out,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not os.path.exists(out):
-        raise RxpError(
-            "could not build the miss-recovery shim: "
-            + (proc.stderr or proc.stdout or "no compiler output")[-800:]
-        )
+    cxx = find_cxx_compiler()
+    if cxx is None:
+        raise ShimUnavailable(_CXX_MISSING)
+    lib_dir = os.path.join(_RIVLIB_ROOT, "lib")
+    work = tempfile.mkdtemp(prefix="rxpshim-build-", dir=os.path.dirname(out))
+    try:
+        built = os.path.join(work, os.path.basename(out))
+        cmd = [
+            cxx, "-std=c++11", "-O2", "-fPIC", "-shared",
+            "-I" + os.path.join(_RIVLIB_ROOT, "include"), src,
+            "-L" + lib_dir, "-Wl,-rpath," + lib_dir, "-lscanifc",
+            "-o", built,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # Includes the timeout: a compiler wedged on a network filesystem
+            # should cost the sky shell, not the import.
+            raise ShimUnavailable(
+                "No-return (sky) shots cannot be read: the miss-recovery "
+                f"helper could not be built ({exc})."
+            ) from exc
+        if proc.returncode != 0 or not os.path.exists(built):
+            raise ShimUnavailable(
+                "No-return (sky) shots cannot be read: the miss-recovery "
+                "helper could not be built from this RiVLib copy. "
+                + (proc.stderr or proc.stdout or "no compiler output")[-500:]
+            )
+        # Prove it loads BEFORE it enters the cache. Otherwise the
+        # `if os.path.exists(out): return out` fast path freezes a broken shim
+        # in place and re-fails forever with no diagnosis.
+        _load_shim(built)
+        os.replace(built, out)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _load_shim(path: str):
+    """dlopen a shim and bind its exports, or raise ShimUnavailable.
+
+    THE catch-all for a class of failures that cannot be enumerated from a
+    header, which is why it is a helper rather than an inline CDLL: a RiVLib
+    built for the wrong gcc, a shim whose compiler was newer than the
+    libstdc++ that ends up first on the loader path (PyInstaller's bundle leads
+    LD_LIBRARY_PATH in a packaged app, and beats DT_RUNPATH), a missing
+    transitive dependency, a PHYTOGRAPH_RXP_SHIM pointing at something that is
+    not a library, or a shim that loads but exports nothing.
+
+    Every one of those used to escape as an OSError or AttributeError, past
+    stream_scan's `except ShimUnavailable` and past main()'s `except RxpError`,
+    and killed an import over a shell the caller was willing to do without. The
+    raw loader message is carried through because it is the only thing that
+    names the actual mismatch.
+
+    Called in two places on purpose: here at use, which covers a cache hit and a
+    user-supplied prebuilt shim, and again in the build before publishing, which
+    keeps a bad artifact out of the cache in the first place.
+    """
+    try:
+        lib = ctypes.CDLL(path)
+        lib.rxpshim_collect_misses.restype = ctypes.c_void_p
+        lib.rxpshim_collect_misses.argtypes = [ctypes.c_char_p]
+        lib.rxpshim_error.restype = ctypes.c_char_p
+        lib.rxpshim_error.argtypes = [ctypes.c_void_p]
+        for name in ("rxpshim_miss_count", "rxpshim_shot_count",
+                     "rxpshim_hit_shot_count", "rxpshim_echo_count"):
+            getattr(lib, name).restype = ctypes.c_uint64
+            getattr(lib, name).argtypes = [ctypes.c_void_p]
+        lib.rxpshim_copy.argtypes = [
+            ctypes.c_void_p,
+            np.ctypeslib.ndpointer(dtype=np.float64, flags="C_CONTIGUOUS"),
+            np.ctypeslib.ndpointer(dtype=np.float64, flags="C_CONTIGUOUS"),
+        ]
+        lib.rxpshim_free.argtypes = [ctypes.c_void_p]
+        return lib
+    except (OSError, AttributeError) as exc:
+        raise ShimUnavailable(
+            "No-return (sky) shots cannot be read: the miss-recovery helper "
+            f"at {path} could not be loaded ({exc})."
+        ) from exc
 
 
 def _build_shim() -> str:
@@ -533,21 +781,7 @@ def collect_misses(rxp_path: str) -> dict:
     The counts are the reconciliation handle: `shots` must equal
     `hit_shots + len(times)`, and `echoes` must match what the C API returned.
     """
-    lib = ctypes.CDLL(_build_shim())
-    lib.rxpshim_collect_misses.restype = ctypes.c_void_p
-    lib.rxpshim_collect_misses.argtypes = [ctypes.c_char_p]
-    lib.rxpshim_error.restype = ctypes.c_char_p
-    lib.rxpshim_error.argtypes = [ctypes.c_void_p]
-    for name in ("rxpshim_miss_count", "rxpshim_shot_count",
-                 "rxpshim_hit_shot_count", "rxpshim_echo_count"):
-        getattr(lib, name).restype = ctypes.c_uint64
-        getattr(lib, name).argtypes = [ctypes.c_void_p]
-    lib.rxpshim_copy.argtypes = [
-        ctypes.c_void_p,
-        np.ctypeslib.ndpointer(dtype=np.float64, flags="C_CONTIGUOUS"),
-        np.ctypeslib.ndpointer(dtype=np.float64, flags="C_CONTIGUOUS"),
-    ]
-    lib.rxpshim_free.argtypes = [ctypes.c_void_p]
+    lib = _load_shim(_build_shim())
 
     handle = lib.rxpshim_collect_misses(_uri(rxp_path).encode())
     if not handle:
@@ -598,15 +832,28 @@ class _Scanifc:
                     "The usual cause is the wrong build: Phytograph needs the "
                     "64-bit (x86_64) Windows RiVLib."
                 )
-            else:
-                # In the container. The overwhelmingly common cause here is a
-                # build for the wrong compiler ABI, which no header check can
-                # see -- it only fails when the loader resolves symbols, and it
-                # says so with a GLIBC or libstdc++ error.
+            elif _in_container():
+                # The overwhelmingly common cause here is a build for the wrong
+                # compiler ABI, which no header check can see -- it only fails
+                # when the loader resolves symbols, and it says so with a GLIBC
+                # or libstdc++ error. gcc9 is MANDATORY in the container, whose
+                # base image is pinned to a matching glibc.
                 cause = (
                     "The usual cause is a build for the wrong compiler: "
                     "Phytograph needs Part 1 for x86_64-linux-gcc9. A GLIBC or "
                     "libstdc++ message above is exactly that."
+                )
+            else:
+                # Native Linux. Same failure mode, DIFFERENT rule: nothing is
+                # pinned here, so the requirement is only that this machine's
+                # libstdc++ be at least as new as the build's. gcc9 is therefore
+                # a safe floor rather than a mandate, which is the opposite
+                # advice from the container and must not be merged with it.
+                cause = (
+                    "The usual cause is a build for a newer compiler than this "
+                    "machine's libstdc++: Part 1 for x86_64-linux-gcc9 loads on "
+                    "any host with glibc 2.17 or newer, so it is the safe "
+                    "choice. A GLIBC or libstdc++ message above is exactly that."
                 )
             raise RxpError(
                 f"RiVLib at {lib_path} could not be loaded: {exc}. {cause} A "

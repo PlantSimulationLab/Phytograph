@@ -383,9 +383,23 @@ export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
  */
 export type RieglRuntime = 'docker' | 'native' | null;
 
+/**
+ * The OS the BACKEND probed, which is not necessarily the one Electron is
+ * running on: PHYTOGRAPH_RIEGL_RUNTIME can force a runtime that
+ * `process.platform` would contradict, and the whole fake-RiVLib suite depends
+ * on exactly that. Every RIEGL probe answers for this value, so the UI must
+ * render it rather than consulting the renderer's own idea of the platform.
+ *
+ * Needed because 'native' now covers TWO hosts whose remediation differs in
+ * every particular — which download, which folder, which compiler.
+ */
+export type RieglHostOs = 'windows' | 'darwin' | 'linux' | null;
+
 export interface RieglStatus {
   available: boolean;
   platformSupported: boolean;
+  /** See RieglHostOs — the backend's own platform.system(), not process.platform. */
+  hostOs: RieglHostOs;
   /**
    * How this machine reads .rxp, and therefore which other fields mean
    * anything.
@@ -393,10 +407,12 @@ export interface RieglStatus {
    * 'docker'  — macOS. RiVLib has no Darwin build at all, so the reader runs in
    *             a linux/amd64 container: Docker must be reachable and the image
    *             built. `dockerPresent`/`imageBuilt`/`imageStale` apply.
-   * 'native'  — Windows. RiVLib runs directly, so there is no daemon and no
-   *             image; RiVLib alone decides `available`, and the docker fields
-   *             are inert (false/true placeholders, never rendered).
-   * null      — no runtime on this OS (Linux today).
+   * 'native'  — Windows, or x86_64 Linux. RiVLib runs directly, so there is no
+   *             daemon and no image; RiVLib alone decides `available`, and the
+   *             docker fields are inert (false/true placeholders, never
+   *             rendered). Read `hostOs` to tell the two apart.
+   * null      — no runtime on this OS/arch: arm64 Linux (RIEGL publishes no
+   *             arm64 build), or an OS with no RiVLib at all.
    */
   runtime: RieglRuntime;
   dockerPresent: boolean;
@@ -692,6 +708,10 @@ export async function getRieglStatus(
   return {
     available: j.available === true,
     platformSupported: j.platform_supported === true,
+    hostOs:
+      j.host_os === 'windows' || j.host_os === 'darwin' || j.host_os === 'linux'
+        ? j.host_os
+        : null,
     runtime:
       j.runtime === 'docker' || j.runtime === 'native' ? j.runtime : null,
     dockerPresent: j.docker_present === true,
