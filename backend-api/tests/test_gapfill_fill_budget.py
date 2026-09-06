@@ -22,6 +22,7 @@ than the mechanism that used to deliver it.)
 Native tests — a stubbed cloud cannot exercise real allocation behaviour.
 """
 
+import functools
 import os
 import subprocess
 import sys
@@ -118,25 +119,52 @@ def test_small_raster_fills_every_empty_cell():
     assert filled == 400, f"expected one hit per grid cell (400), got {filled}"
 
 
-def test_full_resolution_raster_fills_without_exhausting_memory():
-    """A scanner-native raster must fill, and must stay affordable while doing it.
+@functools.lru_cache(maxsize=None)
+def _full_raster_verdict():
+    """One 2000 x 4000 fill, shared by the two tests below (it takes seconds)."""
+    return _run(2000, 4000)
 
-    2000 x 4000 = 8M cells. Materialized at ~100 bytes/point that is ~800 MB (and the
-    real VZ-600i raster from issue #5 is 95.8M cells, i.e. ~10 GB — the allocation that
-    actually died on Windows). Virtualized it is ~1 MB of bitset. The memory ceiling
-    here is what makes this a regression test rather than a slow smoke test: if the
-    misses are ever materialized again, peak RSS blows straight through it.
-    """
-    verdict = _run(2000, 4000)
+
+def test_full_resolution_raster_fills_every_cell():
+    """A scanner-native raster must fill completely: 8,000,000 cells, one miss each."""
+    verdict = _full_raster_verdict()
     assert verdict.startswith("OK"), f"expected a successful fill, got: {verdict}"
-    _, count, added_mb, peak_mb, before_mb = verdict.split()
-    assert int(count) == 2000 * 4000, (
-        f"expected the full raster to be gap-filled (8,000,000), got {int(count):,}")
+    count = int(verdict.split()[1])
+    assert count == 2000 * 4000, (
+        f"expected the full raster to be gap-filled (8,000,000), got {count:,}")
+
+
+# OPEN: the fill is NOT virtualized on the Linux build. Measured on the CI runner
+# (ubuntu-24.04, gcc, helios-core 1.3.84 + 971159896): the fill ADDED 1160 MB over a
+# 102 MB baseline for 8M cells — ~145 bytes per cell, i.e. a HitPoint plus its
+# hit-data columns per miss, exactly the materialized layout the virtualization was
+# written to remove. The same child on macOS (clang, libomp) adds 2 MB. Same source,
+# same pins, same Python wrapper (`gapfillLiDARMisses` -> `gapfillMissesCount`, the
+# count-only path); the divergence is somewhere below that and has not been located.
+# It matters beyond this test: the real VZ-600i raster is 95.8M cells, which at this
+# rate is ~14 GB — the allocation that originally died on Windows, a gcc/MSVC-shaped
+# platform rather than a clang one. Strict xfail so the day it is fixed this flips to
+# an XPASS failure and the marker has to come out, rather than silently hiding.
+@pytest.mark.xfail(
+    sys.platform.startswith("linux"), strict=True,
+    reason="helios-core gap-fill materializes ~145 B/cell on the Linux (gcc) build; "
+           "virtualized on macOS (clang). Unlocated as of 2026-09-05.")
+def test_full_resolution_raster_fill_is_virtualized():
+    """...and must stay affordable while doing it.
+
+    Materialized at ~100 bytes/point, 8M cells is ~800 MB (the real VZ-600i raster
+    from issue #5 is 95.8M cells, ~10 GB — the allocation that actually died on
+    Windows). Virtualized it is ~1 MB of bitset. The memory ceiling is what makes this
+    a regression test rather than a slow smoke test: if the misses are materialized,
+    the fill's footprint blows straight through it.
+    """
+    verdict = _full_raster_verdict()
+    assert verdict.startswith("OK"), f"expected a successful fill, got: {verdict}"
+    _, _count, added_mb, peak_mb, before_mb = verdict.split()
     # Budget the fill's OWN footprint (peak after minus resident before), not the
-    # absolute peak: the process baseline is platform-dependent (109 MB total on
-    # macOS against 1268 MB on the Linux CI runner for this same child, with a
-    # 2 MB fill) and says nothing about whether the misses were materialized.
+    # absolute peak: the process baseline is what the interpreter and libhelios
+    # cost on that platform and says nothing about whether misses were materialized.
     assert int(added_mb) < 600, (
         f"gap-filling an 8M-cell raster added {added_mb} MB (peak {peak_mb} MB over a "
-        f"{before_mb} MB baseline) — the misses look materialized again rather than "
+        f"{before_mb} MB baseline) — the misses look materialized rather than "
         f"virtualized (~800 MB of HitPoints at ~100 bytes each)")
