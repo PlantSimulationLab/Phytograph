@@ -270,10 +270,21 @@ jobs:
       # for every platform. pytest-asyncio because pytest.ini sets
       # asyncio_mode = auto; httpx for TestClient; pytest-cov because the same
       # pytest.ini passes --cov, which --no-cov then switches back off.
+      #
+      # requirements.txt is installed HERE too, not only in "Install Python
+      # dependencies" above. That step is skipped on a backend-cache HIT, which
+      # leaves the runner's Python with no numpy, no fastapi, nothing — and
+      # these tests import main.py. Every run of this step before v0.82.0 was
+      # a cache miss (a failed or cancelled job never saves its cache), so the
+      # hit path was first exercised by the release tag itself, where it failed
+      # both gate jobs with `No module named 'numpy'` after the same commit had
+      # passed on main minutes earlier. On a miss the packages are already
+      # present and pip resolves this in seconds; on a hit it costs a couple of
+      # minutes, which is what the tests need to run at all.
       - name: RIEGL reader against the fake RiVLib
         working-directory: backend-api
         run: |
-          pip install pytest pytest-cov pytest-asyncio httpx
+          pip install -r requirements.txt pytest pytest-cov pytest-asyncio httpx
           python -m pytest tests/test_riegl_fake_rivlib.py tests/test_riegl_native_runtime.py -v --no-cov
 
       # PotreeConverter links Intel TBB. The Windows build vendors it and Linux
