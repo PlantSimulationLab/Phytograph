@@ -532,7 +532,12 @@ def test_linux_reasons_name_linux_things(monkeypatch, tmp_path):
     (empty / "lib").mkdir(parents=True)
     reason = main._riegl_status(str(empty))["reason"]
     assert "libscanifc.so" in reason
-    assert "\\" not in reason
+    # The backslash check is for a Windows-style hint such as lib\scanifc-mt-s.dll.
+    # The reason also echoes the folder the user chose, verbatim -- which is
+    # correct, and on a Windows HOST running this Linux simulation that path
+    # itself carries backslashes (it failed the packaged Windows suite that
+    # way). Strip the echoed path so the check sees only the remediation text.
+    assert "\\" not in reason.replace(str(empty), "")
     assert "scanifc-mt-s.dll" not in reason
 
     root = _rivlib(tmp_path, "libscanifc.so")
