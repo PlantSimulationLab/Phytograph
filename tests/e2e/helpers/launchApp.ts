@@ -1,8 +1,8 @@
 import { _electron, type ElectronApplication, type Page } from '@playwright/test';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { waitForBackend } from './waitForBackend';
@@ -13,6 +13,49 @@ import { checkBackendBundle, readExpectedBackendVersion } from '../../../scripts
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = join(__dirname, '..', '..', '..');
+
+/**
+ * The tails of the log files this launch wrote, for a launch that failed.
+ *
+ * The main process routes console.* through electron-log (src/main/logger.ts),
+ * so nothing useful reaches the Electron process's stdout — the file is the
+ * record. logger.ts names it `main-<iso>-pid<PID>.log`, and the sidecar names
+ * its own `phytograph-backend-<same tag>.log` beside it, so the main process's
+ * pid is enough to find both. The directory is electron-log's default:
+ * `~/Library/Logs/<app name>` on macOS, `<userData>/logs` elsewhere — and
+ * userData here is the private `--user-data-dir` this launch was given. The
+ * app name is lowercase `phytograph` because main.ts only calls
+ * app.setName('Phytograph') outside E2E.
+ */
+async function sessionLogTails(pid: number | undefined, userDataDir: string, lines = 60): Promise<string> {
+  const dir = process.platform === 'darwin'
+    ? join(homedir(), 'Library', 'Logs', 'phytograph')
+    : join(userDataDir, 'logs');
+  if (pid === undefined) return `(no main-process pid; cannot locate logs under ${dir})`;
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return `(no log directory at ${dir} — the main process never got as far as logging)`;
+  }
+  const main = names.find((n) => n.startsWith('main-') && n.endsWith(`-pid${pid}.log`));
+  if (!main) return `(no main-*-pid${pid}.log under ${dir}; files present: ${names.join(', ') || 'none'})`;
+  const tag = main.slice('main-'.length, -'.log'.length);
+  const out: string[] = [];
+  for (const name of [main, `phytograph-backend-${tag}.log`]) {
+    let text: string;
+    try {
+      text = await readFile(join(dir, name), 'utf8');
+    } catch {
+      out.push(`--- ${name}: not written (the sidecar never started logging) ---`);
+      continue;
+    }
+    const all = text.split('\n').filter((l) => l.trim().length > 0);
+    out.push(`--- ${join(dir, name)} (last ${Math.min(lines, all.length)} of ${all.length} lines) ---`);
+    out.push(...all.slice(-lines));
+  }
+  return out.join('\n');
+}
 
 // Each launched app gets its own free backend port (bind :0, read the
 // assignment), passed to Electron via PHYTOGRAPH_BACKEND_PORT. This keeps a
@@ -156,8 +199,21 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
 
   // Wait for the supervised backend to actually serve /version. The main
   // process spawns it on backendPort in startBackend(); we don't proceed until
-  // it answers.
-  const { version } = await waitForBackend(backendPort);
+  // it answers. If it never does, say WHY: attach the tails of this launch's
+  // own log files, which is where the supervisor's decision (spawn threw, port
+  // taken, stood down, respawn budget exhausted) and the sidecar's own startup
+  // trace actually live. Without them a launch failure reports only "did not
+  // become ready within 120000ms" — all that CI shard 2 had to offer for
+  // lad-export.spec.ts on run 34081346174, a first-time failure with nothing
+  // to chase.
+  let version: string;
+  try {
+    ({ version } = await waitForBackend(backendPort));
+  } catch (err) {
+    const pid = app.process().pid;
+    await app.close().catch(() => {});
+    throw new Error(`${(err as Error).message}\n\n${await sessionLogTails(pid, userDataDir)}`);
+  }
 
   // Belt-and-braces on top of the pre-launch stamp check: assert the version the
   // backend ACTUALLY served. The stamp describes the bundle on disk, but the
