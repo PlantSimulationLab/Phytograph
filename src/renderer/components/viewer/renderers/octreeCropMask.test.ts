@@ -347,3 +347,246 @@ describe('a stack of mask clauses', () => {
     expect(calls).toBeGreaterThan(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Filter clauses. The same index buffer carries both previews, so these cover
+// the filter path alone AND its composition with crop rules — the case where a
+// second, independent index writer would have silently erased the first.
+describe('filter clauses', () => {
+  // A tile geometry with named scalar attributes alongside position, matching
+  // what potree's loader decodes for every non-builtin octree attribute.
+  function makeGeometryWithAttrs(
+    points: Array<[number, number, number]>,
+    attrs: Record<string, number[]>,
+  ) {
+    const geom = makeGeometry(points);
+    for (const [name, values] of Object.entries(attrs)) {
+      geom.attributes[name] = new THREE.BufferAttribute(new Float32Array(values), 1);
+    }
+    return geom;
+  }
+
+  const spec = (clauses: any[]) => ({ clauses, key: JSON.stringify(clauses) });
+  const attrClause = (slug: string, min: number, max: number, extra: any = {}) => ({
+    source: { kind: 'attribute', slug },
+    range: { min, max, enabled: true, ...extra },
+  });
+  const posClause = (axis: 0 | 1 | 2, min: number, max: number) => ({
+    source: { kind: 'position', axis },
+    range: { min, max, enabled: true },
+  });
+  const drawn = (geom: any) => (geom.index ? Array.from(geom.index.array) : null);
+
+  it('keeps only the points whose attribute is in range', () => {
+    const geom = makeGeometryWithAttrs(
+      [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]],
+      { dev: [0, 1, 2, 3] },
+    );
+    applyCropMaskRulesToGeometry(
+      geom, new THREE.Matrix4(), undefined, [], spec([attrClause('dev', 1, 2)]),
+    );
+    expect(drawn(geom)).toEqual([1, 2]);
+  });
+
+  it('honours selectedClasses, rounding float32 class ids', () => {
+    // The categorical case that used to preview as a no-op and then delete
+    // points on commit — now routed through the shared filterValueKeeps.
+    const geom = makeGeometryWithAttrs(
+      [[0, 0, 0], [1, 0, 0], [2, 0, 0]],
+      { c: [1, 1.9999999, 3] },
+    );
+    applyCropMaskRulesToGeometry(
+      geom, new THREE.Matrix4(), undefined, [],
+      spec([attrClause('c', 1, 3, { selectedClasses: [2] })]),
+    );
+    expect(drawn(geom)).toEqual([1]);
+  });
+
+  it('AND-combines two attribute clauses', () => {
+    const geom = makeGeometryWithAttrs(
+      [[0, 0, 0], [1, 0, 0], [2, 0, 0]],
+      { a: [1, 1, 5], b: [9, 2, 2] },
+    );
+    applyCropMaskRulesToGeometry(
+      geom, new THREE.Matrix4(), undefined, [],
+      spec([attrClause('a', 0, 2), attrClause('b', 0, 3)]),
+    );
+    expect(drawn(geom)).toEqual([1]);
+  });
+
+  it('drops the index entirely when every point passes', () => {
+    const geom = makeGeometryWithAttrs([[0, 0, 0], [1, 0, 0]], { dev: [1, 2] });
+    applyCropMaskRulesToGeometry(
+      geom, new THREE.Matrix4(), undefined, [], spec([attrClause('dev', 0, 9)]),
+    );
+    expect(geom.index).toBeNull();
+  });
+
+  it('ignores a clause whose attribute the tile does not carry', () => {
+    // Matches pointPassesFilters, which skips a scalar filter for a field the
+    // cloud has no values for. Dropping instead would blank the cloud whenever
+    // a sibling scan's field was filtered.
+    const geom = makeGeometryWithAttrs([[0, 0, 0], [1, 0, 0]], { dev: [1, 2] });
+    applyCropMaskRulesToGeometry(
+      geom, new THREE.Matrix4(), undefined, [], spec([attrClause('absent', 5, 6)]),
+    );
+    expect(geom.index).toBeNull();
+  });
+
+  it('falls back to the live intensity slot when no original is stashed', () => {
+    const geom = makeGeometryWithAttrs([[0, 0, 0], [1, 0, 0]], { intensity: [0.1, 0.9] });
+    applyCropMaskRulesToGeometry(
+      geom, new THREE.Matrix4(), undefined, [],
+      spec([{
+        source: { kind: 'attribute', slug: '__intensity_orig', fallbackSlug: 'intensity' },
+        range: { min: 0.5, max: 1, enabled: true },
+      }]),
+    );
+    expect(drawn(geom)).toEqual([1]);
+  });
+
+  it('prefers the stashed original intensity over the aliased live slot', () => {
+    // In scalar colour mode `intensity` points at ANOTHER field's buffer. A
+    // filter that read the live slot would filter by whatever is being
+    // coloured by — here that would keep point 0 instead of point 1.
+    const geom = makeGeometryWithAttrs([[0, 0, 0], [1, 0, 0]], {
+      intensity: [0.9, 0.1],          // aliased to some scalar
+      __intensity_orig: [0.1, 0.9],   // the real intensity
+    });
+    applyCropMaskRulesToGeometry(
+      geom, new THREE.Matrix4(), undefined, [],
+      spec([{
+        source: { kind: 'attribute', slug: '__intensity_orig', fallbackSlug: 'intensity' },
+        range: { min: 0.5, max: 1, enabled: true },
+      }]),
+    );
+    expect(drawn(geom)).toEqual([1]);
+  });
+
+  describe('position clauses are tested in WORLD space', () => {
+    // Node positions are re-origined server-side at tiling time, so the raw
+    // buffer is small node-local float32 while the panel's bounds are the
+    // cloud's world bounds. Testing one against the other would hide an
+    // essentially arbitrary set of points.
+    it('applies the tile transform before testing an axis range', () => {
+      const geom = makeGeometry([[0, 0, 0], [10, 0, 0]]);
+      // Tile sits 100 units out in world X.
+      const m = new THREE.Matrix4().makeTranslation(100, 0, 0);
+      applyCropMaskRulesToGeometry(geom, m, undefined, [], spec([posClause(0, 105, 115)]));
+      // World X is 100 and 110 → only the second survives. Testing the raw
+      // buffer (0, 10) against [105,115] would have kept neither.
+      expect(drawn(geom)).toEqual([1]);
+    });
+
+    it('adds the display offset back before testing', () => {
+      const geom = makeGeometry([[0, 0, 0], [10, 0, 0]]);
+      applyCropMaskRulesToGeometry(
+        geom, new THREE.Matrix4(), { x: 1000, y: 0, z: 0 }, [], spec([posClause(0, 1005, 1015)]),
+      );
+      expect(drawn(geom)).toEqual([1]);
+    });
+
+    it('tests the right component for Y and Z', () => {
+      const geom = makeGeometry([[0, 0, 0], [0, 5, 0], [0, 0, 5]]);
+      applyCropMaskRulesToGeometry(geom, new THREE.Matrix4(), undefined, [], spec([posClause(1, 4, 6)]));
+      expect(drawn(geom)).toEqual([1]);
+      applyCropMaskRulesToGeometry(geom, new THREE.Matrix4(), undefined, [], spec([posClause(2, 4, 6)]));
+      expect(drawn(geom)).toEqual([2]);
+    });
+  });
+
+  describe('composition with crop rules', () => {
+    // The reason both previews live in this one module: a geometry has ONE
+    // index, so two independent writers would erase each other.
+    const keepXBelow = (limit: number): CropMaskRule => ({
+      predicate: (x: number) => x < limit,
+      invert: false,
+      key: `x<${limit}`,
+    });
+
+    it('keeps only points surviving BOTH the crop rule and the filter', () => {
+      const geom = makeGeometryWithAttrs(
+        [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]],
+        { dev: [5, 1, 1, 5] },
+      );
+      // crop keeps x<2 → {0,1}; filter keeps dev in [0,2] → {1,2}. AND → {1}.
+      applyCropMaskRulesToGeometry(
+        geom, new THREE.Matrix4(), undefined, [keepXBelow(2)], spec([attrClause('dev', 0, 2)]),
+      );
+      expect(drawn(geom)).toEqual([1]);
+    });
+
+    it('a filter alone still hides points when no crop rule is active', () => {
+      const geom = makeGeometryWithAttrs(
+        [[0, 0, 0], [1, 0, 0]], { dev: [1, 9] },
+      );
+      applyCropMaskRulesToGeometry(
+        geom, new THREE.Matrix4(), undefined, [], spec([attrClause('dev', 0, 2)]),
+      );
+      expect(drawn(geom)).toEqual([0]);
+    });
+
+    it('a crop alone still hides points when no filter is active', () => {
+      const geom = makeGeometryWithAttrs([[0, 0, 0], [5, 0, 0]], { dev: [1, 1] });
+      applyCropMaskRulesToGeometry(
+        geom, new THREE.Matrix4(), undefined, [keepXBelow(2)],
+      );
+      expect(drawn(geom)).toEqual([0]);
+    });
+
+    it('clears the index when neither is active', () => {
+      const geom = makeGeometryWithAttrs([[0, 0, 0]], { dev: [1] });
+      applyCropMaskRulesToGeometry(geom, new THREE.Matrix4(), undefined, [keepXBelow(-99)]);
+      expect(geom.index).not.toBeNull();
+      applyCropMaskRulesToGeometry(geom, new THREE.Matrix4(), undefined, []);
+      expect(geom.index).toBeNull();
+    });
+  });
+
+  describe('stats', () => {
+    it('reports the surviving RATIO, not just a count', () => {
+      // The panel shows a percentage: the mask only sees LOADED tiles, so an
+      // absolute count is a sample of the LOD, while the proportion is
+      // meaningful at any level.
+      const geom = makeGeometryWithAttrs(
+        [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]],
+        { dev: [0, 1, 2, 3] },
+      );
+      const octree = makeOctree([makeNode(geom)]);
+      (octree as any).traverse = (fn: any) => fn({ isPoints: true, visible: true, geometry: geom });
+      applyCropMaskRulesToVisibleNodes(
+        octree, undefined, [], 'k1', spec([attrClause('dev', 1, 2)]),
+      );
+      const stats = (globalThis as any).__octreeCropMask;
+      expect(stats.drawn).toBe(2);
+      expect(stats.full).toBe(4);
+      expect(stats.shown).toBeCloseTo(0.5, 10);
+    });
+
+    it('publishes per cloud so several selected scans do not overwrite one another', () => {
+      // The Filter tool previews EVERY selected scan (its commit buttons act on
+      // all of them), and the single global slot would report whichever cloud
+      // rendered last.
+      const mk = (values: number[]) => {
+        const g = makeGeometryWithAttrs(values.map((_, i) => [i, 0, 0] as [number, number, number]), { dev: values });
+        const o = makeOctree([makeNode(g)]);
+        (o as any).traverse = (fn: any) => fn({ isPoints: true, visible: true, geometry: g });
+        return o;
+      };
+      const a = mk([0, 1, 2, 3]);   // dev in [0,1] keeps 2 of 4
+      const b = mk([5, 5, 5, 0]);   // dev in [0,1] keeps 1 of 4
+      applyCropMaskRulesToVisibleNodes(a, undefined, [], 'k', spec([attrClause('dev', 0, 1)]), 'cloud-a');
+      applyCropMaskRulesToVisibleNodes(b, undefined, [], 'k', spec([attrClause('dev', 0, 1)]), 'cloud-b');
+      const byCloud = (globalThis as any).__octreeMaskByCloud;
+      expect(byCloud['cloud-a'].shown).toBeCloseTo(0.5, 10);
+      expect(byCloud['cloud-b'].shown).toBeCloseTo(0.25, 10);
+    });
+
+    it('reports everything shown when no tiles are loaded yet', () => {
+      const octree = makeOctree([]);
+      (octree as any).traverse = () => {};
+      applyCropMaskRulesToVisibleNodes(octree, undefined, [], 'k', spec([]), 'empty');
+      expect((globalThis as any).__octreeMaskByCloud['empty'].shown).toBe(1);
+    });
+  });
+});

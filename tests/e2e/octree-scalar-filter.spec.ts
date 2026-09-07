@@ -16,9 +16,13 @@ const FIXTURE_B = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalars-b.xyz');
  * scalars.xyz imports through convert_to_octree (the renderer never holds the
  * points), so its scalar columns live as octree extra-dimension attributes —
  * NOT in data.scalarFields. The Filter panel exposes those imported scalars
- * (Timestamp_s, Deviation, Target_Index) alongside X/Y/Z. There is no live
- * preview for octrees: setting a range and clicking a commit button re-converts
- * the cloud on the backend.
+ * (Timestamp_s, Deviation, Target_Index) alongside X/Y/Z.
+ *
+ * Setting a range previews LIVE — the points that would be removed are hidden
+ * in the viewport by a per-point mask over the loaded octree tiles
+ * (octreeCropMask.ts), the same mechanism the polygon-crop preview uses, with
+ * no backend call. Clicking a commit button then re-converts the cloud on the
+ * backend, which is what actually removes points.
  *
  * Two commit actions (no Apply button):
  *   - Filter (remove points)  → keeps in-range, drops the rest. (filter-remove)
@@ -526,3 +530,128 @@ test('a touched-but-unnarrowed X does not crop siblings to the first scan', asyn
   }).toPass({ timeout: 60_000 });
   await expect(page.getByTestId('confirm-delete')).toHaveCount(0);
 });
+
+// ---------------------------------------------------------------------------
+// Live preview. These assert on the points actually DRAWN before any commit —
+// the mask publishes its own drawn/full tally per cloud on
+// `window.__octreeMaskByCloud`, which is the only way to tell "the preview hid
+// the right points" from "nothing happened" (the DOM shows neither, and the
+// scan row's point count deliberately does not move until commit).
+
+/**
+ * The mask's tally for the loaded cloud.
+ *
+ * Picks the entry with the most points rather than asserting there is exactly
+ * one: the hook is keyed by octree cacheId, and a scan whose octree component
+ * has not yet unmounted (or a previously-filtered cloud in the same session)
+ * can still have an entry. The fixture is the only 60-point cloud in play.
+ */
+async function maskStats(page: import('@playwright/test').Page) {
+  return page.evaluate(() => {
+    const byCloud = (window as any).__octreeMaskByCloud ?? {};
+    const entries = Object.values(byCloud) as { drawn: number; full: number }[];
+    if (entries.length === 0) return null;
+    return entries.reduce((a, b) => (b.full > a.full ? b : a));
+  });
+}
+
+test('previews a scalar filter live, before any commit', async () => {
+  const { app, page } = session;
+  const cloudRow = await importAndSelect(app, page);
+
+  await page.getByTestId('tool-filter').click();
+  const fieldSelect = page.getByTestId('filter-field-select');
+  await expect(fieldSelect).toBeVisible();
+
+  // Baseline: nothing filtered, so every loaded point draws.
+  await expect(async () => {
+    const s = await maskStats(page);
+    expect(s?.full ?? 0).toBeGreaterThan(0);
+    expect(s.drawn).toBe(s.full);
+  }).toPass({ timeout: 20_000 });
+
+  // Deviation cycles 0..4 evenly, so [0,2] keeps exactly 36 of 60 — and the
+  // fixture is small enough to load in one tile, so the previewed ratio is the
+  // exact one, not a sample.
+  await fieldSelect.selectOption('scalar:Deviation');
+  await page.getByTestId('filter-min-input').fill('0');
+  await page.getByTestId('filter-max-input').fill('2');
+
+  await expect(async () => {
+    const s = await maskStats(page);
+    expect(s.full).toBe(60);
+    expect(s.drawn).toBe(36);
+  }).toPass({ timeout: 20_000 });
+
+  // The preview must NOT have touched the cloud — that is the commit's job.
+  expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
+  await expect(page.locator('[data-testid="toast-error"]')).toHaveCount(0);
+
+  // The panel reports it as a percentage (36/60 = 60%), never a raw count.
+  const readout = page.getByTestId('filter-preview-fraction');
+  await expect(readout).toContainText('60%');
+  await expect(readout).toContainText('of points kept');
+
+  // Widening the range restores the hidden points — the preview is reversible
+  // and nothing has been destroyed.
+  await page.getByTestId('filter-max-input').fill('4');
+  await expect(async () => {
+    const s = await maskStats(page);
+    expect(s.drawn).toBe(60);
+  }).toPass({ timeout: 20_000 });
+});
+
+test('previews a WIDE (float64) attribute in the right units', async () => {
+  // The trap this exists for: potree pre-normalises any attribute wider than a
+  // float32 into 0..1 on upload, while the panel's bounds come from the octree
+  // metadata in FILE units. Testing 100..150 against a buffer holding 0.0..1.0
+  // hides the entire cloud — silently, since a filter legitimately can.
+  // Timestamps run 100, 102.5, …, 247.5, so [100, 150] keeps the first 21.
+  const { app, page } = session;
+  await importAndSelect(app, page);
+
+  await page.getByTestId('tool-filter').click();
+  const fieldSelect = page.getByTestId('filter-field-select');
+  await expect(fieldSelect).toBeVisible();
+  await fieldSelect.selectOption('scalar:gps-time');
+  await page.getByTestId('filter-min-input').fill('100');
+  await page.getByTestId('filter-max-input').fill('150');
+
+  await expect(async () => {
+    const s = await maskStats(page);
+    expect(s.full).toBe(60);
+    // Not 0 (the units bug) and not 60 (no filtering at all).
+    expect(s.drawn).toBe(21);
+  }).toPass({ timeout: 20_000 });
+});
+
+test('preview and commit agree on which points survive', async () => {
+  // The property that matters most: whatever the preview hides is exactly what
+  // the backend removes. These were separate implementations once, and they
+  // drifted — a categorical filter previewed as a no-op and then deleted points.
+  const { app, page } = session;
+  const cloudRow = await importAndSelect(app, page);
+
+  await page.getByTestId('tool-filter').click();
+  const fieldSelect = page.getByTestId('filter-field-select');
+  await expect(fieldSelect).toBeVisible();
+  await fieldSelect.selectOption('scalar:Deviation');
+  await page.getByTestId('filter-min-input').fill('1');
+  await page.getByTestId('filter-max-input').fill('3');
+
+  let previewed = 0;
+  await expect(async () => {
+    const s = await maskStats(page);
+    expect(s.full).toBe(60);
+    expect(s.drawn).toBeGreaterThan(0);
+    previewed = s.drawn;
+  }).toPass({ timeout: 20_000 });
+
+  await page.getByTestId('filter-remove').click();
+  await expect(async () => {
+    const n = parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10);
+    expect(n).toBeGreaterThan(0);
+    // The count the backend lands on is the count the preview showed.
+    expect(n).toBe(previewed);
+  }).toPass({ timeout: 30_000 });
+}); 

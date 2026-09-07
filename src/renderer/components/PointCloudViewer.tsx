@@ -865,6 +865,12 @@ export default function PointCloudViewer({
   // mean "use the data-derived range."
   const [colorRanges, setColorRanges] = useState<Record<string, { min?: number; max?: number }>>({});
   const [showFilterPanel, setShowFilterPanel] = useState(false);
+  // Kept-fraction of the live filter preview, for the panel's percentage
+  // readout. Sampled on an interval rather than pushed from the renderer: the
+  // mask is recomputed inside the r3f frame loop, and calling setState from
+  // there would re-render the whole viewer every frame. A slow poll is enough
+  // for a number a human reads, and it costs nothing while the panel is shut.
+  const [filterPreviewShown, setFilterPreviewShown] = useState<number | null>(null);
   const [showResamplePanel, setShowResamplePanel] = useState(false);
   const [resampleFraction, setResampleFraction] = useState(0.5);
   const [resamplePreview, setResamplePreview] = useState<{
@@ -5701,6 +5707,35 @@ export default function PointCloudViewer({
       .map(id => clouds.find(c => c.id === id))
       .filter((c): c is PointCloudEntry => !!c);
   }, [selectedIds, clouds]);
+
+  // Sample the live preview's kept-fraction while the Filter panel is open.
+  //
+  // Aggregated across every selected scan (the preview covers all of them, and
+  // so does the commit), weighted by each cloud's previewed point count so the
+  // figure means "of the points being previewed, this share survives" rather
+  // than an average of per-cloud percentages — which would let a tiny scan
+  // swing the number as much as a huge one.
+  useEffect(() => {
+    if (!showFilterPanel) { setFilterPreviewShown(null); return; }
+    const sample = () => {
+      const byCloud = (window as { __octreeMaskByCloud?: Record<string, { drawn: number; full: number }> })
+        .__octreeMaskByCloud;
+      if (!byCloud) { setFilterPreviewShown(null); return; }
+      let drawn = 0;
+      let full = 0;
+      for (const cloud of filterTargetClouds) {
+        const id = cloud.data.octree?.cacheId;
+        const s = id ? byCloud[id] : undefined;
+        if (!s) continue;
+        drawn += s.drawn;
+        full += s.full;
+      }
+      setFilterPreviewShown(full > 0 ? drawn / full : null);
+    };
+    sample();
+    const t = setInterval(sample, 250);
+    return () => clearInterval(t);
+  }, [showFilterPanel, filterTargetClouds]);
 
   // A cloud's filters with every field present at its full extent and disabled.
   // Used to seed the panel and to give a sibling scan (never opened in the
@@ -18076,9 +18111,11 @@ export default function PointCloudViewer({
           // their LOD streaming handles everything, and getDisplayIndices
           // would return an empty Uint32Array (no positions → no matches).
           // The kill-switch below would then hide the whole cloud the
-          // moment the user opens crop or any range filter. Crop preview
-          // for octree clouds is going to be a ClipBox in M3; for now,
-          // skip the indices path entirely.
+          // moment the user opens crop or any range filter.
+          //
+          // They preview through the per-point mask instead, not this index:
+          // crop via `clipBox`/`cropMask` and filters via `filters` below, both
+          // composed onto the tile geometries by octreeCropMask.ts.
           const isOctreeCloud = !!cloud.data.octree;
           const indices = hasResamplePreview || isOctreeCloud
             ? null
@@ -18205,6 +18242,12 @@ export default function PointCloudViewer({
                   // sends to the backend, so the preview matches the result
                   // by construction rather than by a parallel implementation.
                   cropMask={cropMaskRulesFor(cloud.id, showCropPreview ? octreeCropMask : null)}
+                  // Live filter preview. Passed for EVERY cloud that has
+                  // filters, not just the panel's primary: the commit buttons
+                  // act on the whole selection (see resolveFilterTargets), so
+                  // previewing only the primary would show a different set from
+                  // the one Filter/Segment are about to act on.
+                  filters={cloudFilters.get(cloud.id)}
                   // Live labelling preview — only for the cloud being labelled.
                   labelOverlayRef={
                     labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
@@ -21815,6 +21858,7 @@ export default function PointCloudViewer({
             pendingFilterMax={pendingFilterMax}
             activeFilters={activeFilters}
             hasAnyFilter={hasAnyFilter}
+            previewShownFraction={filterPreviewShown}
             selectedFieldNarrows={selectedFieldNarrows}
             getFieldFilter={getFieldFilter}
             fieldNarrows={fieldNarrows}

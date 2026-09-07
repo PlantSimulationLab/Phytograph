@@ -480,10 +480,21 @@ cloud instead.
     scan are reused for the rest; a scan the criteria wouldn't change is
     skipped rather than needlessly rebuilt.
 
-!!! info "Small vs large clouds"
-    Small (in-memory) clouds preview the filter live in the viewport as you
-    edit the range. Large, octree-backed clouds have no live preview —
-    committing applies the filter to the in-memory points and rebuilds the
+!!! info "Live preview"
+    The viewport previews the filter **as you type**, for small (in-memory)
+    clouds and large octree-backed ones alike: points the criteria exclude are
+    hidden immediately, with no backend round-trip and nothing altered on disk.
+    Widen the range and they come straight back. Nothing is removed until you
+    press one of the commit buttons.
+
+    On a large cloud the preview covers the points currently loaded at the
+    displayed level of detail, so treat it as a preview of the **shape** of the
+    result. That's why the panel reports a **percentage kept** rather than a
+    point count — the proportion holds up at any level of detail, whereas an
+    exact count only comes from the commit itself.
+
+!!! info "Committing on a large cloud"
+    Committing applies the filter to the in-memory points and rebuilds the
     displayed octree from the survivors (the file is not re-read). On a large
     plot that rebuild takes a while, so a **progress pill** appears at the top
     of the viewport while it runs and the commit button reads *Filtering…* —

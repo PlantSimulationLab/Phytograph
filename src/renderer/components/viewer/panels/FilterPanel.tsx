@@ -48,6 +48,16 @@ interface FilterPanelProps {
   // removes nothing, and listing it read as "a filter is being applied".
   activeFilters: FieldOption[];
   hasAnyFilter: boolean;
+  // Fraction of the previewed points the current criteria KEEP (0-1), or null
+  // when nothing is previewing yet.
+  //
+  // Deliberately a proportion and not a count. The live preview masks whatever
+  // tiles the octree LOD happens to have streamed in, so an absolute number
+  // would be a sample of the current view dressed up as an answer — and the
+  // only number that matters, the one the backend returns on commit, is not
+  // known until the user commits. The ratio is stable across LODs, so it is the
+  // honest thing to show.
+  previewShownFraction?: number | null;
   // True when the SELECTED field alone narrows anything. Separate from
   // `hasAnyFilter` so "Remove this filter" is offered per field rather than
   // whenever any other field happens to be filtered.
@@ -102,6 +112,26 @@ interface FilterPanelProps {
   onClearNoise: () => void;
 }
 
+/**
+ * Format a kept-fraction (0-1) for the preview readout.
+ *
+ * The two ends are special-cased because plain rounding lies exactly where the
+ * user is most likely to act on it: a filter keeping 3 points in 10 million
+ * rounds to "0% kept" (reads as "this removes everything", when it does not),
+ * and one dropping 3 rounds to "100% kept" (reads as "this does nothing", when
+ * it is about to delete points). So a non-empty result never shows 0% and a
+ * non-complete one never shows 100%.
+ */
+export function formatShownPercent(fraction: number): string {
+  if (!Number.isFinite(fraction)) return '—';
+  if (fraction <= 0) return '0%';
+  if (fraction >= 1) return '100%';
+  const pct = fraction * 100;
+  if (pct < 1) return '<1%';
+  if (pct > 99) return '>99%';
+  return `${Math.round(pct)}%`;
+}
+
 export function FilterPanel({
   availableFields,
   selectedFilterField,
@@ -112,6 +142,7 @@ export function FilterPanel({
   pendingFilterMax,
   activeFilters,
   hasAnyFilter,
+  previewShownFraction = null,
   selectedFieldNarrows,
   getFieldFilter,
   fieldNarrows,
@@ -453,6 +484,24 @@ export function FilterPanel({
               );
             })}
           </div>
+          {/* Live preview summary. A PERCENTAGE, not a count — see
+              `previewShownFraction`. Labelled "preview" and paired with the
+              caveat below so it is never read as the number Filter will
+              actually remove. */}
+          {previewShownFraction != null && (
+            <div
+              data-testid="filter-preview-fraction"
+              data-shown-fraction={previewShownFraction}
+              className="mt-1 text-[10px] text-neutral-400 bg-neutral-900/50 rounded px-2 py-1"
+            >
+              Preview: <span className="text-neutral-200 font-medium">
+                {formatShownPercent(previewShownFraction)}
+              </span> of points kept
+              <div className="text-neutral-500">
+                approximate, at the current level of detail
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -4,7 +4,8 @@ import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBo
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
-import type { PointCloudData } from '../../../lib/pointCloudTypes';
+import type { CloudFilters, PointCloudData } from '../../../lib/pointCloudTypes';
+import { resolveOctreeFilterSpec, EMPTY_FILTER_SPEC } from '../../../lib/octreeFilterSpec';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
 import { isWideOctreeAttribute } from '../../../lib/octreeWideAttributes';
 import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
@@ -12,7 +13,7 @@ import { applyOctreePose } from './octreePose';
 import {
   applyCropMaskToVisibleNodes,
   clearCropMaskFromVisibleNodes,
-  cropMaskRulesKey,
+  visibilityMaskKey,
   type CropMaskRule,
   publishCropMaskStats,
 } from './octreeCropMask';
@@ -115,6 +116,16 @@ export interface OctreePointCloudProps {
   // region changes and is what triggers a re-mask — pass stable strings.
   // Null or empty hides nothing.
   cropMask?: readonly CropMaskRule[] | null;
+  /**
+   * Live filter preview. The Filter panel's committed ranges for THIS cloud;
+   * points failing any enabled one are hidden through the same per-point mask
+   * the crop preview uses (they share the geometry index, so they must).
+   *
+   * Undefined/no-enabled-filter hides nothing. Unlike the crop preview this
+   * does NOT cap the LOD — a filter is static between edits, so it can preview
+   * at the full point budget (see the note in octreeCropMask.ts).
+   */
+  filters?: CloudFilters | null;
   /**
    * Live manual-labelling preview, read through a REF.
    *
@@ -239,6 +250,11 @@ function applyScalarSwapToVisibleNodes(octree: any, field: string): void {
 // higher = denser/uniform but heavier; lower = sparser/lighter. Removed on exit.
 const CROP_PREVIEW_MAX_LEVEL = 4;
 
+// How long the filter preview waits after the last edit before re-masking.
+// Long enough that typing "12.5" is one mask pass rather than four, short
+// enough to still read as live. The panel's own state is never debounced.
+const FILTER_PREVIEW_DEBOUNCE_MS = 80;
+
 // Module-level and frozen so `cropMask ?? EMPTY_CROP_MASK` is referentially
 // stable: a fresh `[]` per render would re-run the mask effect (and its
 // clear-then-reapply cleanup) on every parent render with no crop active.
@@ -315,6 +331,7 @@ export function OctreePointCloud({
   labelIndexScheme = null,
   slabBoxMatrix = null,
   cropMask = null,
+  filters = null,
   translation,
   rotation,
   pivot,
@@ -509,6 +526,12 @@ export function OctreePointCloud({
     return () => {
       if (cacheId && (window as any).__octreePositions) {
         delete (window as any).__octreePositions[cacheId];
+      }
+      // Same reason as the two above: a cloud that is gone must not leave its
+      // last mask tally behind, or the panel's percentage (and any test reading
+      // this hook) would keep counting a scan that no longer exists.
+      if (cacheId && (window as any).__octreeMaskByCloud) {
+        delete (window as any).__octreeMaskByCloud[cacheId];
       }
       if (cacheId && (window as any).__octreeCropHidden) {
         delete (window as any).__octreeCropHidden[cacheId];
@@ -1014,17 +1037,45 @@ export function OctreePointCloud({
   // restores full density. The cleanup runs on unmount and on every key change,
   // which is what un-hides points rather than leaving an earlier mask behind.
   const cropMaskRules = cropMask ?? EMPTY_CROP_MASK;
-  const cropMaskKey = cropMaskRulesKey(cropMaskRules);
+  const cacheId = data.octree?.cacheId;
+
+  // The filter preview, DEBOUNCED. The panel commits a new range on every
+  // keystroke (so a flat cloud previews as you type), which for an octree would
+  // mean re-masking every loaded tile once per character. Debouncing the MASK
+  // rather than the input keeps the panel's own state instant — the typed value
+  // and the Active Filters list update immediately — while the GPU-side work
+  // coalesces. Trailing edge only; a filter is meaningless mid-keystroke.
+  const liveFilterSpec = useMemo(
+    () => resolveOctreeFilterSpec(filters, octree),
+    [filters, octree],
+  );
+  const [filterSpec, setFilterSpec] = useState(EMPTY_FILTER_SPEC);
   useEffect(() => {
-    if (!octree) return;
-    if (cropMaskRules.length === 0) {
-      clearCropMaskFromVisibleNodes(octree);
+    // Clearing is applied immediately: restoring hidden points is what the user
+    // is waiting to see, and it costs a setIndex(null) per tile.
+    if (liveFilterSpec.clauses.length === 0) {
+      setFilterSpec(EMPTY_FILTER_SPEC);
       return;
     }
-    applyCropMaskToVisibleNodes(octree, displayOffset, cropMaskRules, cropMaskKey);
-    return () => clearCropMaskFromVisibleNodes(octree);
+    const t = setTimeout(() => setFilterSpec(liveFilterSpec), FILTER_PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [liveFilterSpec]);
+
+  // ONE mask, two clause sources — see the header of octreeCropMask.ts. The key
+  // covers both, so a change to either re-masks and an empty stack restores full
+  // density. The cleanup runs on unmount and on every key change, which is what
+  // un-hides points rather than leaving an earlier mask behind.
+  const cropMaskKey = visibilityMaskKey(cropMaskRules, filterSpec);
+  useEffect(() => {
+    if (!octree) return;
+    if (cropMaskRules.length === 0 && filterSpec.clauses.length === 0) {
+      clearCropMaskFromVisibleNodes(octree, cacheId);
+      return;
+    }
+    applyCropMaskToVisibleNodes(octree, displayOffset, cropMaskRules, cropMaskKey, filterSpec, cacheId);
+    return () => clearCropMaskFromVisibleNodes(octree, cacheId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [octree, cropMaskKey, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
+  }, [octree, cropMaskKey, cacheId, displayOffset?.x, displayOffset?.y, displayOffset?.z]);
 
   // Cap the octree LOD level while a crop box is previewing so potree spreads
   // the (reduced) budget across a shallower, cheaper, more even part of the tree
@@ -1068,15 +1119,21 @@ export function OctreePointCloud({
   // Tracks whether the overlay was active last frame, so it is torn down
   // exactly once when the tool closes rather than every frame after.
   const labelOverlayWasActiveRef = useRef(false);
+  // The filter spec key that was last observed to hide EVERY loaded point, or
+  // null. Drives the zero-result LOD skip in shouldSkip above; see the note
+  // there for why it is keyed rather than a bare boolean.
+  const emptyFilterKeyRef = useRef<string | null>(null);
   const frameStateRef = useRef({
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
+    filterSpec, cacheId,
   });
   frameStateRef.current = {
     // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
     // emptiness for a rotated cloud (see cropClipsEverything).
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
+    filterSpec, cacheId,
   };
 
   useEffect(() => {
@@ -1100,6 +1157,27 @@ export function OctreePointCloud({
           if (octree.visible) octree.visible = false;
           return true;
         }
+        // Same pathology for a filter that keeps NOTHING: an unfilled point
+        // budget makes potree stream the whole region, so a cloud that is
+        // entirely masked away costs the most to render. But unlike a crop box
+        // this cannot be predicted from bounds — a filter's result depends on
+        // per-point attribute values — so it is read back from the LAST mask
+        // pass (`drawn === 0` over tiles that were actually loaded) rather than
+        // computed ahead. That makes it lag by a frame, which is harmless: the
+        // frame it lags by is one that drew nothing anyway.
+        //
+        // Latched on the FILTER KEY, not on the stats alone. Skipping an entry
+        // excludes it from the shared update, so its `afterUpdate` — the thing
+        // that refreshes these stats — never runs again (see updateAllPointClouds).
+        // Keying on the spec means any edit to the filter re-admits the cloud
+        // for one frame, which re-masks and either clears the latch or renews
+        // it. Without this a filter that emptied the cloud once would leave it
+        // invisible no matter how far the user then widened the range.
+        const fs = frameStateRef.current.filterSpec;
+        if (fs.clauses.length > 0 && emptyFilterKeyRef.current === fs.key) {
+          if (octree.visible) octree.visible = false;
+          return true;
+        }
         if (!octree.visible) octree.visible = true;
         return false;
       },
@@ -1111,6 +1189,7 @@ export function OctreePointCloud({
           data: d, colorMode: cm, selectedScalarField: field,
           onFirstTilesReady: onReady,
           cropMask: mask, cropMaskKey: maskKey, displayOffset: offset,
+          filterSpec: fspec, cacheId: cid,
         } = frameStateRef.current;
         const cur = octree.material;
         const visible = (octree as any).visibleNodes;
@@ -1159,12 +1238,21 @@ export function OctreePointCloud({
         // crop effect ran — without this they render their cropped-away points
         // as the LOD fills in. Skips any tile already masked under this key, so
         // the steady-state cost is one string compare per visible node.
-        if (mask.length > 0) {
-          applyCropMaskToVisibleNodes(octree, offset, mask, maskKey);
+        // A FILTER preview needs this just as much as a crop does, and for the
+        // same reason: potree streams tiles in continuously, so an unmasked
+        // arrival would render the points the filter is meant to hide.
+        if (mask.length > 0 || fspec.clauses.length > 0) {
+          applyCropMaskToVisibleNodes(octree, offset, mask, maskKey, fspec, cid);
+          // Record whether THIS filter emptied the cloud, so shouldSkip can stop
+          // potree refilling an unfillable budget next frame. Keyed by spec, so
+          // the latch dies with the filter that caused it.
+          const s = (window as any).__octreeMaskByCloud?.[cid ?? ''];
+          emptyFilterKeyRef.current =
+            fspec.clauses.length > 0 && s && s.tiles > 0 && s.drawn === 0 ? fspec.key : null;
         } else {
           // Keep the E2E stats hook truthful while no mask is active, so a test
           // can read a real "nothing hidden" baseline before drawing.
-          publishCropMaskStats(octree);
+          publishCropMaskStats(octree, cid);
         }
       },
     });

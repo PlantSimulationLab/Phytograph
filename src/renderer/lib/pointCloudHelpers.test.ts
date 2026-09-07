@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   formatColorbarTick,
+  filterValueKeeps,
   pointPassesFilters,
   hasEnabledFilter,
   computeBoundsFromPositions,
@@ -1827,6 +1828,38 @@ describe('extentForParameterSeeding', () => {
   });
 });
 
+
+describe('filterValueKeeps', () => {
+  // The value-level rule shared by the flat preview, the OCTREE preview (which
+  // cannot call pointPassesFilters — it has no flat PointCloudData) and the
+  // destructive commit. A parallel implementation of these rules is the drift
+  // this function exists to make impossible.
+  it('keeps a value inside a continuous range, inclusive of both bounds', () => {
+    const f = { min: 1, max: 3, enabled: true };
+    expect([0.9, 1, 2, 3, 3.1].map(v => filterValueKeeps(f, v)))
+      .toEqual([false, true, true, true, false]);
+  });
+
+  it('matches a categorical filter on the ROUNDED value', () => {
+    // float32 storage: a class id of 2 reads back as 1.9999999.
+    const f = { min: 1, max: 3, enabled: true, selectedClasses: [2] };
+    expect([1.9999999, 2, 2.0000001, 3].map(v => filterValueKeeps(f, v)))
+      .toEqual([true, true, true, false]);
+  });
+
+  it('keeps nothing when the selected class set is empty', () => {
+    const f = { min: 1, max: 3, enabled: true, selectedClasses: [] };
+    expect([1, 2, 3].map(v => filterValueKeeps(f, v))).toEqual([false, false, false]);
+  });
+
+  it('ignores min/max entirely once selectedClasses is present', () => {
+    // The panel commits min/max spanning the whole class range alongside the
+    // class set, so a range test here would keep everything.
+    const f = { min: 0, max: 0, enabled: true, selectedClasses: [7] };
+    expect(filterValueKeeps(f, 7)).toBe(true);
+    expect(filterValueKeeps(f, 0)).toBe(false);
+  });
+});
 
 describe('pointPassesFilters', () => {
   // One predicate now backs BOTH the viewport preview (PointCloud.tsx) and the

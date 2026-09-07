@@ -1,13 +1,32 @@
 // Pure, stateless helpers extracted from PointCloudViewer.tsx. No React, no
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
-import type { AlignedArrays, CloudFilters, HitPoints, MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
+import type { AlignedArrays, CloudFilters, FilterRange, HitPoints, MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
 import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire, shiftPoseStream } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
 import { applyTriangleFilter } from './triangleFilter';
 import { MISS_ATTRIBUTE } from './classification';
+
+// Does one field's committed filter keep the value `v`? The single definition
+// of what a FilterRange means, at the level of one value.
+//
+// Extracted so the OCTREE preview can share it: octree clouds have no flat
+// `PointCloudData` to index into (their values live in per-tile
+// `geometry.attributes[slug]` buffers), so `pointPassesFilters` below cannot be
+// called on them — but a second, parallel implementation of the same rules is
+// exactly the drift that made a categorical filter preview as a no-op and then
+// delete points on commit. Everything that decides "does this value survive the
+// filter" — flat preview, octree preview, destructive commit — routes here.
+//
+// Categorical: keep iff the ROUNDED value is a selected class. Values are
+// float32, so a class id of 2 can read back as 1.9999999, and a bare
+// `includes(v)` would drop every point of that class.
+export function filterValueKeeps(f: FilterRange, v: number): boolean {
+  if (f.selectedClasses) return f.selectedClasses.includes(Math.round(v));
+  return v >= f.min && v <= f.max;
+}
 
 // Does point `i` of a FLAT cloud pass every enabled filter? The single
 // definition of the filter predicate, shared by the live viewport preview
@@ -30,25 +49,16 @@ export function pointPassesFilters(
   const x = data.positions[i * 3];
   const y = data.positions[i * 3 + 1];
   const z = data.positions[i * 3 + 2];
-  if (filters.x.enabled && (x < filters.x.min || x > filters.x.max)) return false;
-  if (filters.y.enabled && (y < filters.y.min || y > filters.y.max)) return false;
-  if (filters.z.enabled && (z < filters.z.min || z > filters.z.max)) return false;
+  if (filters.x.enabled && !filterValueKeeps(filters.x, x)) return false;
+  if (filters.y.enabled && !filterValueKeeps(filters.y, y)) return false;
+  if (filters.z.enabled && !filterValueKeeps(filters.z, z)) return false;
   if (filters.intensity?.enabled && data.intensities) {
-    const v = data.intensities[i];
-    if (v < filters.intensity.min || v > filters.intensity.max) return false;
+    if (!filterValueKeeps(filters.intensity, data.intensities[i])) return false;
   }
   for (const name in filters.scalarFields) {
     const sf = filters.scalarFields[name];
     if (sf.enabled && data.scalarFields?.[name]) {
-      const v = data.scalarFields[name].values[i];
-      // Categorical: keep iff the rounded value is a selected class. The values
-      // are float32, so a class id of 2 can read back as 1.9999999, and a bare
-      // `includes(v)` would drop every point of that class.
-      if (sf.selectedClasses) {
-        if (!sf.selectedClasses.includes(Math.round(v))) return false;
-      } else if (v < sf.min || v > sf.max) {
-        return false;
-      }
+      if (!filterValueKeeps(sf, data.scalarFields[name].values[i])) return false;
     }
   }
   return true;
