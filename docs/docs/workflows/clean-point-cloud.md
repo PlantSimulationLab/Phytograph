@@ -205,14 +205,19 @@ run: scans already cropped stay cropped, and the rest are left untouched.
 Two ways to shape the box:
 
 - **Type dimensions / center** in the panel for an exact axis-aligned box.
-- **Click "Draw box in viewport"** then click two opposite corners on the
-  ground plane. After the first click a marker shows where it landed and a
-  live preview box follows the cursor until you click the second corner.
-  The box's Z extent auto-spans the data; refine with the dimension /
-  center fields afterwards. <kbd>Esc</kbd> cancels.
+- **Click "Draw box in viewport"** then click two opposite corners. Each
+  corner lands on the surface under the cursor — click a tree and the corner
+  lands at that tree — falling back to the ground plane where the click
+  misses the cloud. After the first click a marker shows where it landed and
+  a live preview box follows the cursor until you click the second corner.
+  The current box is hidden while you draw so it can't obscure what you're
+  aiming at, and the camera is locked between the two clicks so an orbit
+  can't be mistaken for a corner. The box's Z extent auto-spans the data;
+  refine with the dimension / center fields afterwards. <kbd>Esc</kbd>
+  cancels and restores the previous box.
 
-Box mode is axis-aligned and easiest from a roughly top-down view. To crop
-from an angled view, use **Rect** instead.
+Box mode is axis-aligned. For a region that isn't square to the axes, use
+**Rect** or **Polygon** instead.
 
 !!! tip "Cropping out the ground"
     For TLS scans of a single plant, raise the box's lower Z bound to

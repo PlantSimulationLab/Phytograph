@@ -271,9 +271,9 @@ export function CropPanel({
             className={`w-full px-2 py-1.5 text-xs rounded mb-2 ${cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2' ? 'bg-amber-600 text-white' : 'bg-neutral-700 hover:bg-neutral-600 text-neutral-200'}`}
           >
             {cropDrawState === 'awaiting-box-corner-1'
-              ? 'Click first corner on ground…'
+              ? 'Click first corner…'
               : cropDrawState === 'awaiting-box-corner-2'
-                ? 'Click second corner on ground…'
+                ? 'Click second corner…'
                 : 'Draw box in viewport'}
           </button>
           <button

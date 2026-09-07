@@ -2164,9 +2164,23 @@ export default function PointCloudViewer({
   const [polygonInProgress, setPolygonInProgress] = useState<
     { x: number; y: number }[]
   >([]);
-  // First-corner stash while a two-click ground-plane box draw is in
-  // progress.
+  // First-corner stash while a two-click box draw is in progress.
   const boxDrawFirstCornerRef = useRef<{ x: number; y: number } | null>(null);
+  // Mirror of cropDrawState for the raycaster's onPick, which must NOT read the
+  // state variable. Both clicks land on the same mounted BoxDrawRaycaster, so a
+  // state read there returns the value from the render that mounted it — the
+  // second click would still see 'awaiting-box-corner-1' and overwrite the first
+  // corner instead of completing the box. Same trap the cross-section slab code
+  // calls out (slabDrawRef). This used to survive only because the state change
+  // remounted the component with a fresh closure; that is an accident, not a
+  // guarantee, and the more the surrounding render conditions change the less
+  // safe it gets.
+  //
+  // Assigned during render rather than mirrored at each of the ~20
+  // setCropDrawState call sites (which would decay the first time someone adds
+  // one) and rather than in an effect (which would leave the ref a render
+  // behind for the click that arrives first).
+  const boxDrawStateRef = useRef<'idle' | 'awaiting-box-corner-1' | 'awaiting-box-corner-2'>('idle');
   // Live world-XY cursor position on the ground plane while placing box
   // corners, used to render the corner-1 marker and the live preview box
   // that follows the cursor before corner 2 is clicked. On a ref (plus a
@@ -7179,6 +7193,17 @@ export default function PointCloudViewer({
   // clamped to the panel edge — and `blocked` says a click right now would be
   // swallowed. Panels stay interactive; the ⊘ cursor marker says so.
   const cropDrawing = cropDrawState === 'drawing-polygon' || cropDrawState === 'drawing-rect';
+  // Placing the two corners of a world-space crop box. Distinct from
+  // `cropDrawing` (the screen-space shapes): this one suppresses the COMMITTED
+  // box — both its wireframe and its GPU clip — so the box being replaced can't
+  // hide the points you're aiming at, and it freezes the camera so an orbit drag
+  // can't land as a corner.
+  const boxDrawing = cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2';
+  // Keep the ref the raycaster's onPick reads in step with the state. See the
+  // declaration for why that handler cannot read `cropDrawState` directly.
+  boxDrawStateRef.current = boxDrawing
+    ? (cropDrawState as 'awaiting-box-corner-1' | 'awaiting-box-corner-2')
+    : 'idle';
   const cropZone = useViewportBlockZone(cropDrawing, viewerRootRef, {
     onMove: (p) => {
       if (rectDragStart) {
@@ -18159,8 +18184,13 @@ export default function PointCloudViewer({
                   // below instead. Segment mode never clips — both
                   // halves survive, so the whole cloud stays visible and
                   // only the CropBox wireframe marks the split.
+                  //
+                  // Suspended while placing corners (`boxDrawing`): the clip
+                  // is still the OLD box, so it hides exactly the points the
+                  // user is trying to aim the new one at. Unclipped for the
+                  // duration; the second click reinstates it with the new box.
                   clipBox={
-                    showCropPreview && !cropSegment && cropMode === 'box' && cropBox
+                    showCropPreview && !cropSegment && cropMode === 'box' && cropBox && !boxDrawing
                       ? {
                           min: new THREE.Vector3(cropBox.min.x, cropBox.min.y, cropBox.min.z),
                           max: new THREE.Vector3(cropBox.max.x, cropBox.max.y, cropBox.max.z),
@@ -18702,7 +18732,12 @@ export default function PointCloudViewer({
           // unlike erase: a sphere is the same volume from any angle, so
           // orbiting between strokes is useful and safe. Only the drag ITSELF
           // is suppressed, or a left-drag would paint and orbit at once.
-          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !eraseActive && !labelBrushPainting}
+          // `boxDrawing` joins the two screen-space draws for a reason of its
+          // own: the corner picks are plain clicks on an in-scene plane, so an
+          // orbit drag that happens to end over that plane registers as a
+          // corner placement. Freezing the camera removes that path outright
+          // (rather than bolting on a drag-slop guard). Esc still cancels.
+          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !boxDrawing && !eraseActive && !labelBrushPainting}
           // While the brush owns plain wheel for its radius, zoom moves to Alt.
           zoomOnAltWheel={labelBrushActive}
           displayOffset={displayOffset}
@@ -19038,8 +19073,14 @@ export default function PointCloudViewer({
 
         {/* Crop Box (world-space) — shown only in box mode. The polygon
             lasso is drawn as an SVG overlay outside the canvas so it
-            doesn't fight three.js event handling. */}
-        {editMode === 'crop' && cropMode === 'box' && cropBox && (
+            doesn't fight three.js event handling.
+
+            Hidden while the two corners are being placed: the rubber-band
+            preview below already draws a box, and without this you get BOTH —
+            the box you're replacing and the one you're drawing, two green
+            wireframes and two translucent fills at once. `cropBox` state itself
+            is untouched, so Esc restores the previous box. */}
+        {editMode === 'crop' && cropMode === 'box' && cropBox && !boxDrawing && (
           // Render-only precision safety net: cropBox.min/max state stays WORLD
           // (it's sent to the backend as-is); only the rendered gizmo shifts into
           // display space via a wrapping group.
@@ -19052,16 +19093,27 @@ export default function PointCloudViewer({
           </group>
         )}
 
-        {/* Two-click ground-plane box-draw raycaster. Active only while
-            the user has clicked "Draw box" in the panel. */}
-        {editMode === 'crop' &&
-          (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2') && (
+        {/* Two-click box-draw raycaster. Active only while the user has clicked
+            "Draw box" in the panel. Corners land on the surface under the
+            cursor, falling back to the ground plane where the ray misses. */}
+        {editMode === 'crop' && boxDrawing && (
           <BoxDrawRaycaster
             // The raycaster lives in the scene (now DISPLAY space), so its ground
             // plane is at the display z. The hit (x,y) is display-space; the
             // corner refs + cropBox below store WORLD coords (offset added back),
             // since cropBox is sent to the backend in world space.
             groundZ={combinedBounds.groundZ - displayOffset.z}
+            // Surface-pick across every SELECTED, visible octree cloud — crop
+            // applies to the whole selection, so `selectedOctree()` (first
+            // cloud only) would be the wrong helper. Projected-miss octrees are
+            // never entered into the registry, so a sky point ~1 km out can
+            // never win a corner pick without any filtering here. Flat clouds
+            // have no octree and fall through to the ground plane.
+            octrees={clouds.flatMap((c) => {
+              if (!c.visible || !selectedIds.has(c.id)) return [];
+              const oct = octreeRegistryRef.current.get(c.id);
+              return oct ? [oct] : [];
+            })}
             onMove={(x, y) => {
               boxDrawCursorRef.current = { x: x + displayOffset.x, y: y + displayOffset.y };
               // Re-render so the corner-1 marker / preview box follows the
@@ -19071,7 +19123,10 @@ export default function PointCloudViewer({
             onPick={(x, y) => {
               const wx = x + displayOffset.x;
               const wy = y + displayOffset.y;
-              if (cropDrawState === 'awaiting-box-corner-1') {
+              // Read the draw state through the REF, never the state variable —
+              // see boxDrawStateRef's declaration. Both clicks land on the same
+              // mounted raycaster.
+              if (boxDrawStateRef.current === 'awaiting-box-corner-1') {
                 boxDrawFirstCornerRef.current = { x: wx, y: wy };
                 setCropDrawState('awaiting-box-corner-2');
                 return;
@@ -19097,8 +19152,7 @@ export default function PointCloudViewer({
             marker at the first corner and, once it's placed, a preview box
             spanning corner 1 → current cursor that updates on every move.
             Mirrors the polygon lasso's cursor-follows preview. */}
-        {editMode === 'crop' &&
-          (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2') && (() => {
+        {editMode === 'crop' && boxDrawing && (() => {
           // Read the tick so this re-renders as the cursor moves.
           void boxDrawCursorTick;
           const first = boxDrawFirstCornerRef.current;
