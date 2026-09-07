@@ -216,6 +216,12 @@ export function LADPopup({
   // uncertainty that the backend computes on every run. Broadleaf ≈ 0.05 m,
   // conifer needles ≈ 0.002 m — presets below set common values.
   const [elementWidthStr, setElementWidthStr] = useState('0.05');
+  // Occlusion screening. Blank = use the backend's grid-derived default
+  // (100x the mean voxel side length; Soma, Pimont & Dupuy 2021). A typed
+  // value is in metres of total probed beam path, matching the published
+  // parameter so a user can enter a literature value directly.
+  const [occlusionThresholdStr, setOcclusionThresholdStr] = useState('');
+  const [fillOccluded, setFillOccluded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // --- Direct G(θ) / leaf-angle-distribution override (the third source) ------
@@ -322,6 +328,23 @@ export function LADPopup({
   const profileGrid = reuseTri ? reuseTri.grid : selectedGrid?.grid;
   const nz = profileGrid?.nz ?? 0;
 
+  // The occlusion threshold the BACKEND will apply when the field is left blank:
+  // 100x the mean voxel side length. Mirrored here purely so the placeholder can
+  // show the real number rather than a vague "auto" — the backend remains the
+  // authority and recomputes it from the grid it actually built.
+  // Shown only for a plain axis-aligned box, where dividing the grid extent by the
+  // division counts provably gives the same cell size the backend will see. On a
+  // terrain-following grid Helios can adjust cells, so the two could disagree and
+  // advertising a specific number would be worse than saying "auto".
+  const defaultOcclusionThreshold = useMemo(() => {
+    const g = profileGrid;
+    if (!g || gridIsSnapped) return null;
+    const nxg = g.nx || 1, nyg = g.ny || 1, nzg = g.nz || 1;
+    const sx = g.size[0] / nxg, sy = g.size[1] / nyg, sz = g.size[2] / nzg;
+    const mean = (sx + sy + sz) / 3;
+    return Number.isFinite(mean) && mean > 0 ? 100 * mean : null;
+  }, [profileGrid, gridIsSnapped]);
+
   // Keep the per-level profile rows sized to nz, seeding new/blank rows from the
   // single-spec drafts so a fresh profile starts from the user's current choice.
   useEffect(() => {
@@ -401,6 +424,19 @@ export function LADPopup({
     const maxAspectRatio = reuseTri ? reuseTri.maxAspectRatio : (parseFloat(maxAspectRatioStr) || 4.0);
     const minVoxelHits = Math.max(1, parseInt(minVoxelHitsStr, 10) || 1);
     const elementWidth = Math.max(0, parseFloat(elementWidthStr) || 0.05);
+    // Blank/unparseable => undefined, so the backend applies its grid-derived
+    // default rather than a number invented here.
+    const parsedOcclusion = parseFloat(occlusionThresholdStr);
+    if (occlusionThresholdStr.trim() !== ''
+        && (!Number.isFinite(parsedOcclusion) || parsedOcclusion < 0)) {
+      // Silently falling back to the auto default here would show one number in
+      // the field while a different one ran.
+      setError('Occlusion threshold must be a number of metres, 0 or greater '
+               + '(leave it blank to use the automatic value).');
+      return;
+    }
+    const occlusionThresholdM = Number.isFinite(parsedOcclusion) && parsedOcclusion >= 0
+      ? parsedOcclusion : undefined;
 
     // Direct G(θ) override (constant or vertical profile, value/de Wit/Beta). When
     // active it selects the supplied-G(θ) path: no triangulation, no mesh reuse.
@@ -447,6 +483,8 @@ export function LADPopup({
       maxAspectRatio,
       minVoxelHits,
       elementWidth,
+      occlusionThresholdM,
+      fillOccluded,
       gthetaSpec,
     });
 
@@ -487,7 +525,7 @@ export function LADPopup({
 
     onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh, newTri, selectedScans);
     onClose();
-  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, anyMoving, useSuppliedGtheta, gthetaSpatial, nz, gthetaProfileRows, gthetaMethod, gthetaConstStr, gthetaDewit, gthetaBetaMuStr, gthetaBetaNuStr, buildValueSpec, onStartLAD, onClose]);
+  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, occlusionThresholdStr, fillOccluded, anyMoving, useSuppliedGtheta, gthetaSpatial, nz, gthetaProfileRows, gthetaMethod, gthetaConstStr, gthetaDewit, gthetaBetaMuStr, gthetaBetaNuStr, buildValueSpec, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
@@ -1070,6 +1108,48 @@ export function LADPopup({
                   Conifer (0.002)
                 </button>
               </div>
+            </div>
+
+            {/* Occlusion screening — a voxel probed by too little total beam path
+                is reported as occluded rather than measured, and can optionally be
+                estimated from the reliable voxels around it. */}
+            <div className="mt-4">
+              <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+                Occlusion threshold (m of beam path)
+                <InfoHint
+                  data-testid="lad-occlusion-help"
+                  label="Occlusion threshold"
+                  text="Total length of laser beam path that must pass through a voxel before its leaf-area estimate is trusted. Below this the inversion is not just noisy but biased HIGH, so the voxel is reported as occluded rather than as a measurement, and is left out of the leaf-area total. Leave blank to use 100× the voxel side length (Soma, Pimont & Dupuy 2021) — the right default because total path length scales with voxel size, so no fixed number suits every grid. Enter a value in metres to match a published figure."
+                />
+              </label>
+              <input
+                data-testid="lad-input-occlusion-threshold"
+                type="number"
+                onWheel={(e) => e.currentTarget.blur()}
+                value={occlusionThresholdStr}
+                onChange={(e) => setOcclusionThresholdStr(e.target.value)}
+                step="1"
+                min="0"
+                placeholder={defaultOcclusionThreshold != null
+                  ? `Auto — ${defaultOcclusionThreshold.toFixed(1)} m for this grid`
+                  : 'Auto (100× voxel side)'}
+                className="w-full px-2 py-1.5 bg-neutral-700 border border-neutral-600 rounded text-xs text-white placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-green-500/50"
+              />
+              <label className="flex items-center gap-2 text-[10px] text-neutral-400 cursor-pointer mt-2">
+                <input
+                  data-testid="lad-fill-occluded"
+                  type="checkbox"
+                  checked={fillOccluded}
+                  onChange={(e) => setFillOccluded(e.target.checked)}
+                  className="rounded bg-neutral-700 border-neutral-600 w-3 h-3 accent-neutral-500"
+                />
+                Fill occluded voxels
+                <InfoHint
+                  data-testid="lad-fill-help"
+                  label="Fill occluded voxels"
+                  text="Estimate each occluded voxel from the surrounding well-sampled ones by LAD-kriging (Soma et al. 2020), which weights each neighbour by how reliably it was measured. Filled voxels are marked as interpolated and their leaf area is reported separately — never folded into the measured total. Leave off to report occlusion without modelling it."
+                />
+              </label>
             </div>
 
             {/* Note: the supplied-G(θ) panel (above, when "Supply G(θ) directly"

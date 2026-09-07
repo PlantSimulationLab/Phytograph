@@ -381,3 +381,154 @@ def test_single_band_dem_geotiff_is_unchanged():
     assert data.shape == (2, 2)
     assert data[0, 0] == pytest.approx(3.0)      # north-up flip
     assert data[0, 1] == pytest.approx(-9999.0)  # NaN -> nodata
+
+
+# ---------------------------------------------------------------------------
+# Under-sampled (occlusion-screened) voxels
+# ---------------------------------------------------------------------------
+#
+# The NoData rule was written for occluded voxels but, in practice, never fired:
+# `solved` is almost always True because Helios writes a hard leaf_area = 0 for a
+# beam-starved voxel rather than NaN. `under_sampled` is the flag that actually
+# fires, so every format must honour it exactly as it honours `solved`.
+
+UNDER_IJK = (0, 1, 0)
+VOLUME = CELL[0] * CELL[1] * CELL[2]
+GROUND = CELL[0] * 2 * CELL[1] * 2
+
+
+def _cells_with_under_sampled(filled=False):
+    """The standard grid, plus one voxel flagged under-sampled but 'solved'.
+
+    Its lad is a NON-ZERO number deliberately: if a format ignores the flag the
+    inflated value leaks into the output and the assertions below catch it.
+    """
+    cells = _cells()
+    idx = UNDER_IJK[2] * 4 + UNDER_IJK[1] * 2 + UNDER_IJK[0]
+    lad = 3.0 if filled else 9.99
+    cells[idx].update({
+        "solved": True,            # Beer's law "converged"...
+        "under_sampled": True,     # ...but the voxel was barely probed
+        "lad": lad,
+        "leaf_area": lad * VOLUME,
+        "path_length_total": 1.2,
+        "lad_filled": filled,
+    })
+    return cells
+
+
+def test_csv_leaves_under_sampled_lad_empty_even_though_solved(client):
+    """The flag that actually fires. A solved-but-under-sampled voxel must write a
+    BLANK lad, never its inflated value."""
+    header, rows = _csv_rows(
+        _files(client, "csv", cells=_cells_with_under_sampled())["lad_voxels.csv"])
+    assert header == main._LAD_CSV_HEADER      # still the frozen, append-only contract
+    row = [r for r in rows
+           if (int(r["i"]), int(r["j"]), int(r["k"])) == UNDER_IJK][0]
+    assert row["lad"] == "", "an under-sampled voxel must not export its LAD"
+    assert row["leaf_area"] == ""
+    assert row["under_sampled"] == "true"
+    assert row["solved"] == "false"            # not a measurement, whatever the cause
+    assert row["path_length_total"] == "1.2"
+
+
+def test_geotiff_under_sampled_is_nodata(client):
+    """Rasters must show NoData, not a confident number, where nothing was measured."""
+    import tifffile
+    blob = _files(client, "tif", cells=_cells_with_under_sampled())["lad_lad.tif"]
+    data = tifffile.imread(io.BytesIO(blob))
+    ui, uj, uk = UNDER_IJK
+    assert data[uk, (2 - 1) - uj, ui] == pytest.approx(-9999.0)
+
+
+def test_vox_omits_under_sampled_voxels(client):
+    blob = _files(client, "vox", cells=_cells_with_under_sampled())["lad.vox"]
+    lines = [ln for ln in blob.decode("utf-8").splitlines() if ln.strip()]
+    body = [ln.split() for ln in lines if ln[0].isdigit()]
+    ijk = {(int(r[0]), int(r[1]), int(r[2])) for r in body}
+    assert UNDER_IJK not in ijk
+    assert OCCLUDED_IJK not in ijk
+
+
+def test_summary_excludes_under_sampled_from_lai_and_counts_it(client):
+    """The bias this whole path exists to avoid: an under-sampled voxel counted as
+    data would inflate LAI (its lad is 9.99); counted as a zero it would deflate it.
+    It must be excluded from LAI and reported on its own line."""
+    text = _files(client, "txt",
+                  cells=_cells_with_under_sampled())["lad_summary.txt"].decode("utf-8")
+    assert "number of under-sampled voxels 1" in text
+    # Two unmeasured of eight: the NaN-unsolved voxel and the under-sampled one.
+    assert "number of occluded voxels 2" in text
+    assert "proportion of occlusion 0.2500" in text
+    # LAI reflects ONLY the leafy voxel.
+    assert f"LAI {(KNOWN_LAD * VOLUME / GROUND):.3f}" in text
+
+
+def test_filled_voxel_writes_its_value_with_the_interpolated_flag(client):
+    """A filled voxel DOES export its value — withholding it would mean the fill the
+    user switched on silently vanished from the file. `lad_filled` is what lets a
+    reader include or drop it knowingly; a blank column could not be distinguished
+    from an unfilled occluded voxel."""
+    header, rows = _csv_rows(
+        _files(client, "csv",
+               cells=_cells_with_under_sampled(filled=True))["lad_voxels.csv"])
+    row = [r for r in rows
+           if (int(r["i"]), int(r["j"]), int(r["k"])) == UNDER_IJK][0]
+    assert row["lad"] == "3", "a filled voxel must export the estimate it was given"
+    assert row["lad_filled"] == "true"
+    assert row["under_sampled"] == "true"   # still records WHY it needed filling
+
+    # ...whereas an occluded voxel that was NOT filled still writes a blank.
+    _, plain = _csv_rows(
+        _files(client, "csv", cells=_cells_with_under_sampled())["lad_voxels.csv"])
+    unfilled = [r for r in plain
+                if (int(r["i"]), int(r["j"]), int(r["k"])) == UNDER_IJK][0]
+    assert unfilled["lad"] == ""
+
+
+def test_filled_voxel_is_reported_but_never_counted_as_measured(client):
+    """A filled voxel holds an interpolation: excluded from LAI, and its area
+    reported separately so a reader can add it deliberately."""
+    text = _files(client, "txt", cells=_cells_with_under_sampled(filled=True)
+                  )["lad_summary.txt"].decode("utf-8")
+    # Worded as a SUBSET of the occlusion count, not a separate population to add.
+    assert "number of occluded voxels that were filled 1" in text
+    assert ("filled leaf area (interpolated, excluded from the total) "
+            f"{3.0 * VOLUME:.1f}") in text
+    assert f"LAI {(KNOWN_LAD * VOLUME / GROUND):.3f}" in text   # unchanged by the fill
+
+
+def test_legacy_cells_without_the_new_flags_still_export(client):
+    """Backward compatibility: a result computed before these fields existed carries
+    neither flag and must keep its old meaning (measured)."""
+    header, rows = _csv_rows(_files(client, "csv")["lad_voxels.csv"])
+    leafy = [r for r in rows
+             if (int(r["i"]), int(r["j"]), int(r["k"])) == LEAFY_IJK][0]
+    assert leafy["lad"] != ""
+    assert leafy["under_sampled"] == ""      # absent => not flagged
+    assert leafy["lad_filled"] == ""
+
+
+def test_geotiff_can_carry_the_filled_flag_as_its_own_band(client):
+    """A GeoTIFF has no flag column, so without a `lad_filled` band an interpolated
+    voxel is indistinguishable from a measurement in the raster — and a user summing
+    it would get a number the summary file contradicts."""
+    import tifffile
+    files = _files(client, "tif", cells=_cells_with_under_sampled(filled=True),
+                   variables=["lad", "lad_filled"])
+    assert "lad_lad_filled.tif" in files, files.keys()
+    data = tifffile.imread(io.BytesIO(files["lad_lad_filled.tif"]))
+    ui, uj, uk = UNDER_IJK
+    assert data[uk, (2 - 1) - uj, ui] == pytest.approx(1.0)      # interpolated
+    # A cell that never carried the flag reads NoData, not 0.0 — "we don't know"
+    # rather than a positive claim that it was measured.
+    li, lj, lk = LEAFY_IJK
+    assert data[lk, (2 - 1) - lj, li] == pytest.approx(-9999.0)
+
+    # An explicit False DOES read as 0.0, so a screened result is fully self-describing.
+    cells = _cells_with_under_sampled(filled=True)
+    for cell in cells:
+        cell.setdefault("lad_filled", False)
+    files = _files(client, "tif", cells=cells, variables=["lad_filled"])
+    data = tifffile.imread(io.BytesIO(files["lad_lad_filled.tif"]))
+    assert data[lk, (2 - 1) - lj, li] == pytest.approx(0.0)      # measured

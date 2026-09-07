@@ -470,6 +470,234 @@ class TestLADUncertaintyShaping:
 
 @pytest.mark.skipif(not os.path.isfile(_FIXTURE_XYZ),
                     reason="lad-leafcube fixture not present")
+# ---------------------------------------------------------------------------
+# Occlusion screening (Soma, Pimont & Dupuy 2021) + the fill
+# ---------------------------------------------------------------------------
+
+class TestOcclusionScreening:
+    """Total probed path length (beam_count * mean_path_length) decides whether a
+    voxel was adequately sampled. The stub reports 1000 beams x 0.8 m = 800 m."""
+
+    def test_threshold_defaults_to_100x_voxel_side(self, tmp_path, stub_pyhelios):
+        """The literature rule, not a fixed 30 m. A constant is not portable:
+        total path length scales with voxel size and scan density."""
+        result = main._do_lad_computation(_single_return_request(tmp_path))
+        assert result["success"] is True
+        # 1x1x1 m cell -> mean side 1.0 -> 100 m.
+        assert result["occlusion_threshold_m"] == pytest.approx(100.0)
+        # 800 m of probe length clears it.
+        assert result["under_sampled_count"] == 0
+        assert result["cells"][0]["under_sampled"] is False
+        assert result["cells"][0]["path_length_total"] == pytest.approx(800.0)
+
+    def test_threshold_scales_with_the_grid(self):
+        """A 2x2x2 split of the same 1 m box gives 0.5 m cells -> a 50 m threshold,
+        and 8x8x8 gives 0.125 m cells -> 12.5 m.
+
+        Driven on the REAL path deliberately: the stub cloud hardcodes a 1 m
+        getCellSize, so it is structurally incapable of exercising the scaling that
+        is the whole point of a grid-derived default.
+        """
+        pytest.importorskip("pyhelios")
+        for n, expected in ((2, 50.0), (8, 12.5)):
+            result = main._do_lad_computation(self._leafcube_request(nx=n, ny=n, nz=n))
+            assert result["success"] is True, result.get("error")
+            assert result["occlusion_threshold_m"] == pytest.approx(expected), \
+                f"nx={n} should resolve to {expected} m"
+
+    @staticmethod
+    def _leafcube_request(**grid_over):
+        scan = main.HeliosScanEntry(
+            file_path=_FIXTURE_XYZ, ascii_format="x y z is_miss",
+            origin=_FIXTURE_ORIGIN,
+            n_theta=2600, n_phi=5200, theta_min=0, theta_max=180,
+            phi_min=0, phi_max=360, return_type="single")
+        grid = main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1],
+                               **({"nx": 1, "ny": 1, "nz": 1} | grid_over))
+        return main.LADComputeRequest(scans=[scan], grid=grid, lmax=0.04,
+                                      max_aspect_ratio=10, min_voxel_hits=1)
+
+    def test_real_path_flags_the_under_probed_voxels(self):
+        """On real output the flagged voxels are the badly-biased ones.
+
+        The leafcube's truth is LAD 2.0. Its single side-scan probes every voxel
+        fairly evenly (measured total path length 44-65 m at 0.125 m voxels), so the
+        DEFAULT threshold correctly flags nothing there — asserting on the default
+        would be a rubber stamp. An explicit 55 m splits that real distribution, and
+        the flagged half must be the more biased one.
+        """
+        pytest.importorskip("pyhelios")
+        import statistics
+        req = self._leafcube_request(nx=8, ny=8, nz=8)
+        object.__setattr__(req, "occlusion_threshold_m", 55.0)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True, result.get("error")
+        flagged, kept = [], []
+        for c in result["cells"]:
+            if c["lad"] <= 0:
+                continue
+            (flagged if c["under_sampled"] else kept).append(abs(c["lad"] - 2.0) / 2.0)
+        assert flagged and kept, "the fixture must produce both populations"
+        assert 0 < result["under_sampled_count"] < len(result["cells"])
+        assert statistics.median(flagged) > statistics.median(kept), (
+            f"flagged median err {statistics.median(flagged):.2f} should exceed "
+            f"kept {statistics.median(kept):.2f}")
+        # Per-layer counts cover every level and sum to the total.
+        assert len(result["occluded_by_layer"]) == 8
+        assert sum(result["occluded_by_layer"]) == result["under_sampled_count"]
+
+    def test_real_path_kriging_fill_flags_and_separates_leaf_area(self):
+        """The fill runs, marks what it touched, and never folds an interpolation
+        into the measured total."""
+        pytest.importorskip("pyhelios")
+        req = self._leafcube_request(nx=8, ny=8, nz=8)
+        object.__setattr__(req, "occlusion_threshold_m", 55.0)
+        object.__setattr__(req, "fill_occluded", True)
+        result = main._do_lad_computation(req)
+        assert result["success"] is True, result.get("error")
+        assert result["fill_method_used"] == "kriging"
+        assert result["filled_count"] == result["under_sampled_count"] > 0
+        filled = [c for c in result["cells"] if c["lad_filled"]]
+        assert len(filled) == result["filled_count"]
+        # Every filled voxel carries a finite, non-negative density.
+        assert all(c["lad"] >= 0 and c["lad"] == c["lad"] for c in filled)
+        # The interpolated area is reported apart from the measured total.
+        assert result["filled_leaf_area"] > 0
+        measured = sum(c["leaf_area"] for c in result["cells"]
+                       if not c["under_sampled"])
+        assert result["total_leaf_area"] == pytest.approx(measured, rel=1e-6)
+
+    def test_explicit_threshold_is_used_verbatim(self, tmp_path, stub_pyhelios):
+        """Typing the published 30 m must reproduce the paper exactly."""
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "occlusion_threshold_m", 30.0)
+        result = main._do_lad_computation(req)
+        assert result["occlusion_threshold_m"] == pytest.approx(30.0)
+        assert result["under_sampled_count"] == 0        # 800 m still clears it
+
+    def test_voxel_below_the_threshold_is_flagged_and_excluded(self, tmp_path, stub_pyhelios):
+        """The core behaviour: an under-probed voxel is an ABSENCE of measurement,
+        so it must not contribute leaf area to the total."""
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "occlusion_threshold_m", 1000.0)   # above 800 m
+        result = main._do_lad_computation(req)
+        cell = result["cells"][0]
+        assert cell["under_sampled"] is True
+        assert result["under_sampled_count"] == 1
+        assert result["occluded_by_layer"] == [1]
+        # Excluded from the leaf-area total (it would otherwise add its 2.0 m^2).
+        assert result["total_leaf_area"] == pytest.approx(0.0)
+        # ...and from the group CI, whose premise is adequate sampling.
+        assert result["group_ci_valid"] is False
+
+    def test_min_voxel_hits_gated_voxel_is_under_sampled_not_a_measured_zero(
+            self, tmp_path, stub_pyhelios):
+        """REGRESSION for a real, long-lived defect.
+
+        A voxel failing the min_voxel_hits gate is written by Helios as a hard
+        leaf_area = 0 (NOT NaN), so it came back lad = 0.0 with lad_solved True — a
+        CONFIDENT MEASURED ZERO. Every exporter's NoData rule, the occlusion counts
+        and the summary's LAI therefore counted beam-starved voxels as real zeros,
+        which is exactly the low bias lad_solved was introduced to prevent.
+
+        Here the stub reports 1000 beams while min_voxel_hits is 5000, so the voxel
+        is beam-starved and must be flagged even though its path length is large.
+        """
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "min_voxel_hits", 5000)
+        result = main._do_lad_computation(req)
+        cell = result["cells"][0]
+        assert cell["beam_count"] == 1000            # fewer than min_voxel_hits
+        assert cell["under_sampled"] is True, "beam-starved voxel must not read as measured"
+        assert result["under_sampled_count"] == 1
+        assert result["total_leaf_area"] == pytest.approx(0.0)
+
+    def test_empty_air_outside_the_scan_is_not_occlusion(self):
+        """REGRESSION: a voxel NO beam entered is outside the scan, not occluded.
+
+        Grids are routinely drawn with headroom and margin around the canopy. Those
+        cells are empty air the scanner never swept: they have beam_count 0 and hence
+        zero probed path, which a naive `path < threshold` test flags as occluded.
+        Doing so drowns the occlusion figure in geometry — measured on a 3 m box
+        around the 1 m leafcube, 148 of 216 voxels flagged, of which only 4 were real
+        occlusion and 144 were untouched margin.
+
+        Such a voxel must keep its honest lad = 0 (nothing was intercepted along a
+        path of zero length), which is what it reported before screening existed.
+        """
+        pytest.importorskip("pyhelios")
+        # A 3 m box around the 1 m cube: mostly empty air the scan never reaches.
+        scan = main.HeliosScanEntry(
+            file_path=_FIXTURE_XYZ, ascii_format="x y z is_miss",
+            origin=_FIXTURE_ORIGIN,
+            n_theta=2600, n_phi=5200, theta_min=0, theta_max=180,
+            phi_min=0, phi_max=360, return_type="single")
+        result = main._do_lad_computation(main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[3, 3, 3],
+                                 nx=6, ny=6, nz=6),
+            lmax=0.04, max_aspect_ratio=10, min_voxel_hits=1))
+        assert result["success"] is True, result.get("error")
+
+        zero_beam = [c for c in result["cells"] if (c["beam_count"] or 0) == 0]
+        assert zero_beam, "this grid must contain voxels no beam reached"
+        # None of them may be called occluded, whatever the threshold.
+        assert not any(c["under_sampled"] for c in zero_beam), (
+            f"{sum(c['under_sampled'] for c in zero_beam)} untouched voxels were "
+            "misreported as occluded")
+        # And the headline figure stays interpretable rather than swamped by margin.
+        assert result["under_sampled_count"] < len(result["cells"]) / 2
+
+    def test_threshold_zero_disables_screening(self, tmp_path, stub_pyhelios):
+        """0 means "screen nothing" — an explicit opt-out. It must not be confused
+        with "unset" (which resolves the grid-derived default) nor flag every voxel."""
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "occlusion_threshold_m", 0.0)
+        result = main._do_lad_computation(req)
+        assert result["occlusion_threshold_m"] == pytest.approx(0.0)
+        assert result["under_sampled_count"] == 0
+        assert result["cells"][0]["under_sampled"] is False
+
+    def test_fill_is_off_by_default(self, tmp_path, stub_pyhelios):
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "occlusion_threshold_m", 1000.0)
+        result = main._do_lad_computation(req)
+        assert result["filled_count"] == 0
+        assert result["fill_method_used"] is None
+        assert result["cells"][0]["lad_filled"] is False
+
+    def test_fill_marks_voxels_and_keeps_them_out_of_the_measured_total(
+            self, tmp_path, stub_pyhelios):
+        """A filled voxel is an interpolation: flagged, and reported in
+        filled_leaf_area rather than folded into total_leaf_area."""
+        req = _single_return_request(tmp_path, nx=2, ny=2, nz=2)
+        # Every voxel is identical in the stub, so flag them all and check the
+        # bookkeeping: with no donors nothing can be filled.
+        object.__setattr__(req, "occlusion_threshold_m", 1e9)
+        object.__setattr__(req, "fill_occluded", True)
+        result = main._do_lad_computation(req)
+        assert result["under_sampled_count"] == 8
+        assert result["filled_count"] == 0            # no donors => invent nothing
+        assert result["fill_method_used"] == "none"
+        assert result["total_leaf_area"] == pytest.approx(0.0)
+        assert result["filled_leaf_area"] == pytest.approx(0.0)
+
+    def test_occlusion_warning_is_reported(self, tmp_path, stub_pyhelios):
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "occlusion_threshold_m", 1000.0)
+        result = main._do_lad_computation(req)
+        assert any("reported as occluded" in w for w in result["warnings"])
+
+    def test_response_model_accepts_the_new_fields(self, tmp_path, stub_pyhelios):
+        req = _single_return_request(tmp_path)
+        object.__setattr__(req, "occlusion_threshold_m", 1000.0)
+        result = main._do_lad_computation(req)
+        model = main.LADComputeResponse(**result)     # must not raise
+        assert model.under_sampled_count == 1
+        assert model.cells[0].under_sampled is True
+        assert model.cells[0].path_length_total == pytest.approx(800.0)
+
+
 class TestLeafCubeLAD:
     """Adapts the C++ 'LiDAR Single/Eight Voxel Isotropic Patches' tests. The
     fixture is a synthetic scan of the LAI=2 spherical leaf cube; the 1x1x1 m

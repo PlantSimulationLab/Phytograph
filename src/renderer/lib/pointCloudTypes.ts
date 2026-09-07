@@ -820,6 +820,17 @@ export interface LADVoxel {
   // this: unsolved voxels become NoData rather than zeros, which would otherwise
   // bias any mean LAD / LAI computed downstream. Absent on legacy results.
   solved?: boolean;
+  // Total probed beam path through this voxel (m) = beamCount x meanPathLength.
+  pathLengthTotal?: number;
+  // True => the voxel was not probed well enough for its inversion to be trusted
+  // (Soma, Pimont & Dupuy 2021). This is the flag that actually fires: `solved` is
+  // nearly always true because Helios writes a hard 0 for a beam-starved voxel
+  // rather than NaN, so it would otherwise read as a confident measured zero.
+  // Renderers must draw these distinctly from empty air; aggregates must exclude them.
+  underSampled?: boolean;
+  // True => `lad` here is an INTERPOLATION (LAD-kriging) over neighbouring reliable
+  // voxels, not a measurement. Never counted into a measured total.
+  ladFilled?: boolean;
 }
 
 // A leaf-area-density result: a 3D grid of voxels each carrying an LAD scalar.
@@ -887,7 +898,16 @@ export interface LADResultEntry {
   // gridRotationDeg this gates the GeoTIFF option.
   terrainFollow?: boolean;
   droppedColumns?: number;
-  totalLeafArea?: number;     // m², summed over solved voxels
+  totalLeafArea?: number;     // m², summed over MEASURED voxels (excludes filled)
+  // Occlusion screening summary. Absent on results computed before this existed.
+  occlusion?: {
+    thresholdM: number;       // total-probe-length threshold actually applied (m)
+    underSampledCount: number;
+    filledCount: number;
+    byLayer: number[];        // under-sampled voxels per z-level, 0 = lowest
+    filledLeafArea: number;   // m², interpolated — reported apart from the total
+    fillMethod?: 'kriging' | 'layer_mean' | 'none';
+  };
   // Resolved G(theta) per z-level when a vertical-profile override was used.
   gthetaProfile?: number[];
 }

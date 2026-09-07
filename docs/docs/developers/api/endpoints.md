@@ -154,7 +154,7 @@ backend `cut_pursuit_py` is bundled via `collectAll` in
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/lad/compute` | `main.py` | Per-voxel leaf area density via PyHelios. Accepts either a JSON `LADComputeRequest` (fresh-triangulation path) or a **PHB1** binary frame carrying the request fields plus the mesh as raw buffers — the binary path lets a 1M+ triangle mesh ride back compactly to be injected via `setExternalTriangulation` instead of re-triangulated. Streams PHP1 progress ahead of the JSON result. **Requires misses** (see the admonition below) |
+| POST | `/api/lad/compute` | `main.py` | Per-voxel leaf area density via PyHelios. Accepts either a JSON `LADComputeRequest` (fresh-triangulation path) or a **PHB1** binary frame carrying the request fields plus the mesh as raw buffers — the binary path lets a 1M+ triangle mesh ride back compactly to be injected via `setExternalTriangulation` instead of re-triangulated. Streams PHP1 progress ahead of the JSON result. Screens occluded voxels by total probed beam path (`occlusion_threshold_m`, default 100x the voxel side length) and can fill them by LAD-kriging (`fill_occluded`); each cell reports `path_length_total` / `under_sampled` / `lad_filled`, and `total_leaf_area` counts measured voxels only. **Requires misses** (see the admonition below) |
 | POST | `/api/lad/snap-grid` | `main.py` | Sample a DEM under each voxel column so the grid can be displaced to follow the ground. Returns the authoritative per-column offsets (`column_offsets`) the UI renders and feeds to the inversion, plus `kept_columns` / `dropped_columns` |
 
 ## Plant models & sessions

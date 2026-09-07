@@ -232,15 +232,83 @@ export function LADResultsPanel({
                         className="text-[9px] text-neutral-500 mt-1 cursor-help"
                         title={
                           'This interval reflects sampling uncertainty conditional on ' +
-                          'beams that entered the voxels — it does NOT capture occlusion ' +
-                          'bias (canopy no beam reached). Single-voxel intervals are ' +
-                          'routinely ±50–100% and valid only in narrow regimes; the ' +
-                          'group-scale interval shown here is the recommended, much ' +
-                          'tighter aggregate.'
+                          'beams that entered the voxels. It does not by itself capture ' +
+                          'occlusion bias — canopy too few beams reached — because a ' +
+                          'barely-probed voxel can report a narrow interval around a ' +
+                          'badly overestimated value. Occlusion is screened separately, ' +
+                          'by total probed beam path, and reported just below. ' +
+                          'Single-voxel intervals are routinely ±50–100% and valid only ' +
+                          'in narrow regimes; the group-scale interval shown here is the ' +
+                          'recommended, much tighter aggregate, and it now excludes ' +
+                          'occluded voxels.'
                         }
                       >
                         What this does (and doesn’t) capture ⓘ
                       </div>
+                    </div>
+                  )}
+                  {result.occlusion && (
+                    <div
+                      data-testid="lad-occlusion-summary"
+                      data-under-sampled={result.occlusion.underSampledCount}
+                      data-filled={result.occlusion.filledCount}
+                      className="rounded bg-neutral-900/60 border border-neutral-700/60 px-2 py-1.5"
+                    >
+                      <div className="text-[11px] text-neutral-200 font-medium">
+                        Occluded {result.occlusion.underSampledCount} of{' '}
+                        {result.voxels.length} voxels
+                        {result.voxels.length > 0 && (
+                          <> ({(100 * result.occlusion.underSampledCount
+                                / result.voxels.length).toFixed(1)}%)</>
+                        )}
+                      </div>
+                      <div className="text-[9px] text-neutral-500">
+                        probed by under {result.occlusion.thresholdM.toFixed(1)} m of
+                        total beam path
+                        {result.occlusion.filledCount > 0
+                          && result.occlusion.fillMethod
+                          && result.occlusion.fillMethod !== 'none' && (
+                          <> · {result.occlusion.filledCount} filled by{' '}
+                            {result.occlusion.fillMethod === 'kriging'
+                              ? 'kriging' : 'layer mean'}</>
+                        )}
+                      </div>
+                      {result.occlusion.byLayer.length > 1 && (
+                        <div className="mt-1.5" data-testid="lad-occlusion-by-layer">
+                          <div className="text-[9px] text-neutral-500 mb-0.5">
+                            By height (lowest first)
+                          </div>
+                          {/* One bar per z-level: the vertical profile of what the
+                              scan could not see, which is where occlusion concentrates. */}
+                          <div className="flex items-end gap-px h-6">
+                            {result.occlusion.byLayer.map((count, i) => {
+                              // Scale each bar against the LARGEST layer count, not
+                              // an assumed uniform population: terrain-following
+                              // grids drop whole columns, so layers differ in size,
+                              // and a fixed denominator saturates every heavy layer
+                              // at full height — destroying the vertical profile the
+                              // chart exists to show.
+                              const peak = Math.max(
+                                1, ...result.occlusion!.byLayer);
+                              const frac = Math.min(1, count / peak);
+                              return (
+                                <div
+                                  key={i}
+                                  title={`Level ${i}: ${count} occluded`}
+                                  className="flex-1 bg-amber-700/70 rounded-sm min-h-[1px]"
+                                  style={{ height: `${Math.max(frac * 100, 2)}%` }}
+                                />
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {result.occlusion.filledLeafArea > 0 && (
+                        <div className="text-[9px] text-amber-300/80 mt-1">
+                          {result.occlusion.filledLeafArea.toFixed(2)} m² of the leaf
+                          area is interpolated and excluded from the total.
+                        </div>
+                      )}
                     </div>
                   )}
                   <div>

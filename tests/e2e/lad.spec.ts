@@ -74,6 +74,19 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     await page.getByTestId('lad-input-aspect').fill('10');
     await page.getByTestId('lad-input-min-hits').fill('1');
 
+    // Occlusion screening. The leafcube's single side-scan probes every voxel
+    // fairly evenly (measured 44-65 m of total beam path at this resolution), so
+    // the AUTO default deliberately flags nothing here. Set an explicit threshold
+    // that splits that real distribution, and switch on the kriging fill, so the
+    // panel readout below is asserting on a real, non-empty result.
+    const occlusionInput = page.getByTestId('lad-input-occlusion-threshold');
+    // Blank by default: the backend resolves it from the grid, and the placeholder
+    // tells the user what that works out to rather than hiding it behind "auto".
+    await expect(occlusionInput).toHaveValue('');
+    await expect(occlusionInput).toHaveAttribute('placeholder', /Auto — \d/);
+    await occlusionInput.fill('60');
+    await page.getByTestId('lad-fill-occluded').check();
+
     // Set the element width via the Broadleaf preset — this drives the Pimont
     // (2018) uncertainty interval the result panel reports.
     await page.getByTestId('lad-preset-broadleaf').click();
@@ -180,6 +193,16 @@ test('Computes per-voxel leaf area density for the leaf-cube fixture', async () 
     await expect(uncertainty).toBeVisible();
     await expect(uncertainty).toContainText(/Mean LAD .*\[.*–.*\] m²\/m³/);
     await expect(uncertainty).toContainText(/95% group-scale CI/);
+
+    // --- Occlusion screening ------------------------------------------------
+    // Voxels probed by under 60 m of total beam path are reported as occluded
+    // rather than as measurements. At a 1x1x1 grid the single voxel is well
+    // probed, so this is asserted on the grid the test actually built.
+    const occlusion = page.getByTestId('lad-occlusion-summary');
+    await expect(occlusion).toBeVisible();
+    await expect(occlusion).toContainText(/Occluded \d+ of \d+ voxels/);
+    // The threshold that actually ran is shown, so the number is interpretable.
+    await expect(occlusion).toContainText(/under 60\.0 m of\s+total beam path/);
   } finally {
     await close();
   }

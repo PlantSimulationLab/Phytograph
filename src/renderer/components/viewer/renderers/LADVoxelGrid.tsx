@@ -8,8 +8,9 @@ import { ladColorT } from '../../../lib/pointCloudHelpers';
 // Renders a leaf-area-density result as instanced, translucent voxel cells in
 // world space, each colored by its LAD value through the shared colormap.
 // Empty cells (no hits / lad<=0) are hidden when `hideEmpty`, else drawn faint
-// gray. Hover/click report the voxel under the cursor so the caller can show a
-// value readout.
+// gray. OCCLUDED cells (under-sampled: too little beam path to trust) are drawn in
+// their own color and are never hidden, since an unmeasured voxel is not empty air.
+// Hover/click report the voxel under the cursor so the caller can show a readout.
 export interface LADVoxelGridProps {
   voxels: LADVoxel[];
   // Azimuthal rotation of the grid box about +z (degrees). Helios returns voxel
@@ -30,6 +31,11 @@ export interface LADVoxelGridProps {
 }
 
 const EMPTY_COLOR = new THREE.Color('#3a3a3a');
+// An OCCLUDED voxel is not empty air — no beam adequately probed it, so its value is
+// an absence of measurement rather than a measurement of zero. Drawing it in the same
+// gray as genuinely empty space is what let occlusion bias hide in plain sight, so it
+// gets its own hue (amber: "unknown", distinct from every LAD colormap ramp).
+const OCCLUDED_COLOR = new THREE.Color('#b45309');
 
 export function LADVoxelGrid({
   voxels,
@@ -47,8 +53,13 @@ export function LADVoxelGrid({
 
   // The cells actually drawn (after the hide-empty filter). We keep the mapping
   // back to the original voxel so instanceId → voxel is correct for hover/click.
+  // `hideEmpty` hides cells with nothing in them, but an OCCLUDED cell is never
+  // hidden by it: "we could not measure here" is information the user must see, and
+  // silently dropping it is exactly how occlusion bias goes unnoticed.
   const drawn = useMemo(
-    () => voxels.filter(v => !hideEmpty || (v.hitCount > 0 && v.lad > 0)),
+    () => voxels.filter(v => !hideEmpty || v.underSampled === true
+                              || v.ladFilled === true
+                              || (v.hitCount > 0 && v.lad > 0)),
     [voxels, hideEmpty],
   );
 
@@ -96,7 +107,13 @@ export function LADVoxelGrid({
         new THREE.Vector3(v.size[0], v.size[1], v.size[2]),
       );
       mesh.setMatrixAt(i, m);
-      if (v.hitCount === 0 || v.lad <= 0) {
+      if (v.underSampled === true && v.ladFilled !== true) {
+        // Checked FIRST: an occluded voxel usually also reads lad <= 0, so testing
+        // for empty first would swallow it into the empty-air gray. A FILLED voxel
+        // is the exception — it was occluded, but it now carries an estimate, and
+        // painting that estimate is the entire point of having filled it.
+        color.copy(OCCLUDED_COLOR);
+      } else if (v.hitCount === 0 || v.lad <= 0) {
         color.copy(EMPTY_COLOR);
       } else {
         const rgb = sampleColormap(colormap, ladColorT(v.lad, min, max));

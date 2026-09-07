@@ -16326,6 +16326,12 @@ export default function PointCloudViewer({
         // Occluded-vs-empty. Only carried when the backend actually said false,
         // so a legacy response (no flag) leaves it absent and reads as solved.
         ...(c.lad_solved != null ? { solved: c.lad_solved } : {}),
+        // Occlusion screening. `underSampled` is the flag that actually fires and
+        // is what the renderer colors on — `solved` is nearly always true even for
+        // a beam-starved voxel (Helios writes a hard 0, not NaN).
+        ...(c.path_length_total != null ? { pathLengthTotal: c.path_length_total } : {}),
+        ...(c.under_sampled != null ? { underSampled: c.under_sampled } : {}),
+        ...(c.lad_filled != null ? { ladFilled: c.lad_filled } : {}),
       }));
 
       const entry: LADResultEntry = {
@@ -16359,6 +16365,19 @@ export default function PointCloudViewer({
         terrainFollow: response.terrain_follow ?? false,
         droppedColumns: response.dropped_columns ?? 0,
         totalLeafArea: response.total_leaf_area,
+        // Occlusion summary — attached when the backend reported a threshold (i.e.
+        // screening ran). Older responses lack these keys and leave it undefined.
+        ...(response.occlusion_threshold_m != null ? {
+          occlusion: {
+            thresholdM: response.occlusion_threshold_m,
+            underSampledCount: response.under_sampled_count ?? 0,
+            filledCount: response.filled_count ?? 0,
+            byLayer: response.occluded_by_layer ?? [],
+            filledLeafArea: response.filled_leaf_area ?? 0,
+            fillMethod: (response.fill_method_used ?? undefined) as
+              'kriging' | 'layer_mean' | 'none' | undefined,
+          },
+        } : {}),
         ...(response.gtheta_profile ? { gthetaProfile: response.gtheta_profile } : {}),
         visible: true,
         color: '#22c55e',

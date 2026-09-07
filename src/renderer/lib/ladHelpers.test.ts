@@ -213,3 +213,31 @@ describe('buildLADRequest', () => {
     expect(s.scalar_columns).toBeUndefined();
   });
 });
+
+describe('buildLADRequest occlusion screening', () => {
+  it('omits both fields when unset, so the backend applies its grid-derived default', () => {
+    const req = buildLADRequest([makeScan()], GRID, PARAMS);
+    // Deliberately absent, NOT 30: the threshold scales with voxel size, so a
+    // number invented in the UI would be wrong at most resolutions.
+    expect('occlusion_threshold_m' in req).toBe(false);
+    expect('fill_occluded' in req).toBe(false);
+  });
+
+  it('carries an explicit threshold in metres', () => {
+    const req = buildLADRequest([makeScan()], GRID, { ...PARAMS, occlusionThresholdM: 30 });
+    expect(req.occlusion_threshold_m).toBe(30);
+  });
+
+  it('carries a zero threshold rather than dropping it as falsy', () => {
+    // 0 disables screening explicitly and must survive the conditional spread.
+    const req = buildLADRequest([makeScan()], GRID, { ...PARAMS, occlusionThresholdM: 0 });
+    expect(req.occlusion_threshold_m).toBe(0);
+  });
+
+  it('sends fill_occluded only when enabled', () => {
+    expect('fill_occluded' in
+      buildLADRequest([makeScan()], GRID, { ...PARAMS, fillOccluded: false })).toBe(false);
+    expect(buildLADRequest([makeScan()], GRID, { ...PARAMS, fillOccluded: true })
+      .fill_occluded).toBe(true);
+  });
+});

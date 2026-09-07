@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.82.0"
+BACKEND_VERSION = "0.83.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -6313,6 +6313,13 @@ _LAD_EXPORT_VARIABLES = {
     "relative_density_index": "Relative density index",
     "mean_path_length": "Mean path length (m)",
     "lad_std": "LAD std (1/m)",
+    "path_length_total": "Total probed path length (m)",
+    # Exportable so a RASTER can distinguish an interpolated voxel from a measured
+    # one. The CSV has a `lad_filled` column, but a GeoTIFF has no flag channel, so
+    # without this band a filled voxel is indistinguishable from a measurement in
+    # the raster and a user summing it gets a number the summary file contradicts.
+    # 1.0 = interpolated, 0.0 = measured.
+    "lad_filled": "Filled (interpolated) flag",
 }
 
 # Frozen column order for the voxel CSV. This is the contract with anyone parsing
@@ -6325,6 +6332,7 @@ _LAD_CSV_HEADER = [
     "lad_variance", "lad_std", "ci_valid",
     "leaf_area_ci_lower", "leaf_area_ci_upper",
     "solved",
+    "path_length_total", "under_sampled", "lad_filled",
 ]
 
 
@@ -6351,6 +6359,12 @@ class LADExportCell(BaseModel):
     # None (legacy result computed before the flag existed) is treated as solved,
     # which preserves the old behaviour rather than silently voiding a whole grid.
     solved: Optional[bool] = None
+    # Total probed beam path through the voxel (m) and the occlusion verdict derived
+    # from it. `under_sampled` is the flag that actually fires in practice — see
+    # _lad_is_solved. `lad_filled` marks a value that was INTERPOLATED, not measured.
+    path_length_total: Optional[float] = None
+    under_sampled: Optional[bool] = None
+    lad_filled: Optional[bool] = None
 
 
 class LADExportRequest(BaseModel):
@@ -6410,16 +6424,43 @@ def _lad_cell_ijk(cell: "LADExportCell", origin, cell_size, nx: int, ny: int, nz
 
 
 def _lad_is_solved(cell: "LADExportCell") -> bool:
-    """Whether Beer's law solved for this voxel. A legacy cell with no flag counts
-    as solved (see LADExportCell.solved)."""
-    return cell.solved is not False
+    """Whether this voxel holds a real MEASUREMENT.
+
+    Two independent ways it may not:
+
+    * ``solved is False`` — Beer's law returned NaN.
+    * ``under_sampled is True`` — too little beam path went through the voxel for the
+      inversion to be trusted (Soma, Pimont & Dupuy 2021). This is the common case by
+      far, and the one the ``solved`` flag alone MISSES: Helios writes a hard
+      leaf_area = 0 for a beam-starved voxel rather than NaN, so it would otherwise
+      export as a confident zero and bias any mean LAD / LAI low.
+
+    A legacy cell carrying neither flag counts as measured, preserving old behaviour
+    rather than silently voiding a whole grid.
+
+    A FILLED voxel is the deliberate exception: it was under-sampled, but the user
+    asked for an estimate and it carries `lad_filled` to say so. Withholding the value
+    would mean the fill they switched on simply vanished from the export, while the
+    flag lets any consumer include or drop it knowingly. It is still excluded from the
+    LAI and leaf-area totals below, which count measurements only.
+    """
+    if cell.lad_filled is True:
+        return True
+    if cell.solved is False or cell.under_sampled is True:
+        return False
+    return True
 
 
 def _lad_variable_value(cell: "LADExportCell", name: str) -> Optional[float]:
-    """One variable off a voxel, or None when it is undefined for that cell."""
+    """One variable off a voxel, or None when it is undefined for that cell.
+
+    Booleans (lad_filled) come through as 1.0/0.0 so they can ride in a raster band;
+    a None stays None and lands as NoData rather than a misleading 0."""
     v = getattr(cell, name, None)
     if v is None:
         return None
+    if isinstance(v, bool):
+        return 1.0 if v else 0.0
     return float(v)
 
 
@@ -6492,6 +6533,9 @@ def _lad_csv_bytes(request: "LADExportRequest") -> bytes:
             num(cell.leaf_area_ci_lower),
             num(cell.leaf_area_ci_upper),
             "true" if solved else "false",
+            num(cell.path_length_total),
+            "" if cell.under_sampled is None else ("true" if cell.under_sampled else "false"),
+            "" if cell.lad_filled is None else ("true" if cell.lad_filled else "false"),
         ]))
     return ("\n".join(rows) + "\n").encode("utf-8")
 
@@ -6541,9 +6585,27 @@ def _lad_statistics_bytes(request: "LADExportRequest") -> bytes:
     export path is built to avoid."""
     dx, dy, dz = (float(v) for v in request.cell_size)
     total = len(request.cells)
-    occluded = sum(1 for c in request.cells if not _lad_is_solved(c))
-    with_material = sum(1 for c in request.cells if _lad_is_solved(c) and c.lad > 0.0)
-    leaf_area = sum(float(c.leaf_area) for c in request.cells if _lad_is_solved(c))
+    # Every voxel that is not a direct measurement, filled or not. Reported as the
+    # headline occlusion figure; `filled` below says how many of these carry an
+    # interpolated value, so the two lines describe overlapping sets by design and
+    # the wording says so rather than inviting the reader to add them.
+    occluded = sum(1 for c in request.cells
+                   if c.solved is False or c.under_sampled is True)
+    # The two ways a voxel fails to be a measurement, reported apart so a reader can
+    # tell "Beer's law diverged" from "the beams never adequately probed it" — in
+    # practice almost all occlusion is the latter.
+    under_sampled = sum(1 for c in request.cells if c.under_sampled is True)
+    unsolved = sum(1 for c in request.cells if c.solved is False)
+    filled = sum(1 for c in request.cells if c.lad_filled is True)
+    def _measured(c: "LADExportCell") -> bool:
+        """A real measurement: solved, adequately probed, and not an interpolation."""
+        return _lad_is_solved(c) and c.lad_filled is not True
+
+    with_material = sum(1 for c in request.cells if _measured(c) and c.lad > 0.0)
+    leaf_area = sum(float(c.leaf_area) for c in request.cells if _measured(c))
+    # Interpolated area is reported beside the measured total, never inside it.
+    filled_leaf_area = sum(float(c.leaf_area) for c in request.cells
+                           if c.lad_filled is True)
     ground = dx * request.nx * dy * request.ny
     lai = (leaf_area / ground) if ground > 0 else 0.0
     lines = [
@@ -6552,8 +6614,13 @@ def _lad_statistics_bytes(request: "LADExportRequest") -> bytes:
         f"number of voxels reported {total}",
         f"number of occluded voxels {occluded}",
         f"proportion of occlusion {(occluded / total if total else 0.0):.4f}",
+        f"number of under-sampled voxels {under_sampled}",
+        f"number of unsolved voxels {unsolved}",
+        # A subset of the occluded count above, not an addition to it.
+        f"number of occluded voxels that were filled {filled}",
         f"number of voxels containing material (detected) {with_material}",
         f"total leaf area {leaf_area:.1f}",
+        f"filled leaf area (interpolated, excluded from the total) {filled_leaf_area:.1f}",
         f"LAI {lai:.3f}",
     ]
     return ("\n".join(lines) + "\n").encode("utf-8")
@@ -7759,6 +7826,26 @@ class LADComputeRequest(BaseModel):
     # taken as a constant, either uniformly (spatial="constant") or per z-level
     # (spatial="profile"). See GThetaOverrideSpec (defined above).
     gtheta_spec: Optional[GThetaOverrideSpec] = None
+    # ---- Occlusion screening (Soma, Pimont & Dupuy 2021) --------------------
+    # A voxel's TOTAL probed path length (sum over beams of the chord each one cut
+    # through the voxel = beam_count * mean_path_length) is the established measure of
+    # how well it was actually sampled. Below a threshold the Beer's-law inversion is
+    # not merely noisy but BIASED HIGH, so such voxels are flagged `under_sampled`
+    # rather than reported as measurements.
+    #
+    # In metres, matching the published parameter so a value is directly comparable
+    # with VoxLAD / the literature. None => resolved from the grid as
+    # 100 * mean voxel side length, which is how the 2021 paper states it (their
+    # widely-quoted "30 m" is that rule at their ~0.3 m voxels). A FIXED default
+    # would not be portable: measured on one canopy, total path length runs ~19,700 m
+    # at a 1 m voxel and ~57 m at 0.25 m, so any constant is either inert or
+    # over-eager depending on resolution. The resolved value is echoed in the response.
+    occlusion_threshold_m: Optional[float] = None
+    # When true, occluded voxels are estimated from the reliable ones by LAD-kriging
+    # (Soma et al. 2020) and flagged `lad_filled`. A fill is an INTERPOLATION and is
+    # never folded into total_leaf_area. Off by default: reporting occlusion is always
+    # correct, whereas filling it is a modelling choice the user should opt into.
+    fill_occluded: bool = False
 
 class LADCell(BaseModel):
     """A single voxel result."""
@@ -7779,14 +7866,31 @@ class LADCell(BaseModel):
     ci_valid: Optional[bool] = None              # single-voxel Pimont validity gate
     leaf_area_ci_lower: Optional[float] = None   # m^2 (only when ci_valid)
     leaf_area_ci_upper: Optional[float] = None   # m^2 (only when ci_valid)
-    # Whether Beer's law actually SOLVED for this voxel. Helios returns NaN for an
-    # unsolved cell and we squash it to 0.0 above so the UI/JSON stay finite — which
-    # makes an OCCLUDED voxel (no beam ever reached it) indistinguishable from one
-    # that is genuinely empty air. Both read `lad == 0`. That difference is the
-    # whole ballgame for anything aggregating the grid: counting occluded voxels as
-    # zeros biases mean LAD and LAI low. Consumers (the exporters especially) must
-    # gate on this flag, writing NoData for False and a real 0.0 for True.
+    # Whether Beer's law returned a FINITE LAD for this voxel (NaN -> False), captured
+    # before the NaN->0 squash above.
+    #
+    # CAUTION, measured: this is nearly always True and is NOT the occlusion flag it
+    # was once assumed to be. A voxel that fails the `min_voxel_hits` gate is written
+    # by Helios as a hard leaf_area = 0 (LiDAR.cpp calculateLeafArea_inner), not NaN,
+    # and GridCell's constructor also inits leaf_area = 0 — so a beam-starved voxel
+    # comes back lad = 0.0 with lad_solved True, i.e. a CONFIDENT MEASURED ZERO.
+    # Use `under_sampled` below to tell "never adequately probed" from "empty air";
+    # that is the flag the exporters and any aggregate (mean LAD, LAI) must gate on.
     lad_solved: Optional[bool] = None
+    # ---- Occlusion screening -------------------------------------------------
+    # Total probed path length through this voxel, in metres: the sum over beams of
+    # the chord each cut through it (= beam_count * mean_path_length). The quantity
+    # the occlusion threshold is applied to. None when the voxel reports no beams.
+    path_length_total: Optional[float] = None
+    # True => this voxel was not probed well enough for its inversion to be trusted
+    # (path length under the threshold, or fewer beams than min_voxel_hits). Such a
+    # voxel is an ABSENCE OF MEASUREMENT, not a measurement of zero: counting it as a
+    # zero biases mean LAD and LAI low, the most-repeated caution in the voxel-LAD
+    # literature. Exports write NoData for it; aggregates must exclude it.
+    under_sampled: Optional[bool] = None
+    # True => `lad` here is an INTERPOLATION over neighbouring reliable voxels
+    # (LAD-kriging), not a measurement. Never counted into total_leaf_area.
+    lad_filled: Optional[bool] = None
 
 class LADComputeResponse(BaseModel):
     """Response model for leaf area density computation."""
@@ -7805,8 +7909,24 @@ class LADComputeResponse(BaseModel):
     dropped_columns: int = 0
     is_multi_return: bool = False
     return_mode: str = "single"      # "single" | "multi"
+    # Leaf area summed over MEASURED voxels only — never includes a filled voxel,
+    # whose value is an interpolation (see filled_leaf_area).
     total_leaf_area: float = 0.0
     method_used: str = "helios"
+    # ---- Occlusion screening / fill ------------------------------------------
+    # The threshold actually applied (m), resolved from the grid when the request
+    # left it unset, so the UI and any report can state what ran.
+    occlusion_threshold_m: Optional[float] = None
+    under_sampled_count: int = 0          # voxels flagged as not adequately probed
+    filled_count: int = 0                 # of those, how many got an estimate
+    # Under-sampled voxels per horizontal layer, index 0 = lowest (Helios k-major).
+    occluded_by_layer: List[int] = []
+    # Leaf area contributed by FILLED voxels, reported separately so a consumer can
+    # add it deliberately rather than having an interpolation folded into the total.
+    filled_leaf_area: float = 0.0
+    # "kriging" | "layer_mean" | "none" — which path the fill actually took, since
+    # kriging degrades to a layer mean when the donors can't support a variogram.
+    fill_method_used: Optional[str] = None
     # Group-scale LAD confidence interval (Pimont et al. 2018, Eq. 39) over all
     # solved voxels — the recommended aggregate (much tighter than single-voxel).
     # group_ci_valid=False => the interval fell outside the Pimont validity range
@@ -10774,8 +10894,20 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                                             column_z_offsets=column_offsets,
                                             ndiv=(grid_nx, grid_ny, grid_nz))
 
+        # Occlusion threshold (m of total probed path length). Resolved from the grid
+        # when unset: 100 * mean voxel side length (Soma, Pimont & Dupuy 2021). Uses
+        # the MEAN of the three sides so non-cubic cells behave sensibly.
+        if request.occlusion_threshold_m is not None:
+            occlusion_threshold = max(float(request.occlusion_threshold_m), 0.0)
+        elif cell_sizes:
+            occlusion_threshold = 100.0 * float(np.mean(
+                [(cs.x + cs.y + cs.z) / 3.0 for cs in cell_sizes]))
+        else:
+            occlusion_threshold = 0.0
+
         cells = []
         total_leaf_area = 0.0
+        filled_leaf_area = 0.0
         solved_indices = []  # voxels with a real LAD solution + defined variance
         # For terrain following, cells in dropped columns (outside the DEM footprint)
         # are excluded from the reported results. Helios still holds them (so the ray
@@ -10801,7 +10933,6 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 lad = 0.0
             if gt != gt:
                 gt = 0.0
-            total_leaf_area += la
 
             # Pimont per-voxel uncertainty. Sentinels: beam_count -1, variance -1,
             # and NaN all map to None so the UI gates on presence. Single-voxel CI
@@ -10829,12 +10960,46 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 "ci_valid": bool(ci_valid),
                 "leaf_area_ci_lower": _clean(float(ci_lo)) if ci_valid else None,
                 "leaf_area_ci_upper": _clean(float(ci_hi)) if ci_valid else None,
-                # Captured BEFORE the NaN->0 squash above, so consumers can tell an
-                # occluded voxel from genuinely empty air (both read lad == 0).
+                # Captured BEFORE the NaN->0 squash above. See the field's docstring:
+                # this is convergence, NOT occlusion — use under_sampled for that.
                 "lad_solved": lad_solved,
             }
-            if lad_solved and var >= 0:
-                solved_indices.append(i)
+
+            # --- Occlusion screening ------------------------------------------
+            # Total probed path length = sum over beams of the chord each cut through
+            # this voxel. mean_path_length (zbar_e) is only written by Helios on the
+            # SOLVED branch, so a min_voxel_hits-gated voxel reports 0.0 here — which
+            # is why the beam-count gate is tested explicitly as well.
+            mpl = cell["mean_path_length"]
+            path_total = (float(bc) * float(mpl)) if (bc >= 0 and mpl is not None) else None
+
+            # A voxel NO beam ever entered is OUTSIDE the scan, not occluded by
+            # foliage: grids are routinely drawn with headroom and margin around the
+            # canopy, and those cells are empty air the scanner simply never swept.
+            # Flagging them would drown the occlusion figure in geometry — measured
+            # on a 3 m box around a 1 m cube: 148 of 216 voxels flagged, of which 144
+            # were zero-beam margin and only 4 were real occlusion. They keep their
+            # honest lad = 0 (nothing intercepted along a path of zero length), the
+            # behaviour before screening existed.
+            #
+            # Occlusion means "beams went in and were stopped short": some path, but
+            # not enough. That is what the threshold is calibrated against.
+            never_probed = (bc <= 0) or (path_total is None) or (path_total <= 0.0)
+            under = bool(
+                (not never_probed)
+                and ((path_total < occlusion_threshold) or (bc < min_hits))
+            )
+            cell["path_length_total"] = path_total
+            cell["under_sampled"] = under
+            cell["lad_filled"] = False
+
+            # An under-sampled voxel is an absence of measurement: it contributes
+            # neither leaf area nor a term to the group-scale CI (whose whole premise
+            # is that the beams adequately sampled the voxel).
+            if not under:
+                total_leaf_area += la
+                if lad_solved and var >= 0:
+                    solved_indices.append(i)
             cells.append(cell)
 
         # Group-scale CI (Pimont Eq. 39) over the solved voxels — the recommended,
@@ -10857,6 +11022,68 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 "Leaf-area uncertainty was computed, but no voxel met the criteria "
                 "for a solution, so no confidence interval could be reported."
             )
+
+        # --- Occlusion accounting, and the optional fill ------------------------
+        # Layer of a cell is its Helios k-major z-level: index // (nx*ny). Same
+        # convention the G(theta) vertical profile uses, and robust to terrain
+        # column offsets (which move a cell in z without changing its index).
+        cells_per_level = max(grid_nx * grid_ny, 1)
+        occluded_by_layer = [0] * grid_nz
+        for cell in cells:
+            if cell["under_sampled"]:
+                lvl = min(int(cell["index"]) // cells_per_level, grid_nz - 1)
+                occluded_by_layer[lvl] += 1
+        under_sampled_count = sum(occluded_by_layer)
+
+        filled_count = 0
+        fill_method_used = None
+        if request.fill_occluded and under_sampled_count:
+            _report(0.95, "Filling occluded voxels")
+            try:
+                import lad_kriging
+
+                fills, fill_method_used = lad_kriging.fill_occluded(
+                    centers=[c["center"] for c in cells],
+                    lad=[c["lad"] for c in cells],
+                    variances=[c["lad_variance"] for c in cells],
+                    occluded=[bool(c["under_sampled"]) for c in cells],
+                    layers=[min(int(c["index"]) // cells_per_level, grid_nz - 1)
+                            for c in cells],
+                    voxel_size=float(np.mean(
+                        [(cs.x + cs.y + cs.z) / 3.0 for cs in cell_sizes]))
+                    if cell_sizes else 1.0,
+                )
+                # fill_occluded is indexed by POSITION in `cells`, not by the Helios
+                # cell index — terrain-dropped columns make those differ.
+                for pos, value in fills.items():
+                    cell = cells[pos]
+                    sz = cell["size"]
+                    volume = float(sz[0]) * float(sz[1]) * float(sz[2])
+                    cell["lad"] = float(value)
+                    cell["leaf_area"] = float(value) * volume
+                    cell["lad_filled"] = True
+                    filled_leaf_area += cell["leaf_area"]
+                    filled_count += 1
+            except Exception as exc:      # never fail a computed LAD over a fill
+                logger.warning("LAD occlusion fill failed: %s", exc)
+                warnings.append(
+                    f"Occluded voxels could not be filled ({exc}); they are reported "
+                    "as occluded instead.")
+                fill_method_used = None
+
+        if under_sampled_count:
+            # The exclusion caveat rides on BOTH branches: a filled voxel's leaf area
+            # is still kept out of total_leaf_area, and that is precisely the fact a
+            # user who just switched filling on most needs to know.
+            msg = (f"{under_sampled_count} of {len(cells)} voxels were probed by less "
+                   f"than {occlusion_threshold:.1f} m of total beam path and are "
+                   "reported as occluded rather than measured. Their leaf area is "
+                   "excluded from the total")
+            if filled_count:
+                method = "kriging" if fill_method_used == "kriging" else "the layer mean"
+                msg += (f"; {filled_count} of them were given an interpolated value by "
+                        f"{method}, reported separately as filled leaf area")
+            warnings.append(msg + ".")
 
         # Report the grid center + bounds in true WORLD coordinates, consistent
         # with the per-cell `center` (which adds lad_shift back above). On a
@@ -10889,6 +11116,12 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "is_multi_return": is_multi,
             "return_mode": return_mode,
             "total_leaf_area": total_leaf_area,
+            "occlusion_threshold_m": occlusion_threshold,
+            "under_sampled_count": under_sampled_count,
+            "filled_count": filled_count,
+            "occluded_by_layer": occluded_by_layer,
+            "filled_leaf_area": filled_leaf_area,
+            "fill_method_used": fill_method_used,
             "group_ci_valid": group_ci_valid,
             "group_lad_mean": group_lad_mean,
             "group_lad_ci_lower": group_lad_ci_lower,

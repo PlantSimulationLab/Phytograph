@@ -15,7 +15,11 @@ export const LAD_EXPORT_VARIABLES: { key: string; label: string }[] = [
   { key: 'beam_count', label: 'Beam count' },
   { key: 'relative_density_index', label: 'Relative density index' },
   { key: 'mean_path_length', label: 'Mean path length (m)' },
+  { key: 'path_length_total', label: 'Total probed path length (m)' },
   { key: 'lad_std', label: 'LAD std (1/m)' },
+  // A raster has no flag column, so without this band an interpolated voxel
+  // is indistinguishable from a measured one in a GeoTIFF.
+  { key: 'lad_filled', label: 'Filled (interpolated) flag' },
 ];
 
 // 'txt' is the plain-text grid summary — the one place LAI is reported, since no
@@ -114,6 +118,11 @@ export function buildLadExportRequest(
     beam_count: v.beamCount ?? null,
     relative_density_index: v.relativeDensityIndex ?? null,
     mean_path_length: v.meanPathLength ?? null,
+    path_length_total: v.pathLengthTotal ?? null,
+    // The occlusion verdict travels with the cell so every writer can apply
+    // the NoData rule; `solved` alone misses the beam-starved case.
+    under_sampled: v.underSampled ?? null,
+    lad_filled: v.ladFilled ?? null,
     lad_variance: v.ladVariance ?? null,
     lad_std: v.ladStd ?? null,
     ci_valid: v.ciValid ?? null,

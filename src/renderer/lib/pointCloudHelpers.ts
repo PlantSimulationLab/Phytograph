@@ -1366,6 +1366,11 @@ export function buildLADRequest(
   params: {
     lmax: number; maxAspectRatio: number; minVoxelHits: number;
     elementWidth?: number;
+    // Occlusion screening. `occlusionThresholdM` is the total probed beam path (m)
+    // below which a voxel is reported as occluded; omit to let the backend resolve
+    // it from the grid (100x mean voxel side, per Soma/Pimont 2021).
+    occlusionThresholdM?: number;
+    fillOccluded?: boolean;
     // Mean leaf-projection coefficient G(theta) — required for moving-platform
     // scans (no triangulation to derive it), ignored for static scans.
     gtheta?: number;
@@ -1486,6 +1491,11 @@ export function buildLADRequest(
     min_voxel_hits: params.minVoxelHits,
     // Drives the Pimont (2018) uncertainty; omit to let the backend default it.
     ...(params.elementWidth !== undefined ? { element_width: params.elementWidth } : {}),
+    // Occlusion screening. Omitted when unset so the backend applies its
+    // grid-derived default rather than a hardcoded number from the UI.
+    ...(params.occlusionThresholdM !== undefined
+      ? { occlusion_threshold_m: params.occlusionThresholdM } : {}),
+    ...(params.fillOccluded ? { fill_occluded: true } : {}),
     // G(theta) for moving-platform scans (no-op for static); omit to let the
     // backend default it to 0.5 (spherical) with a warning.
     ...(params.gtheta !== undefined ? { gtheta: params.gtheta } : {}),

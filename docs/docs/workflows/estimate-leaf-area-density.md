@@ -160,22 +160,63 @@ surface.
   solved voxels following Pimont et al. (2018). This is the recommended
   aggregate — it is far tighter and more trustworthy than a single
   voxel's interval. It reflects sampling uncertainty *conditional on the
-  beams that entered the voxels*; it does **not** capture occlusion bias
-  (foliage no beam ever reached). If the interval falls outside the
-  method's validity range, it is not reported.
+  beams that entered the voxels*; it does not by itself capture occlusion
+  bias, which is screened separately (below). If the interval falls
+  outside the method's validity range, it is not reported.
+- The result also reports **occlusion**: how many voxels were probed by too
+  little beam path to trust, the threshold applied, and a per-height
+  breakdown. Occluded voxels are drawn in their own colour (amber) rather
+  than the grey used for empty air, and are never hidden by *hide empty
+  voxels* — an unmeasured voxel is not an empty one.
+
+## Occlusion
+
+Beams are intercepted by foliage, so voxels behind dense canopy are reached by
+few beams over short paths. Their estimate is not merely noisy — it is biased
+**high**, increasingly so as the probed path shortens. Phytograph screens for
+this using the **total probed beam path** through each voxel (the sum over
+beams of the chord each one cut through it), the measure established by Soma,
+Pimont & Dupuy (2021).
+
+Two controls in the LAD dialog:
+
+- **Occlusion threshold (m of beam path)** — below this a voxel is reported as
+  occluded rather than measured, and its leaf area is excluded from the total.
+  Voxels no beam reached *at all* — the empty headroom and margin around a
+  canopy — are not counted as occluded; they simply lie outside what the scan
+  swept and keep their LAD of zero.
+  Leave it blank for the default of **100 × the voxel side length**, which is
+  how the threshold is defined in the literature (the widely-quoted *30 m*
+  figure is that rule at ~0.3 m voxels). A fixed number is not portable: total
+  path length scales with voxel size and scan density, so the same constant is
+  inert on one grid and over-eager on another. The dialog shows the resolved
+  value for your grid, and you can type any figure to match a published one.
+- **Fill occluded voxels** — estimates each occluded voxel from the surrounding
+  well-sampled ones by **LAD-kriging** (Soma et al. 2020), which weights each
+  neighbour by how reliably it was measured. Filled voxels are marked as
+  interpolated, and their leaf area is reported *separately* — never folded
+  into the measured total. Leave it off to report occlusion without modelling
+  it.
+
+!!! note "A filled voxel is a model, not a measurement"
+    Filling makes a canopy-wide figure less biased than treating occluded
+    voxels as zeros, but the filled values are interpolations. Every export
+    marks them, so downstream analysis can include or exclude them
+    deliberately.
 
 ## Exporting the result
 
 Select a LAD result and use **Export** in its row. Tick the variables you want
 (leaf area density, leaf area, G(θ), hit count, beam count, relative density
-index, mean path length, LAD std), then choose a format:
+index, mean path length, total probed path length, LAD std), then choose a
+format:
 
 | Format | What you get | Use it for |
 | --- | --- | --- |
 | **GeoTIFF** | One file per variable, each with **one band per vertical level** (band 1 = lowest), georeferenced when the source CRS is known | QGIS / ArcGIS / R `terra`; the same shape `canopyLazR` and AMAPVox's `toRaster()` produce |
 | **Voxel CSV** | One row per voxel with *every* field, including the lattice indices and the per-voxel Pimont uncertainty | Analysis in R / Python / Excel. The lossless option |
 | **AMAPVox** | `.vox` voxel space — `#min_corner` / `#max_corner` / `#split` / `#res` header, then `i j k PadBVTotal …` rows | The R `AMAPVox` package, DART / `pytools4dart` |
-| **Summary** | A small `.txt`: voxel and occlusion counts, total leaf area, and **LAI** | Reading the headline canopy numbers — LAI is not carried by any other format |
+| **Summary** | A small `.txt`: voxel, occlusion, under-sampled and filled counts, total leaf area (measured only), interpolated leaf area, and **LAI** | Reading the headline canopy numbers — LAI is not carried by any other format |
 
 Exporting several raster variables at once asks for a **folder**; a single file
 asks for a save location.

@@ -191,10 +191,74 @@ narrow regimes, whereas the aggregate is much tighter (typically ±5–10%).
 Two caveats worth keeping in mind:
 
 - The interval is **conditional on the beams that entered the voxels**. It
-  quantifies sampling noise, not **occlusion bias** — foliage that no beam
-  ever reached is invisible to both the estimate and its interval.
+  quantifies sampling noise, not **occlusion bias** — which is screened
+  separately, below.
 - If the data fall outside the method's validity envelope, no interval is
   reported rather than a misleading one.
+
+## Occlusion
+
+Foliage intercepts beams, so a voxel behind dense canopy is reached by few
+beams travelling only a short way through it. Its Beer's-law inversion then
+goes wrong in a specific direction: **LAD is overestimated**, increasingly so
+as the probed path shortens.
+
+Phytograph screens for this with the **total probed beam path** through each
+voxel — the sum, over all beams, of the chord each cut through it. Below a
+threshold the voxel is reported as *occluded* rather than measured: excluded
+from the leaf-area total and from the group-scale interval, written as NoData
+in every export, and drawn in its own colour in the viewer. The default
+threshold is **100 × the voxel side length**, the form the criterion takes in
+Soma, Pimont & Dupuy (2021).
+
+Occlusion means *beams went in and were stopped short* — some path through the
+voxel, but not enough. A voxel that **no beam entered at all** is a different
+thing: it lies outside what the scan swept, which is ordinary for the headroom
+and margin around a canopy, and it keeps its honest LAD of zero rather than
+being counted as occluded. Folding those in would swamp the occlusion figure
+with geometry: on a 3 m box drawn around a 1 m canopy, doing so flags 69 % of
+the grid, of which only a handful is real occlusion.
+
+### Why not use the confidence interval instead?
+
+It is tempting to screen on the Pimont interval — it is already computed, and a
+badly-sampled voxel ought to have a wide one. It does not work, for a reason
+worth knowing:
+
+The sampling variance carries a factor *I*(1 − *I*)/*N*, where *N* is the beam
+count and *I* the fraction intercepted. Deep occlusion lowers *N*, which widens
+the interval — but it also drives *I* toward 1, which *shrinks* that numerator.
+The two effects largely cancel. Pushed far enough the interval gets **narrower**
+as occlusion worsens: a voxel reached by a handful of nearly-all-intercepted
+beams can report a confident-looking interval around a wildly inflated value.
+
+Underneath that is a simpler point: occlusion produces **bias**, and a
+confidence interval describes **variance**. An interval is not obliged to cover
+a systematic offset, and this one does not. The interval remains the right tool
+for what it measures, which is why it is used to *weight* neighbours during
+filling — just not to detect occlusion in the first place.
+
+### Filling
+
+Occluded voxels can optionally be estimated from the reliable ones by
+**LAD-kriging** (Soma et al. 2020), a kriging variant that treats each donor
+voxel's own sampling variance as a known measurement error, so better-measured
+neighbours count for more. Filled voxels stay marked as interpolations and
+their leaf area is reported apart from the measured total — treating a fill as
+data is the very bias the screening exists to remove.
+
+## References
+
+- Pimont, F. et al. (2018). Estimators and confidence intervals for plant area
+  density at voxel scale with T-LiDAR. *Remote Sensing of Environment*
+  **215**, 343–370.
+- Soma, M. et al. (2020). Mitigating occlusion effects in leaf area density
+  estimates from terrestrial LiDAR through a specific kriging method. *Remote
+  Sensing of Environment* **245**, 111836.
+- Soma, M., Pimont, F. & Dupuy, J.-L. (2021). Sensitivity of voxel-based
+  estimations of leaf area density with terrestrial LiDAR to vegetation
+  structure and sampling limitations. *Remote Sensing of Environment*
+  **257**, 112354.
 
 See [Estimate leaf area density](../workflows/estimate-leaf-area-density.md)
 for the step-by-step workflow.

@@ -1153,6 +1153,9 @@ export interface LADExportCell {
   // false => occluded. Written as NoData rather than 0 (see the backend's
   // "THE NODATA RULE"): counting occluded voxels as zeros biases LAD/LAI low.
   solved?: boolean;
+  path_length_total?: number | null;
+  under_sampled?: boolean | null;
+  lad_filled?: boolean | null;
 }
 
 export interface LADExportRequest {
@@ -1630,6 +1633,14 @@ export interface LADRequest {
   lmax: number;                 // max triangle edge length (G-function)
   max_aspect_ratio: number;     // max triangle aspect ratio
   min_voxel_hits: number;       // min ray hits for a voxel to be solved
+  // Occlusion screening: a voxel probed by less than this much TOTAL beam path
+  // (metres) is reported as occluded rather than measured. Omit to let the
+  // backend resolve it from the grid as 100x the mean voxel side length
+  // (Soma, Pimont & Dupuy 2021) — a fixed value is not portable across
+  // voxel resolutions.
+  occlusion_threshold_m?: number;
+  // Estimate occluded voxels from the reliable ones by LAD-kriging.
+  fill_occluded?: boolean;
   // Characteristic vegetation element width (m), e.g. broadleaf ≈ 0.05, conifer
   // ≈ 0.002. Drives the Pimont et al. (2018) per-voxel sampling uncertainty.
   element_width?: number;
@@ -1675,6 +1686,13 @@ export interface LADVoxelResult {
   // their NaN squashed to 0 for JSON, so this is the only way to tell them from
   // genuinely empty air. null/absent on results predating the flag.
   lad_solved?: boolean | null;
+  // Total probed beam path through the voxel (m), and the occlusion verdict
+  // derived from it. `under_sampled` is the flag that actually fires —
+  // `lad_solved` is nearly always true even for a beam-starved voxel.
+  path_length_total?: number | null;
+  under_sampled?: boolean | null;
+  // True => `lad` is an interpolation over neighbours, not a measurement.
+  lad_filled?: boolean | null;
 }
 
 export interface LADResponse {
@@ -1692,7 +1710,13 @@ export interface LADResponse {
   bounds: number[][];          // [[lo...], [hi...]]
   is_multi_return: boolean;
   return_mode: string;         // "single" | "multi"
-  total_leaf_area: number;
+  total_leaf_area: number;      // measured voxels only; excludes filled ones
+  occlusion_threshold_m?: number | null;   // the threshold actually applied (m)
+  under_sampled_count?: number;
+  filled_count?: number;
+  occluded_by_layer?: number[];            // index 0 = lowest z-level
+  filled_leaf_area?: number;               // interpolated area, reported apart
+  fill_method_used?: string | null;        // 'kriging' | 'layer_mean' | 'none'
   method_used: string;
   // Group-scale LAD confidence interval (Pimont et al. 2018, Eq. 39) over solved
   // voxels — the recommended aggregate. group_ci_valid=false => not reported.

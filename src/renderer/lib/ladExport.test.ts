@@ -166,3 +166,26 @@ describe('base64ToBytes', () => {
     expect(Array.from(bytes)).toEqual([0x49, 0x49, 0x2a, 0x00]);
   });
 });
+
+describe('buildLadExportRequest occlusion fields', () => {
+  it('carries the occlusion verdict so every writer can apply the NoData rule', () => {
+    const req = buildLadExportRequest(result({
+      voxels: [voxel({ underSampled: true, pathLengthTotal: 1.2, ladFilled: true })],
+    }), 'csv', ['lad']);
+    expect(req.cells[0].under_sampled).toBe(true);
+    expect(req.cells[0].path_length_total).toBe(1.2);
+    expect(req.cells[0].lad_filled).toBe(true);
+  });
+
+  it('leaves the flags null on a voxel that was never screened', () => {
+    // A legacy result: absent flags must not be coerced to false, which would
+    // assert "measured" about a voxel we know nothing about.
+    const req = buildLadExportRequest(result({ voxels: [voxel()] }), 'csv', ['lad']);
+    expect(req.cells[0].under_sampled).toBeNull();
+    expect(req.cells[0].lad_filled).toBeNull();
+  });
+
+  it('offers total probed path length as an exportable variable', () => {
+    expect(LAD_EXPORT_VARIABLES.map(v => v.key)).toContain('path_length_total');
+  });
+});
