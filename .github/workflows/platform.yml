@@ -244,49 +244,6 @@ jobs:
         if: steps.backend-cache.outputs.cache-hit != 'true'
         run: node scripts/build-backend.mjs
 
-      # The RIEGL reader against the fake RiVLib in
-      # backend-api/tests/fixtures/. ci.yml already runs this file on every
-      # push, but only on Linux. This job runs it on ALL THREE, because each
-      # covers something the others cannot:
-      #
-      #   Windows — loading a .dll, which needs os.add_dll_directory rather
-      #     than PATH; `file:C:\...`, the URI form real RiVLib accepts,
-      #     backslashes and all, where the file:// spelling is rejected; and
-      #     building the miss-recovery shim with MSVC, located through vswhere.
-      #   Linux — the OTHER native host, and now the unforced one. It is where
-      #     _compile_shim_gcc's command composition and its degradation paths
-      #     run, and where the arch gate and the XDG default location are real.
-      #   macOS — the branch that exists ONLY to make this fixture work:
-      #     _riegl_rivlib_unloadable's darwin + forced-native Mach-O case, which
-      #     was otherwise covered "locally on a developer's Mac", i.e. by
-      #     nobody, while the code around it moves.
-      #
-      # It costs seconds and needs no secrets, because nothing here is RIEGL's:
-      # the stand-in is ~200 lines of our own C. The job that uses the REAL
-      # library is necessarily separate and credentialed.
-      #
-      # requirements.txt carries no test deps (it exists to feed PyInstaller),
-      # so they are installed here rather than widening the packaging install
-      # for every platform. pytest-asyncio because pytest.ini sets
-      # asyncio_mode = auto; httpx for TestClient; pytest-cov because the same
-      # pytest.ini passes --cov, which --no-cov then switches back off.
-      #
-      # requirements.txt is installed HERE too, not only in "Install Python
-      # dependencies" above. That step is skipped on a backend-cache HIT, which
-      # leaves the runner's Python with no numpy, no fastapi, nothing — and
-      # these tests import main.py. Every run of this step before v0.82.0 was
-      # a cache miss (a failed or cancelled job never saves its cache), so the
-      # hit path was first exercised by the release tag itself, where it failed
-      # both gate jobs with `No module named 'numpy'` after the same commit had
-      # passed on main minutes earlier. On a miss the packages are already
-      # present and pip resolves this in seconds; on a hit it costs a couple of
-      # minutes, which is what the tests need to run at all.
-      - name: RIEGL reader against the fake RiVLib
-        working-directory: backend-api
-        run: |
-          pip install -r requirements.txt pytest pytest-cov pytest-asyncio httpx
-          python -m pytest tests/test_riegl_fake_rivlib.py tests/test_riegl_native_runtime.py -v --no-cov
-
       # PotreeConverter links Intel TBB. The Windows build vendors it and Linux
       # gets it from apt (see ci.yml's LINUX_DEPS), but the macOS runner ships
       # neither — without this the CMake configure fails on a cold potree cache.
@@ -388,6 +345,67 @@ jobs:
         env:
           PHYTOGRAPH_E2E_PLATFORM: '1'
         run: npm run test:e2e
+
+      # ---------------- RIEGL reader unit tests ----------------
+      # The RIEGL reader against the fake RiVLib in
+      # backend-api/tests/fixtures/. ci.yml already runs this file on every
+      # push, but only on Linux. This job runs it on ALL THREE, because each
+      # covers something the others cannot:
+      #
+      #   Windows — loading a .dll, which needs os.add_dll_directory rather
+      #     than PATH; `file:C:\...`, the URI form real RiVLib accepts,
+      #     backslashes and all, where the file:// spelling is rejected; and
+      #     building the miss-recovery shim with MSVC, located through vswhere.
+      #   Linux — the OTHER native host, and now the unforced one. It is where
+      #     _compile_shim_gcc's command composition and its degradation paths
+      #     run, and where the arch gate and the XDG default location are real.
+      #   macOS — the branch that exists ONLY to make this fixture work:
+      #     _riegl_rivlib_unloadable's darwin + forced-native Mach-O case, which
+      #     was otherwise covered "locally on a developer's Mac", i.e. by
+      #     nobody, while the code around it moves.
+      #
+      # The tests themselves cost seconds and need no secrets, because nothing
+      # here is RIEGL's: the stand-in is ~200 lines of our own C. The job that
+      # uses the REAL library is necessarily separate and credentialed.
+      #
+      # These steps are LAST on purpose, after every step that runs
+      # check-backend-bundle.mjs (the verify step, `npm run test:e2e`, and
+      # launchApp inside it). The tests import main.py, and main.py needs a
+      # compiled libhelios in the source tree. On a backend-cache MISS that lib
+      # is the one the bundle was just built from, so nothing disagrees. On a
+      # HIT the build steps above were skipped and the tree has no lib, so one
+      # has to be compiled here — and a lib compiled on THIS runner cannot match
+      # the hash stamped into the cached bundle on Windows, where MSVC embeds
+      # timestamps in every PE it links (clang on macOS happens to be
+      # reproducible, which is why only the Windows gate failed). With the
+      # compile after the last bundle check, the checks see the tree the way a
+      # CI E2E shard does — bundle only, nothing to disagree with — which is the
+      # case check-backend-bundle.mjs already documents as valid.
+      #
+      # Both v0.82.0 gate failures were on this hit path, which no run had
+      # exercised before the release tag (a failed or cancelled job never saves
+      # its cache): first `No module named 'numpy'`, because "Install Python
+      # dependencies" is skipped on a hit, then the libhelios mismatch above
+      # once main.py's import-time auto-rebuild had compiled a lib mid-pytest.
+      # Building it in its own step, up front, is the same cost as ci.yml's
+      # pytest job pays and reads as a build rather than as slow tests.
+      - name: Build PyHelios for the RIEGL tests (backend cache hit)
+        if: steps.backend-cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          pip install -r backend-api/requirements.txt
+          node scripts/build-pyhelios.mjs
+
+      # requirements.txt carries no test deps (it exists to feed PyInstaller),
+      # so they are installed here rather than widening the packaging install
+      # for every platform. pytest-asyncio because pytest.ini sets
+      # asyncio_mode = auto; httpx for TestClient; pytest-cov because the same
+      # pytest.ini passes --cov, which --no-cov then switches back off.
+      - name: RIEGL reader against the fake RiVLib
+        working-directory: backend-api
+        run: |
+          pip install pytest pytest-cov pytest-asyncio httpx
+          python -m pytest tests/test_riegl_fake_rivlib.py tests/test_riegl_native_runtime.py -v --no-cov
 
       - name: Upload Playwright report on failure
         if: failure()
