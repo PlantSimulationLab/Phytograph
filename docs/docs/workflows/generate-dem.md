@@ -49,8 +49,9 @@ you write any subset of these layers to `.asc` / GeoTIFF.
    classification, only the ground points are gridded, giving a true bare-earth
    model. If it doesn't, the panel shows a notice and the ground is
    **auto-detected** with the Cloth Simulation Filter (its cloth settings are
-   scaled to the cloud's size, so a field- or ALS-scale tile is handled as
-   efficiently as a close-range scan). Running Segment Ground first just gives you
+   scaled to the cloud's size, so a field-scale tile is handled as efficiently
+   as a close-range scan; airborne clouds take the same fixed recipe described
+   under [Segment Ground](segment-ground.md)). Running Segment Ground first just gives you
    control over that step (and lets you reuse the classification elsewhere).
 3. Click **Generate DEM** (the mountain icon in the tool column), or open the
    command palette and choose **Generate DEM** (searching "DSM" or "CHM" also

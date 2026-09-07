@@ -230,6 +230,17 @@ export interface PointCloudData {
   // content" — the raw centre is the midpoint of the outlier-inflated box, which
   // on a scene with far strays lands in empty space nowhere near the data.
   robustBounds?: { min: [number, number, number]; max: [number, number, number] };
+  // Median 3D nearest-neighbour spacing (world units), computed by the backend
+  // at import.
+  //
+  // The ground-segmentation tool switches CSF recipe on it: an airborne tile and
+  // a close-range plant scan want opposite cloth resolutions, and no property of
+  // the bounding box distinguishes them (extent doesn't — measured across the 15
+  // ISPRS filtertest samples, the best cloth has no relationship to it). Cannot
+  // be derived renderer-side: an octree cloud holds no positions here.
+  // Undefined on clouds that predate this or were built renderer-side; callers
+  // fall back to the close-range path, which is what every such cloud is.
+  pointSpacing?: number;
 }
 
 // Point cloud entry with metadata. Internal alias matching the data-bearing

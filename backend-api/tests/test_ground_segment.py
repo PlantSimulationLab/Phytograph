@@ -273,6 +273,70 @@ def test_estimate_class_threshold_on_a_cleanly_separated_scene():
     assert 0.03 <= threshold <= 0.30, meta
 
 
+def test_band_floor_needs_air_above_the_band():
+    """The band floor may only be applied when the density genuinely empties
+    out just above the ground — otherwise there is no band edge to measure.
+
+    Regression test for the Nickels almond scan (bare flat ground, potted
+    plants, 12.6 m extent, 31 M points). Its ground band is razor-sharp (HWHM
+    0.0126 m, contained within about 0.015 m) precisely BECAUSE the ground is
+    bare and flat, and the pots' returns form an unbroken plateau from 0.05 m
+    to 1.10 m that never thins out.
+
+    The floor's guard (`PEAK_FRACTION`) asks where the band's skirt has ended.
+    Here nothing answers below the plants — density first falls under 0.1% of
+    peak at 1.197 m, ABOVE the pots — so `reached[0]` was meaningless and the
+    `MAX_HWHM` cap alone set the threshold: 20 x 0.0126 = 0.252 m, ~17x outside
+    the band. Verified spatially on the real scan: of the points between 0.076
+    and 0.252 m, 99.4% sit in a 0.25 m column that also contains plant material
+    above 0.5 m, against a 47.2% base rate — i.e. that slice is almost purely
+    pot, and the old cut swept all of it into the ground class.
+
+    The labelled tree_1 / tree_4 references behave the OPPOSITE way and must be
+    left alone: their density bottoms out at 0.00017-0.00019 of peak within
+    ~7 cloth resolutions, a real empty gap, and the floor is what puts their
+    thresholds at 0.184 / 0.145 (kappa 0.992 / 0.999 against ground truth).
+
+    Mirrors the scan's measured histogram rather than shipping a 1.5 GB file."""
+    rng = np.random.default_rng(7)
+    heights = np.concatenate([
+        # Razor-sharp ground band: bare flat ground, close range.
+        rng.normal(0.0, 0.006, 1_200_000),
+        # Pots + plants: a solid plateau that never thins out. Its density
+        # (~0.2% of peak) stays ABOVE PEAK_FRACTION, so no empty bin exists
+        # below it — this is what made the cap the sole decider.
+        rng.uniform(0.05, 1.10, 300_000),
+        # Foliage thinning out above the pots. Load-bearing, not decoration:
+        # without something that eventually DOES reach PEAK_FRACTION, the
+        # buggy branch is skipped entirely and the fixture would pass against
+        # the very bug it exists to catch.
+        rng.exponential(0.25, 20_000) + 1.10,
+    ])
+    threshold, meta = main._estimate_class_threshold(heights, 0.126, fallback=0.126)
+    # No air above the band ⇒ no floor. Pre-fix the floor returned 0.252.
+    assert meta["band_floor"] == 0.0, meta
+    assert threshold <= 0.12, meta
+
+
+def test_band_floor_still_applies_when_there_is_air_above_the_band():
+    """The complement: a sharp band with genuinely empty air above it must
+    still get the floor, which is what keeps the tree_1 / tree_4 references
+    correct. Same shape as those scans — a tight band, a sparse near-ground
+    skirt, then canopy well clear overhead.
+
+    Uses tree_1's real geometry (cloth 0.092 seeded from its 9.2 m extent,
+    canopy from 0.8 m), and lands at 0.188 against that scan's measured 0.184."""
+    rng = np.random.default_rng(11)
+    heights = np.concatenate([
+        rng.normal(0.0, 0.010, 3_000_000),        # sharp ground band
+        rng.exponential(0.05, 120_000) + 0.02,    # skirt, decaying to nothing
+        rng.uniform(0.8, 6.0, 400_000),           # canopy, well clear above
+    ])
+    threshold, meta = main._estimate_class_threshold(heights, 0.092, fallback=0.092)
+    assert meta["band_floor"] > 0.0, meta
+    assert 0.10 <= threshold <= 0.30, meta
+
+
 def test_desnag_cloth_pulls_down_a_snagged_node():
     """A node hung up on a trunk is pulled back to local terrain; flat terrain
     and genuine relief are left alone.

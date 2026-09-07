@@ -1009,6 +1009,13 @@ export function buildPointCloudFromOctree(
         Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && isFinite(n));
       return b && ok(b.min) && ok(b.max) ? { min: b.min, max: b.max } : undefined;
     })(),
+    // Same provenance again: the ground tool's ALS/close-range regime switch.
+    // Must be > 0 to count — the backend returns 0.0 when it could not measure
+    // one, and a 0 would read as "close-range" by luck rather than by evidence.
+    pointSpacing: (() => {
+      const s = (meta as OctreeMetadata & { point_spacing?: unknown }).point_spacing;
+      return typeof s === 'number' && isFinite(s) && s > 0 ? s : undefined;
+    })(),
     fileName,
     octree: {
       cacheId: meta.cache_id,

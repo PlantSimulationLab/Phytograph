@@ -125,4 +125,61 @@ describe('groundSegmentDefaultsForExtent', () => {
       expect(d.slopeSmooth).toBe(false);
     }
   });
+
+  describe('airborne (ALS) regime', () => {
+    // Extent/relief/spacing triples below are MEASURED on the 15 ISPRS
+    // filtertest samples and the close-range references — see the ALS_SPACING_M
+    // comment for the benchmark numbers this recipe is calibrated against.
+
+    it('gives an airborne tile the fixed ALS recipe, not the extent-scaled one', () => {
+      // samp51: 430 m across, 1.74 m point spacing. The extent-scaled rule asks
+      // for a 4.3 m cloth, clamps to 2.0, and scores 0.498 overall accuracy —
+      // a cloth FINER than the data supports, conforming to sampling noise.
+      const d = groundSegmentDefaultsForExtent(430, 49, 1.74);
+      expect(d.clothResolution).toBe(0.75);
+      expect(d.rigidness).toBe(2);
+      expect(d.slopeSmooth).toBe(true);
+    });
+
+    it('applies the ALS recipe regardless of relief ratio', () => {
+      // The close-range branches key off relief ratio; an airborne tile can be
+      // flat (samp71, ratio 0.04) or steep (samp11, ratio 0.36) and must take
+      // the same recipe either way. Before this, samp11 landed in the sloped
+      // branch and samp71 in the flat one, and both were wrong.
+      for (const [ext, relief] of [[395, 16], [303, 109]]) {
+        const d = groundSegmentDefaultsForExtent(ext, relief, 1.7);
+        expect(d.clothResolution).toBe(0.75);
+        expect(d.rigidness).toBe(2);
+      }
+    });
+
+    it('keeps close-range clouds on the extent-scaled path', () => {
+      // Measured spacings: tree_1 0.0020, Nickels 0.0052, bean 0.0125 — two
+      // orders of magnitude below the cutoff.
+      for (const [ext, relief, spacing] of [[9.2, 8.4, 0.0020], [12.6, 9.1, 0.0052], [5.9, 0.3, 0.0125]]) {
+        const d = groundSegmentDefaultsForExtent(ext, relief, spacing);
+        expect(d.clothResolution).toBeLessThan(0.5);
+      }
+    });
+
+    it('does NOT call a small sparse cloud airborne', () => {
+      // Spacing alone is not enough: 3D nearest-neighbour distance measures
+      // spatial separation, so a volume-filling cloud reads far sparser than a
+      // surface scan of the same size — 2000 points in a 5 m cube measure
+      // 0.219 m, past the spacing cutoff. A 0.75 m cloth on a 5 m cloud would
+      // be absurd, so the extent condition has to hold too.
+      const d = groundSegmentDefaultsForExtent(5, 5, 0.219);
+      expect(d.clothResolution).toBeLessThan(0.5);
+    });
+
+    it('stays on the close-range path when spacing is unknown', () => {
+      // Renderer-built clouds carry no measured spacing. Every such cloud is
+      // close-range, and guessing airborne would be far more damaging than the
+      // reverse.
+      for (const spacing of [undefined, NaN, 0]) {
+        const d = groundSegmentDefaultsForExtent(430, 49, spacing);
+        expect(d.clothResolution).not.toBe(0.75);
+      }
+    });
+  });
 });

@@ -25,6 +25,18 @@ labels the points the cloth settles onto as ground.
    single tall tree standing on flat ground, say — is read as *vegetation*
    rather than terrain, and keeps the flat-ground recipe: a conforming cloth
    would climb the trunk.
+   **Airborne (ALS) scans get a different recipe entirely.** Phytograph
+   recognises them by their point spacing — metres apart, against millimetres
+   for a tripod scan — and switches to a fixed 0.75 m cloth with slope
+   smoothing on, rather than scaling the cloth from the tile's width. Scaling
+   it up is actively wrong on airborne data: on a 400 m tile the size-based
+   rule asks for a cloth several metres across, which is *coarser than the
+   terrain* yet, once clamped, still finer than the points can support, so it
+   settles onto sampling noise. Measured on the standard ISPRS ground-filtering
+   benchmark, the fixed airborne recipe raises mean accuracy from 0.76 to 0.86.
+   Expect an airborne tile to take noticeably longer than before — a finer
+   cloth over a wide tile is far more simulation work, and that cost is what
+   buys the accuracy.
    (CSF's parameters are absolute distances, so a fixed default that suits a
    1 m plant scan would label nearly everything as non-ground on a 50 m
    field — and a coarse, stiff cloth tuned for a flat field bridges over a

@@ -825,16 +825,23 @@ def test_auto_csf_params_scale_with_extent():
     ps = main._auto_csf_params(small)
     assert ps["cloth_resolution"] == 0.05 and ps["rigidness"] == 3
 
-    # Large flat field (200 m, low relief) → coarse cloth (extent/100 clamped) — NOT 5 cm.
+    # Large flat field (200 m, low relief). These synthetic tiles are UNIFORM
+    # NOISE at ~0.1 pts/m^2, i.e. 1.5 m point spacing — sparser than most of the
+    # real ISPRS filtertest samples (0.51-2.03 m), so they classify as airborne
+    # and take the fixed ALS recipe. That is the correct call for data this
+    # sparse; what these assertions exist to pin is the property that made the
+    # function necessary, which is that a large tile never gets the pathological
+    # plant-scale 5 cm cloth and never builds an unbounded node grid.
     flat = np.column_stack([rng.uniform(0, 200, 4000), rng.uniform(0, 200, 4000), rng.uniform(0, 1, 4000)])
     pf = main._auto_csf_params(flat)
-    assert pf["cloth_resolution"] >= 1.0 and pf["rigidness"] == 3 and pf["slope_smooth"] is False
+    assert pf["cloth_resolution"] >= 0.5
+    assert 200.0 / pf["cloth_resolution"] <= 601
 
-    # Steep ALS-style tile (186 m extent, 81 m relief, ratio 0.44) → slope recipe.
+    # Steep ALS-style tile (186 m extent, 81 m relief, ratio 0.44).
     sl = np.column_stack([rng.uniform(0, 186, 4000), rng.uniform(0, 80, 4000), rng.uniform(0, 81, 4000)])
     psl = main._auto_csf_params(sl)
-    assert psl["rigidness"] == 1 and psl["slope_smooth"] is True
-    assert 0.05 < psl["cloth_resolution"] <= 1.0   # ~0.93 — never the pathological 5 cm
+    assert psl["slope_smooth"] is True
+    assert 0.05 < psl["cloth_resolution"] <= 1.0   # never the pathological 5 cm
 
 
 def test_auto_csf_params_on_br04_is_tractable():

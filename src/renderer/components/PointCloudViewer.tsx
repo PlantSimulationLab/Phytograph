@@ -1018,7 +1018,10 @@ export default function PointCloudViewer({
       // coarse. See extentForParameterSeeding.
       const size = sel ? extentForParameterSeeding(sel.data) : null;
       if (size) {
-        const defaults = groundSegmentDefaultsForExtent(Math.max(size.x, size.y), size.z);
+        // Point spacing (measured at import) selects the ALS vs close-range
+        // recipe; undefined on a renderer-built cloud, which is close-range.
+        const defaults = groundSegmentDefaultsForExtent(
+          Math.max(size.x, size.y), size.z, sel?.data.pointSpacing);
         setGroundClothResolution(defaults.clothResolution);
         setGroundRigidness(defaults.rigidness);
         setGroundSlopeSmooth(defaults.slopeSmooth);

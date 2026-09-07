@@ -5526,6 +5526,115 @@ def _pack_dem_frame(result: dict) -> bytes:
     return _bin_frame_bytes(meta, buffers)
 
 
+# Airborne (ALS) clouds need a different CSF recipe, and the extent-scaled one
+# is actively harmful there. Measured over all 15 ISPRS filtertest samples (the
+# standard ground-filtering benchmark, X Y Z 0|1 reference labels):
+#
+#   extent-scaled seeding (what we shipped)  mean overall accuracy 0.7634
+#   fixed cloth 0.75, rigidness 2, smooth    mean overall accuracy 0.8574
+#
+# i.e. a single FIXED recipe beats the adaptive one by 9 points. The reason the
+# adaptivity hurts: `ext/100` on a 300-500 m tile computes a 3-5 m cloth, which
+# CLOTH_MAX clamps to 2.0 — and on samp54 (median point spacing 2.03 m) that is
+# a cloth FINER than the data supports, so its nodes have no points to settle
+# against and it conforms to sampling noise. Overall accuracy there was 0.33.
+#
+# Two things were tested as continuous drivers and BOTH are unsupported, which
+# is why this is a regime switch rather than a cleverer formula:
+#   - extent: the best cloth per sample has no relationship to it (samp51 at
+#     430 m and samp23 at 206 m want the same cloth; samp61 at 504 m and samp42
+#     at 227 m both want 1.0).
+#   - point spacing: best-cloth/spacing ranges 0.24-1.29 across ALS and 7.8-289
+#     within close-range alone. It predicts nothing as a magnitude.
+# What DOES bound the cloth is the height of the shortest object that must stay
+# separable from the ground (a cloth coarser than that drapes over it — the bean
+# fixture, whose plants sit a median 0.117 m up, collapses from 0.988 to 0.672
+# accuracy at cloth 0.25), but that is only knowable AFTER segmentation.
+#
+# So: spacing fails as a magnitude but works as a CLASSIFIER, which is a much
+# weaker claim and one the data supports overwhelmingly — close-range scans
+# measure 0.0020-0.0125 m and airborne ones 0.53-2.03 m, a 42x gap with nothing
+# in between. Above the cutoff we use a fixed ALS recipe; below it, the
+# extent-scaled path is unchanged and stays calibrated on tree_1 / tree_4 / bean.
+#
+# 0.75 rather than the literature's habitual 0.5 because COST decides it. CSF
+# simulates an (ext/cloth)^2 node grid ~500x, so halving the cloth quadruples the
+# work — on a 430 m tile, cloth 0.5 measured 15.5 s against 7.6 s at 0.75 and
+# 1.06 s for the (wrong) 2.0 we shipped. Accuracy across 0.40-0.75 is a plateau
+# (0.854 / 0.853 / 0.857) that only falls off at 0.25 (0.785) and 1.0 (0.824), so
+# 0.75 is simultaneously the most accurate point measured AND 2.3x cheaper than
+# 0.5. This is still ~7x slower than the old seeding, which is the price of the
+# 9-point accuracy gain; the old value was fast because its cloth was too coarse
+# to resolve anything.
+#
+# BOTH conditions are required, and the extent one is not redundant. Spacing
+# alone misreads a sparse SMALL cloud: 3D nearest-neighbour distance measures
+# how far apart points are in space, so a volume-filling cloud reads far sparser
+# than a surface scan of the same extent — 2000 points scattered through a 5 m
+# cube measure 0.219 m, well past the spacing cutoff, and a synthetic fixture of
+# exactly that shape sits in test_dem.py. Real close-range scans sample surfaces
+# at 0.0017-0.0125 m and are nowhere near it, but "small and sparse" must not be
+# allowed to mean "airborne": every ISPRS sample spans 122-504 m while every
+# close-range reference spans 5.9-12.6 m, a 10x gap, so requiring both puts the
+# toy shape safely on the close-range side where a 0.75 m cloth would be absurd.
+_ALS_SPACING_M = 0.1
+_ALS_MIN_EXTENT_M = 50.0
+_ALS_CLOTH = 0.75
+_ALS_CLASS_THRESHOLD = 0.5
+
+
+def _regime_point_spacing(points: np.ndarray, *, max_subset: int = 50_000,
+                          n_query: int = 2000, seed: int = 0) -> float:
+    """Median 3D nearest-neighbour spacing, cheaply. Returns 0.0 when it cannot
+    be measured (fewer than 2 points, or every neighbour distance degenerate).
+
+    Distinct from `_median_point_spacing` (which ICP uses to size its
+    correspondence window) and deliberately so: that one builds its tree over
+    every finite point, which costs ~390 ms on a 1.5 M-point cloud and ~10 s on
+    tree_1's 29 M — affordable once per ICP run, not on the import path this
+    feeds. It also returns None rather than 0.0 on failure. Keep them separate:
+    the two callers want different accuracy/cost trades, and quietly pointing
+    one at the other's implementation is a real hazard here (they differ in
+    return type, so the mistake surfaces as a TypeError at best).
+
+    Deliberately approximate, because the only caller uses it to pick a REGIME
+    across a 42x gap, not to compute a magnitude. Cost matters more than the
+    last few percent: the ground tool already runs a 500-iteration cloth
+    simulation, and this must not add to that noticeably. Measured 2-20 ms on
+    every reference scene including the 29 M-point tree_1, against ~390 ms for
+    the full-cloud `_do_spacing_check` pattern and ~560 ms for an all-points
+    query — 20-40x cheaper, with the measured value landing within 0.86-1.15x
+    of the full-cloud answer on all 19 reference scenes.
+
+    Two details are load-bearing:
+      - The tree is built over a CONTIGUOUS block, not a random sample. A tree
+        over randomly-drawn points measures the spacing OF THE SAMPLE, which on
+        the Nickels scan reads 0.077 against a true 0.006 — a 13x error that
+        would misclassify a close-range scan as airborne.
+      - Distances are 3D, not 2D. A terrestrial scan stacks returns in a
+        vertical column (canopy over ground), so 44% of tree_1's points share
+        their XY with another point exactly; the 2D median is 0.000002 m, which
+        is a property of the LAS 1 mm quantisation rather than of the scan.
+    """
+    from scipy.spatial import cKDTree
+
+    n = len(points)
+    if n < 2:
+        return 0.0
+    rng = np.random.default_rng(seed)
+    if n > max_subset:
+        start = int(rng.integers(0, n - max_subset))
+        sub = points[start:start + max_subset, :3]
+    else:
+        sub = points[:, :3]
+    tree = cKDTree(sub)
+    qi = rng.choice(len(sub), min(n_query, len(sub)), replace=False)
+    dist, _ = tree.query(sub[qi], k=2, workers=-1)
+    nn = dist[:, 1]
+    nn = nn[np.isfinite(nn) & (nn > 0)]
+    return float(np.median(nn)) if nn.size else 0.0
+
+
 def _auto_csf_params(points: np.ndarray) -> dict:
     """Extent-scaled CSF parameters for the DEM tool's automatic ground
     extraction. CSF's cloth resolution is an ABSOLUTE distance: a 5 cm cloth
@@ -5535,7 +5644,9 @@ def _auto_csf_params(points: np.ndarray) -> dict:
     extent (see groundSegmentDefaults.ts); the DEM panel exposes no CSF controls,
     so its auto path must self-scale identically. Flat terrain → coarse stiff
     cloth ∝ extent; sloped (relief ratio ≥ 0.2) → finer, low-rigidness,
-    slope-smoothed cloth that conforms instead of bridging."""
+    slope-smoothed cloth that conforms instead of bridging.
+
+    Airborne clouds take the fixed ALS recipe instead — see _ALS_SPACING_M."""
     xy = points[:, :2]
     ext = float(max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1])))
     if not (ext > 0):
@@ -5555,6 +5666,17 @@ def _auto_csf_params(points: np.ndarray) -> dict:
     # which a normal in-extent cloud never hits but a runaway extent is clamped to.
     MAX_CLOTH_NODES_PER_SIDE = 600
     cloth_floor = ext / MAX_CLOTH_NODES_PER_SIDE
+
+    # Airborne clouds take the fixed ALS recipe (see _ALS_SPACING_M) — but still
+    # subject to `cloth_floor`, which is why this sits AFTER it rather than
+    # short-circuiting at the top of the function. A miss-contaminated cloud
+    # reads as wide-spaced (the sky shell is sparse) and so lands here, and an
+    # unfloored 0.5 m cloth over its ~1000x-inflated extent is 4000 nodes per
+    # side — precisely the hang the backstop exists to prevent.
+    if ext >= _ALS_MIN_EXTENT_M and _regime_point_spacing(points) >= _ALS_SPACING_M:
+        return {"cloth_resolution": max(_ALS_CLOTH, cloth_floor),
+                "class_threshold": _ALS_CLASS_THRESHOLD,
+                "rigidness": 2, "slope_smooth": True}
 
     if ratio >= 0.2:
         cloth = min(ext / 200.0, 1.0)
@@ -14257,6 +14379,32 @@ _BAND_FLOOR_SHARP_HWHM = 0.25
 _BAND_FLOOR_PEAK_FRACTION = 0.001
 _BAND_FLOOR_MAX_HWHM = 20.0
 
+# ...but the floor is only MEANINGFUL if the density genuinely empties out just
+# above the band. PEAK_FRACTION asks "where has the skirt ended"; on a scene
+# where it never ends below the vegetation, the first bin that finally answers
+# sits ABOVE the objects, `reached[0]` is meaningless, and MAX_HWHM alone
+# decides the threshold — which inverts, because it is a multiple of the mode's
+# own width and so GROWS relative to the band as the ground gets cleaner.
+#
+# On the Nickels almond scan (bare flat ground, potted plants, HWHM 0.0126 m)
+# the pots' returns form an unbroken plateau from 0.05 m to 1.1 m; density does
+# not reach PEAK_FRACTION until 1.197 m, and the cap set the answer at
+# 20 x 0.0126 = 0.252 m — ~17x outside a band contained within 0.015 m, putting
+# the bottom quarter-metre of every pot in the ground class. CLEANER ground gave
+# a WORSE cut.
+#
+# So require the empty bin to arrive within a plausible band distance. The
+# labelled references separate cleanly on exactly this measure: tree_1 and
+# tree_4 bottom out at 0.00017 and 0.00019 of peak (a genuinely empty gap, well
+# under PEAK_FRACTION) and reach it at 0.60-0.69 m, while Nickels bottoms out at
+# 0.00226 — never empty at all. Measured in cloth resolutions so the test is
+# scale-free: the trees reach it at ~7x their cloth, Nickels would need ~9.5x.
+# 8 sits in that gap. When the bin arrives later than this, there is no
+# measurable band edge and NO floor is applied — the knee/tail rule decides
+# alone, which is the correct answer for a scene with no empty air above the
+# ground.
+_BAND_FLOOR_MAX_CLOTH = 8.0
+
 
 def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
                               fallback: float) -> "tuple[float, dict]":
@@ -14417,7 +14565,12 @@ def _estimate_class_threshold(height: np.ndarray, cloth_resolution: float,
     band_floor = 0.0
     if meta["method"] == "tail" and hwhm < _BAND_FLOOR_SHARP_HWHM * cloth_resolution:
         tail_lvl = _BAND_FLOOR_PEAK_FRACTION * smooth[peak]
-        reached = np.flatnonzero((centres > centres[peak]) & (smooth < tail_lvl))
+        # Only within a plausible band distance: past that the density never
+        # emptied out above the band, so there is no edge to measure and no
+        # floor to apply. See _BAND_FLOOR_MAX_CLOTH.
+        limit = centres[peak] + _BAND_FLOOR_MAX_CLOTH * cloth_resolution
+        reached = np.flatnonzero((centres > centres[peak]) & (centres <= limit)
+                                 & (smooth < tail_lvl))
         if reached.size:
             # Cap relative to the mode's own width: on a cloud with a long
             # sparse tail the density fraction alone can run far away from the
@@ -29084,6 +29237,14 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         # dominate a percentile span exactly as they do the raw bounding box.
         robust_extent = _robust_extent(_gz_src)
         robust_bounds = _robust_aabb(_gz_src)
+        # Median nearest-neighbour spacing, for the ground tool's ALS/close-range
+        # regime switch (see _ALS_SPACING_M). Measured HERE rather than when the
+        # panel opens because the renderer holds no positions for an octree
+        # cloud, so a panel-time probe would be a backend round-trip on every
+        # open; this is ~10 ms once, flat in cloud size, against the ~80 ms
+        # `_robust_extent` beside it. Hits-only for the same reason as those: a
+        # miss shell sits ~1 km out and is not part of the sampling pattern.
+        point_spacing = _regime_point_spacing(_gz_src)
 
         sess = CloudSession(
             session_id=session_id,
@@ -29257,6 +29418,11 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             # needs its CENTRE: with far outliers the raw box centre sits out in
             # empty space, so a camera converging on it stalls short of the data.
             "robust_bounds": robust_bounds,
+            # Median nearest-neighbour spacing (see `_regime_point_spacing`). The
+            # ground tool switches CSF recipe on it: close-range and airborne
+            # clouds want opposite cloth resolutions, and the renderer cannot
+            # measure this itself on an octree cloud (it holds no positions).
+            "point_spacing": point_spacing,
             **miss_info, **meta}
 
 

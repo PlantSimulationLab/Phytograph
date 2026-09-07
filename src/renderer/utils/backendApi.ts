@@ -4105,6 +4105,12 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // content's centre — unlike `tight_bounds`', which far outliers drag into
   // empty space. null on a degenerate cloud.
   robust_bounds?: { min: [number, number, number]; max: [number, number, number] } | null;
+  // Median 3D nearest-neighbour spacing (see `_regime_point_spacing` in
+  // main.py). The ground tool switches CSF recipe on it — airborne and
+  // close-range clouds want opposite cloth resolutions. Measured at import
+  // because an octree cloud holds no positions renderer-side. null/0 when it
+  // could not be measured; callers then take the close-range path.
+  point_spacing?: number | null;
 }
 
 // The wire shape of the backend `scan_params` dict. Canonically defined in

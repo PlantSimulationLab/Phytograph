@@ -93,6 +93,60 @@ const SLOPE_RELIEF_RATIO = 0.2;
 // is the clearest demonstration that the box measures the tree, not the ground.
 const VEGETATION_RELIEF_RATIO = 0.7;
 
+// Airborne (ALS) clouds need a different recipe entirely, and the extent-scaled
+// one above is actively harmful there. Measured over all 15 samples of the ISPRS
+// filtertest benchmark (the standard ground-filtering reference, with per-point
+// ground/non-ground labels), scoring the real CSF + threshold estimator:
+//
+//   extent-scaled seeding (what we shipped)   mean overall accuracy 0.7634
+//   fixed cloth 0.75, rigidness 2, smooth     mean overall accuracy 0.8574
+//
+// A single FIXED recipe beats the adaptive one by 9 points. Why the adaptivity
+// hurts: ext/100 on a 300-500 m tile asks for a 3-5 m cloth, CLOTH_MAX clamps it
+// to 2.0, and on samp54 (median point spacing 2.03 m) that is a cloth FINER than
+// the data supports — its nodes have no points to settle against, so it conforms
+// to sampling noise instead of terrain. Accuracy there was 0.33.
+//
+// This is a REGIME SWITCH rather than a smarter formula because two candidate
+// continuous drivers were tested and both are unsupported:
+//   - extent: best-cloth per sample has no relationship to it (samp51 at 430 m
+//     and samp23 at 206 m want the same cloth; samp61 at 504 m and samp42 at
+//     227 m both want 1.0).
+//   - spacing as a MAGNITUDE: best-cloth/spacing ranges 0.24-1.29 across the ALS
+//     samples and 7.8-289 within close-range scans alone.
+// What actually bounds the cloth is the height of the shortest object that must
+// stay separable from ground — the bean fixture, whose plants sit a median
+// 0.117 m up, collapses from 0.988 to 0.672 accuracy at cloth 0.25 — but that is
+// only knowable AFTER a segmentation.
+//
+// Spacing fails as a magnitude yet works as a CLASSIFIER, a far weaker claim the
+// data supports overwhelmingly: close-range scans measure 0.0020-0.0125 m and
+// airborne ones 0.53-2.03 m, a 42x gap with nothing in between. 0.1 sits in that
+// void, so the cutoff is not delicate.
+//
+// The cloth is 0.75 rather than the literature's habitual 0.5 because COST
+// decides it. CSF simulates an (ext/cloth)^2 node grid ~500x, so halving the
+// cloth quadruples the work: on a 430 m tile, cloth 0.5 measured 15.5 s against
+// 7.6 s at 0.75. Accuracy across 0.40-0.75 is a plateau (0.854 / 0.853 / 0.857)
+// that falls off only at 0.25 (0.785) and 1.0 (0.824), so 0.75 is at once the
+// most accurate point measured and 2.3x cheaper than 0.5.
+//
+// Mirrored by `_ALS_SPACING_M` / `_ALS_CLOTH` in backend-api/main.py, which the
+// DEM tool's auto path uses.
+// BOTH conditions are required, and the extent one is not redundant. Spacing
+// alone misreads a sparse SMALL cloud: 3D nearest-neighbour distance measures how
+// far apart points are in space, so a volume-filling cloud reads far sparser than
+// a surface scan of the same extent — 2000 points scattered through a 5 m cube
+// measure 0.219 m, past the cutoff. Real close-range scans sample surfaces at
+// 0.0017-0.0125 m and are nowhere near it, but "small and sparse" must not mean
+// "airborne": every ISPRS sample spans 122-504 m while every close-range
+// reference spans 5.9-12.6 m, so requiring both keeps such a cloud close-range,
+// where a 0.75 m cloth would be absurd.
+const ALS_SPACING_M = 0.1;
+const ALS_MIN_EXTENT_M = 50;
+const ALS_CLOTH = 0.75;
+const ALS_CLASS_THRESHOLD = 0.5;
+
 function clampRound(value: number, lo: number, hi: number): number {
   const clamped = Math.max(lo, Math.min(hi, value));
   // 3 decimals keeps seeded values clean (0.5, 0.237) without float noise.
@@ -113,7 +167,23 @@ function clampRound(value: number, lo: number, hi: number): number {
 export function groundSegmentDefaultsForExtent(
   horizontalExtentM: number,
   verticalReliefM = 0,
+  pointSpacingM?: number,
 ): GroundSegmentDefaults {
+  // Airborne clouds take a fixed recipe; see ALS_SPACING_M. Checked FIRST because
+  // the extent/relief rules below are close-range calibrations that this data
+  // does not obey — an ALS tile is large and can be steep, so it would otherwise
+  // land in the sloped branch and get a cloth its point spacing cannot support.
+  if (Number.isFinite(pointSpacingM ?? NaN)
+      && (pointSpacingM as number) >= ALS_SPACING_M
+      && Number.isFinite(horizontalExtentM) && horizontalExtentM >= ALS_MIN_EXTENT_M) {
+    return {
+      clothResolution: ALS_CLOTH,
+      classThreshold: ALS_CLASS_THRESHOLD,
+      rigidness: 2,
+      slopeSmooth: true,
+    };
+  }
+
   const ext = Number.isFinite(horizontalExtentM) && horizontalExtentM > 0 ? horizontalExtentM : 1.5;
   const relief = Number.isFinite(verticalReliefM) && verticalReliefM > 0 ? verticalReliefM : 0;
   const reliefRatio = relief / ext;
