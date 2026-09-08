@@ -10,6 +10,8 @@ import {
   buildLegendEntries,
   layoutLegend,
   cssColorToRgb,
+  sharedDomains,
+  sharedDomainKey,
   LEGEND_EXPAND_LIMIT,
 } from './colorChannel';
 import { GROUND_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE } from './classification';
@@ -386,5 +388,126 @@ describe('layoutLegend', () => {
     ]);
     const layout = layoutLegend(all);
     expect(layout.expanded.some(e => e.objectIds.includes('sel'))).toBe(true);
+  });
+});
+
+describe('sharedDomainKey', () => {
+  it('keys a self-describing mode by the mode alone', () => {
+    expect(sharedDomainKey('height')).toBe('height');
+  });
+
+  it('separates scalar fields from each other', () => {
+    expect(sharedDomainKey('scalar', 'wood_class'))
+      .not.toBe(sharedDomainKey('scalar', 'height_above_ground'));
+  });
+
+  it('ignores a stray field on a mode that does not use one', () => {
+    expect(sharedDomainKey('height', 'wood_class')).toBe('height');
+  });
+});
+
+describe('sharedDomains', () => {
+  it('unions the ranges of every object mapping the same variable', () => {
+    const domains = sharedDomains([
+      { mode: 'height', min: 0, max: 4.2 },
+      { mode: 'height', min: 1.5, max: 9.8 },
+      { mode: 'height', min: 0.3, max: 5.1 },
+    ]);
+    expect(domains.get('height')).toEqual({ min: 0, max: 9.8 });
+  });
+
+  it('keeps different variables on independent scales', () => {
+    const domains = sharedDomains([
+      { mode: 'height', min: 0, max: 10 },
+      { mode: 'intensity', min: 0, max: 1 },
+      { mode: 'scalar', field: 'wood_class', min: 1, max: 2 },
+    ]);
+    expect(domains.get('height')).toEqual({ min: 0, max: 10 });
+    expect(domains.get('intensity')).toEqual({ min: 0, max: 1 });
+    expect(domains.get('scalar:wood_class')).toEqual({ min: 1, max: 2 });
+  });
+
+  it('does not pool two different scalar fields together', () => {
+    const domains = sharedDomains([
+      { mode: 'scalar', field: 'a', min: 0, max: 1 },
+      { mode: 'scalar', field: 'b', min: 500, max: 900 },
+    ]);
+    expect(domains.get('scalar:a')).toEqual({ min: 0, max: 1 });
+    expect(domains.get('scalar:b')).toEqual({ min: 500, max: 900 });
+  });
+
+  it('ignores non-finite bounds instead of poisoning the union', () => {
+    // A degenerate/empty cloud must not turn every other scan's scale into NaN.
+    const domains = sharedDomains([
+      { mode: 'height', min: 2, max: 8 },
+      { mode: 'height', min: NaN, max: NaN },
+      { mode: 'height', min: -Infinity, max: Infinity },
+    ]);
+    expect(domains.get('height')).toEqual({ min: 2, max: 8 });
+  });
+
+  it('returns no domain for a variable nothing maps', () => {
+    expect(sharedDomains([]).get('height')).toBeUndefined();
+  });
+
+  it('handles a single object as its own domain', () => {
+    expect(sharedDomains([{ mode: 'height', min: 3, max: 7 }]).get('height'))
+      .toEqual({ min: 3, max: 7 });
+  });
+
+  it('does not mutate its inputs', () => {
+    const inputs = [
+      { mode: 'height', min: 0, max: 4 },
+      { mode: 'height', min: 1, max: 9 },
+    ];
+    sharedDomains(inputs);
+    expect(inputs[0]).toEqual({ mode: 'height', min: 0, max: 4 });
+  });
+});
+
+describe('shared domains collapse the per-scan legend stack', () => {
+  // The user-visible payoff, asserted end to end through the real dedup: three
+  // scans at different heights used to yield three separate Z colorbars, each
+  // printing its own numbers. Pooling the domain first is what makes them one.
+  const scans = [
+    { id: 'a', min: 0, max: 4.2 },
+    { id: 'b', min: 1.5, max: 9.8 },
+    { id: 'c', min: 0.3, max: 5.1 },
+  ];
+
+  it('splits into one entry per scan when each keeps its own domain', () => {
+    const entries = buildLegendEntries(scans.map(s => descriptor({
+      objectId: s.id,
+      dataRange: { min: s.min, max: s.max },
+      channel: { mode: 'height', colormap: 'viridis' },
+    })));
+    expect(entries).toHaveLength(3);
+  });
+
+  it('folds into a single grouped entry on the pooled domain', () => {
+    const pooled = sharedDomains(
+      scans.map(s => ({ mode: 'height', min: s.min, max: s.max })),
+    ).get('height')!;
+    const entries = buildLegendEntries(scans.map(s => descriptor({
+      objectId: s.id,
+      dataRange: pooled,
+      channel: { mode: 'height', colormap: 'viridis' },
+    })));
+    expect(entries).toHaveLength(1);
+    expect(entries[0].objectLabel).toBe('3 scans');
+    expect(entries[0].min).toBe(0);
+    expect(entries[0].max).toBe(9.8);
+    expect(entries[0].objectIds).toEqual(['a', 'b', 'c']);
+  });
+
+  it('still splits scans that use genuinely different colormaps', () => {
+    const pooled = sharedDomains(
+      scans.map(s => ({ mode: 'height', min: s.min, max: s.max })),
+    ).get('height')!;
+    const entries = buildLegendEntries([
+      descriptor({ objectId: 'a', dataRange: pooled, channel: { mode: 'height', colormap: 'viridis' } }),
+      descriptor({ objectId: 'b', dataRange: pooled, channel: { mode: 'height', colormap: 'turbo' } }),
+    ]);
+    expect(entries).toHaveLength(2);
   });
 });

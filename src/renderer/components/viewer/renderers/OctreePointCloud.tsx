@@ -654,8 +654,14 @@ export function OctreePointCloud({
     // and bottom of the cloud aren't pinned exactly at the gradient
     // texture's edge texels (mirrors potree-core's own setter).
     if (rangeMin !== undefined && rangeMax !== undefined && rangeMax > rangeMin) {
-      (m as any).heightMin = rangeMin;
-      (m as any).heightMax = rangeMax;
+      // rangeMin/rangeMax are WORLD Z (a user-typed override, or the scene-wide
+      // shared height domain), but the shader reads the DISPLAY frame — so the
+      // offset comes off here exactly as it does in the derived branch below.
+      // Without this the gradient shifts by the whole offset on a UTM scene,
+      // painting every cloud one flat end-of-ramp colour.
+      const dz = displayOffset?.z ?? 0;
+      (m as any).heightMin = rangeMin - dz;
+      (m as any).heightMax = rangeMax - dz;
     } else {
       // potree's height shader reads `modelMatrix * position`, i.e. the DISPLAY
       // frame (world − displayOffset) with the pose already applied. `data.bounds`

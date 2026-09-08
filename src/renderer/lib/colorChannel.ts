@@ -391,3 +391,57 @@ export function layoutLegend(
     collapsed: entries.filter(e => !expandedKeys.has(e.key)),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Shared continuous domains across objects
+// ---------------------------------------------------------------------------
+
+// The key a continuous mapping shares its domain under. Two clouds pool their
+// ranges only when they are colored by the SAME variable — 'height' with
+// 'height', `scalar:wood_class` with `scalar:wood_class` — never across
+// variables that merely happen to be continuous.
+export function sharedDomainKey(mode: string, field?: string): string {
+  return mode === 'scalar' && field ? `scalar:${field}` : mode;
+}
+
+export interface DomainInput {
+  mode: string;
+  field?: string;
+  min: number;
+  max: number;
+}
+
+// Union the per-object ranges of every object mapping the same variable.
+//
+// Why this exists: a data range read from ONE cloud's bounds is only meaningful
+// when that cloud is the only thing on screen. With several scans loaded, a
+// per-cloud Z domain meant identical-looking points in two scans were painted
+// different colors (each scan's own min became dark blue, its own max yellow),
+// and the legend — which derives its identity from the domain — split into one
+// colorbar per scan. Neither is readable: the whole point of pseudocoloring by
+// height is that a color means a height, scene-wide.
+//
+// Pooling the domain fixes both at once. The renderers take min/max from the
+// same resolver the legend does, so the shared scale IS what gets painted, and
+// the now-identical channels fold back into a single "N scans · Z (Height)"
+// entry through the existing dedup in buildLegendEntries.
+//
+// Non-finite bounds are ignored rather than poisoning the union — an empty or
+// degenerate cloud must not turn every other scan's scale into NaN.
+export function sharedDomains(
+  inputs: DomainInput[],
+): Map<string, { min: number; max: number }> {
+  const out = new Map<string, { min: number; max: number }>();
+  for (const input of inputs) {
+    if (!isFinite(input.min) || !isFinite(input.max)) continue;
+    const key = sharedDomainKey(input.mode, input.field);
+    const existing = out.get(key);
+    if (!existing) {
+      out.set(key, { min: input.min, max: input.max });
+      continue;
+    }
+    existing.min = Math.min(existing.min, input.min);
+    existing.max = Math.max(existing.max, input.max);
+  }
+  return out;
+}

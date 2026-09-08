@@ -41,6 +41,13 @@ unambiguously instead of stacking anonymous colorbars.
   produce one entry captioned *5 scans*, not five identical colorbars.
   Give one of them its own colormap and it splits out into its own entry,
   captioned by name.
+- **Point clouds share one scale per variable.** Every visible cloud
+  colored by the same variable is mapped through a single domain, unioned
+  across those clouds — so a given color means the same value everywhere
+  in the scene, and a short scan next to a tall one is not stretched to
+  fill the same gradient. Hiding a cloud re-tightens the scale to what
+  remains visible, and a cloud colored by a *different* variable never
+  affects it. The **Min/Max** inputs window this shared scale.
 - **The stack stops growing at three.** Beyond that, the remaining
   entries collapse into a compact list of one-line rows; click a row to
   expand it. The selected object keeps a full-size entry, outlined in
@@ -98,7 +105,9 @@ For **LAS/LAZ** imports this covers two kinds of column:
 Field names come from the file's header row when present (so
 `Reflectance[dB]` shows as **Reflectance [dB]**); files without a header
 fall back to positional names. The selected field's value range drives
-the colorbar, and the **Min/Max** inputs let you window it.
+the colorbar — pooled across every visible cloud carrying that same field,
+as described under [The legend stack](#the-legend-stack) — and the
+**Min/Max** inputs let you window it.
 
 !!! note
     Clouds imported before their attributes were carried (XYZ/CSV extras:

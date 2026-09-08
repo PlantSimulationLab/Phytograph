@@ -170,6 +170,8 @@ import { LegendStack } from './viewer/LegendStack';
 import {
   buildLegendEntries,
   cssColorToRgb,
+  sharedDomains,
+  sharedDomainKey,
   type ChannelDescriptor,
   type LegendEntry,
 } from '../lib/colorChannel';
@@ -17802,10 +17804,15 @@ export default function PointCloudViewer({
     });
   }, [clouds]);
 
-  // Data-derived min/max + caption for a given cloud under a given mode.
+  // A single cloud's OWN data-derived min/max + caption under a given mode.
   // Returns null when the mode maps nothing (rgb / single / per-scan) or the
   // cloud doesn't carry the field.
-  const dataRangeFor = useCallback((
+  //
+  // This is the raw per-cloud extent. It is NOT what gets painted when several
+  // clouds share a color mode — see `dataRangeFor` below, which pools these
+  // into one scene-wide domain. Read this only when you specifically want one
+  // cloud's own spread.
+  const ownDataRangeFor = useCallback((
     cloud: PointCloudEntry | null,
     mode: ColorMode,
     field: string | undefined,
@@ -17833,6 +17840,57 @@ export default function PointCloudViewer({
     return null;
   }, []);
 
+  // The pooled continuous domain for each color mode in play, unioned across
+  // every VISIBLE cloud currently using that mode.
+  //
+  // Why pool at all: a domain read from one cloud's own bounds only means
+  // something when that cloud is alone on screen. With several scans loaded,
+  // per-cloud domains meant a point at z=3 was painted one color in a short
+  // scan and a different color in a tall one — so the color no longer encoded a
+  // height, only a within-scan rank. It also split the legend, because
+  // `buildLegendEntries` keys entry identity on the domain: N scans produced N
+  // colorbars printing N different number pairs for what the user reads as one
+  // variable.
+  //
+  // Visible-only, and only clouds actually using the mode, so the scale
+  // describes what is on screen: hiding a scan re-tightens it, and a cloud
+  // colored by RGB or intensity never drags the height scale around.
+  // 'intensity' is already a fixed 0–1 domain and pools to itself harmlessly.
+  const sharedCloudDomains = useMemo(() => {
+    const inputs: { mode: string; field?: string; min: number; max: number }[] = [];
+    for (const cloud of clouds) {
+      if (!cloud.visible) continue;
+      const { mode, field } = colorModeFor(cloud.id);
+      const own = ownDataRangeFor(cloud, mode, field);
+      if (!own) continue;
+      inputs.push({ mode, field, min: own.min, max: own.max });
+    }
+    return sharedDomains(inputs);
+  }, [clouds, colorModeFor, ownDataRangeFor]);
+
+  // Data-derived min/max + caption for a cloud, on the SHARED scale.
+  //
+  // The caption and the null-vs-not decision still come from the cloud itself
+  // (it knows whether it carries the field, and what to call it); only the
+  // numbers are replaced by the pooled domain. Every consumer — the renderers'
+  // rangeMin/rangeMax, the legend descriptors, the Display panel's range
+  // inputs — goes through here, so the scale that is painted and the scale that
+  // is drawn on the colorbar cannot drift apart.
+  //
+  // A cloud that is currently hidden contributed nothing to the pool, so it
+  // falls back to its own range rather than reporting an empty one.
+  const dataRangeFor = useCallback((
+    cloud: PointCloudEntry | null,
+    mode: ColorMode,
+    field: string | undefined,
+  ): { min: number; max: number; label: string } | null => {
+    const own = ownDataRangeFor(cloud, mode, field);
+    if (!own) return null;
+    const pooled = sharedCloudDomains.get(sharedDomainKey(mode, field));
+    if (!pooled) return own;
+    return { min: pooled.min, max: pooled.max, label: own.label };
+  }, [ownDataRangeFor, sharedCloudDomains]);
+
   // The min/max actually applied to a cloud's colormap: the user's range
   // override for that mode/field, else the data-derived range.
   const rangeForCloud = useCallback((cloud: PointCloudEntry): { min: number; max: number } | null => {
@@ -17843,6 +17901,39 @@ export default function PointCloudViewer({
     const override = colorRanges[key];
     return { min: override?.min ?? base.min, max: override?.max ?? base.max };
   }, [colorModeFor, dataRangeFor, colorRanges]);
+
+  // Test hook: the height/scalar domain each VISIBLE cloud is actually painted
+  // on, keyed by cloud id, alongside the cloud's own raw extent.
+  //
+  // E2E can't read pixels back from the offscreen WebGL context (see
+  // __meshColorSignature), and the legend alone can't prove the fix: a single
+  // colorbar that agreed with nothing the shaders paint would be worse than the
+  // per-scan bug it replaced. These are the exact numbers handed to
+  // OctreePointCloud/PointCloud as rangeMin/rangeMax, so comparing them across
+  // clouds is comparing the scales really in use.
+  useEffect(() => {
+    (window as any).__cloudColorDomains = () => {
+      const out: Record<string, {
+        mode: string; field?: string;
+        painted: { min: number; max: number } | null;
+        own: { min: number; max: number } | null;
+        visible: boolean;
+      }> = {};
+      for (const cloud of clouds) {
+        const { mode, field } = colorModeFor(cloud.id);
+        const own = ownDataRangeFor(cloud, mode, field);
+        out[cloud.id] = {
+          mode,
+          field,
+          painted: rangeForCloud(cloud),
+          own: own ? { min: own.min, max: own.max } : null,
+          visible: cloud.visible,
+        };
+      }
+      return out;
+    };
+    return () => { delete (window as any).__cloudColorDomains; };
+  }, [clouds, colorModeFor, ownDataRangeFor, rangeForCloud]);
 
   // The selected cloud's range, driving the Display panel's range inputs.
   const dataRange = useMemo(
