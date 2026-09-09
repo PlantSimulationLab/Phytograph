@@ -253,10 +253,58 @@ the LRU-by-timestamp policy of the on-disk `_evict_octree_cache`:
   (default 30 min), then evicts least-recently-accessed survivors down to
   `PHYTOGRAPH_MAX_CLOUD_SESSIONS` / `PHYTOGRAPH_MAX_PLANT_SESSIONS` (default 8
   each). Evicted plant sessions get their PyHelios context torn down.
+- **An evicted CLOUD session is written to disk, not dropped.**
+  `_sweep_cloud_sessions` pickles it under `<octree root>/.sessions/<pid>-<nonce>/`
+  and `_get_cloud_session` reads it back on demand. RAM is capped exactly as
+  before; what changes is that a cache miss costs a disk read rather than the
+  cloud.
+
+    Before this, the cap silently bounded what the user could *do*: the 9th
+    import made the 1st cloud's session unreachable, so every compute, export and
+    ICP on it answered `404: Cloud session not found` with no way back — while the
+    cloud sat there in the scene still rendering from its octree. One field log
+    showed 77 creates producing 39 evictions in a two-hour session.
+
+    Five things follow from the spill being the cloud rather than a cache,
+    each pinned in `backend-api/tests/test_session_spill.py`:
+
+    - Every session read goes through `_get_cloud_session` /
+      `_peek_cloud_session`. A direct `_cloud_sessions.get` cannot see a spilled
+      session, and several callers degrade *silently* on a miss.
+    - **The directory is per backend process** (`<pid>-<nonce>`, inside the
+      octree root so it inherits that root's per-launch isolation), and startup
+      reaps only the dirs whose pid is dead. A first cut used one shared dir and
+      wiped it at startup — so a second app instance, a parallel E2E worker, or
+      a dev session beside the packaged app deleted the *other* process's
+      clouds mid-session, the failure the spill exists to end.
+    - **A session held by an in-flight request is pinned** and never evicted.
+      A handler fetches its session once and holds it for the whole request,
+      but `last_accessed` is stamped only at that fetch; without the pin, a
+      create batch beside a long edit would pickle the cloud *while the handler
+      was writing its arrays* and later restore that torn, pre-edit snapshot
+      over the user's work. Pins ride a `ContextVar` installed by the
+      `SessionPinScope` middleware (and by `_run_pinned` for executor threads,
+      which do not inherit contextvars and can outlive a cancelled request).
+      Resident count can therefore exceed the cap by one request's working
+      set, which is unavoidable and logged.
+    - A spilled session still pins its octree ids in `_live_session_octree_ids`
+      — out of RAM is not out of the scene.
+    - A spill that fails to write invalidates any earlier spill for that id: a
+      pre-edit snapshot served back would silently undo the user's work.
+
+    Two costs to know about. A sweep writes its evictions synchronously inside
+    whichever request triggered it, and `extract_by_column` inserts every child
+    without sweeping, so a 20-class split followed by any create can block that
+    create while ~13 sessions are written out. And restoring N > cap sessions in
+    one request (LAD over many scans) evicts and rewrites the surplus once the
+    request ends, even though nothing changed — a "clean since restore" flag
+    would avoid the rewrite and is the next improvement here. The directory is
+    held under `PHYTOGRAPH_SESSION_SPILL_MAX_BYTES` (default 64 GB); a trimmed
+    spill *is* the old failure, so trimming is last and logs loudly.
 - The per-session undo stack (`deleted_history`, one full point-mask per erase)
   is capped at `PHYTOGRAPH_MAX_DELETED_HISTORY` (default 50) snapshots.
 
-All four limits are environment-overridable.
+All five limits are environment-overridable.
 
 ## Filesystem access (allowlist)
 

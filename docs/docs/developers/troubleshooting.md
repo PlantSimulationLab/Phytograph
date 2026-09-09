@@ -160,6 +160,18 @@ nothing looks wrong until a tool needs the actual points.
 
 **Fix:** re-import the cloud.
 
+!!! note "Importing a 9th cloud is no longer a cause of this"
+    It used to be. Only `PHYTOGRAPH_MAX_CLOUD_SESSIONS` (default 8) sessions are
+    held in RAM, and an evicted one used to be gone — so on a scene of twenty
+    scans, everything but the eight most recent answered this error. Eviction now
+    spills the session to disk and reads it back on demand
+    ([Session eviction](architecture/processes.md#in-ram-session-eviction)), so the
+    remaining causes are a backend restart, an explicit delete, a spill that
+    could not be written (disk full — the log says `Could not spill cloud
+    session`) or read back (corrupt file; `Could not restore cloud session`),
+    or one trimmed away under `PHYTOGRAPH_SESSION_SPILL_MAX_BYTES`. The first
+    use of a paged-out cloud is slower by one disk read.
+
 This is deliberately a hard error rather than a fall back to the file the cloud
 was imported from. **Once a file is imported, Phytograph treats it as if it no
 longer exists.** The session arrays are the complete source of truth: they carry

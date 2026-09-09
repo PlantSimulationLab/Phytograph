@@ -1545,6 +1545,22 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         });
       }
 
+      // Positions the backend could not build. A per-position failure no longer
+      // aborts the run (see main.py's on_scan), so these are DROPPED from an
+      // otherwise successful import — and a silently short scan list is exactly
+      // the failure the user cannot diagnose. Named explicitly instead.
+      const failed = project.scans.filter((s: RieglScanPosition) => s.error);
+
+      if (newScans.length === 0 && failed.length > 0 && !importCancelledRef.current) {
+        showToast({
+          title: 'RIEGL import failed',
+          message:
+            `No scan position could be imported. ${failed[0].name}: ` +
+            `${failed[0].error}`,
+          type: 'error',
+        });
+      }
+
       if (newScans.length > 0 && !importCancelledRef.current) {
         handleAddScans(newScans);
         const warned = project.scans.filter((s: RieglScanPosition) => s.warning);
@@ -1561,12 +1577,18 @@ function App({ onResetScene }: { onResetScene: () => void }) {
               ? `${placed} placed by the project's registration; ${unplaced} from a metre-level prior — run ICP on those.`
               : 'Placed by the project\u2019s own registration — no ICP needed.'
             : 'Scans are unregistered — run ICP to align them.';
+        const failedNote = failed.length
+          ? ` ${failed.length} position${failed.length > 1 ? 's' : ''} failed ` +
+            `and ${failed.length > 1 ? 'were' : 'was'} skipped — ` +
+            `${failed[0].name}: ${failed[0].error}`
+          : '';
         showToast({
           title: `Imported ${newScans.length} RIEGL scan position${newScans.length > 1 ? 's' : ''}`,
           message:
             alignment +
-            (warned.length ? ` ${warned.length} had multi-return warnings.` : ''),
-          type: warned.length ? 'warning' : 'success',
+            (warned.length ? ` ${warned.length} had multi-return warnings.` : '') +
+            failedNote,
+          type: failed.length || warned.length ? 'warning' : 'success',
         });
       }
     } catch (err) {

@@ -69,6 +69,43 @@ def _riegl_image_stamp_is_current(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _session_spill_registries_start_empty(monkeypatch, tmp_path_factory):
+    """Keep one test's spilled cloud sessions out of the next one's view, and
+    off the developer's machine.
+
+    `_spilled_sessions` is module-level and, unlike `_cloud_sessions`, is read by
+    `_live_session_octree_ids` — so a test that pushed sessions past
+    `_MAX_CLOUD_SESSIONS` left their octree ids pinned for every later test,
+    which is exactly how `test_octree_cache_eviction`'s "pins nothing" case
+    started failing in a full run while passing on its own.
+
+    The spill FILES need their own redirect. The octree root (which the spill
+    dir lives under) resolves from LOCALAPPDATA on Windows — covered by the
+    RIEGL fixture above — but from XDG_CACHE_HOME / ~/Library/Caches elsewhere,
+    neither of which that fixture touches. Without this, a macOS or Linux run of
+    `test_session_eviction.py` (no cache override, cap forced to 2) pickled real
+    sessions into the developer's ~/Library/Caches/Phytograph — the running
+    desktop app's directory. Hermetic on Windows only is not hermetic.
+
+    `_cloud_sessions` is deliberately NOT cleared — plenty of tests reach into it
+    directly and clearing it would change what they see.
+    """
+    import main
+
+    monkeypatch.setenv(
+        "PHYTOGRAPH_SESSION_SPILL_ROOT",
+        str(tmp_path_factory.mktemp("spill")),
+    )
+    registries = (main._spilled_sessions, main._spilling_sessions,
+                  main._session_restore_locks, main._inflight_session_pins)
+    for registry in registries:
+        registry.clear()
+    yield
+    for registry in registries:
+        registry.clear()
+
+
 @pytest.fixture(scope="session")
 def client():
     """FastAPI TestClient bound to the real app. No mocks."""

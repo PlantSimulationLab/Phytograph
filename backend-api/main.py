@@ -349,6 +349,30 @@ class SlowRequestLogger:
 app.add_middleware(SlowRequestLogger)
 
 
+class SessionPinScope:
+    """Give every HTTP request its own cloud-session pin set (see _SESSION_PINS).
+
+    Raw ASGI for the same reason as SlowRequestLogger: BaseHTTPMiddleware breaks
+    client-disconnect propagation, which cancellation depends on. This passes
+    receive/send through untouched. `await self.app(...)` returns only once the
+    response -- including a streamed body -- is fully sent, so the pins live for
+    the whole request; a `def` handler runs under anyio's `to_thread.run_sync`,
+    which propagates contextvars, so it sees the same set.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        with _session_pin_scope():
+            return await self.app(scope, receive, send)
+
+
+app.add_middleware(SessionPinScope)
+
+
 # ==================== WORKER-THREAD BUDGET ====================
 #
 # Route handlers that do blocking CPU work are declared `def`, not `async def`,
@@ -380,6 +404,20 @@ async def _bound_worker_threadpool() -> None:
         anyio.to_thread.current_default_thread_limiter().total_tokens = _MAX_WORKER_THREADS
     except Exception as e:  # pragma: no cover - never fail startup over a knob
         print(f"[startup] could not size the worker threadpool: {e}", flush=True)
+
+
+@app.on_event("startup")
+async def _reset_session_spills() -> None:
+    """Reap spilled sessions left by backend processes that have exited.
+
+    Session ids are per-run UUIDs, so a dead run's spills can never be claimed
+    again; keeping them would leak gigabytes per launch. A LIVE run's are left
+    alone -- they belong to another instance. Never allowed to fail startup.
+    """
+    try:
+        await run_in_threadpool(_clear_session_spills)
+    except Exception as e:  # pragma: no cover - never fail startup over a cache
+        print(f"[startup] could not clear session spills: {e}", flush=True)
 
 
 # Centralized error logging. The ~38 per-endpoint try/except blocks already call
@@ -2168,10 +2206,25 @@ def riegl_project_extract(
                         sop=sop,
                     ),
                 )
-            except ScanCancelled:
+            except (ScanCancelled, MemoryError):
+                # A cancel must unwind; out-of-memory is not a per-position
+                # condition and continuing would fail every later one anyway.
                 raise
             except HTTPException as exc:
                 info["error"] = str(exc.detail)
+            except Exception as exc:  # noqa: BLE001
+                # ONE position must not lose the whole import. Everything from
+                # here down is per-position work (LAS staging, PotreeConverter,
+                # the cache install), and it fails for per-position reasons — a
+                # full disk, a transient Windows handle on the octree cache, a
+                # converter crash on one malformed sweep. Letting that escape
+                # aborted the entire run and discarded every position already
+                # built, which on a 30-position project is an hour of decoding
+                # thrown away for one bad scan. Recorded like any other
+                # per-position failure instead, so the response still carries
+                # the positions that worked and names the one that didn't.
+                logger.exception("RIEGL position %s failed to import", name)
+                info["error"] = f"{exc.__class__.__name__}: {exc}"
             built.append(info)
             progress(
                 min(0.99, (index + 1) / denom),
@@ -7385,8 +7438,7 @@ def _resolve_scan_session(scan_entry, what: str):
     """
     if not scan_entry.session_id:
         return None
-    with _cloud_session_lock:
-        sess = _cloud_sessions.get(scan_entry.session_id)
+    sess = _peek_cloud_session(scan_entry.session_id)
     if sess is not None:
         return sess
     if getattr(scan_entry, 'allow_file_source', False):
@@ -8223,7 +8275,7 @@ def _session_hit_positions_for_triangulation(session_id: str) -> "np.ndarray":
     interleaved `is_miss` points (when present) are dropped via the extra.
     """
     import numpy as np
-    sess = _cloud_sessions.get(session_id)
+    sess = _peek_cloud_session(session_id)
     if sess is None:
         raise ValueError(
             f"Cloud session not found: {session_id}. The backend may have "
@@ -8264,7 +8316,7 @@ def _session_multireturn_columns_for_triangulation(session_id: str):
     target_count > 1 (mirrors isMultiReturnData()).
     """
     import numpy as np
-    sess = _cloud_sessions.get(session_id)
+    sess = _peek_cloud_session(session_id)
     if sess is None:
         return {}
     with _cloud_session_lock:
@@ -9241,7 +9293,7 @@ async def triangulate_check_spacing(request: HeliosTriangulationRequest):
 
     async def stream_result():
         loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(None, compute_and_serialize)
+        future = loop.run_in_executor(None, _run_pinned(compute_and_serialize))
         while not future.done():
             yield " "
             await asyncio.sleep(5)
@@ -10074,10 +10126,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         # coordinates are large (UTM). Peek at sessions here (read-only) so an
         # ExtraBytes-only scan with NO trajectory still contributes to the shift floor.
         def _scan_beam_origins(s):
-            if not s.session_id:
-                return None
-            with _cloud_session_lock:
-                _s = _cloud_sessions.get(s.session_id)
+            _s = _peek_cloud_session(s.session_id)
             return getattr(_s, "beam_origins", None) if _s is not None else None
 
         # CRS of the inputs, for a georeferenced raster export downstream. Same union
@@ -10085,10 +10134,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         # all agree, otherwise the grid has no single CRS to write. A scan fed from
         # inline points or a bare file path contributes no session, hence no CRS.
         def _scan_crs(s):
-            if not s.session_id:
-                return None
-            with _cloud_session_lock:
-                _s = _cloud_sessions.get(s.session_id)
+            _s = _peek_cloud_session(s.session_id)
             return getattr(_s, "crs_epsg", None) if _s is not None else None
 
         scan_epsgs = [_scan_crs(s) for s in request.scans]
@@ -12317,6 +12363,10 @@ def _scan_entry_points_estimate(scan_entry) -> float:
     caller reads as "fall back to equal weights".
     """
     if scan_entry.session_id:
+        # Deliberately NOT `_peek_cloud_session`: this only weights a progress
+        # bar, and paging a spilled session in off disk to do it would read
+        # hundreds of MB to decide how wide a slice to draw. A miss here falls
+        # back to equal weights, which is exactly what this already handles.
         with _cloud_session_lock:
             sess = _cloud_sessions.get(scan_entry.session_id)
         if sess is not None:
@@ -19417,7 +19467,7 @@ async def generate_plant_stream(request: PlantStreamRequest, http_request: Reque
         loop = asyncio.get_event_loop()
         # Emit the run_id up front so the client can cancel before heavy work.
         yield f"event: run_id\ndata: {json.dumps({'run_id': run_id})}\n\n"
-        task = loop.run_in_executor(None, _do)
+        task = loop.run_in_executor(None, _run_pinned(_do))
 
         try:
             while True:
@@ -22939,6 +22989,7 @@ def _bin_frame_streaming_response(
 
     def _run():
         return build_frame(reporter) if wants_progress else build_frame()
+    _run = _run_pinned(_run)
 
     # Poll the executor future frequently in BOTH modes so the finished frame is
     # flushed as soon as the off-thread build returns — `poll` is the re-check
@@ -25851,6 +25902,84 @@ def _write_octree_labels(octree_dir: _Path, extra_dims: List[dict]) -> None:
     (octree_dir / _OCTREE_LABELS_FILENAME).write_text(json.dumps(mapping))
 
 
+# How long to keep retrying the octree install before giving up. Windows only
+# needs a few hundred ms in practice; the cap is generous because failing here
+# throws away a conversion that cost minutes.
+_OCTREE_INSTALL_RETRY_SECONDS = 15.0
+
+
+def _install_octree_dir(
+    staging_dir: _Path, cache_dir: _Path, report=None, cancel_event=None,
+) -> None:
+    """Move a finished staging octree into its cache slot, retrying on Windows.
+
+    The install is a same-filesystem directory rename and must stay atomic — see
+    the CANCEL-SAFETY INVARIANT on `_build_octree_from_las`. What this adds is
+    tolerance of a TRANSIENT failure, which on Windows is routine rather than
+    exceptional: `MoveFileEx` on a directory returns ERROR_ACCESS_DENIED
+    (PermissionError / WinError 5) while any process holds a handle anywhere
+    inside it, and Defender, the Search indexer and endpoint-security agents all
+    open the octree's freshly written files to scan them — `octree.bin` is
+    hundreds of MB and `_write_octree_labels` closes its sidecar microseconds
+    before this runs, so the scan is still in flight. The same applies to
+    `rmtree` of a pre-existing `cache_dir`: a deleted-but-still-open file leaves
+    the directory in Windows' delete-pending state, where it still exists and
+    cannot be renamed onto.
+
+    Both are self-clearing within a second or two, so retry rather than fail. A
+    real permissions problem (a policy-locked cache root) exhausts the window and
+    raises the original error, which is what the caller should report.
+    """
+    def _installed_by_someone_else() -> bool:
+        # Every caller checked, under `_octree_build_lock`, that no complete
+        # entry existed before building -- so a `metadata.json` here now can only
+        # be another PROCESS'S finished install of the same bytes. Probed with the
+        # error swallowed: on a delete-pending path Windows answers the stat
+        # itself with ERROR_ACCESS_DENIED, and pathlib does not treat that as
+        # "absent", so an unguarded is_file() would escape the retry loop.
+        try:
+            return (cache_dir / "metadata.json").is_file()
+        except OSError:
+            return False
+
+    deadline = time.time() + _OCTREE_INSTALL_RETRY_SECONDS
+    delay = 0.05
+    while True:
+        # Checked BEFORE touching cache_dir, every iteration. The first cut only
+        # checked after a failure, by which point its own rmtree could have half-
+        # deleted the rival's complete tree (rmtree stops at the first locked
+        # file, and NTFS lists `hierarchy.bin` before `octree.bin`), leaving a
+        # `metadata.json` that passes the cache-hit gate over a directory the
+        # renderer can never stream from.
+        if _installed_by_someone_else():
+            _shutil.rmtree(staging_dir, ignore_errors=True)
+            return
+        try:
+            try:
+                present = cache_dir.exists()
+            except OSError:
+                present = True  # delete-pending: still there for rename purposes
+            if present:
+                _shutil.rmtree(cache_dir)
+            staging_dir.rename(cache_dir)
+            return
+        except OSError:
+            if time.time() >= deadline:
+                raise
+            # Between attempts only -- never between the rename and the metadata
+            # read, which is the CANCEL-SAFETY window. A cancel here leaves the
+            # entry absent, and the caller's except removes the staging dir.
+            if cancel_event is not None and cancel_event.is_set():
+                raise ScanCancelled()
+            # Say so rather than freezing a finished-looking bar for seconds.
+            # Safe here despite the CANCEL-SAFETY INVARIANT: the reporter only
+            # queues a marker, it never raises (see _ProgressReporter.__call__).
+            if report is not None:
+                report("Waiting for the octree cache to free up…")
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)
+
+
 def _read_octree_labels(octree_dir: _Path) -> dict:
     """Load the slug→label sidecar, or {} if absent/unreadable.
 
@@ -26014,7 +26143,14 @@ def _live_session_octree_ids() -> "set[str]":
     """
     ids: "set[str]" = set()
     with _cloud_session_lock:
-        for sess in _cloud_sessions.values():
+        # A SPILLED session is still a cloud in the user's scene -- it is out of
+        # RAM, not out of the project -- so its octrees stay pinned. Dropping the
+        # pin on eviction would let the next convert delete the only rendered
+        # copy of an edited cloud, which is the exact loss `_evict_octree_cache`
+        # pins live sessions to prevent.
+        for entry in _spilled_sessions.values():
+            ids.update(entry.get("octree_ids") or ())
+        for sess in list(_spilling_sessions.values()) + list(_cloud_sessions.values()):
             # `rendered_octree_cache_id` is the octree a cloud with unbaked
             # deletions is STILL BEING DRAWN FROM — stale as geometry, live as
             # pixels. Omitting it let a convert evict the directory a visible
@@ -27701,14 +27837,457 @@ def _evict_session_ids(sessions: Dict[str, Any], max_count: int, now: float) -> 
     return evict
 
 
-def _sweep_cloud_sessions() -> None:
-    """Lazily drop idle / over-cap cloud sessions (frees their RAM arrays)."""
-    now = time.time()
+# ---- Session spill (evicted sessions survive on disk) ------------------------
+# `_MAX_CLOUD_SESSIONS` bounds RAM, and for a long time it also bounded what the
+# user could DO: an evicted session was simply gone, so every cloud past the most
+# recent 8 answered 404 for compute, export and ICP with no way back. A field log
+# showed a scene of ~20 imported positions where 77 creates produced 39
+# evictions; the user returned an hour later and cloud-to-cloud ICP failed with
+# "Cloud session not found", the cloud unusable and unrecoverable.
+#
+# Eviction now WRITES the session out instead of dropping it, and
+# `_get_cloud_session` reads it back on demand. RAM stays capped exactly as
+# before; a miss costs a disk read rather than the cloud.
+#
+# WHY PICKLE. The alternative -- naming each array in an npz plus JSON for the
+# scalars -- has a blind spot that is the COMMON case: add a field to
+# `CloudSession` (it has gained a dozen) and forget the serializer, and every
+# restored session silently loses it. Pickle round-trips whatever the dataclass
+# holds, and `test_session_spill.py` walks `dataclasses.fields()` to prove it, so
+# the blind spot cannot reopen. The file is written by this process into a
+# per-user cache directory, wiped at startup, and read back only by the same
+# build; a corrupt or foreign one is treated as a MISS, never as a failure. It is
+# not a data-interchange format and must not become one.
+_SESSION_SPILL_SUFFIX = ".session"
+
+# Cap for the spill directory. Generous next to the octree cache's 20 GB because
+# these files ARE the clouds -- a trimmed spill is a cloud the user loses, which
+# is the failure this exists to stop, so trimming is the last resort.
+_DEFAULT_SESSION_SPILL_MAX_BYTES = 64 * 1024 * 1024 * 1024
+
+# id -> {"path", "bytes", "at", "octree_ids"}. Guarded by `_cloud_session_lock`.
+_spilled_sessions: Dict[str, dict] = {}
+# id -> session, while its spill file is being written. The object is still a
+# perfectly good live session, so a lookup in that window re-admits it rather
+# than waiting or failing.
+_spilling_sessions: Dict[str, "CloudSession"] = {}
+# Per-id restore locks, so two concurrent requests for one evicted session read
+# its (possibly hundreds of MB) file once rather than twice.
+_session_restore_locks: Dict[str, threading.Lock] = {}
+_session_restore_locks_guard = threading.Lock()
+
+# ---- Request pins -------------------------------------------------------------
+# A handler fetches its session ONCE and then holds the object for the whole
+# request -- tens of seconds for a crop or filter, a minute-plus for a bake. The
+# sweep only knows `last_accessed`, stamped at that fetch, so a `create-multi`
+# of 8+ positions running alongside the edit would make the edited cloud the LRU,
+# pop it, and pickle it OUTSIDE the lock while the handler is still writing its
+# arrays. The snapshot is then torn or pre-edit, the handler finishes on the
+# orphan and returns 200, and the next request restores the stale file: the
+# user's edit silently reverted. The old code lost the session loudly; this would
+# have lost the edit quietly, which is worse.
+#
+# So every request carries a pin set (a ContextVar, installed by the middleware
+# below and by each executor-thread entry point), `_get_cloud_session` adds each
+# id it resolves, and the sweep never evicts a pinned id. RAM can then exceed the
+# cap by exactly one request's working set, which is unavoidable: that set is in
+# use. Pins die with the request -- or, for the streaming paths whose worker can
+# outlive a cancelled request (see `_bin_frame_streaming_response`), with the
+# worker thread itself, which is what `_run_pinned` is for.
+import contextvars as _contextvars
+
+_SESSION_PINS: "_contextvars.ContextVar[Optional[set]]" = _contextvars.ContextVar(
+    "phytograph_session_pins", default=None
+)
+_inflight_session_pins: List[set] = []
+_inflight_pins_lock = threading.Lock()
+
+
+class _session_pin_scope:
+    """Context manager: a fresh pin set for the calling thread/task's lifetime."""
+
+    def __enter__(self):
+        self._pins: set = set()
+        self._token = _SESSION_PINS.set(self._pins)
+        with _inflight_pins_lock:
+            _inflight_session_pins.append(self._pins)
+        return self._pins
+
+    def __exit__(self, *exc):
+        with _inflight_pins_lock:
+            try:
+                _inflight_session_pins.remove(self._pins)
+            except ValueError:
+                pass
+        _SESSION_PINS.reset(self._token)
+        return False
+
+
+def _run_pinned(fn):
+    """Wrap an executor-thread entry point in its own pin scope.
+
+    `loop.run_in_executor` does not propagate contextvars, and a scope owned by
+    the THREAD (rather than the request) is what keeps a worker that outlives a
+    cancelled request -- the orphan `_bin_frame_streaming_response` documents --
+    from having its session evicted and pickled mid-flight.
+    """
+    def _wrapped():
+        with _session_pin_scope():
+            return fn()
+    return _wrapped
+
+
+def _pin_session(session_id: str) -> None:
+    pins = _SESSION_PINS.get()
+    if pins is not None:
+        pins.add(session_id)
+
+
+def _pinned_session_ids() -> "set[str]":
+    with _inflight_pins_lock:
+        out: set = set()
+        for pins in _inflight_session_pins:
+            out.update(pins)
+        return out
+
+
+def _session_spill_max_bytes() -> int:
+    try:
+        return int(_os.environ.get(
+            "PHYTOGRAPH_SESSION_SPILL_MAX_BYTES", _DEFAULT_SESSION_SPILL_MAX_BYTES,
+        ))
+    except ValueError:
+        return _DEFAULT_SESSION_SPILL_MAX_BYTES
+
+
+# One directory PER BACKEND PROCESS. The first cut used `<octree root>.parent /
+# "sessions"` and wiped it at startup, which is the "second instance empties the
+# cache" shape CLAUDE.md documents for Chromium, reproduced exactly: under E2E
+# the octree root is a mkdtemp in %TEMP%, so every Playwright worker's spill dir
+# was `%TEMP%\sessions` and each spec's launch deleted the other worker's
+# spilled clouds mid-run; two packaged instances (supported — see Port wiring)
+# shared `%LOCALAPPDATA%\Phytograph\cache\sessions` and B's startup wiped A's.
+# Keying the directory by pid + a per-run nonce makes it private by
+# construction, and startup reaps only the dirs whose pid is dead.
+_SESSION_SPILL_DIRNAME = ".sessions"
+_SESSION_SPILL_RUN = f"{_os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def _session_spill_root() -> _Path:
+    """Where THIS process writes evicted sessions.
+
+    Inside the octree cache root, under `.sessions/<pid>-<nonce>/`. Inside rather
+    than beside it so it inherits every isolation the octree root already has
+    (per-launch under E2E, per-dev-session under `npm run dev`, honoured by both
+    processes) and is removed with it. `_evict_octree_cache` cannot touch it:
+    that walk only considers 40-hex sha1 directory names.
+    """
+    override = _os.environ.get("PHYTOGRAPH_SESSION_SPILL_ROOT")
+    if override:
+        return _Path(override)
+    return _octree_cache_root() / _SESSION_SPILL_DIRNAME / _SESSION_SPILL_RUN
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a process with this pid exists. Conservative: unsure means alive.
+
+    NOT `os.kill(pid, 0)` on Windows — there it is TerminateProcess, and the
+    "probe" would kill a concurrent Phytograph backend.
+    """
+    if pid <= 0:
+        return False
+    if _os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            # ERROR_ACCESS_DENIED (5): it exists but belongs to someone else.
+            # ERROR_INVALID_PARAMETER (87): no such process.
+            return ctypes.get_last_error() == 5
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        _os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _session_restore_lock(session_id: str) -> threading.Lock:
+    with _session_restore_locks_guard:
+        lock = _session_restore_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_restore_locks[session_id] = lock
+        return lock
+
+
+def _clear_session_spills() -> None:
+    """Reap spill directories left by backend processes that no longer exist.
+
+    Session ids are per-run UUIDs, so a dead run's spills can never be claimed
+    again -- keeping them would leak gigabytes per launch. But ONLY a dead run's:
+    a live pid is another backend (a second app instance, a parallel E2E
+    worker, a dev session beside the packaged app) whose clouds these are. Under
+    the env override the directory is private to this process by contract and
+    is cleared outright.
+    """
     with _cloud_session_lock:
+        _spilled_sessions.clear()
+    own = _session_spill_root()
+    try:
+        if _os.environ.get("PHYTOGRAPH_SESSION_SPILL_ROOT"):
+            _shutil.rmtree(own, ignore_errors=True)
+            return
+        parent = own.parent
+        if not parent.is_dir():
+            return
+        for child in parent.iterdir():
+            if child == own or not child.is_dir():
+                continue
+            try:
+                pid = int(child.name.split("-", 1)[0])
+            except ValueError:
+                continue
+            if _pid_alive(pid):
+                continue
+            _shutil.rmtree(child, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def _replace_with_retry(src: _Path, dst: _Path, timeout_s: float = 5.0) -> None:
+    """`os.replace`, tolerating a transient Windows handle on either path."""
+    deadline = time.time() + timeout_s
+    delay = 0.05
+    while True:
+        try:
+            _os.replace(src, dst)
+            return
+        except OSError:
+            if time.time() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+
+
+def _spill_cloud_session(sess: "CloudSession") -> Optional[dict]:
+    """Write one evicted session to disk. Returns its index entry, or None.
+
+    Called with `_cloud_session_lock` RELEASED -- this writes hundreds of MB and
+    holding the global session lock across it would stall every other request.
+    """
+    import pickle
+
+    root = _session_spill_root()
+    path = root / f"{sess.session_id}{_SESSION_SPILL_SUFFIX}"
+    tmp = root / f"{sess.session_id}{_SESSION_SPILL_SUFFIX}.tmp"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb", buffering=1 << 20) as fh:
+            pickle.dump(sess, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        # os.replace, not Path.rename: replace overwrites an existing spill
+        # atomically on both platforms. Retried for the same reason
+        # `_install_octree_dir` is — on Windows this fails with
+        # ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION while anything holds a
+        # handle on either file, and a scanner opening the file we just closed is
+        # routine on a managed machine. Failing here would cost the user a cloud,
+        # so it is worth a few seconds of patience.
+        _replace_with_retry(tmp, path)
+        size = path.stat().st_size
+    except Exception:
+        logger.exception("Could not spill cloud session %s", sess.session_id)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return None
+    return {
+        "path": path,
+        "bytes": int(size),
+        "at": time.time(),
+        # Recorded so `_live_session_octree_ids` keeps pinning the octrees of a
+        # cloud that is still in the user's scene but no longer in RAM. Without
+        # it, eviction would unpin them and the next convert could delete the
+        # only rendered copy of an edited cloud.
+        "octree_ids": [
+            cid for cid in (
+                getattr(sess, "octree_cache_id", None),
+                getattr(sess, "rendered_octree_cache_id", None),
+                getattr(sess, "miss_octree_cache_id", None),
+            ) if cid
+        ],
+    }
+
+
+def _restore_cloud_session(session_id: str) -> "Optional[CloudSession]":
+    """Read a spilled session back into RAM, or None if there is none to read.
+
+    Re-admits it as the most-recently-used entry, then sweeps -- so a restore
+    never grows RAM past the cap, it only changes which session is resident.
+    """
+    import pickle
+
+    with _session_restore_lock(session_id):
+        # Another thread may have restored it while we waited for the lock.
+        with _cloud_session_lock:
+            live = _cloud_sessions.get(session_id)
+            if live is None:
+                # Evicted again while we waited for the lock: its file is being
+                # rewritten and the object is the truth. Claim it back, exactly
+                # as `_get_cloud_session` does, rather than load an older file.
+                live = _spilling_sessions.pop(session_id, None)
+                if live is not None:
+                    _cloud_sessions[session_id] = live
+            if live is not None:
+                live.last_accessed = time.time()
+                return live
+            entry = _spilled_sessions.get(session_id)
+        if entry is None:
+            return None
+        try:
+            with open(entry["path"], "rb", buffering=1 << 20) as fh:
+                sess = pickle.load(fh)
+        except Exception:
+            # A truncated or unreadable spill is a MISS, not a crash: the caller
+            # then reports the same 404 it would have reported before spilling
+            # existed. Drop the index entry so it is not retried forever.
+            logger.exception("Could not restore cloud session %s", session_id)
+            with _cloud_session_lock:
+                _spilled_sessions.pop(session_id, None)
+            return None
+        sess.last_accessed = time.time()
+        with _cloud_session_lock:
+            _cloud_sessions[session_id] = sess
+    # Outside the restore lock: this can evict (and spill) a DIFFERENT session.
+    _sweep_cloud_sessions()
+    return sess
+
+
+def _drop_session_spill(session_id: str) -> None:
+    """Forget and delete a session's spill -- it was explicitly deleted."""
+    with _cloud_session_lock:
+        entry = _spilled_sessions.pop(session_id, None)
+        _spilling_sessions.pop(session_id, None)
+    if entry is not None:
+        try:
+            _Path(entry["path"]).unlink()
+        except OSError:
+            pass
+
+
+def _trim_session_spills() -> None:
+    """Hold the spill directory under its cap, oldest-spilled first.
+
+    A trimmed session reverts to the pre-spill behaviour (404, cloud lost), so
+    this is the last thing that happens and is logged loudly when it does.
+    """
+    cap = _session_spill_max_bytes()
+    with _cloud_session_lock:
+        total = sum(int(e.get("bytes", 0)) for e in _spilled_sessions.values())
+        if total <= cap:
+            return
+        ranked = sorted(_spilled_sessions.items(), key=lambda kv: kv[1].get("at", 0.0))
+        doomed = []
+        for sid, entry in ranked:
+            if total <= cap:
+                break
+            doomed.append((sid, entry))
+            total -= int(entry.get("bytes", 0))
+        for sid, _entry in doomed:
+            _spilled_sessions.pop(sid, None)
+    for sid, entry in doomed:
+        logger.warning(
+            "Session spill cache over %.1f GB - dropping session %s; that cloud "
+            "can no longer be used for compute or export.", cap / 1e9, sid,
+        )
+        try:
+            _Path(entry["path"]).unlink()
+        except OSError:
+            pass
+
+
+def _sweep_cloud_sessions() -> None:
+    """Evict idle / over-cap cloud sessions, spilling each to disk on the way out.
+
+    RAM is bounded exactly as before -- what changes is that an evicted session
+    is recoverable (see the Session spill notes above) rather than gone.
+
+    The pop and the WRITE are deliberately split: the write is hundreds of MB and
+    must not happen under `_cloud_session_lock`. In between, the session sits in
+    `_spilling_sessions`, where it is still a perfectly good live object, so a
+    lookup in that window re-admits it instead of failing.
+    """
+    now = time.time()
+    pinned = _pinned_session_ids()
+    with _cloud_session_lock:
+        evicted = []
+        kept = 0
         for sid in _evict_session_ids(_cloud_sessions, _MAX_CLOUD_SESSIONS, now):
+            if sid in pinned:
+                # In use by a request right now. Evicting it would pickle the
+                # arrays while a handler may still be writing them. Left resident;
+                # the next sweep after that request ends will take it.
+                kept += 1
+                continue
             sess = _cloud_sessions.pop(sid, None)
             if sess is not None:
-                print(f"[Cloud Session] Evicted idle/over-cap session {sid}")
+                _spilling_sessions[sid] = sess
+                evicted.append((sid, sess))
+        if kept:
+            print(f"[Cloud Session] {kept} over-cap session(s) kept resident: in use by "
+                  "an in-flight request", flush=True)
+
+    for sid, sess in evicted:
+        stale = None
+        entry = _spill_cloud_session(sess)
+        with _cloud_session_lock:
+            # A lookup during the write claimed it back, so the file we just
+            # wrote is already behind the live object: index nothing. It may also
+            # be a TORN snapshot -- the claimant is free to mutate the arrays
+            # while pickle is still walking them -- which is precisely why it is
+            # discarded rather than kept as a fallback.
+            claimed_back = _spilling_sessions.pop(sid, None) is None
+        if claimed_back:
+            if entry is not None:
+                try:
+                    _Path(entry["path"]).unlink()
+                except OSError:
+                    pass
+            continue
+        with _cloud_session_lock:
+            if entry is not None:
+                _spilled_sessions[sid] = entry
+            else:
+                # The write failed. Any entry from an EARLIER eviction of this
+                # same session describes the cloud as it was before whatever was
+                # done to it since, so serving that back would silently undo the
+                # user's edits. Drop it: a 404 is recoverable, wrong data is not.
+                stale = _spilled_sessions.pop(sid, None)
+        if entry is None and stale is not None:
+            try:
+                _Path(stale["path"]).unlink()
+            except OSError:
+                pass
+        print(
+            f"[Cloud Session] Evicted idle/over-cap session {sid}"
+            + (f" (spilled {entry['bytes'] / 1e6:.0f} MB)" if entry else
+               " (spill failed - this cloud is no longer usable)")
+        )
+    if evicted:
+        _trim_session_spills()
 
 
 def _sweep_plant_sessions() -> None:
@@ -28092,13 +28671,53 @@ def _read_las_crs_epsg(path: "_Path") -> Optional[int]:
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
+    """The one place a session id becomes a session. Falls back to the spill.
+
+    Three tiers, cheapest first: resident, mid-eviction (still in RAM, its file
+    only part-written -- re-admit it), and spilled (read it back). A 404 now
+    means the session was never created, was explicitly deleted, or its spill was
+    trimmed away -- not merely that eight newer clouds were imported after it.
+    """
     with _cloud_session_lock:
         sess = _cloud_sessions.get(session_id)
+        if sess is None:
+            # Being written out right now. The object is untouched and valid, so
+            # this is a hit: take it back and let the sweep pick another victim.
+            # POPPED, not read: claiming it out of `_spilling_sessions` is how the
+            # sweep learns the file it is midway through writing is already behind
+            # the live object and must not be indexed. Leaving it there would let
+            # a later failed spill fall back on that stale snapshot and silently
+            # serve a cloud without the edits made after this moment.
+            sess = _spilling_sessions.pop(session_id, None)
+            if sess is not None:
+                _cloud_sessions[session_id] = sess
         if sess is not None:
             sess.last_accessed = time.time()
     if sess is None:
+        sess = _restore_cloud_session(session_id)
+    if sess is None:
         raise HTTPException(status_code=404, detail=f"Cloud session not found: {session_id}")
+    _pin_session(session_id)
     return sess
+
+
+def _peek_cloud_session(session_id: "Optional[str]") -> "Optional[CloudSession]":
+    """`_get_cloud_session` for callers that treat a miss as "no session".
+
+    Exists so those callers go through the SAME three-tier lookup — resident,
+    mid-eviction, spilled — rather than reading `_cloud_sessions` directly. A
+    direct read is now a bug: it reports a merely-evicted cloud as absent, and
+    several of these callers degrade SILENTLY when they get None (the multi-
+    return columns fall back to a single-return triangulation at ~1/3 the true
+    leaf area; the LAD beam origins fall back to a trajectory join). Never called
+    while holding `_cloud_session_lock` — a restore takes that lock itself.
+    """
+    if not session_id:
+        return None
+    try:
+        return _get_cloud_session(session_id)
+    except HTTPException:
+        return None
 
 
 # `_BEAM_ORIGIN_ALIAS_SETS` (the ExtraBytes name aliases for a per-pulse
@@ -28701,9 +29320,11 @@ def _build_octree_from_las(
                 _run_potree_converter(las_path, staging_dir, cancel_event=cancel_event)
                 _write_octree_labels(staging_dir, extra_dims_meta)
                 _report(0.95, "Installing octree…")
-                if cache_dir.exists():
-                    _shutil.rmtree(cache_dir)
-                staging_dir.rename(cache_dir)
+                _install_octree_dir(
+                    staging_dir, cache_dir,
+                    report=lambda msg: _report(0.95, msg),
+                    cancel_event=cancel_event,
+                )
             except Exception:
                 # Catches ScanCancelled too (it subclasses Exception), so a
                 # killed converter's partial output is always removed.
@@ -30829,6 +31450,8 @@ def _do_session_extract_by_column(session_id: str, request: SessionExtractByColu
         with _cloud_session_lock:
             for _value, child in children:
                 _cloud_sessions.pop(child.session_id, None)
+        for _value, child in children:
+            _drop_session_spill(child.session_id)
         if isinstance(exc, ScanCancelled):
             raise
         # The response stream is already open, so an exception here could only
@@ -31721,9 +32344,13 @@ def _translate_octree_in_place(cache_id: Optional[str],
                 _shutil.rmtree(staging_dir)
             try:
                 octree_transform.translate_octree_dir(src_dir, staging_dir, delta)
-                if cache_dir.exists():
-                    _shutil.rmtree(cache_dir)
-                staging_dir.rename(cache_dir)
+                # The SAME install as `_build_octree_from_las`, so it takes the
+                # same Windows retry. It matters MORE here: the `except` below
+                # turns any failure into a silent fall back to a full reconvert —
+                # the ~83 s on a 10 M-point scan this fast path exists to avoid,
+                # logged only at INFO, surfacing to the user as nothing at all.
+                # A handle that clears in a second must not buy that.
+                _install_octree_dir(staging_dir, cache_dir)
             except Exception:
                 # Includes OctreeTransformError (unsupported layout/encoding).
                 # Clean up and tell the caller to take the converter path — an
@@ -32089,6 +32716,10 @@ def delete_cloud_session(session_id: str):
     """Free a cloud session's in-RAM arrays."""
     with _cloud_session_lock:
         existed = _cloud_sessions.pop(session_id, None) is not None
+    # An explicit delete must also reclaim the spill, or a scene the user cleared
+    # would leave its clouds on disk until the next launch wiped them.
+    existed = existed or session_id in _spilled_sessions or session_id in _spilling_sessions
+    _drop_session_spill(session_id)
     return {"session_id": session_id, "deleted": existed}
 
 GROUND_CLASS_SLUG = "ground_class"
