@@ -1,4 +1,4 @@
-import { Loader2, X } from 'lucide-react';
+import { AlertTriangle, Loader2, X } from 'lucide-react';
 import { GroundSegmentIcon } from '../../icons/GroundSegmentIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
@@ -16,6 +16,11 @@ interface GroundSegmentPanelProps {
   splitClouds: boolean;
   inProgress: boolean;
   error: string | null;
+  // Cost advisory from the backend (a 409 `cost_warning`): the run on this
+  // cloud is estimated past the time / memory guideline. Not an error — the
+  // button turns into "Segment Anyway" and the next click re-sends with
+  // `acknowledge_cost`. Mirrors TreeSegmentPanel.
+  costWarning: string | null;
   onClose: () => void;
   onClothResolutionChange: (n: number) => void;
   onClassThresholdChange: (n: number) => void;
@@ -37,6 +42,7 @@ export function GroundSegmentPanel({
   splitClouds,
   inProgress,
   error,
+  costWarning,
   onClose,
   onClothResolutionChange,
   onClassThresholdChange,
@@ -210,6 +216,18 @@ export function GroundSegmentPanel({
         </div>
       )}
 
+      {/* Cost advisory: amber, not red — the run is still available, it just
+          wants a deliberate second click. */}
+      {costWarning && !inProgress && (
+        <div
+          data-testid="ground-segment-cost-warning"
+          className="mb-3 p-2 bg-amber-900/30 border border-amber-600/50 rounded text-[10px] text-amber-200 flex gap-1.5"
+        >
+          <AlertTriangle className="w-3 h-3 shrink-0 mt-px" />
+          <span>{costWarning}</span>
+        </div>
+      )}
+
       {inProgress ? (
         <div className="flex gap-2">
           <button
@@ -233,10 +251,14 @@ export function GroundSegmentPanel({
         <button
           data-testid="ground-segment-run-button"
           onClick={onSegment}
-          className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
+          className={`w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 text-white ${
+            costWarning
+              ? 'bg-amber-600 hover:bg-amber-500'
+              : 'bg-green-600 hover:bg-green-500'
+          }`}
         >
-          <GroundSegmentIcon className="w-3 h-3" />
-          Segment Ground
+          {costWarning ? <AlertTriangle className="w-3 h-3" /> : <GroundSegmentIcon className="w-3 h-3" />}
+          {costWarning ? 'Segment Anyway' : 'Segment Ground'}
         </button>
       )}
     </div>

@@ -110,7 +110,10 @@ Two consequences worth knowing:
 
 - **Peak memory is no longer capped at one operation.** Serialization used to
   bound it implicitly. The worker threadpool is sized to
-  `max(8, min(16, cpu_count))`, overridable with `PHYTOGRAPH_MAX_WORKER_THREADS`.
+  `max(8, min(16, cpu_count))`, overridable with `PHYTOGRAPH_MAX_WORKER_THREADS`
+  — and that bounds *how many* operations run, not how big they are. The
+  byte-weighted gate for size is the memory budget and admission control in
+  [Large clouds](large-clouds.md).
 - **Shared state needs its lock.** `_cloud_sessions`, `_plant_sessions`,
   `_SEG_WORKERS`, `_CANCEL_REGISTRY` and the octree build locks each have a
   `threading.Lock`, and session read-modify-write runs entirely inside it. Never

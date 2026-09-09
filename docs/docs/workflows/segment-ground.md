@@ -92,6 +92,19 @@ original points are never deleted.
     class. Crop them out first (see [Clean a point
     cloud](clean-point-cloud.md#crop)) if you need a plant-only result.
 
+### Large clouds
+
+Before it starts, Phytograph estimates how long the run will take on this
+cloud — the cloth filter plus the octree rebuild that follows it (two extra
+rebuilds when **Split into ground + plant clouds** is on) — and how much
+memory it needs. When the estimate is past about a minute and a half, or the
+memory needed is more than this machine's budget, the panel shows an amber
+advisory with the estimate instead of starting, and the button becomes
+**Segment Anyway**. Click it to run regardless; **Cancel** still works once
+the run is under way. A cloth resolution far too fine for the cloud's extent
+(tens of millions of cloth cells) is refused with the coarsest resolution
+that would work — that combination hangs rather than merely slows.
+
 ## Inspect and use the result
 
 The classification is stored as a scalar attribute named **Ground Class**.

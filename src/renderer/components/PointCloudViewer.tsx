@@ -974,6 +974,11 @@ export default function PointCloudViewer({
   const [showGroundSegmentPanel, setShowGroundSegmentPanel] = useState(false);
   const [groundSegmentInProgress, setGroundSegmentInProgress] = useState(false);
   const [groundSegmentError, setGroundSegmentError] = useState<string | null>(null);
+  // Backend cost advisory (409 `cost_warning`) for the ground run: arms the
+  // panel's "Segment Anyway"; the next run re-sends with acknowledge_cost. Same
+  // shape as the TreeIso pair below.
+  const [groundSegmentCostWarning, setGroundSegmentCostWarning] = useState<string | null>(null);
+  const groundCostAcknowledgedRef = useRef(false);
   const [groundClothResolution, setGroundClothResolution] = useState(0.05);
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
   // Measure the ground tolerance off the settled cloth rather than seeding it
@@ -11189,6 +11194,13 @@ export default function PointCloudViewer({
     const abort = new AbortController();
     groundSegmentAbortRef.current = abort;
 
+    // Consume any pending "Segment Anyway" confirmation: this run carries the
+    // acknowledgement, and the armed state is cleared so a later run on a
+    // different cloud prompts again rather than silently inheriting it.
+    const acknowledgeCost = groundCostAcknowledgedRef.current;
+    groundCostAcknowledgedRef.current = false;
+    setGroundSegmentCostWarning(null);
+
     const csfParams = {
       cloth_resolution: groundClothResolution,
       rigidness: groundRigidness,
@@ -11224,7 +11236,8 @@ export default function PointCloudViewer({
         // folds it into the same concurrent pool.
         const willSplit = groundSplitClouds && !!onAddCloud;
         const meta = await sessionSegmentGround(
-          sessionId, { ...csfParams, defer_octree: willSplit }, abort.signal);
+          sessionId, { ...csfParams, defer_octree: willSplit, acknowledge_cost: acknowledgeCost },
+          abort.signal);
         // The parent keeps ALL points, classified + coloured by ground_class.
         // A deferred run carries no octree fields — adopting them would hand the
         // renderer a pre-column octree it would treat as current — so the update
@@ -11403,6 +11416,13 @@ export default function PointCloudViewer({
       // missing the second turned a user-initiated cancel into a red toast.
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (error instanceof ScanCancelledError) return;
+      // A 409 cost advisory is a confirmation prompt, not an error: arm
+      // "Segment Anyway" instead of surfacing a failure toast.
+      if (error instanceof CostWarningError) {
+        groundCostAcknowledgedRef.current = true;
+        setGroundSegmentCostWarning(error.costWarning.message);
+        return;
+      }
       console.error('Ground segmentation error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Ground segmentation failed';
       setGroundSegmentError(errorMessage);
@@ -22223,6 +22243,7 @@ export default function PointCloudViewer({
           splitClouds={groundSplitClouds}
           inProgress={groundSegmentInProgress}
           error={groundSegmentError}
+          costWarning={groundSegmentCostWarning}
           onClose={() => setShowGroundSegmentPanel(false)}
           onClothResolutionChange={setGroundClothResolution}
           onClassThresholdChange={setGroundClassThreshold}

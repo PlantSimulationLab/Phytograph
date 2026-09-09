@@ -150,6 +150,7 @@ nav:
           - Processes & IPC: developers/architecture/processes.md
           - Backend sidecar: developers/architecture/backend.md
           - Version lock: developers/architecture/version-lock.md
+          - Large clouds: developers/architecture/large-clouds.md
       - Development:
           - developers/development/index.md
           - Dev loop: developers/development/dev-loop.md

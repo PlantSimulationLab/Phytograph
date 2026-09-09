@@ -26,6 +26,7 @@ from pathlib import Path
 # constants. Also the single implementation `_reject_sparse_voxels` and
 # `qsm.preprocess` both defer to.
 import denoise
+import memory_budget
 from pytexit import py2tex
 
 # ==================== PyHelios source submodule ====================
@@ -244,7 +245,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.83.0"
+BACKEND_VERSION = "0.84.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -330,6 +331,11 @@ class SlowRequestLogger:
         queued = SlowRequestLogger._in_flight
         SlowRequestLogger._in_flight += 1
         started = time.perf_counter()
+        # Resident memory at entry, so a slow request also says what it COST.
+        # A request that is slow because the machine is paging shows up here as
+        # an RSS near or past the budget; a request that is slow because it was
+        # queued behind others shows `queued`. Both used to be invisible.
+        rss_before = memory_budget.rss_bytes()
         try:
             return await self.app(scope, receive, send)
         finally:
@@ -339,9 +345,16 @@ class SlowRequestLogger:
                 contention = (
                     f", {queued} other request(s) already in flight" if queued else ""
                 )
+                rss_after = memory_budget.rss_bytes()
+                memory = (
+                    f", rss {memory_budget.fmt_bytes(rss_before)} -> "
+                    f"{memory_budget.fmt_bytes(rss_after)} of a "
+                    f"{memory_budget.fmt_bytes(memory_budget.budget_bytes())} budget"
+                    if rss_after else ""
+                )
                 print(
                     f"[slow] {scope.get('method', '?')} {scope.get('path', '?')} "
-                    f"took {elapsed:.1f}s{contention}",
+                    f"took {elapsed:.1f}s{contention}{memory}",
                     flush=True,
                 )
 
@@ -393,6 +406,20 @@ except (ValueError, TypeError):
     _MAX_WORKER_THREADS = None
 if _MAX_WORKER_THREADS is None:
     _MAX_WORKER_THREADS = max(8, min(16, (os.cpu_count() or 4)))
+
+# ==================== MEMORY BUDGET / ADMISSION ====================
+#
+# The thread cap above bounds how many operations run at once; it says nothing
+# about how BIG they are. Sixteen concurrent 1 M-point bakes are fine and two
+# concurrent 100 M-point ones are an OOM kill on a 16 GB laptop. `memory_budget`
+# measures the machine and derives a budget (a fraction of physical RAM, or a
+# pinned PHYTOGRAPH_MEMORY_BUDGET_BYTES), and `_ADMISSION` is the byte-weighted
+# gate the heavy paths declare their working set to: a job waits until it fits
+# beside what is already running, and a job bigger than the whole budget runs
+# alone with a log line rather than being refused. Refusing / prompting happens
+# BEFORE the work is committed to, via `_cost_advisory` and the 409 cost
+# warning, where the user can still say no.
+_ADMISSION = memory_budget.Admission(memory_budget.budget_bytes)
 
 
 @app.on_event("startup")
@@ -457,8 +484,19 @@ def root():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint for backend status"""
-    return {"status": "healthy", "service": "Phytograph Backend", "version": BACKEND_VERSION}
+    """Health check endpoint for backend status.
+
+    Also reports the memory budget and what is currently admitted against it,
+    so a support log or the renderer's diagnostics can say why a large-cloud
+    operation is queued or slow without attaching a profiler.
+    """
+    return {
+        "status": "healthy",
+        "service": "Phytograph Backend",
+        "version": BACKEND_VERSION,
+        "memory": memory_budget.snapshot(),
+        "admitted": _ADMISSION.in_flight(),
+    }
 
 
 @app.get("/version")
@@ -5195,6 +5233,119 @@ def _resolve_segmentation_points(
     raise HTTPException(status_code=400, detail="Provide either `points` or `source`.")
 
 
+# ==================== COST ADVISORY (large-cloud ETA + memory) ====================
+#
+# Throughputs measured on the dev machine (M-series laptop, 10 cores) with the
+# probes in the large-cloud plan; deliberately CONSERVATIVE (about half the
+# measured rate) so an advisory says "about 3 minutes" and the run takes 2, not
+# the other way round. They feed an ETA the user sees BEFORE committing to a
+# run, so their job is to be the right order of magnitude, not exact.
+_RATE_CSF_PTS_PER_S = 10e6            # measured ~35 M pts/s on a uniform cloud
+_RATE_CLOTH_NODE_ITERS_PER_S = 50e6   # measured 60-105 M node-iterations/s
+_RATE_WORKER_STAGE_PTS_PER_S = 30e6   # np.save + np.load of the (N,3) float64
+_WORKER_STARTUP_S = 4.5               # seg_worker re-imports main + libhelios
+_RATE_LAS_WRITE_PTS_PER_S = 10e6      # _session_to_las incl. extras
+_RATE_CONVERT_PTS_PER_S = {"poisson": 0.3e6, "random": 1.8e6}   # PotreeConverter
+# Above this estimated wall time the endpoint answers 409 with a `cost_warning`
+# instead of starting, and the panel offers "Segment Anyway".
+_COST_WARNING_SECONDS = float(os.environ.get("PHYTOGRAPH_COST_WARNING_SECONDS", "90"))
+# CSF allocates ~100 B per cloth particle and simulates every one 500x; past
+# this many nodes a run is minutes and gigabytes regardless of how many points
+# there are, and the panel's inputs allow a cloth fine enough to get there on a
+# field-sized extent. The DEM's auto path floors the cloth (MAX_CLOTH_NODES_PER_SIDE
+# in _auto_csf_params); the interactive path honours the user's value up to here
+# and refuses with a concrete alternative beyond it.
+_MAX_CLOTH_NODES = 25_000_000
+
+
+def _convert_seconds(point_count: int) -> float:
+    """Wall-time estimate for one PotreeConverter run of `point_count` points,
+    honouring the sampling policy the converter will actually be given."""
+    n = max(0, int(point_count))
+    method = _potree_sampling_method(n)
+    return n / _RATE_LAS_WRITE_PTS_PER_S + n / _RATE_CONVERT_PTS_PER_S[method]
+
+
+def _cloth_node_count(extent_m: float, cloth_resolution: float) -> int:
+    if not (cloth_resolution > 0) or not (extent_m > 0):
+        return 0
+    side = math.ceil(extent_m / cloth_resolution) + 1
+    return int(side * side)
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = max(0.0, float(seconds))
+    if s < 60:
+        return f"{int(round(s))} s"
+    if s < 3600:
+        return f"{s / 60:.0f} min" if s >= 120 else f"{s / 60:.1f} min"
+    return f"{s / 3600:.1f} h"
+
+
+def _cost_advisory(label: str, seconds: float, bytes_needed: int, *,
+                   breakdown: "Optional[str]" = None) -> "Optional[dict]":
+    """A structured `cost_warning` when a run is worth confirming, else None.
+
+    Fires on TIME (estimate past `_COST_WARNING_SECONDS`) or on MEMORY (the
+    run's transient working set alone exceeds the machine's budget - it will
+    still be admitted, alone, but the user should know it may page). Same body
+    shape as `_treeiso_cost_warning` so the renderer's `CostWarningError` path
+    handles it unchanged.
+    """
+    budget = memory_budget.budget_bytes()
+    over_time = seconds >= _COST_WARNING_SECONDS
+    over_memory = budget > 0 and bytes_needed > budget
+    if not (over_time or over_memory):
+        return None
+    parts = [f"{label} is estimated at about {_fmt_duration(seconds)}"]
+    if breakdown:
+        parts[0] += f" ({breakdown})"
+    parts.append(f"and roughly {memory_budget.fmt_bytes(bytes_needed)} of memory")
+    if over_memory:
+        parts.append(
+            f"- more than this machine's {memory_budget.fmt_bytes(budget)} budget, "
+            "so it may slow down the whole computer while it runs")
+    message = " ".join(parts) + ". You can cancel while it runs."
+    return {
+        "message": message,
+        "estimated_seconds": float(round(seconds, 1)),
+        "estimated_bytes": int(bytes_needed),
+        "budget_bytes": int(budget),
+        "over_time": bool(over_time),
+        "over_memory": bool(over_memory),
+    }
+
+
+def _ground_cost_estimate(n_points: int, extent_m: float, cloth_resolution: float,
+                          iterations: int, rebuild_points: int) -> "tuple[float, int, str]":
+    """(seconds, bytes, breakdown) for one ground segmentation on `n_points`
+    hits followed by octree rebuilds totalling `rebuild_points` points."""
+    n = max(0, int(n_points))
+    nodes = _cloth_node_count(extent_m, cloth_resolution)
+    t_csf = (_WORKER_STARTUP_S + n / _RATE_WORKER_STAGE_PTS_PER_S + n / _RATE_CSF_PTS_PER_S
+             + nodes * max(1, int(iterations)) / _RATE_CLOTH_NODE_ITERS_PER_S)
+    t_rebuild = _convert_seconds(rebuild_points)
+    # Parent copy of the hits + the worker's copy + the labels, plus the cloth.
+    bytes_needed = n * (24 + 24 + 8) + nodes * 100
+    breakdown = f"cloth filter ~{_fmt_duration(t_csf)}, octree rebuild ~{_fmt_duration(t_rebuild)}"
+    return t_csf + t_rebuild, int(bytes_needed), breakdown
+
+
+def _refuse_oversized_cloth(extent_m: float, cloth_resolution: float) -> None:
+    nodes = _cloth_node_count(extent_m, cloth_resolution)
+    if nodes <= _MAX_CLOTH_NODES:
+        return
+    suggested = extent_m / math.sqrt(_MAX_CLOTH_NODES)
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"A cloth resolution of {cloth_resolution:g} m over a {extent_m:,.0f} m extent "
+            f"is a {nodes:,}-node cloth, which would take minutes to hours and gigabytes "
+            f"of memory. Use a cloth resolution of at least {suggested:.2f} m for this cloud."
+        ),
+    )
+
+
 @app.post("/api/segment/ground", response_model=GroundSegmentationResponse)
 async def segment_ground_points(request: GroundSegmentationRequest, http_request: Request):
     """Classify a point cloud into ground (1) and plant (2) points using the
@@ -5214,6 +5365,11 @@ async def segment_ground_points(request: GroundSegmentationRequest, http_request
                 num_points=len(points),
                 error="Need at least 10 points for ground segmentation",
             )
+        # Same hang guard as the session endpoint: a cloth too fine for the
+        # extent is refused with a usable alternative, whatever the point count.
+        _refuse_oversized_cloth(
+            float(max(np.ptp(points[:, 0]), np.ptp(points[:, 1]))),
+            float(request.cloth_resolution))
 
         csf_params = dict(
             cloth_resolution=request.cloth_resolution,
@@ -20681,7 +20837,14 @@ def _do_point_cloud_export(
         if progress is not None:
             progress(0.02, "Reading points")
         _cancel_checkpoint(progress)
-        points, src_colors, src_intensity, src_extras = _read_points_and_extras(src)
+        # The read copies every surviving point plus every column; an export
+        # of a large cloud is one of the biggest transients in the process.
+        n_src = _source_point_count_estimate(src)
+        with _ADMISSION.admit(
+                n_src * memory_budget.bytes_per_point(
+                    n_extras=8, colors=True, intensity=True, timestamps=True),
+                f"export {n_src:,} pts"):
+            points, src_colors, src_intensity, src_extras = _read_points_and_extras(src)
         if fmt in _TEXT_EXPORT_FORMATS or fmt == "pcd":
             try:
                 # Formatting is ~97% of a text export's wall time; report it as
@@ -23214,6 +23377,37 @@ async def _run_killable(
     import tempfile
 
     loop = asyncio.get_event_loop()
+    # Declare the working set to the memory budget: the staged copy on disk is
+    # paged back in by the worker (N x 24 B), the worker's own compute holds at
+    # least one more copy, and the labels come back (N x 8 B). Acquired off the
+    # event loop - a queued job must not stall unrelated requests while it waits.
+    n_pts = int(len(points))
+    estimate = n_pts * (24 + 24 + 8) + (int(reflectance.nbytes) if reflectance is not None else 0)
+    admitted = _ADMISSION.admit(estimate, f"{tool} worker on {n_pts:,} pts")
+    await run_in_threadpool(admitted.__enter__)
+    try:
+        return await _run_killable_admitted(
+            tool, points, params, http_request=http_request, reflectance=reflectance,
+            seeds=seeds, poll=poll)
+    finally:
+        admitted.__exit__(None, None, None)
+
+
+async def _run_killable_admitted(
+    tool: str,
+    points: "np.ndarray",
+    params: dict,
+    *,
+    http_request: "Optional[Request]" = None,
+    reflectance: "Optional[np.ndarray]" = None,
+    seeds: "Optional[np.ndarray]" = None,
+    poll: float = 0.25,
+):
+    """The body of `_run_killable`, once the memory budget has admitted it."""
+    import asyncio
+    import tempfile
+
+    loop = asyncio.get_event_loop()
     with tempfile.TemporaryDirectory(prefix="phyto_seg_") as workdir:
         # Stage inputs OFF the event loop. `points` is the full cloud — writing
         # 7 M points is ~170 MB of np.save, seconds of blocking that would stall
@@ -23791,6 +23985,26 @@ def _load_las_arrays(
             intensity = None
 
     return positions, colors, intensity
+
+
+def _source_point_count_estimate(src: "PointSource") -> int:
+    """How many points a `_read_points_and_extras(src)` call is about to copy,
+    for the memory budget. Session sources answer from the in-RAM arrays; a file
+    source answers from the LAS header when it is one, else 0 (unknown - the
+    admission then costs nothing, which is the pre-budget behaviour)."""
+    sid = getattr(src, "session_id", None)
+    if sid:
+        sess = _peek_cloud_session(sid)
+        if sess is not None:
+            try:
+                return int(len(sess.positions))
+            except Exception:
+                return 0
+        return 0
+    path = getattr(src, "source_path", None)
+    if path and str(path).lower().endswith((".las", ".laz")):
+        return _las_point_count(_Path(path)) or 0
+    return 0
 
 
 def _read_points_from_source(
@@ -26187,13 +26401,77 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     )
 
 
+# ---- Octree LOD sampling policy ---------------------------------------------
+#
+# PotreeConverter builds each inner octree node's level-of-detail sample one of
+# two ways: "poisson" (blue-noise, the converter's default and the prettiest at
+# low LOD) or "random". Measured here on a 10 M-point cloud (M-series laptop,
+# 10 converter threads): poisson 32 s = 0.31 M pts/s, random 5.1 s = 1.97 M
+# pts/s — a 6x difference on the SAME output size, and the converter is the
+# single largest cost of every import, bake, filter, split and segmentation on
+# a large cloud (a ground segmentation with split reconverts ~2N points). At
+# 100 M points that is the difference between ~1 min and ~6 min per edit.
+#
+# Random sampling is what Entwine/untwine (COPC) and QGIS ship; with the
+# renderer's 2 M-point budget the low-LOD difference is small, and the full-
+# resolution leaves are identical either way. So: poisson below a size where
+# the user cannot feel the cost, random above it. `PHYTOGRAPH_POTREE_SAMPLING`
+# pins one method (poisson | random | auto) and `_MIN_POINTS` moves the knee.
+_POTREE_SAMPLING_METHODS = ("poisson", "random")
+_POTREE_RANDOM_SAMPLING_MIN_POINTS = 2_000_000
+
+
+def _potree_sampling_policy() -> str:
+    raw = (_os.environ.get("PHYTOGRAPH_POTREE_SAMPLING") or "auto").strip().lower()
+    return raw if raw in _POTREE_SAMPLING_METHODS + ("auto",) else "auto"
+
+
+def _potree_random_sampling_min_points() -> int:
+    try:
+        return max(0, int(_os.environ.get(
+            "PHYTOGRAPH_POTREE_RANDOM_SAMPLING_MIN_POINTS",
+            _POTREE_RANDOM_SAMPLING_MIN_POINTS)))
+    except ValueError:
+        return _POTREE_RANDOM_SAMPLING_MIN_POINTS
+
+
+def _potree_sampling_method(point_count: "Optional[int]") -> str:
+    """Which `-m` PotreeConverter gets for a cloud of `point_count` points.
+
+    An unknown count (None) takes poisson: the LAS header could not be read, so
+    the safe assumption is the small-cloud, quality-first path.
+    """
+    policy = _potree_sampling_policy()
+    if policy != "auto":
+        return policy
+    if point_count is None:
+        return "poisson"
+    return "random" if int(point_count) >= _potree_random_sampling_min_points() else "poisson"
+
+
+def _las_point_count(las_path: _Path) -> "Optional[int]":
+    """Point count from a LAS/LAZ header, without reading the points; None if
+    the file is not a readable LAS (the converter will report that itself)."""
+    try:
+        import laspy
+        with laspy.open(str(las_path)) as reader:
+            return int(reader.header.point_count)
+    except Exception:
+        return None
+
+
 def _run_potree_converter(
     input_las: _Path,
     out_dir: _Path,
     cancel_event: "Optional[threading.Event]" = None,
     poll: float = 0.2,
+    *,
+    point_count: "Optional[int]" = None,
 ) -> None:
     """Invoke PotreeConverter on input_las, writing to out_dir.
+
+    `point_count`, when the caller already knows it, skips a header read and
+    selects the LOD sampling method (see `_potree_sampling_method`).
 
     PyInstaller-bundled Pythons inject DYLD_LIBRARY_PATH / LD_LIBRARY_PATH
     pointing at the bundle's libs. Those collide with PotreeConverter's
@@ -26221,10 +26499,13 @@ def _run_potree_converter(
     # point for position alone, which gives every-other-point garbage on
     # the filtered layout. Trading ~17 bytes/point of cache size for a
     # correct render.
+    method = _potree_sampling_method(
+        point_count if point_count is not None else _las_point_count(input_las))
     cmd = [
         str(converter),
         str(input_las),
         "-o", str(out_dir),
+        "-m", method,
     ]
     # Output goes to a LOG FILE, not a pipe. `subprocess.run` could use pipes
     # safely because it pumps them concurrently; a poll loop with PIPE and no
@@ -29983,7 +30264,17 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             )
             _report(0.25, "Loading points into memory…")
             _cancel_checkpoint(progress)
-            _las = _read_las_into_arrays(las_path)
+            # The read materialises the whole LAS record AND the float64
+            # position copy at once (~2x the session), so declare that to the
+            # memory budget: two large imports then run one after the other
+            # instead of both paging.
+            n_in_file = _las_point_count(las_path) or 0
+            with _ADMISSION.admit(
+                    n_in_file * 2 * memory_budget.bytes_per_point(
+                        n_extras=len(source_extra_dims or []), colors=True,
+                        intensity=True, timestamps=True),
+                    f"import {n_in_file:,} pts"):
+                _las = _read_las_into_arrays(las_path)
         # The session array is the source of truth and must hold FULL precision
         # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
         # synthesised is 1 mm-quantized — coarse enough to shatter precision-
@@ -32205,6 +32496,11 @@ class SessionGroundSegmentRequest(BaseModel):
     slope_smooth: bool = False
     # See GroundSegmentationRequest.auto_class_threshold.
     auto_class_threshold: bool = False
+    # Confirms a run the backend estimated as expensive (see `_cost_advisory`):
+    # without it, a run past the cost guideline answers 409 with a structured
+    # `cost_warning` and the panel prompts "Segment Anyway". Same contract as
+    # TreeIso's `acknowledge_cost`.
+    acknowledge_cost: bool = False
     # Skip the octree rebuild and return NO octree metadata. Set by a caller
     # that is about to POST `extract_by_column` with `rebuild_parent`, so the
     # parent's rebuild runs CONCURRENTLY with the children's instead of alone and
@@ -32239,6 +32535,27 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         pts = sess.positions[~sess.deleted][hit].copy()
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for ground segmentation.")
+    # Cost gate, BEFORE the worker is spawned: a cloth too fine for the extent
+    # is refused outright (it is a hang, not a slowdown), and a run past the
+    # time / memory guideline answers 409 so the user can decide. The rebuild
+    # term counts the parent (and, when a split follows, its two children too,
+    # which together hold the parent's points again).
+    extent_m = float(max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
+    _refuse_oversized_cloth(extent_m, float(request.cloth_resolution))
+    if not request.acknowledge_cost:
+        survivors = int(len(hit))
+        rebuild_points = survivors * (2 if request.defer_octree else 1)
+        seconds, bytes_needed, breakdown = _ground_cost_estimate(
+            len(pts), extent_m, float(request.cloth_resolution),
+            int(request.iterations), rebuild_points)
+        warning = _cost_advisory(
+            f"Ground segmentation of {len(pts):,} points", seconds, bytes_needed,
+            breakdown=breakdown)
+        if warning is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"cost_warning": warning, "message": warning["message"]},
+            )
     csf_params = dict(
         cloth_resolution=request.cloth_resolution,
         rigidness=request.rigidness,

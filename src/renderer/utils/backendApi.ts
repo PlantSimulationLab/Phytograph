@@ -4985,7 +4985,9 @@ export async function sessionMerge(
  * `ground_class` column, and rebuild the octree from the arrays (no file read). */
 export async function sessionSegmentGround(
   sessionId: string,
-  params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean; auto_class_threshold?: boolean; defer_octree?: boolean },
+  // `acknowledge_cost` confirms a run the backend answered 409 with a cost
+  // advisory for (a `CostWarningError` on the first attempt).
+  params: { cloth_resolution?: number; rigidness?: number; class_threshold?: number; iterations?: number; slope_smooth?: boolean; auto_class_threshold?: boolean; defer_octree?: boolean; acknowledge_cost?: boolean },
   signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string; octree_deferred?: boolean }> {
   return postSegment<CloudSessionBakeResult & { class_threshold_used?: number; class_threshold_method?: string; octree_deferred?: boolean }>(

@@ -46,6 +46,13 @@ plyfile>=1.0
 # LAD inversion. Prebuilt wheels for CPython on macOS/Linux/Windows; bundled via
 # `collectAll` in scripts/build-backend.mjs.
 pye57>=0.4.0
+# Memory measurement for the backend's memory budget / admission control
+# (backend-api/memory_budget.py): physical RAM, available RAM, and the RSS of
+# this process plus its killable workers and PotreeConverter children. Wheels
+# for every release target; must ALSO be in `collectAll` in
+# scripts/build-backend.mjs (C-extension). The module degrades to os.sysconf /
+# resource when it is missing, so a bare venv still starts.
+psutil>=5.9
 # Cloth Simulation Filter — ground/non-ground segmentation. SWIG C-extension
 # (imports as `import CSF`); prebuilt wheels for CPython 3.9-3.12 on
 # macOS/Linux/Windows. Bundled via `collectAll` in scripts/build-backend.mjs.

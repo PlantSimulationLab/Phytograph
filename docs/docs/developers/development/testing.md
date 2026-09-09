@@ -243,3 +243,10 @@ Per-spec attribution needs the timeline reporter
 registers only when `PHYTOGRAPH_E2E_TIMELINE` is set — the `--timeline`
 flag does that. Passing `--reporter=…` on the Playwright command line
 overrides the config reporter list and silently drops it.
+
+## Large-cloud benchmark
+
+`backend-api/tests/bench/` measures wall time and peak memory per stage of
+the import → segment → split → rebuild → export workflow on a synthetic cloud
+of any size, and is skipped unless `PHYTO_BENCH=1` is set. See
+[Large clouds](../architecture/large-clouds.md#benchmark-harness).

@@ -172,7 +172,7 @@ const hiddenImports = [
 // wood/leaf segmentation raised ModuleNotFoundError in the packaged app while dev
 // (running against the venv) passed. collect-all, not a hidden-import, so the
 // whole package travels regardless of which subpackages get traced.
-const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'sklearn', 'numpy_indexed', 'pye57', 'pyproj', 'tifffile'];
+const collectAll = ['scipy', 'open3d', 'laspy', 'lazrs', 'pytexit', 'pyhelios', 'CSF', 'cut_pursuit_py', 'skimage', 'sklearn', 'numpy_indexed', 'pye57', 'pyproj', 'tifffile', 'psutil'];
 
 // Vendored TreeIso (MIT) lives under backend-api/vendor/ and is imported lazily
 // via a runtime sys.path tweak in main.py. Add vendor/ to the analysis path so
