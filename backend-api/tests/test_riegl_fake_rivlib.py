@@ -431,3 +431,82 @@ def test_extract_endpoint_builds_a_session_with_the_right_counts(
     assert scan["miss_count"] == MISSES
     assert scan["point_count"] == POINTS
     assert scan["has_misses"] is True
+
+
+@pytest.fixture
+def three_position_project(tmp_path):
+    """A .riproject with three ScanPos directories.
+
+    One position is not enough to show what the per-position failure handling is
+    FOR: the point is that the positions around a bad one still arrive.
+    """
+    root = tmp_path / "three.riproject"
+    for i in (1, 2, 3):
+        pos = root / f"ScanPos00{i}"
+        pos.mkdir(parents=True)
+        (pos / "200101_120000.rxp").write_bytes(b"not really an rxp")
+        (pos / "200101_120000.pat").write_text(
+            "; synthetic scan pattern\r\n"
+            "SCN_SET_RECT_FOV(30.0000, 130.0000, 0.0400, 0.0000, 360.0000, 0.0500)\r\n",
+            encoding="latin-1",
+        )
+    return root
+
+
+def test_one_position_failing_does_not_lose_the_whole_import(
+    client, native, three_position_project, monkeypatch
+):
+    """A per-position error is reported per position, not as a dead import.
+
+    From the field: a 5-position .riproject import raised
+    `PermissionError: [WinError 5] Access is denied` installing the FIFTH
+    position's octree, and the user got an error and nothing else — the four
+    positions that had already decoded and converted were discarded with it. On
+    the 30-position project this was first tried against, that is most of an
+    hour of work thrown away for one transient failure.
+
+    Everything under `on_scan` is per-position work that fails for per-position
+    reasons (a full disk, a Windows handle on the cache, a converter crash on
+    one malformed sweep), so it is recorded like the reader's own per-position
+    errors and the import carries on.
+    """
+    real_create = main._do_create_cloud_session
+    seen: list[str] = []
+
+    def flaky(sess_req, source, **kwargs):
+        seen.append(str(len(seen)))
+        if len(seen) == 2:
+            raise PermissionError(
+                13, "Access is denied", r"C:\...\octrees\abc.staging", 5,
+                r"C:\...\octrees\abc",
+            )
+        return real_create(sess_req, source, **kwargs)
+
+    monkeypatch.setattr(main, "_do_create_cloud_session", flaky)
+
+    with client.stream(
+        "POST", "/api/riegl/project/extract",
+        json={"project_path": str(three_position_project),
+              "scans": ["ScanPos001", "ScanPos002", "ScanPos003"],
+              "frame": "local"},
+    ) as res:
+        assert res.status_code == 200, res.read()[:2000]
+        payload = b"".join(res.iter_bytes())
+
+    idx = payload.rfind(b'{"project"')
+    assert idx >= 0, (
+        "the import produced no payload at all — one position's failure took "
+        f"the whole run with it: {payload[-2000:]!r}"
+    )
+    scans = json.loads(payload[idx:].decode("utf-8"))["scans"]
+    assert len(scans) == 3
+
+    good = [s for s in scans if not s.get("error")]
+    bad = [s for s in scans if s.get("error")]
+    assert len(bad) == 1, [s.get("name") for s in bad]
+    assert "Access is denied" in bad[0]["error"]
+    # The survivors are real, usable imports, not placeholders.
+    assert len(good) == 2
+    for s in good:
+        assert s["session"]["session_id"]
+        assert s["point_count"] == POINTS

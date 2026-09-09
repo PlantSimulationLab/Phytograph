@@ -291,6 +291,10 @@ the reason shown inline.
     so nothing half-imported is left in the scene. An import that somehow runs
     past an hour is stopped automatically.
 
+    A position that **fails** is a different matter: it is skipped and the rest
+    of the import carries on, with the closing toast naming the position and the
+    reason. So a single bad position no longer costs you the whole run.
+
 ## What you get, and what you don't
 
 ### Which frame the points land in
@@ -584,6 +588,14 @@ Windows or Linux.**
   own registration failed for those positions and they are placed to about a
   metre; run [ICP](register-compare.md) to refine them. Also check you did not
   leave **Keep scanner-local coordinates** ticked.
+
+**The import finished, but fewer positions arrived than I selected.**
+: A position that fails is skipped rather than taking the whole import with it,
+  and the closing toast names the first one and why it failed. Common causes are
+  a full disk — the octree cache is written under your user profile and a large
+  project can add tens of gigabytes — and a position the reader could not decode.
+  Re-running the import rebuilds only the missing positions; the ones that
+  already converted are served from the cache and come back in seconds.
 
 **A `.PROJ` holds `.rdbx` files — are those used?**
 : No. Phytograph reads the `.rxp` beside them. The `.rdbx` is RIEGL's processed
