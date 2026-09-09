@@ -1,0 +1,158 @@
+{
+  "_comment": [
+    "CROSS-PROCESS CONTRACT: what LAI means for a gridded LAD result.",
+    "",
+    "LAI is computed in TWO places, from the same voxels, and they must agree:",
+    "  - Python  _lad_statistics_bytes in backend-api/main.py, which writes the",
+    "            'LAI' line of the summary .txt export.",
+    "  - TypeScript  computeLadProfile in src/renderer/lib/ladProfile.ts, which",
+    "            shows the bulk LAI and the vertical profile in the LAD Profile",
+    "            window, without exporting anything.",
+    "An app that DISPLAYS one LAI and EXPORTS a different one from the same grid",
+    "is worse than one that only exports: the user has no way to see the",
+    "disagreement, and would reasonably quote either number in a paper.",
+    "",
+    "The rule both sides implement, and the reason it is written down rather than",
+    "left to each implementation's judgement:",
+    "",
+    "  LAI = (leaf area summed over MEASURED voxels) / (dx*nx * dy*ny)",
+    "",
+    "  MEASURED means all three of:",
+    "    solved is not false        (Beer's law converged)",
+    "    under_sampled is not true  (the beams adequately probed the voxel)",
+    "    lad_filled is not true     (the value is a measurement, not a kriged",
+    "                                interpolation over its neighbours)",
+    "  An absent flag reads as the permissive value, so a legacy result computed",
+    "  before a flag existed still counts.",
+    "",
+    "  The two traps this encodes:",
+    "  1. An occluded voxel is NOT a zero. Helios writes a hard 0 for a voxel the",
+    "     beams never adequately probed, so counting it biases LAI low - the",
+    "     most-repeated caution in the voxel-LAD literature. It is EXCLUDED from",
+    "     the numerator and reported beside the number instead.",
+    "  2. The denominator is the FULL grid footprint, never the occupied one.",
+    "     LAI is leaf area per unit GROUND, and the ground under a column the",
+    "     beams missed is still ground. Shrinking the footprint to the occupied",
+    "     columns inflates LAI - by 4x on the sparse case below.",
+    "",
+    "This file is the single written-down truth both sides are tested against:",
+    "  - src/renderer/lib/ladProfile.contract.test.ts   (vitest)",
+    "  - backend-api/tests/test_lad_lai_contract.py     (pytest)",
+    "Both tests feed these cells through the REAL shipped code path on their side",
+    "- the Python one calls _lad_statistics_bytes and parses its 'LAI' line, the",
+    "TS one calls computeLadProfile - so neither can pass by reimplementing the",
+    "rule. Change one implementation without the other and its own test fails.",
+    "It is test-only data; neither implementation reads it at runtime.",
+    "",
+    "`level_mean_lad` is asserted by the TypeScript side only: it is the mean",
+    "LAD per z-level that the profile plot draws, and the Python summary has no",
+    "per-level output to compare it against. It applies the SAME measured-voxel",
+    "rule, so a profile that averaged occluded voxels in would disagree with its",
+    "own LAI - which is why it lives here rather than in a separate fixture.",
+    "",
+    "Note the occluded voxels below carry NONZERO leaf area on purpose. Helios",
+    "computes a leaf area for them from the few returns it did get; the value",
+    "just rests on too little probing to trust. A fixture that zeroed them would",
+    "pass whether or not the implementation excluded them, and prove nothing.",
+    "",
+    "Coordinates are WORLD-frame (the frame the export request carries), at a",
+    "UTM-scale origin so a dropped worldShift would show up as a gross error.",
+    "Voxel `index` is the Helios k-major cell index, index // (nx*ny) = z-level."
+  ],
+  "cases": [
+    {
+      "name": "occluded voxels are excluded, not counted as zero density",
+      "why": "The headline failure. Level 0 holds one measured voxel and three occluded ones. An occluded voxel still carries a nonzero leaf area (Helios computes one from the few returns it did get) but that number rests on too little probing to trust, so it is excluded from the total and its LAD is not averaged in either.",
+      "nx": 2,
+      "ny": 2,
+      "nz": 2,
+      "origin": [412300.0, 4512100.0, 0.0],
+      "cell_size": [0.5, 0.5, 0.5],
+      "cells": [
+        {"index": 0, "i": 0, "j": 0, "k": 0, "lad": 2.0, "leaf_area": 0.25, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 1, "i": 1, "j": 0, "k": 0, "lad": 6.4, "leaf_area": 0.8, "solved": true, "under_sampled": true, "lad_filled": false},
+        {"index": 2, "i": 0, "j": 1, "k": 0, "lad": 3.2, "leaf_area": 0.4, "solved": true, "under_sampled": true, "lad_filled": false},
+        {"index": 3, "i": 1, "j": 1, "k": 0, "lad": 0.0, "leaf_area": 1.6, "solved": false, "under_sampled": false, "lad_filled": false},
+        {"index": 4, "i": 0, "j": 0, "k": 1, "lad": 1.0, "leaf_area": 0.125, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 5, "i": 1, "j": 0, "k": 1, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 6, "i": 0, "j": 1, "k": 1, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 7, "i": 1, "j": 1, "k": 1, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false}
+      ],
+      "expected": {
+        "measured_leaf_area": 0.375,
+        "ground_area": 1.0,
+        "lai": 0.375,
+        "occluded_count": 3,
+        "_level_mean_lad_note": "Level 0's only measured voxel is index 0 at LAD 2.0; the other three are occluded. Level 1 has four measured voxels at 1.0, 0, 0, 0 => 0.25. Averaging the occluded voxels into level 0 would give (2.0+6.4+3.2+0)/4 = 2.9 instead.",
+        "level_mean_lad": [2.0, 0.25]
+      }
+    },
+    {
+      "name": "kriging-filled voxels stay out of the measured total",
+      "why": "A filled voxel carries an INTERPOLATED leaf area. It is reported beside the total, never inside it, so LAI stays a measurement.",
+      "nx": 2,
+      "ny": 2,
+      "nz": 1,
+      "origin": [412300.0, 4512100.0, 0.0],
+      "cell_size": [0.5, 0.5, 0.5],
+      "cells": [
+        {"index": 0, "i": 0, "j": 0, "k": 0, "lad": 2.0, "leaf_area": 0.25, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 1, "i": 1, "j": 0, "k": 0, "lad": 1.6, "leaf_area": 0.2, "solved": true, "under_sampled": true, "lad_filled": true},
+        {"index": 2, "i": 0, "j": 1, "k": 0, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 3, "i": 1, "j": 1, "k": 0, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false}
+      ],
+      "expected": {
+        "measured_leaf_area": 0.25,
+        "ground_area": 1.0,
+        "lai": 0.25,
+        "occluded_count": 1,
+        "filled_leaf_area": 0.2,
+        "level_mean_lad": [0.6666666666666666]
+      }
+    },
+    {
+      "name": "the denominator is the full footprint, not the occupied columns",
+      "why": "Canopy in one column of four. Dividing by the occupied footprint instead would report LAI 4.0 rather than 1.0.",
+      "nx": 2,
+      "ny": 2,
+      "nz": 1,
+      "origin": [412300.0, 4512100.0, 0.0],
+      "cell_size": [1.0, 1.0, 1.0],
+      "cells": [
+        {"index": 0, "i": 0, "j": 0, "k": 0, "lad": 4.0, "leaf_area": 4.0, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 1, "i": 1, "j": 0, "k": 0, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 2, "i": 0, "j": 1, "k": 0, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 3, "i": 1, "j": 1, "k": 0, "lad": 0.0, "leaf_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false}
+      ],
+      "expected": {
+        "measured_leaf_area": 4.0,
+        "ground_area": 4.0,
+        "lai": 1.0,
+        "occluded_count": 0,
+        "level_mean_lad": [1.0]
+      }
+    },
+    {
+      "name": "a legacy result carrying no flags counts every voxel",
+      "why": "Results computed before the occlusion flags existed must not silently read as fully occluded and report LAI 0.",
+      "nx": 1,
+      "ny": 2,
+      "nz": 2,
+      "origin": [412300.0, 4512100.0, 0.0],
+      "cell_size": [2.0, 2.0, 1.0],
+      "cells": [
+        {"index": 0, "i": 0, "j": 0, "k": 0, "lad": 0.5, "leaf_area": 2.0},
+        {"index": 1, "i": 0, "j": 1, "k": 0, "lad": 0.25, "leaf_area": 1.0},
+        {"index": 2, "i": 0, "j": 0, "k": 1, "lad": 0.125, "leaf_area": 0.5},
+        {"index": 3, "i": 0, "j": 1, "k": 1, "lad": 0.0, "leaf_area": 0.0}
+      ],
+      "expected": {
+        "measured_leaf_area": 3.5,
+        "ground_area": 8.0,
+        "lai": 0.4375,
+        "occluded_count": 0,
+        "level_mean_lad": [0.375, 0.0625]
+      }
+    }
+  ]
+}

@@ -43,6 +43,7 @@ import { MeshCloudDistanceDialog } from './MeshCloudDistanceDialog';
 import { MeshCloudAlignDialog } from './MeshCloudAlignDialog';
 import { type ToolCommand, type SelectionState, isCommandAvailable, requiresText as toolRequiresText, CREATE_GROUPS } from '../lib/toolCommands';
 import { LeafAnglePlotPopup } from './LeafAnglePlotPopup';
+import { LADProfilePopup } from './LADProfilePopup';
 import { QSMResultsPopup } from './QSMResultsPopup';
 import { AddLeavesPopup } from './AddLeavesPopup';
 import { CreatePlanePopup, type CreatePlaneParams } from './CreatePlanePopup';
@@ -1780,6 +1781,8 @@ export default function PointCloudViewer({
   const [showLeafAngleMeshId, setShowLeafAngleMeshId] = useState<string | null>(null);
   // The QSM whose detailed-results window is open (null = closed).
   const [showQSMResultsId, setShowQSMResultsId] = useState<string | null>(null);
+  // The LAD result whose vertical-profile / bulk-LAI window is open (null = closed).
+  const [showLadProfileId, setShowLadProfileId] = useState<string | null>(null);
   const heliosAbortRef = useRef<AbortController | null>(null);
   // Multi-input tool dialogs (pick their own inputs; always launchable).
   const [showAlignDialog, setShowAlignDialog] = useState(false);
@@ -4693,11 +4696,18 @@ export default function PointCloudViewer({
   // Deliberately NOT a `beforeunload` handler. In Electron that raises a native
   // Chromium dialog which the app cannot style, cannot dismiss programmatically,
   // and which wedges an automated quit (it hung Playwright's worker teardown for
-  // the full 180 s timeout). The in-app warnings below — the File > New dialog
-  // and the panel's own unsaved-strokes hint — cover the paths a user actually
-  // takes, without hijacking window close.
+  // the full 180 s timeout).
   //
-  // The File>New confirm dialog and E2E read this to know whether work is at risk.
+  // Window close IS now guarded, but from the main process instead: App.tsx
+  // pushes this count (with the scene's emptiness) over IPC.SceneDirty, and
+  // src/main/quitConfirm.ts raises a native message box from the 'close' /
+  // 'before-quit' handlers, where preventDefault() can cancel the quit outright.
+  // That keeps the dialog cancellable, styleable by the OS, and — because it is
+  // suppressed under PHYTOGRAPH_E2E — incapable of wedging a Playwright
+  // teardown the way beforeunload did.
+  //
+  // The File>New confirm dialog, the quit confirmation and E2E read this to
+  // know whether work is at risk.
   useEffect(() => {
     (window as any).__uncommittedLabelStrokes = labelStrokes.length;
     return () => { (window as any).__uncommittedLabelStrokes = 0; };
@@ -21423,6 +21433,7 @@ export default function PointCloudViewer({
             onUpdate={updateLadResult}
             onColormapChange={setColormapOverride}
             onExport={handleExportLAD}
+            onShowProfile={setShowLadProfileId}
           />
         )}
 
@@ -23451,6 +23462,22 @@ export default function PointCloudViewer({
             onClose={() => setShowLeafAngleMeshId(null)}
             mesh={lapMesh}
             meshName={lapMesh ? displayNameOfMesh(lapMesh) : ''}
+          />
+        );
+      })()}
+
+      {/* LAD vertical-profile / bulk-LAI Popup. Resolved from the live list by id
+          rather than held as an entry, so removing the result closes the window
+          instead of leaving it showing a grid that no longer exists. */}
+      {(() => {
+        const lad = showLadProfileId
+          ? ladResults.find(r => r.id === showLadProfileId) ?? null
+          : null;
+        return (
+          <LADProfilePopup
+            isOpen={lad !== null}
+            onClose={() => setShowLadProfileId(null)}
+            result={lad}
           />
         );
       })()}

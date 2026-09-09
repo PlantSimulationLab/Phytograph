@@ -281,7 +281,8 @@ result is a 3D voxel grid, and exports in four formats (all export-only):
 | `.tif` (GeoTIFF) | **Multi-band**: one band per vertical level, band 1 = lowest, `float32`. One file per selected variable. Carries pixel scale + tiepoint, a CRS when known, `GDAL_NODATA = -9999`, and per-band descriptions naming each band's height range (`lad z=0.50-1.00m`). The band-per-level shape matches `canopyLazR::lad.array.to.raster.stack()` and AMAPVox's `toRaster()`. |
 | `.csv` (voxel table) | One row per voxel, every field. The lossless format, and the only one that carries a rotated or terrain-following grid. |
 | `.vox` (AMAPVox) | `VOXEL SPACE` line, a `#min_corner` / `#max_corner` / `#split` / `#res` / `#type` header, a column-name line, then whitespace-delimited rows keyed by `i j k`. `PadBVTotal` is the plant area density (m²/m³); `nbSampling` / `nbEchos` are the beam and echo counts. Read by the R `AMAPVox` package and DART / `pytools4dart`. |
-| `.txt` (summary) | A short plain-text report: voxel size and grid dimensions, voxel/occlusion counts, total leaf area, and **LAI**. The only export carrying LAI. |
+| `.txt` (summary) | A short plain-text report: voxel size and grid dimensions, voxel/occlusion counts, total leaf area, and **LAI**. The only *voxel* export carrying LAI. |
+| `.csv` (profile) | Written by **Profile & LAI**, not by the Export row: one line per vertical level — height, thickness, mean LAD, its standard deviation across the level, leaf area, the level's share of LAI, and the measured / occluded / filled voxel counts — followed by commented lines giving the bulk LAI, the measured and interpolated leaf areas, and the grid footprint. Its per-level LAI contributions sum exactly to the bulk LAI. |
 
 Coordinates are always written in true world coordinates, so a raster
 georeferences correctly even for a cloud imported with a

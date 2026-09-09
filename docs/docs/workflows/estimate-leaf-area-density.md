@@ -204,6 +204,54 @@ Two controls in the LAD dialog:
     marks them, so downstream analysis can include or exclude them
     deliberately.
 
+## Reading the profile and the bulk LAI
+
+Select a LAD result and click **Profile & LAI** in its row. This opens a window
+with the two numbers a canopy grid is usually computed *for*, without exporting
+anything:
+
+- **Bulk LAI** — the headline figure, shown at the top. Leaf area index is the
+  measured leaf area summed over the grid, divided by the grid's ground
+  footprint (m²/m²). It is the same number the **Summary** export writes, from
+  the same voxels and the same rule.
+- **The vertical profile** — mean LAD per horizontal level of the grid, plotted
+  with density on the x axis and height on the y axis, the orientation the
+  canopy-structure literature draws a profile in. Tick **Show ±1 SD** to shade
+  the spread of LAD *across* each level, which says how horizontally uniform
+  the canopy is at that height.
+
+Below the plot, a table gives each level's mean LAD, its standard deviation,
+its leaf area, its share of the bulk LAI, and how many of its voxels were
+actually measured. That last column matters: a level whose mean rests on three
+measured voxels out of ninety is a far weaker claim than one resting on all
+ninety, and the plotted line alone can't show you the difference.
+
+**Profile CSV** writes the whole table plus the bulk figures to a file.
+
+!!! note "Occluded voxels are excluded here too"
+
+    Every number in this window counts **measured** voxels only — solved,
+    adequately probed, and not [interpolated](#occlusion). An occluded voxel is
+    unmeasured, not empty, so averaging it in as zero density would bias both
+    the profile and the LAI low. The count of excluded voxels is shown beside
+    the LAI, and when occlusion filling is on, the interpolated leaf area is
+    reported next to it — never inside it.
+
+    The per-level LAI contributions in the table sum exactly to the bulk LAI, so
+    the profile and the headline number are the same measurement rather than two
+    similar ones. This is pinned from both sides by
+    `src/shared/ladLai.contract.json`, because the app showing one LAI while
+    exporting a different one would raise no error at all.
+
+!!! tip "On a terrain-following grid, the profile is height above ground"
+
+    Levels are grid *cell* levels, not absolute elevations. On a
+    [terrain-following](#terrain-following-snap-the-grid-to-the-ground) grid
+    each column is lifted to its own ground height, so a level is a constant
+    height *above the terrain* and the axis is labelled that way. That is
+    normally what you want on sloped ground — a profile binned by absolute z
+    would smear the canopy across levels.
+
 ## Exporting the result
 
 Select a LAD result and use **Export** in its row. Tick the variables you want
@@ -365,5 +413,8 @@ entirely and uses those origins directly.
   the misses are stale (they were computed against the pre-crop hits, so the
   hit/miss ratio is off). Re-run [Backfill Misses](backfill-misses.md) on the
   cropped cloud before trusting the LAD.
-- For a single canopy-wide LAI, use a 1×1×1-cell grid sized to the whole
-  canopy and read the single voxel's LAD × its height.
+- For a canopy-wide LAI, just read it off **Profile & LAI** — it is computed
+  over whatever grid you ran, so you do not need to collapse the grid to a
+  single cell to get it. Keep the grid subdivided: a multi-level grid gives you
+  the same bulk LAI *and* the vertical profile, while a 1×1×1 grid throws the
+  profile away and cannot tell occluded canopy from empty air.

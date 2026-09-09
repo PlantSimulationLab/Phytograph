@@ -1962,6 +1962,31 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     onResetScene();
   }, [scene, onResetScene]);
 
+  // Tell main whether closing right now would destroy work, so the window
+  // 'close' / 'before-quit' handlers can confirm first (src/main/quitConfirm.ts).
+  //
+  // "Dirty" is just "the scene holds something": there is no project save, so a
+  // cloud is at risk from the moment it is imported, and every edit after that
+  // (crop, erase, filter, bake, label) exists only in RAM. Main cannot read any
+  // of this, hence the push. Runs on every scene change — cheap, and staleness
+  // here means either a missing warning or a spurious one.
+  const sceneObjectCount =
+    scans.length +
+    scene.state.meshes.length +
+    scene.state.skeletons.length +
+    scene.state.qsms.length +
+    scene.state.ladResults.length;
+  useEffect(() => {
+    window.electronAPI?.setSceneDirty?.({
+      dirty: sceneObjectCount > 0,
+      // Read at push time rather than subscribed: the viewer owns this global
+      // and rewrites it on every stroke, and a stroke only ever exists
+      // alongside a loaded cloud (so `dirty` is already true and the count is
+      // refined on the next scene change).
+      strokes: (window as any).__uncommittedLabelStrokes ?? 0,
+    });
+  }, [sceneObjectCount]);
+
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
   // Most menu items map to existing handlers; File → Import routes through the
   // native file dialog (handleMenuImport) rather than the renderer dropzone.

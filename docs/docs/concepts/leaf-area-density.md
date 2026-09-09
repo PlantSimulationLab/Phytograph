@@ -6,6 +6,21 @@ canopy. It is the spatial building block of leaf area index (LAI) — sum
 LAD over a column of voxels and multiply by their height and you get the
 LAI of that column.
 
+Two summaries fall directly out of a computed grid, and Phytograph reports
+both in the **Profile & LAI** window of a LAD result:
+
+- The **vertical profile** — mean LAD per horizontal level — is how the
+  canopy's foliage is distributed with height. It is what distinguishes a
+  canopy that carries its leaf area in a dense upper crown from one that
+  spreads the same total over its whole depth.
+- The **bulk LAI** — total leaf area over the grid's ground footprint — is
+  the single canopy-scale number, and the one most often quoted.
+
+Neither counts **occluded** voxels. A voxel the beams never adequately
+probed is *unmeasured*, not empty, and treating its density as zero is the
+most common way both figures come out biased low. See
+[estimating LAD](../workflows/estimate-leaf-area-density.md#occlusion).
+
 Phytograph computes LAD with the PyHelios LiDAR plugin from one or more
 terrestrial scans that carry scanner parameters.
 

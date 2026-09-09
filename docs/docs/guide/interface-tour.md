@@ -25,6 +25,19 @@ point clouds, meshes, skeletons, plant models, scans, and analysis results —
 and resets the app to a fresh start, the same as relaunching it. It asks for
 confirmation first because it can&rsquo;t be undone.
 
+!!! warning "Your session is not saved anywhere"
+
+    Phytograph has no project file. Everything you load or create lives in
+    memory for as long as the app is open, and every edit you make after
+    import — crop, erase, filter, bake, segment, label — exists only there.
+    Closing the window or quitting discards all of it.
+
+    Because of that, closing with anything loaded asks you to confirm first,
+    and defaults to **Cancel** so a stray click or keypress can&rsquo;t throw
+    the session away. Choose **Discard and Close** only when you really are
+    finished. To keep results, [export](../workflows/import-export.md) them
+    before you close.
+
 ## Left tool column
 
 A vertical column down the left side. At the top are the **view** controls

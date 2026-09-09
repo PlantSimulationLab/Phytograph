@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Grid3x3, Eye, EyeOff, Trash2, Download } from 'lucide-react';
+import { Grid3x3, Eye, EyeOff, Trash2, Download, BarChart3 } from 'lucide-react';
 import type { LADResultEntry } from '../../../lib/pointCloudTypes';
 import { ladRange } from '../../../lib/pointCloudHelpers';
 import { ColormapName, COLORMAP_NAMES, COLORMAP_LABELS } from '../../../lib/colormaps';
@@ -129,6 +129,8 @@ interface LADResultsPanelProps {
   onColormapChange: (id: string, name: ColormapName | undefined) => void;
   // Writes the result out; `variables` applies to the raster format only.
   onExport: (id: string, format: LadExportFormat, variables: string[]) => void;
+  // Opens the vertical-profile / bulk-LAI window for this result.
+  onShowProfile: (id: string) => void;
 }
 
 export function LADResultsPanel({
@@ -142,6 +144,7 @@ export function LADResultsPanel({
   onUpdate,
   onColormapChange,
   onExport,
+  onShowProfile,
 }: LADResultsPanelProps) {
   return (
     <div className="bg-neutral-800/90 backdrop-blur-sm rounded-lg shadow-lg w-64 max-h-[40vh] flex flex-col shrink-0">
@@ -363,6 +366,19 @@ export function LADResultsPanel({
                       ))}
                     </select>
                   </div>
+                  {/* Reading the result, as opposed to writing it out: the
+                      vertical profile and the bulk LAI. LAI otherwise exists
+                      only inside the summary .txt, so without this the headline
+                      canopy number can't be seen without exporting a file. */}
+                  <button
+                    data-testid="lad-show-profile"
+                    onClick={(e) => { e.stopPropagation(); onShowProfile(result.id); }}
+                    title="Show the vertical LAD profile and the bulk leaf area index"
+                    className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
+                  >
+                    <BarChart3 className="w-3 h-3" />
+                    Profile &amp; LAI
+                  </button>
                   <div className="pt-1 border-t border-neutral-700/50">
                     <LadExportControls result={result} onExport={onExport} />
                   </div>
