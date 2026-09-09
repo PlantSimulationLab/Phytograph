@@ -91,11 +91,22 @@ def _reader_env(fake, **extra):
     return env
 
 
+# `close_fds=False` is what makes CPython spawn the child with `posix_spawn`
+# instead of fork()+exec() (see subprocess.Popen._execute_child's conditions).
+# That matters here for the same reason main.py's _SegProc exists: once
+# anything in the same pytest process has built a cloud session, libhelios' GLFW
+# and open3d's own copy are both loaded and initialised, and forking that image
+# kills the child in the post-fork/pre-exec window with SIGSEGV — the reader
+# then "fails" with exit -11 having never run. It is order-dependent, so these
+# helpers passed alone and died as soon as a session-building test ran first.
+_NO_FORK = {"close_fds": False}
+
+
 def _run_reader(fake, args, **extra):
     proc = subprocess.run(
         [sys.executable, str(READER), *args],
         capture_output=True, text=True, env=_reader_env(fake, **extra),
-        timeout=300,
+        timeout=300, **_NO_FORK,
     )
     if proc.returncode != 0:
         raise AssertionError(
@@ -198,6 +209,7 @@ def _stream(fake, project, out_dir):
             [sys.executable, str(READER), "stream", str(project),
              "--out", str(out_dir), "--frame", "local"],
             stdout=subprocess.PIPE, stderr=fh, env=_reader_env(fake),
+            **_NO_FORK,
         )
         magic = proc.stdout.read(4)
         assert magic == b"PHRX", magic
@@ -356,7 +368,7 @@ def test_a_missing_shim_costs_the_sky_shell_not_the_import(
     env["PHYTOGRAPH_RXP_SHIM"] = str(tmp_path / "does-not-exist.dll")
     proc = subprocess.run(
         [sys.executable, str(READER), "inspect", str(project)],
-        capture_output=True, text=True, env=env, timeout=300,
+        capture_output=True, text=True, env=env, timeout=300, **_NO_FORK,
     )
     # inspect never touches the shim, so it must be unaffected.
     assert proc.returncode == 0, proc.stderr[-2000:]

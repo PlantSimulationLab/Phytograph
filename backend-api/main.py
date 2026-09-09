@@ -2545,29 +2545,49 @@ def _run_riegl_container(
 
     proc = None
     try:
-        with open(log_path, "w") as log_handle, open(out_path, "w") as out_handle:
-            proc = subprocess.Popen(
-                cmd, stdout=out_handle, stderr=log_handle,
-                env=env, text=True,
-            )
+        if container_name is None and hasattr(os, "posix_spawn"):
+            # NATIVE runtime on POSIX: the reader is a child of THIS process, so
+            # the spawn mechanism matters. `Popen` fork()s the loaded image
+            # whenever close_fds is true (the default), and this backend has
+            # BOTH libhelios' GLFW (lidar->visualizer plugin) and open3d's own
+            # copy loaded — they register duplicate Objective-C classes, and
+            # forking that image kills the child in the post-fork/pre-exec
+            # window with SIGSEGV, surfacing only as "RIEGL reader failed
+            # (exit -11)" before a line of the reader runs. Same reason
+            # _run_potree_converter and _spawn_seg_worker use _SegProc.
+            #
+            # Docker keeps Popen: the `docker` CLI is a thin client that loads
+            # none of this, and the container is not in our process tree anyway.
+            proc = _SegProc(cmd, env, log_path, stdout_log=out_path)
+        else:
+            log_handle = open(log_path, "w")
+            out_handle = open(out_path, "w")
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=out_handle, stderr=log_handle,
+                    env=env, text=True,
+                )
+            finally:
+                log_handle.close()
+                out_handle.close()
 
-            started = time.time()
-            while proc.poll() is None:
-                if cancel_event is not None and cancel_event.is_set():
-                    _kill_riegl_container(container_name, proc)
-                    raise ScanCancelled()
-                if time.time() - started > timeout_s:
-                    _kill_riegl_container(container_name, proc)
-                    raise HTTPException(
-                        status_code=504,
-                        detail=(
-                            f"RIEGL extraction exceeded {timeout_s:.0f}s and was "
-                            "stopped."
-                        ),
-                    )
-                time.sleep(poll)
+        started = time.time()
+        while proc.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                _kill_riegl_container(container_name, proc)
+                raise ScanCancelled()
+            if time.time() - started > timeout_s:
+                _kill_riegl_container(container_name, proc)
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        f"RIEGL extraction exceeded {timeout_s:.0f}s and was "
+                        "stopped."
+                    ),
+                )
+            time.sleep(poll)
 
-            proc.wait()
+        proc.wait()
 
         try:
             with open(out_path, encoding="utf-8", errors="replace") as fh:
@@ -2649,10 +2669,30 @@ def _stream_riegl_container(
     trailer: List[dict] = []
     try:
         with open(log_path, "w") as log_handle:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=log_handle, env=env,
-                bufsize=1024 * 1024,
-            )
+            if container_name is None and hasattr(os, "posix_spawn"):
+                # NATIVE runtime on POSIX — spawn WITHOUT forking this process.
+                # See _run_riegl_container for the full reason: libhelios' GLFW
+                # and open3d's own copy are both loaded here, and fork()+exec()
+                # kills the child in the post-fork/pre-exec window (SIGSEGV,
+                # exit -11). Popen takes that path whenever close_fds is true.
+                #
+                # The header still has to arrive on a PIPE rather than a file,
+                # because it is read incrementally while the reader keeps
+                # running; so the pipe is made here and its write end handed to
+                # posix_spawn as fd 1. The write end is closed in the parent
+                # immediately after the spawn, or reading the pipe would never
+                # see EOF when the child dies.
+                read_fd, write_fd = os.pipe()
+                try:
+                    proc = _SegProc(cmd, env, log_path, stdout_fd=write_fd)
+                finally:
+                    os.close(write_fd)
+                proc.stdout = os.fdopen(read_fd, "rb", 1024 * 1024)
+            else:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=log_handle, env=env,
+                    bufsize=1024 * 1024,
+                )
             header = _read_riegl_header(proc.stdout)
             entries = header.get("scans", [])
             by_name = {e.get("name"): (i, e) for i, e in enumerate(entries)}
@@ -22946,23 +22986,42 @@ class _SegProc:
     Exposes the small Popen-like surface `_run_killable` uses: pid, poll(), wait(),
     returncode."""
 
-    def __init__(self, argv, env, error_log: str):
+    def __init__(self, argv, env, error_log: str, stdout_log: "str | None" = None,
+                 stdout_fd: "int | None" = None):
         # `setpgroup=0` puts the child in its OWN process group (pgid == its pid)
         # so `_kill_seg_worker` can killpg the worker's subtree WITHOUT signalling
         # the backend's own group. This is non-negotiable: getpgid would otherwise
         # return the parent's group and a cancel would SIGKILL the whole backend.
         # Send the child's stdout/stderr to the error log file (fd 1 & 2).
+        # `stdout_log` splits them instead: the RIEGL reader writes a JSON
+        # document on stdout while its progress goes to the log, and the caller
+        # parses the former, so the two cannot be merged there.
         fd = os.open(error_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        out_fd = fd
+        opened_out = False
+        if stdout_fd is not None:
+            # An already-open descriptor (a pipe's write end) — the caller owns
+            # it and closes its own copy after the spawn.
+            out_fd = stdout_fd
+        elif stdout_log is not None:
+            out_fd = os.open(stdout_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                             0o600)
+            opened_out = True
         try:
             file_actions = [
-                (os.POSIX_SPAWN_DUP2, fd, 1),
+                (os.POSIX_SPAWN_DUP2, out_fd, 1),
                 (os.POSIX_SPAWN_DUP2, fd, 2),
             ]
             self.pid = os.posix_spawn(argv[0], argv, env,
                                       file_actions=file_actions, setpgroup=0)
         finally:
             os.close(fd)
+            if opened_out:
+                os.close(out_fd)
         self.returncode = None
+        # Popen-compatible attribute; _stream_riegl_container attaches the read
+        # end of its pipe here.
+        self.stdout = None
 
     def poll(self):
         if self.returncode is not None:

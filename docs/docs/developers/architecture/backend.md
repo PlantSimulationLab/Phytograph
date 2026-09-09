@@ -161,6 +161,28 @@ segmentation workers) are spawned via `os.posix_spawn` into their own process
 group and killed with `_kill_seg_worker` — `subprocess.Popen`'s fork path
 crashes the child on macOS when libhelios/open3d GLFW are loaded.
 
+**Every native child must use that path, not just the cancellable ones.** The
+crash is about the spawn mechanism, not cancellation: `Popen` fork()s the loaded
+image whenever `close_fds` is true (its default), and libhelios' GLFW (via the
+lidar→visualizer plugin) plus open3d's own bundled copy register duplicate
+Objective-C classes, so the child dies in the post-fork/pre-exec window with
+SIGSEGV — before a line of its code runs. The RIEGL reader (`_run_riegl_container`
+and `_stream_riegl_container`) was the last `Popen` holdout and failed exactly
+this way, reporting only `RIEGL reader failed (exit -11)`.
+
+It is **order-dependent**, which is what makes it easy to miss: the GLFW runtime
+has to be *initialised*, not merely imported, so a reader spawn only dies once
+something has already built a cloud session in the same process. In tests that
+is `extract` (builds a session) followed by `inspect` (spawns the reader again);
+in the app it is any import after the first. `docker` keeps `Popen` — the CLI is
+a thin client that loads none of this — as does Windows, which doesn't fork.
+
+The same applies to **test helpers** that run the reader directly: pass
+`close_fds=False` so CPython selects `posix_spawn` (see `_NO_FORK` in
+`tests/test_riegl_fake_rivlib.py`). Pinned by `tests/test_riegl_spawn_no_fork.py`,
+which spies on `subprocess._fork_exec` rather than grepping the source — an
+earlier source-grep version passed happily with the fix disabled.
+
 ## When to rebuild
 
 - After any change to `backend-api/main.py` that you want reflected in `npm run dev` (unless you run uvicorn manually).
