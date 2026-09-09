@@ -231,3 +231,91 @@ def test_trajectory_parse_endpoint_missing_file():
     client = TestClient(main.app)
     resp = client.post("/api/trajectory/parse", json={"path": "/nope/missing.sbet"})
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Content validation — a right-SIZED .out that is not an SBET
+#
+# POSPac writes ~15 different formats under the SAME .out extension, so the
+# extension proves nothing and the 136-byte size check is a weak filter. The one
+# that actually gets mis-picked is smrmsg_<mission>.out, which POSPac names like
+# its sbet_<mission>.out sibling and leaves in the same directory. Its records
+# are 80 bytes; gcd(80,136)=8, so a smrmsg with a multiple of 17 records has a
+# size divisible by 136 and used to parse "successfully" into inf coordinates.
+# ---------------------------------------------------------------------------
+
+def _write_smrmsg(path, n_records):
+    """A realistic Applanix smrmsg accuracy file: 10 float64/record."""
+    r = np.zeros((n_records, 10))
+    r[:, 0] = np.linspace(412402.0, 412997.0, n_records)      # GPS week seconds
+    rng = np.random.default_rng(0)
+    r[:, 1:4] = rng.uniform(0.010, 0.035, (n_records, 3))     # position RMS (m)
+    r[:, 4:7] = rng.uniform(0.002, 0.009, (n_records, 3))     # velocity RMS
+    r[:, 7:10] = rng.uniform(0.0005, 0.004, (n_records, 3))   # attitude RMS
+    r.astype("<f8").tofile(str(path))
+
+
+def test_smrmsg_sized_to_pass_the_size_check_is_still_rejected(tmp_path):
+    """The exact hole: 17*k smrmsg records divide evenly by the SBET record."""
+    p = tmp_path / "smrmsg_Mission 1.out"
+    _write_smrmsg(p, 17 * 700)
+    assert p.stat().st_size % sbet.SBET_RECORD_BYTES == 0, "precondition: passes size gate"
+    with pytest.raises(sbet.SbetParseError) as e:
+        sbet.parse_sbet(str(p))
+    # The message must name the confusable sibling, not just say "invalid".
+    assert "smrmsg" in str(e.value)
+
+
+def test_smrmsg_rejection_covers_the_whole_multiple_of_17_family(tmp_path):
+    for k in (1, 2, 5, 40):
+        p = tmp_path / f"smrmsg_{k}.out"
+        _write_smrmsg(p, 17 * k)
+        assert p.stat().st_size % sbet.SBET_RECORD_BYTES == 0
+        with pytest.raises(sbet.SbetParseError):
+            sbet.parse_sbet(str(p))
+
+
+def test_impossible_latitude_rejected(tmp_path):
+    """Latitude past +/-pi/2 radians cannot be a real SBET."""
+    p = tmp_path / "bad.out"
+    _write_sbet(p, [_record(time=t, lat=2.0, lon=0.1) for t in range(10)])
+    with pytest.raises(sbet.SbetParseError) as e:
+        sbet.parse_sbet(str(p))
+    assert "latitude" in str(e.value)
+
+
+def test_non_finite_values_rejected(tmp_path):
+    p = tmp_path / "nan.out"
+    p2 = tmp_path / "inf.out"
+    _write_sbet(p, [_record(time=t, lat=np.nan, lon=0.1) for t in range(10)])
+    _write_sbet(p2, [_record(time=t, lat=0.6, lon=np.inf) for t in range(10)])
+    for bad in (p, p2):
+        with pytest.raises(sbet.SbetParseError):
+            sbet.parse_sbet(str(bad))
+
+
+def test_polar_survey_still_only_WARNS(tmp_path):
+    """The guard must reject the IMPOSSIBLE without rejecting the merely unusual.
+
+    85 deg N is past UTM's +/-84 band -- a real, if awkward, survey. It has always
+    produced a warning, and must not become an error.
+    """
+    p = tmp_path / "polar.out"
+    lat = np.radians(85.0)
+    _write_sbet(p, [_record(time=float(t), lat=lat, lon=0.2) for t in range(10)])
+    out = sbet.parse_sbet(str(p))
+    assert len(out["poses"]) == 10
+    assert any("outside UTM's valid band" in w for w in out["warnings"])
+
+
+def test_valid_sbet_poses_are_all_finite(tmp_path):
+    """No non-finite coordinate may ever escape into a PoseStream."""
+    p = tmp_path / "good.out"
+    _write_sbet(p, [
+        _record(time=float(t), lat=np.radians(38.54), lon=np.radians(-121.79),
+                alt=17.0, heading=0.5)
+        for t in range(50)
+    ])
+    for pose in sbet.parse_sbet(str(p))["poses"]:
+        for k in ("x", "y", "z", "qx", "qy", "qz", "qw"):
+            assert np.isfinite(pose[k]), f"{k} is not finite"

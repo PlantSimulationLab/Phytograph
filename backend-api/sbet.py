@@ -21,10 +21,17 @@ needs before it can join to a point cloud:
      basis change, unit-vector testable: heading 0 -> forward = +Y(North), heading +90° ->
      forward = +X(East).
 
-`smrmsg` accuracy companion files are summarised for a QC warning only; they never
-gate the parse. Records are decimated to a few thousand poses (the LAD join only needs
-the platform path, not every 5 ms sample), always keeping the last record so the time
-span — which the coverage check in main.py validates — is preserved.
+An `.out` extension identifies NOTHING on its own: POSPac writes roughly fifteen
+internal formats under it, so `parse_sbet` validates CONTENT (see
+`_validate_sbet_content`) rather than trusting the extension or the record-size
+arithmetic. Note the two directions `smrmsg` travels here — passed as the
+`smrmsg_path` COMPANION it only ever contributes an advisory QC warning and never
+gates anything, but passed as the main `path` (easy to do: POSPac drops
+`smrmsg_<mission>.out` beside `sbet_<mission>.out`) it is rejected outright.
+
+Records are decimated to a few thousand poses (the LAD join only needs the platform
+path, not every 5 ms sample), always keeping the last record so the time span — which
+the coverage check in main.py validates — is preserved.
 """
 
 from __future__ import annotations
@@ -59,6 +66,59 @@ _DEFAULT_TARGET_POSES = 3000
 
 class SbetParseError(ValueError):
     """Raised when a file is not a structurally valid SBET."""
+
+
+# Physical bounds on the fields parse_sbet actually consumes. These are IMPOSSIBLE
+# values, not merely unusual ones -- the "unusual but real" cases (a polar survey
+# past UTM's +/-84 band, a long east-west line) stay warnings further down.
+_FIELD_BOUNDS = (
+    # (field, limit, human name). Angles in radians; a hair of slack for round-trip.
+    ("lat", np.pi / 2 + 1e-6, "latitude"),
+    ("lon", np.pi + 1e-6, "longitude"),
+    ("roll", np.pi + 1e-6, "roll"),
+    ("pitch", np.pi + 1e-6, "pitch"),
+    ("heading", 2 * np.pi + 1e-6, "heading"),
+)
+
+
+def _validate_sbet_content(recs) -> None:
+    """Reject a file whose SIZE fits the SBET record but whose CONTENT cannot be one.
+
+    The size check alone is far too weak to identify an SBET, because POSPac writes
+    roughly fifteen different internal formats under the SAME `.out` extension. The
+    one that actually gets mis-picked is `smrmsg_<mission>.out`, the accuracy
+    companion: POSPac names it identically to `sbet_<mission>.out` apart from the
+    prefix and drops it in the same directory, so it sits right beside the intended
+    file in the picker. Its records are 10 float64 (80 B) against the SBET's 17
+    (136 B), and gcd(80, 136) = 8 -- so any smrmsg whose record count is a multiple
+    of 17 has a byte size divisible by 136 and sails through the size gate. That is
+    5.9% of them, not a corner case.
+
+    Reinterpreting 80-byte records as 136-byte ones slides every field across record
+    boundaries, so `lat` picks up whatever happened to land there -- RMS values, or
+    GPS times in the hundreds of thousands. Projecting those through pyproj yields
+    `inf` easting/northing, which used to be returned as a perfectly ordinary parse
+    result (with only advisory warnings) and poisoned the viewer's bounds math.
+
+    Checking physical plausibility instead of extension or size catches every one of
+    the fifteen formats generically, and names the likely mistake in the message.
+    """
+    for field, limit, label in _FIELD_BOUNDS:
+        col = recs[field]
+        if not np.all(np.isfinite(col)):
+            raise SbetParseError(
+                f"The {label} column contains NaN/infinite values, so this file is not a "
+                f"valid SBET. POSPac writes several different formats with a .out "
+                f"extension -- check you picked sbet_<mission>.out and not smrmsg_"
+                f"<mission>.out (the accuracy companion) or another export.")
+        worst = float(np.max(np.abs(col)))
+        if worst > limit:
+            raise SbetParseError(
+                f"The {label} column reaches {worst:.4g} radians, outside the physically "
+                f"possible range (+/-{limit:.4g}), so this file is not a valid SBET. POSPac "
+                f"writes several different formats with a .out extension -- check you "
+                f"picked sbet_<mission>.out and not smrmsg_<mission>.out (the accuracy "
+                f"companion) or another export.")
 
 
 def _rot_ned(roll, pitch, heading):
@@ -157,6 +217,10 @@ def parse_sbet(path: str, target_poses: int = _DEFAULT_TARGET_POSES,
     recs = np.fromfile(path, dtype=SBET_DTYPE)
     n = recs.shape[0]
     warnings: List[str] = []
+
+    # Content plausibility BEFORE any projection -- see _validate_sbet_content. A
+    # wrong-but-right-sized .out otherwise projects to inf and returns "successfully".
+    _validate_sbet_content(recs)
 
     lat = recs["lat"]; lon = recs["lon"]  # radians
     lat_deg = np.degrees(lat); lon_deg = np.degrees(lon)

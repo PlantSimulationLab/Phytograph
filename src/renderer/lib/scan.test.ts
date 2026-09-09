@@ -303,6 +303,40 @@ describe('meanScanOrigin', () => {
     expect(meanScanOrigin([makeScanWithColumns(['intensity'])])).toBeNull();
     expect(meanScanOrigin([])).toBeNull();
   });
+
+  // A moving platform's `origin` is its trajectory's FIRST POSE — the aircraft
+  // at the start of the flight, not a station in the plot.
+  function movingScanAt(x: number, y: number, z: number): Scan {
+    const scan = makeScanWithColumns(['timestamp']);
+    scan.params = {
+      ...DEFAULT_SCAN_PARAMETERS,
+      origin: { x, y, z },
+      trajectory: {
+        poses: [
+          { t: 0, x, y, z, qx: 0, qy: 0, qz: 0, qw: 1 },
+          { t: 1, x: x + 10, y, z, qx: 0, qy: 0, qz: 0, qw: 1 },
+        ],
+      },
+    } as typeof scan.params;
+    return scan;
+  }
+
+  it('ignores a moving-platform scan, so the pivot is not put up in the air', () => {
+    // Real numbers from a MiniVUX poplar survey: the first pose is 51 m north of
+    // the cloud's north edge and 21 m above the canopy. Returning it as the scene
+    // origin puts the orbit pivot in empty sky beside the data.
+    expect(meanScanOrigin([movingScanAt(605581.46, 4266703.75, 17.13)])).toBeNull();
+  });
+
+  it('averages only the STATIC stations when both kinds are present', () => {
+    // A terrestrial project with a drone flight dropped in beside it still
+    // pivots on the tripods, which are the things standing in the plot.
+    expect(meanScanOrigin([
+      scanAt(0, 0, 2),
+      movingScanAt(1000, 1000, 90),
+      scanAt(4, 0, 2),
+    ])).toEqual([2, 0, 2]);
+  });
 });
 
 describe('the time column is recognised under either octree spelling', () => {

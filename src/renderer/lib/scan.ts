@@ -365,7 +365,23 @@ export function scanOriginOf(
 export function meanScanOrigin(
   scans: readonly { data?: PointCloudData; params?: ScanParameters }[],
 ): [number, number, number] | null {
-  const origins = scans.map(scanOriginOf).filter((o): o is [number, number, number] => o != null);
+  // MOVING-PLATFORM SCANS ARE SKIPPED. A drone or vehicle has no "station" to
+  // average: `scanOriginOf` reports its trajectory's FIRST POSE, which for an
+  // aerial survey is the aircraft at the start of the flight line — tens of
+  // metres up, and routinely outside the mapped footprint altogether (measured
+  // on a real MiniVUX poplar survey: 51 m north of the cloud's own north edge,
+  // 21 m above the canopy top). Seeding the scene origin from that puts the
+  // orbit pivot and default look-at in empty sky beside the data, so orbiting
+  // swings the whole scene around a point the user cannot see.
+  //
+  // The reasoning that motivates this function — "the centroid of the stations
+  // brackets the plot better than the cloud's bounding box" — is a statement
+  // about TERRESTRIAL scans, where the instrument stands in the plot. It
+  // inverts for a platform that flies over it. When every scan is
+  // moving-platform this returns null and the caller keeps its ground-anchored
+  // bounds center, which is the correct pivot for an aerial survey.
+  const stations = scans.filter((s) => s.params?.trajectory == null);
+  const origins = stations.map(scanOriginOf).filter((o): o is [number, number, number] => o != null);
   if (origins.length === 0) return null;
   const sum = origins.reduce<[number, number, number]>(
     (acc, o) => [acc[0] + o[0], acc[1] + o[1], acc[2] + o[2]],

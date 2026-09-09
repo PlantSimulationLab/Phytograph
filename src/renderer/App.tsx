@@ -7,7 +7,6 @@ import { BulkImportProgress, type BulkImportProgressState } from "./components/B
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import { scanDisplayName, type Scan, type ScanRegistration, createScanColorAllocator } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
-import { shiftPoseStream } from "./lib/poseStream";
 import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
 import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
@@ -428,12 +427,20 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // A trajectory chosen in the wizard marks this a moving-platform scan: attach
     // it to the params (creating defaults if the file carried none), which anchors
     // origin to the first pose and zeros static tilt/heading. Wins over a file's
-    // own reconstructed trajectory — it's the user's explicit choice. The import's
-    // global shift is subtracted from the cloud's stored points, so subtract the
-    // SAME offset from the trajectory poses — otherwise it'd render far from the
-    // shifted cloud and the LAD origin join would be in the wrong frame.
+    // own reconstructed trajectory — it's the user's explicit choice.
+    //
+    // KEPT IN THE WORLD FRAME, deliberately — do not re-introduce a
+    // shiftPoseStream here. `params.origin` / `params.trajectory` are world-frame
+    // by contract, and every consumer converts on its own: the scanner-marker
+    // group renders at `-displayOffset - worldShift`, and the LAD/backfill paths
+    // call `shiftPoseStream(p.trajectory, ws)` before sending to the backend.
+    // Pre-shifting here made those conversions fire on already-shifted poses, so
+    // a georeferenced import drew its trajectory ~4.3 million metres off-screen
+    // AND handed LAD doubly-shifted per-beam origins. The bulk-import path
+    // (PointCloudViewer.bulkImportScans) never shifted, which is why only
+    // drag-drop/single-file imports were affected.
     const params = result.trajectory
-      ? applyTrajectoryToParams(baseParams, shiftPoseStream(result.trajectory, worldShift))
+      ? applyTrajectoryToParams(baseParams, result.trajectory)
       : baseParams;
     return {
       id: crypto.randomUUID(),
