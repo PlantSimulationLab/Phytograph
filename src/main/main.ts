@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBackend, stopBackend, setBackendWindowGetter, setBackendFailedHandler } from './backend.js';
@@ -6,7 +6,8 @@ import { registerIpc } from './ipc.js';
 import { authorizeOpenPaths, extractFilePathsFromArgv } from './openPaths.js';
 import { installApplicationMenu, applyMenuState } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
-import { IPC, type FileDropPayload, type MenuStatePayload } from '../shared/ipc.js';
+import { IPC, type FileDropPayload, type MenuStatePayload, type SceneDirtyPayload } from '../shared/ipc.js';
+import { setSceneDirty, resetSceneDirty, shouldAllowClose } from './quitConfirm.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
 import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler, log } from './logger.js';
@@ -181,6 +182,42 @@ if (!isE2E) {
 let pendingOpenPaths: string[] = [];
 let rendererReady = false;
 
+// Set once the user has approved discarding the session, so the single gesture
+// "Cmd+Q with work open" prompts once rather than twice — 'before-quit' asks,
+// then Electron closes the window, which would otherwise ask again in the
+// window's own 'close' handler. Never cleared: it only becomes true on a quit
+// that is already proceeding.
+let quitConfirmed = false;
+
+// The quit confirmation is a NATIVE modal, which under E2E has no driver to
+// dismiss it — a previous beforeunload-based attempt hung Playwright's teardown
+// for the full 180 s timeout. So it is suppressed whenever isE2E, EXCEPT when a
+// spec opts in with PHYTOGRAPH_E2E_QUIT_CONFIRM, which arms the real handlers
+// and answers them from this env var instead of opening a dialog:
+//   'cancel'  → decline the close (the window must survive)
+//   'discard' → accept it
+// That lets a spec exercise the genuine 'close'/'before-quit' code path — the
+// thing worth testing — with no modal in sight.
+const e2eQuitAnswer = process.env.PHYTOGRAPH_E2E_QUIT_CONFIRM;
+const quitConfirmArmed = !isE2E || !!e2eQuitAnswer;
+
+/** Counts confirmations shown, so an E2E can assert the prompt actually fired
+ *  rather than inferring it from the close being cancelled. */
+let quitConfirmShown = 0;
+
+/** The native confirmation, injected into shouldAllowClose so the decision
+ *  logic stays testable without opening a real dialog. Synchronous because
+ *  'close'/'before-quit' must call preventDefault() during the callback. */
+function showQuitConfirm(opts: Parameters<Parameters<typeof shouldAllowClose>[0]>[0]): number {
+  quitConfirmShown++;
+  // Readable from Playwright's app.evaluate (which runs in main), so a spec can
+  // assert the prompt actually fired instead of inferring it from the outcome.
+  (globalThis as Record<string, unknown>).__quitConfirmShown = quitConfirmShown;
+  if (e2eQuitAnswer) return e2eQuitAnswer === 'discard' ? 1 : 0;
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  return win ? dialog.showMessageBoxSync(win, opts) : dialog.showMessageBoxSync(opts);
+}
+
 function handleOpenPaths(paths: string[]): void {
   // Keeps only importable paths AND registers each with the fs allowlist — a
   // file the OS handed us is user-selected, just via the shell instead of our
@@ -353,9 +390,37 @@ function createWindow(): void {
   // something as ordinary as double-clicking a .las in Finder. Clearing
   // `rendererReady` too routes those opens back through `pendingOpenPaths`, so
   // they are flushed when a window next reports ready.
+  // Closing the window destroys the whole session (nothing is auto-persisted),
+  // so confirm first when the scene holds anything. This covers the window's
+  // own close affordances — the X button, Cmd+W — while 'before-quit' below
+  // covers Cmd+Q / the app menu / the Dock. Both are needed: a window 'close'
+  // on macOS does not quit the app, so it never reaches 'before-quit'; and
+  // Cmd+Q on Windows/Linux runs 'before-quit' before any window 'close'.
+  //
+  // Suppressed under E2E, where a native modal has no driver to dismiss it and
+  // would hang every spec's teardown at app.close(). Same reasoning as the
+  // crash dialogs above.
+  if (quitConfirmArmed) {
+    mainWindow.on('close', (event) => {
+      // quitConfirmed: 'before-quit' may have already asked. Don't ask twice
+      // for one user gesture.
+      if (quitConfirmed) return;
+      if (shouldAllowClose(showQuitConfirm)) {
+        // Off-darwin, closing the last window calls app.quit(), which fires
+        // 'before-quit' — latch so that doesn't ask a second time for this one
+        // gesture.
+        quitConfirmed = true;
+        return;
+      }
+      event.preventDefault();
+    });
+  }
+
   mainWindow.on('closed', () => {
     mainWindow = null;
     rendererReady = false;
+    // The scene died with the window; a later quit has nothing to warn about.
+    resetSceneDirty();
   });
 }
 
@@ -451,6 +516,13 @@ app.whenReady().then(async () => {
     applyMenuState(payload);
   });
 
+  // Whether closing right now would discard work. Nothing in a session is
+  // auto-persisted, so this is "the scene holds something", not a modified
+  // flag — see quitConfirm.ts.
+  ipcMain.on(IPC.SceneDirty, (_e, payload: SceneDirtyPayload) => {
+    setSceneDirty(payload);
+  });
+
   // Windows/Linux: a second launch (e.g. double-clicking a file while the app is
   // already running) delivers its argv here, to the first instance. Focus the
   // existing window and import. (Never fires under the E2E no-lock path.)
@@ -501,6 +573,10 @@ app.whenReady().then(async () => {
       // window-all-closed cleared the marker, so re-arm it to catch a crash in
       // this new session.
       markSessionStarted();
+      // macOS keeps the app alive after a window closes, so an approved close
+      // must not license the NEXT session's quit. Reopening starts fresh work
+      // that deserves its own confirmation.
+      quitConfirmed = false;
       // Same guard as the cold-start path: never let a backend startup
       // failure prevent the window from opening.
       try {
@@ -534,7 +610,18 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' || isE2E) app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  // Confirm BEFORE any teardown: cancelling the quit must leave a fully working
+  // app, and stopBackend() would have killed the sidecar that holds every cloud
+  // session. Covers Cmd+Q, the app-menu Quit, and Dock → Quit — none of which
+  // pass through the window's 'close' handler on macOS.
+  if (quitConfirmArmed && !quitConfirmed) {
+    if (!shouldAllowClose(showQuitConfirm)) {
+      event.preventDefault();
+      return;
+    }
+    quitConfirmed = true;
+  }
   stopBackend();
   // A clean quit reached this handler — remove the marker so the next launch
   // knows the session ended normally. (A crash/SIGKILL never gets here, so the

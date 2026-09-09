@@ -8,6 +8,7 @@ import {
   type LogLevel,
   type MenuCommandPayload,
   type MenuStatePayload,
+  type SceneDirtyPayload,
   type MessageBoxOptions,
   type MessageBoxResult,
   type OpenDialogOptions,
@@ -98,6 +99,10 @@ const api = {
   // lives in main and cannot read renderer state, so this is the only way an
   // item like "Reset Registration" can grey out when there is nothing to reset.
   setMenuState: (payload: MenuStatePayload): void => ipcRenderer.send(IPC.MenuState, payload),
+  // Push whether closing now would lose work. Main owns the window 'close' and
+  // 'before-quit' events and cannot read renderer state, so the confirmation
+  // prompt depends on this being current.
+  setSceneDirty: (payload: SceneDirtyPayload): void => ipcRenderer.send(IPC.SceneDirty, payload),
   onBackendStatus: (handler: (payload: BackendStatusPayload) => void): (() => void) => {
     const listener = (_e: unknown, payload: BackendStatusPayload) => handler(payload);
     ipcRenderer.on(IPC.BackendStatus, listener);

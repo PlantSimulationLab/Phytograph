@@ -51,6 +51,10 @@ export const IPC = {
   // so anything that greys out on a scene condition has to be pushed here. Sent
   // on change (and coalesced by the sender), not polled.
   MenuState: 'menu:state',
+  // Renderer -> main (one-way): does the scene hold work that closing would
+  // destroy? Main owns 'close'/'before-quit' and cannot read renderer state, so
+  // the quit confirmation has to be told. Sent on change, coalesced by main.
+  SceneDirty: 'scene:dirty',
   // Backend supervisor status (main -> renderer): crash/restart lifecycle
   BackendStatus: 'backend:status',
   // Auto-updater download status (main -> renderer). The installer is a few
@@ -187,4 +191,22 @@ export type MenuCommandPayload =
 export interface MenuStatePayload {
   /** Registry tool id → whether the item can currently act. */
   enabled: Record<string, boolean>;
+}
+
+/** Whether closing the app right now would destroy work.
+ *
+ *  Nothing in a Phytograph session is auto-persisted: point clouds, meshes,
+ *  skeletons and plant models live in renderer RAM plus backend sessions, and
+ *  every edit after import (crop, erase, filter, bake, segment, label) exists
+ *  only there until the user exports. So "dirty" is simply "the scene holds
+ *  anything", not a modified-since-save flag — there is no save.
+ *
+ *  `strokes` counts uncommitted labelling strokes, the one item that cannot be
+ *  recomputed even from the source files, so the dialog can call it out the way
+ *  the File → New confirmation already does. */
+export interface SceneDirtyPayload {
+  /** True when the scene holds at least one object worth warning about. */
+  dirty: boolean;
+  /** Uncommitted hand-labelling strokes, or 0 when there are none. */
+  strokes: number;
 }
