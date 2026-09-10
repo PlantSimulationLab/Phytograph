@@ -25,8 +25,10 @@ from pathlib import Path
 # Noise-filter criteria (SOR / ROR / voxel-count) + the noise_class
 # constants. Also the single implementation `_reject_sparse_voxels` and
 # `qsm.preprocess` both defer to.
+import copy as _copy
 import denoise
 import memory_budget
+import session_store
 from pytexit import py2tex
 
 # ==================== PyHelios source submodule ====================
@@ -28817,6 +28819,178 @@ def _replace_with_retry(src: _Path, dst: _Path, timeout_s: float = 5.0) -> None:
             delay = min(delay * 2, 0.5)
 
 
+
+# ---- Store-backed sessions ------------------------------------------------------
+# A CloudSession above `_session_store_min_points()` keeps its arrays in a
+# `session_store.SessionStore` (one memmapped .npy per column) under this
+# process's spill root. Import allocates the columns there directly; every
+# other way a session comes to exist (split, merge, synthetic scan, RIEGL)
+# keeps RAM arrays until its first eviction, when the spill writes them out
+# and the restore hands back maps. The scalar fields travel in a small pickle
+# beside the store. Whole-array code is untouched by any of this: a memmap is
+# an ndarray, and in-place edits (`deleted |= mask`, `positions -= shift`)
+# persist through the map by themselves.
+_SESSION_STORE_ARRAY_FIELDS = (
+    "positions", "colors", "intensity", "deleted", "timestamps", "beam_origins",
+    "deleted_base",
+)
+# Fraction of the memory budget a single RAM-resident session may take before
+# it is stored on disk instead; ~12 M points on a 16 GB laptop, ~50 M on 64 GB.
+_SESSION_STORE_BUDGET_FRACTION = 0.1
+# Fraction of the memory budget that RAM-resident sessions may occupy together
+# before the sweep evicts the least recently used (store-backed sessions'
+# maps are page cache and count as nothing here).
+_SESSION_RAM_FRACTION = 0.5
+
+
+def _session_store_min_points() -> int:
+    raw = _os.environ.get("PHYTOGRAPH_SESSION_STORE_MIN_POINTS")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    per_point = memory_budget.bytes_per_point(n_extras=4, colors=True, intensity=True, timestamps=True)
+    return int(memory_budget.budget_bytes() * _SESSION_STORE_BUDGET_FRACTION / per_point)
+
+
+def _session_should_use_store(n_points: int) -> bool:
+    return int(n_points) >= _session_store_min_points() and int(n_points) > 0
+
+
+def _session_store_dir(session_id: str) -> _Path:
+    return _session_spill_root() / f"{session_id}.store"
+
+
+def _new_session_store(session_id: str, n_points: int) -> "session_store.SessionStore":
+    root = _session_store_dir(session_id)
+    if root.exists():
+        _shutil.rmtree(root, ignore_errors=True)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    return session_store.SessionStore.create(root, int(n_points))
+
+
+def _session_ram_bytes(sess: "CloudSession") -> int:
+    """Bytes this session holds in RAM proper - memmapped columns count as
+    nothing (they are page cache the OS reclaims on its own)."""
+    total = 0
+
+    def _add(arr):
+        nonlocal total
+        if arr is not None and not isinstance(arr, np.memmap):
+            total += int(getattr(arr, "nbytes", 0))
+
+    for f in _SESSION_STORE_ARRAY_FIELDS:
+        _add(getattr(sess, f, None))
+    for arr in (sess.extras or {}).values():
+        _add(arr)
+    for arr in sess.deleted_history or []:
+        _add(arr)
+    for arr in (sess.backfilled_misses or {}).values():
+        _add(arr)
+    return total
+
+
+def _next_extra_column(store, used: set) -> str:
+    k = 0
+    while True:
+        col = f"x{k}"
+        if col not in used and not store.has_column(col):
+            return col
+        k += 1
+
+
+def _session_write_back_to_store(sess: "CloudSession", *, attach: bool) -> "session_store.SessionStore":
+    """Persist every array field into the session's store, creating it if
+    needed. Arrays that already ARE the store's maps are skipped; anything
+    else (a compacted `positions` after a bake, a fresh extras column, a mask
+    the undo replaced) is written. With `attach`, the session's fields are then
+    pointed at the maps; without it the live object is left untouched, which is
+    what a spill needs (a request may claim the object back mid-write and keep
+    editing its RAM arrays - those stay authoritative and are rewritten next
+    time)."""
+    store = sess.store
+    n = int(len(sess.positions))
+    if store is None:
+        store = _new_session_store(sess.session_id, n)
+    if store.n != n:
+        raise session_store.StoreError(
+            f"session {sess.session_id} has {n} points but its store holds {store.n}")
+    for f in _SESSION_STORE_ARRAY_FIELDS:
+        arr = getattr(sess, f, None)
+        if arr is None:
+            if store.has_column(f):
+                store.drop_column(f)
+            continue
+        if store.has_column(f) and store.is_own(f, arr):
+            continue
+        m = store.replace_column(f, arr) if store.has_column(f) else store.add_column(f, arr)
+        if attach:
+            setattr(sess, f, m)
+    mapping = dict(store.attrs.get("extras", {}))    # col -> slug
+    by_slug = {slug: col for col, slug in mapping.items()}
+    new_mapping: Dict[str, str] = {}
+    used: set = set()
+    for slug, arr in list(sess.extras.items()):
+        col = by_slug.get(slug)
+        if col is not None and store.is_own(col, arr):
+            new_mapping[col] = slug
+            used.add(col)
+            continue
+        own = store.column_name_of(arr)
+        if own is not None and own not in used:
+            new_mapping[own] = slug           # renamed slug, same data
+            used.add(own)
+            continue
+        if col is None or col in used:
+            col = _next_extra_column(store, used)
+        m = store.replace_column(col, arr) if store.has_column(col) else store.add_column(col, arr)
+        new_mapping[col] = slug
+        used.add(col)
+        if attach:
+            sess.extras[slug] = m
+    for col in mapping:
+        if col not in new_mapping and store.has_column(col):
+            store.drop_column(col)
+    store.set_attr("extras", new_mapping)
+    store.set_attr("extras_order", list(sess.extras.keys()))
+    store.flush()
+    if attach:
+        sess.store = store
+    return store
+
+
+def _session_detach_for_pickle(sess: "CloudSession") -> "CloudSession":
+    """A shallow copy with every store-backed array and the store itself
+    stripped - the small pickle that sits beside a store on disk."""
+    light = _copy.copy(sess)
+    light.store = None
+    for f in _SESSION_STORE_ARRAY_FIELDS:
+        setattr(light, f, None)
+    light.extras = {}
+    return light
+
+
+def _session_reattach_store(sess: "CloudSession", store_dir) -> None:
+    store = session_store.SessionStore.open(_Path(store_dir))
+    for f in _SESSION_STORE_ARRAY_FIELDS:
+        if store.has_column(f):
+            setattr(sess, f, store.column(f))
+    mapping = dict(store.attrs.get("extras", {}))
+    by_slug = {slug: col for col, slug in mapping.items()}
+    order = [s for s in (store.attrs.get("extras_order") or []) if s in by_slug]
+    order += [s for s in by_slug if s not in order]
+    sess.extras = {slug: store.column(by_slug[slug]) for slug in order}
+    sess.store = store
+
+
+def _delete_session_store_dir(store_dir) -> None:
+    try:
+        _shutil.rmtree(_Path(store_dir), ignore_errors=True)
+    except Exception:
+        pass
+
+
 def _spill_cloud_session(sess: "CloudSession") -> Optional[dict]:
     """Write one evicted session to disk. Returns its index entry, or None.
 
@@ -28828,10 +29002,20 @@ def _spill_cloud_session(sess: "CloudSession") -> Optional[dict]:
     root = _session_spill_root()
     path = root / f"{sess.session_id}{_SESSION_SPILL_SUFFIX}"
     tmp = root / f"{sess.session_id}{_SESSION_SPILL_SUFFIX}.tmp"
+    store_dir = None
     try:
         root.mkdir(parents=True, exist_ok=True)
+        # A large session goes to (or already lives in) its columnar store:
+        # write back whatever is not a map yet, then pickle only the scalar
+        # remainder. The live object is NOT touched (see the write-back's
+        # `attach=False` contract), so a claim-back mid-spill is still safe.
+        to_pickle = sess
+        if sess.store is not None or _session_should_use_store(len(sess.positions)):
+            store = _session_write_back_to_store(sess, attach=False)
+            store_dir = str(store.root)
+            to_pickle = _session_detach_for_pickle(sess)
         with open(tmp, "wb", buffering=1 << 20) as fh:
-            pickle.dump(sess, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(to_pickle, fh, protocol=pickle.HIGHEST_PROTOCOL)
         # os.replace, not Path.rename: replace overwrites an existing spill
         # atomically on both platforms. Retried for the same reason
         # `_install_octree_dir` is — on Windows this fails with
@@ -28850,8 +29034,9 @@ def _spill_cloud_session(sess: "CloudSession") -> Optional[dict]:
         return None
     return {
         "path": path,
-        "bytes": int(size),
+        "bytes": int(size) + (int(sess.store.bytes_on_disk()) if sess.store is not None else 0),
         "at": time.time(),
+        "store_dir": store_dir,
         # Recorded so `_live_session_octree_ids` keeps pinning the octrees of a
         # cloud that is still in the user's scene but no longer in RAM. Without
         # it, eviction would unpin them and the next convert could delete the
@@ -28894,6 +29079,8 @@ def _restore_cloud_session(session_id: str) -> "Optional[CloudSession]":
         try:
             with open(entry["path"], "rb", buffering=1 << 20) as fh:
                 sess = pickle.load(fh)
+            if entry.get("store_dir"):
+                _session_reattach_store(sess, entry["store_dir"])
         except Exception:
             # A truncated or unreadable spill is a MISS, not a crash: the caller
             # then reports the same 404 it would have reported before spilling
@@ -28911,7 +29098,7 @@ def _restore_cloud_session(session_id: str) -> "Optional[CloudSession]":
 
 
 def _drop_session_spill(session_id: str) -> None:
-    """Forget and delete a session's spill -- it was explicitly deleted."""
+    """Forget and delete a session's spill (and its store) -- it was explicitly deleted."""
     with _cloud_session_lock:
         entry = _spilled_sessions.pop(session_id, None)
         _spilling_sessions.pop(session_id, None)
@@ -28920,6 +29107,11 @@ def _drop_session_spill(session_id: str) -> None:
             _Path(entry["path"]).unlink()
         except OSError:
             pass
+        if entry.get("store_dir"):
+            _delete_session_store_dir(entry["store_dir"])
+    store_dir = _session_store_dir(session_id)
+    if store_dir.exists():
+        _delete_session_store_dir(store_dir)
 
 
 def _trim_session_spills() -> None:
@@ -28951,6 +29143,35 @@ def _trim_session_spills() -> None:
             _Path(entry["path"]).unlink()
         except OSError:
             pass
+        if entry.get("store_dir"):
+            _delete_session_store_dir(entry["store_dir"])
+
+
+def _eviction_victims_locked(now: float, pinned: "set[str]") -> List[str]:
+    """TTL and count victims (`_evict_session_ids`), plus MEMORY victims: while
+    the RAM-resident sessions together exceed `_SESSION_RAM_FRACTION` of the
+    budget, the least recently used unpinned one goes too. A store-backed
+    session's maps count as nothing (page cache), so evicting one costs a
+    small pickle and frees whatever RAM arrays it had grown since restore.
+    Caller holds `_cloud_session_lock`."""
+    victims = list(_evict_session_ids(_cloud_sessions, _MAX_CLOUD_SESSIONS, now))
+    taken = set(victims)
+    limit = memory_budget.budget_bytes() * _SESSION_RAM_FRACTION
+    resident = {sid: _session_ram_bytes(s) for sid, s in _cloud_sessions.items() if sid not in taken}
+    total = sum(resident.values())
+    if total <= limit:
+        return victims
+    ranked = sorted(
+        resident, key=lambda sid: (getattr(_cloud_sessions[sid], "last_accessed", 0.0)
+                                   or getattr(_cloud_sessions[sid], "created_at", 0.0)))
+    for sid in ranked:
+        if total <= limit:
+            break
+        if sid in pinned:
+            continue
+        victims.append(sid)
+        total -= resident[sid]
+    return victims
 
 
 def _sweep_cloud_sessions() -> None:
@@ -28969,7 +29190,7 @@ def _sweep_cloud_sessions() -> None:
     with _cloud_session_lock:
         evicted = []
         kept = 0
-        for sid in _evict_session_ids(_cloud_sessions, _MAX_CLOUD_SESSIONS, now):
+        for sid in _eviction_victims_locked(now, pinned):
             if sid in pinned:
                 # In use by a request right now. Evicting it would pickle the
                 # arrays while a handler may still be writing them. Left resident;
@@ -29230,6 +29451,14 @@ class CloudSession:
     # the floor `reset_edits` replays the surviving deltas onto. None until the
     # stack is first truncated; cleared wherever `deleted_history` is.
     deleted_base: Optional[np.ndarray] = None
+    # The on-disk columnar store behind this session's arrays, when it has
+    # one (large clouds - see `_session_should_use_store`). Its columns are
+    # numpy memmaps, so `positions` etc. ARE the files: resident memory is
+    # page cache the OS can drop, and a spill is a write-back of whatever
+    # array is not already a map plus a small pickle of the scalar fields
+    # (`_spill_cloud_session`). Never pickled itself; `_session_detach_for_
+    # pickle` strips it and `_session_reattach_store` restores it.
+    store: Optional[Any] = None
     # Explicitly recovered sky/miss points (see POST .../backfill-misses). A
     # SEPARATE lightweight buffer rather than rows interleaved into `positions`/
     # `extras`, so a sparse scan that is 30-50% sky doesn't pad every scalar
@@ -29511,7 +29740,7 @@ def _las_dim_dtype(dim) -> np.dtype:
     return np.dtype(dt) if dt is not None else np.dtype(np.uint8)
 
 
-def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
+def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
     """Read a LAS file into RAM as the session's source-of-truth arrays, in
     chunks, straight into preallocated columns.
 
@@ -29534,8 +29763,24 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
     known after the read (constant standard dims, all-zero intensity) are
     tracked per chunk in their NATIVE dtype and pruned or cast at the end, so
     the candidates cost 1–2 B/pt while undecided rather than 4.
+
+    With `store` (a `session_store.SessionStore` sized to the file's point
+    count) every kept column is allocated IN the store and filled through its
+    memmap, so a large import is disk-backed from the first chunk and never
+    holds a RAM copy of the cloud at all.
     """
     import laspy
+
+    def _alloc(name, shape, dtype):
+        if store is not None:
+            return store.allocate_column(name, dtype, tuple(shape[1:]))
+        return np.empty(shape, dtype=dtype)
+
+    def _drop(name):
+        if store is not None and store.has_column(name):
+            store.drop_column(name)
+
+    extra_cols: Dict[str, str] = {}   # store column -> slug
 
     with laspy.open(str(las_path)) as reader:
         header = reader.header
@@ -29545,10 +29790,10 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
         std_dims = list(pf.standard_dimensions)
         extra_dims = list(pf.extra_dimensions)
 
-        positions = np.empty((n, 3), dtype=np.float64)
+        positions = _alloc("positions", (n, 3), np.float64)
         has_colors = {"red", "green", "blue"} <= dim_names
-        colors = np.empty((n, 3), dtype=np.uint16) if has_colors else None
-        intensity = np.empty(n, dtype=np.uint16) if "intensity" in dim_names else None
+        colors = _alloc("colors", (n, 3), np.uint16) if has_colors else None
+        intensity = _alloc("intensity", (n,), np.uint16) if "intensity" in dim_names else None
         intensity_nonzero = False
 
         # Detect per-pulse beam-origin ExtraBytes FIRST so their three columns are
@@ -29560,7 +29805,7 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
         for ax, ay, az in _BEAM_ORIGIN_ALIAS_SETS:
             if ax in extra_by_lower and ay in extra_by_lower and az in extra_by_lower:
                 origin_names = (extra_by_lower[ax], extra_by_lower[ay], extra_by_lower[az])
-                beam_origins = np.empty((n, 3), dtype=np.float64)
+                beam_origins = _alloc("beam_origins", (n, 3), np.float64)
                 break
         _origin_skip = set(origin_names or ())
 
@@ -29595,7 +29840,9 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
                 slug = name
             if slug != name and slug in extras:
                 slug = name
-            extras[slug] = np.empty(n, dtype=np.float32)
+            col = f"x{len(extra_cols)}"
+            extra_cols[col] = slug
+            extras[slug] = _alloc(col, (n,), np.float32)
             extra_dims_meta.append({"slug": slug, "label": name})
             extra_sources.append((name, slug))
 
@@ -29646,7 +29893,7 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
                 "arr": np.empty(n, dtype=_las_dim_dtype(d)), "slug": slug,
                 "label": f"LAS {name}", "first": None, "const": True,
             }
-        gps: Optional[np.ndarray] = np.empty(n, dtype=np.float64) if "gps_time" in dim_names else None
+        gps: Optional[np.ndarray] = _alloc("timestamps", (n,), np.float64) if "gps_time" in dim_names else None
         gps_first = None
         gps_const = True
 
@@ -29703,12 +29950,18 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
 
         if intensity is not None and not intensity_nonzero:
             intensity = None
+            _drop("intensity")
 
         # Resolve the content-dependent candidates now that every chunk is in:
         # keep (as float32) only those that actually vary.
         for name, cand in candidates.items():
             if n and not cand["const"]:
-                extras[cand["slug"]] = cand["arr"].astype(np.float32)
+                vals32 = cand["arr"].astype(np.float32)
+                if store is not None:
+                    col = f"x{len(extra_cols)}"
+                    extra_cols[col] = cand["slug"]
+                    vals32 = store.add_column(col, vals32)
+                extras[cand["slug"]] = vals32
                 extra_dims_meta.append({"slug": cand["slug"], "label": cand["label"]})
             del cand["arr"]
 
@@ -29738,6 +29991,10 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
                     if (int(header.global_encoding.value) & 1)
                     else 'gps_week'
                 )
+        elif gps is not None:
+            # Constant (typically all-zero) gps_time: not a timestamp column.
+            gps = None
+            _drop("timestamps")
 
     # Fall back to a `timestamp` EXTRA dimension when the standard field carried
     # nothing usable.
@@ -29770,6 +30027,9 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
                 # consumer prefers the float64 one when both are present.
                 timestamps = _cand
 
+    if store is not None:
+        store.set_attr("extras", extra_cols)
+        store.set_attr("extras_order", list(extras.keys()))
     return LasReadResult(
         positions=positions,
         colors=colors,
@@ -30307,6 +30567,30 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
                              progress=None, cancel_event=None,
                              preloaded: "Optional[LasReadResult]" = None,
                              preloaded_meta: "Optional[dict]" = None) -> dict:
+    """See `_do_create_cloud_session_inner`. This wrapper only guarantees that
+    a large import which fails or is cancelled part-way removes the on-disk
+    session store it had started filling (the inner body creates it once the
+    point count is known and hands it out through `store_box`)."""
+    store_box: dict = {}
+    try:
+        return _do_create_cloud_session_inner(
+            request, source_path, progress=progress, cancel_event=cancel_event,
+            preloaded=preloaded, preloaded_meta=preloaded_meta, store_box=store_box)
+    except BaseException:
+        store = store_box.get("store")
+        if store is not None and not store_box.get("registered"):
+            try:
+                store.delete()
+            except Exception:
+                pass
+        raise
+
+
+def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_path: _Path,
+                                   progress=None, cancel_event=None,
+                                   preloaded: "Optional[LasReadResult]" = None,
+                                   preloaded_meta: "Optional[dict]" = None,
+                                   store_box: "Optional[dict]" = None) -> dict:
     """The heavy worker behind `/api/cloud/session/create`, factored out so it can
     run OFF the event loop under `_bin_frame_streaming_response` and report
     per-stage progress via `progress(fraction, message)`.
@@ -30326,6 +30610,9 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             progress(fraction, message)
 
     session_id = uuid.uuid4().hex[:8]
+    store = None
+    if store_box is None:
+        store_box = {}
 
     # Normalise to a LAS in a temp dir, read it fully into RAM, then build the
     # octree from that same LAS. After this the file is never touched again.
@@ -30363,12 +30650,32 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             # _read_las_into_arrays); declare that to the memory budget so two
             # large imports run one after the other instead of both paging.
             n_in_file = _las_point_count(las_path) or 0
+            # A large cloud is read straight into an on-disk columnar store
+            # (memmaps), so it is never held as a RAM copy - see CloudSession.store.
+            if _session_should_use_store(n_in_file):
+                store = _new_session_store(session_id, n_in_file)
+                store_box["store"] = store
             with _ADMISSION.admit(
-                    int(n_in_file * 1.25) * memory_budget.bytes_per_point(
+                    (int(n_in_file * 0.25) if store is not None else int(n_in_file * 1.25))
+                    * memory_budget.bytes_per_point(
                         n_extras=len(source_extra_dims or []), colors=True,
                         intensity=True, timestamps=True),
                     f"import {n_in_file:,} pts"):
-                _las = _read_las_into_arrays(las_path)
+                _las = _read_las_into_arrays(las_path, store=store)
+            if store is not None and len(_las.positions) != store.n:
+                # The header over/under-stated the count; the reader trimmed to
+                # what it read, which a fixed-size store cannot hold. Fall back
+                # to RAM for this (rare, small-by-definition) case.
+                _las = LasReadResult(
+                    positions=np.array(_las.positions), colors=None if _las.colors is None else np.array(_las.colors),
+                    intensity=None if _las.intensity is None else np.array(_las.intensity),
+                    extras={k: np.array(v) for k, v in _las.extras.items()},
+                    extra_dims_meta=_las.extra_dims_meta, timestamps=None if _las.timestamps is None else np.array(_las.timestamps),
+                    gps_time_encoding=_las.gps_time_encoding,
+                    beam_origins=None if _las.beam_origins is None else np.array(_las.beam_origins))
+                store.delete()
+                store = None
+                store_box.pop("store", None)
         # The session array is the source of truth and must hold FULL precision
         # (it is never re-read from the file). For ASCII/XYZ imports the LAS we
         # synthesised is 1 mm-quantized — coarse enough to shatter precision-
@@ -30387,7 +30694,8 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
                         f"LAS ({_las.positions.shape[0]}). Please report this file."
                     ),
                 )
-            positions = full_xyz
+            positions = (store.replace_column("positions", full_xyz)
+                         if store is not None else full_xyz)
         else:
             positions = _las.positions
         colors = _las.colors
@@ -30430,11 +30738,11 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
                     detail=f"world_shift must be [x, y, z]; got {request.world_shift!r}",
                 )
             if np.any(ws != 0.0):
-                positions = positions - ws  # new array; positions is float64 here
+                positions -= ws  # in place: keeps a store-backed column current
                 # beam_origins are in the SAME world frame as positions — shift them
                 # in lockstep so per-beam origins stay consistent with the points.
                 if beam_origins is not None:
-                    beam_origins = beam_origins - ws
+                    beam_origins -= ws
                 world_shift_arr = ws
         # `_read_las_into_arrays` sets label==slug from the LAS header, which
         # loses the wizard's custom labels. `_source_to_las` returns the proper
@@ -30559,12 +30867,19 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             gps_time_encoding=gps_time_encoding,
             beam_origins=beam_origins,  # float64 ExtraBytes origins; bypass the join
             crs_epsg=_read_las_crs_epsg(source_path),  # for DEM raster georeferencing
-            deleted=np.zeros(n, dtype=bool),
+            deleted=(store.allocate_column("deleted", bool) if store is not None
+                     else np.zeros(n, dtype=bool)),
             deleted_history=[],
             octree_cache_id=None,
             created_at=time.time(),
             last_accessed=time.time(),
+            store=store,
         )
+        if store is not None:
+            # Reconcile: anything the import wizard renamed/dropped/added above
+            # (role overrides, unticked scalars, ASCII-captured origins) is
+            # written into the store and the session left holding its maps.
+            _session_write_back_to_store(sess, attach=True)
         # Build the octree from a HITS-ONLY LAS so far-field misses (~20 km) don't
         # poison its bounding box / camera framing. Misses stay in the session
         # (is_miss + true coords) for LAD and the on-demand miss overlay.
@@ -30593,6 +30908,7 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
     _sweep_cloud_sessions()
     with _cloud_session_lock:
         _cloud_sessions[session_id] = sess
+        store_box["registered"] = True
         # Exact class lists for the categorical pickers/legend at IMPORT, not
         # just after the first edit (every later edit re-attaches these in
         # `_session_rebuild`). Without it a freshly imported cloud whose class
@@ -33598,7 +33914,10 @@ def session_filter(session_id: str, request: SessionFilterRequest, http_request:
 def delete_cloud_session(session_id: str):
     """Free a cloud session's in-RAM arrays."""
     with _cloud_session_lock:
-        existed = _cloud_sessions.pop(session_id, None) is not None
+        live = _cloud_sessions.pop(session_id, None)
+        existed = live is not None
+    if live is not None and live.store is not None:
+        live.store.close()
     # An explicit delete must also reclaim the spill, or a scene the user cleared
     # would leave its clouds on disk until the next launch wiped them.
     existed = existed or session_id in _spilled_sessions or session_id in _spilling_sessions

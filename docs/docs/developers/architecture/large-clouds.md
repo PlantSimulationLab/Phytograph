@@ -48,6 +48,49 @@ indices each step *newly* deleted and `reset_edits` replays them; when the
 bounded stack (`_MAX_DELETED_HISTORY`) drops its oldest step, that step's
 deletions fold into `deleted_base`, the floor the replay starts from.
 
+## Store-backed sessions (memory-mapped columns)
+
+Above `_session_store_min_points()` — 10 % of the memory budget divided by
+the per-point cost, so ~12 M points on a 16 GB laptop and ~50 M on 64 GB;
+`PHYTOGRAPH_SESSION_STORE_MIN_POINTS` pins it — a session's arrays live in a
+`session_store.SessionStore`: one memory-mapped `.npy` per column under
+`<octree cache root>/.sessions/<pid>-<nonce>/<session_id>.store/`. What
+changes and what does not:
+
+- **Import writes the columns there directly.** `_read_las_into_arrays(store=…)`
+  allocates each kept column in the store and fills it chunk by chunk, so a
+  large cloud is disk-backed from the first chunk and never exists as a RAM
+  copy. The renderer, the octree build and every tool see the same
+  `CloudSession` fields as before; a memmap is an ndarray.
+- **In-place edits persist by themselves.** `deleted |= mask`,
+  `positions -= shift`, a label brush writing into an extras column — all go
+  through the map. Wholesale replacements (a bake compacting `positions`, a
+  new `ground_class` column) stay RAM arrays until the session is next
+  evicted, when `_session_write_back_to_store` writes anything that is not
+  already the store's own map (identity, not equality) and updates the
+  extras mapping.
+- **Spill is a write-back plus a small pickle.** `_spill_cloud_session`
+  writes back, then pickles `_session_detach_for_pickle(sess)` — the session
+  with every store-backed array stripped — beside the store. Restore
+  unpickles that and `_session_reattach_store` hands the maps back. The live
+  object is never mutated by a spill, so the mid-spill claim-back the spill
+  design relies on stays safe. A session born with RAM arrays (a split child,
+  a merge, a synthetic scan) gets its store at its first eviction.
+- **Eviction now also fires on memory pressure.** `_eviction_victims_locked`
+  adds, after the TTL and count victims, the least recently used RAM-resident
+  sessions while together they exceed `_SESSION_RAM_FRACTION` (50 %) of the
+  budget. Store-backed columns count as nothing there: they are page cache
+  the OS reclaims on its own, and evicting such a session costs one small
+  pickle.
+- **Delete removes the directory**, whether the session was live or spilled;
+  a run that dies leaves directories that the next launch's dead-pid reaping
+  removes (they live under the per-process spill root).
+
+What is *not* yet chunked: tools still call `positions[keep].copy()` through
+`_read_points_and_extras`, so a compute on a 100 M-point store still
+materialises a full copy — that is the tiled runner's job (next section of
+the plan), for which the store's `iter_chunks` is the input.
+
 ## The memory budget
 
 `backend-api/memory_budget.py` measures the machine (via `psutil`, with an

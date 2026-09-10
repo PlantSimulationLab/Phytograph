@@ -301,8 +301,16 @@ the LRU-by-timestamp policy of the on-disk `_evict_octree_cache`:
     would avoid the rewrite and is the next improvement here. The directory is
     held under `PHYTOGRAPH_SESSION_SPILL_MAX_BYTES` (default 64 GB); a trimmed
     spill *is* the old failure, so trimming is last and logs loudly.
-- The per-session undo stack (`deleted_history`, one full point-mask per erase)
-  is capped at `PHYTOGRAPH_MAX_DELETED_HISTORY` (default 50) snapshots.
+    Large sessions (above `_session_store_min_points()`, ~10 % of the memory
+    budget) do not pickle their arrays at all: they live in a memory-mapped
+    columnar store from import, and a spill is a write-back of whatever is
+    not a map yet plus a small pickle of the scalar fields. The sweep also
+    evicts on memory pressure, not only on count and idle time. See
+    [Large clouds](large-clouds.md#store-backed-sessions-memory-mapped-columns).
+- The per-session undo stack (`deleted_history`, one index delta per erase —
+  the points that step newly deleted, not a full mask) is capped at
+  `PHYTOGRAPH_MAX_DELETED_HISTORY` (default 50) steps; steps that fall off the
+  end fold into `deleted_base`.
 
 All five limits are environment-overridable.
 

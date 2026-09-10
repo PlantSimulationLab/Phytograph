@@ -283,6 +283,21 @@ class SessionStore:
         for a, b in iter_ranges(self.n, rows):
             yield a, b, {name: m[a:b] for name, m in cols.items()}
 
+    # ---- identity ---------------------------------------------------------------
+
+    def is_own(self, name: str, arr) -> bool:
+        """Whether `arr` is the very map this store handed out for `name`."""
+        with self._lock:
+            return self._maps.get(name) is arr
+
+    def column_name_of(self, arr) -> Optional[str]:
+        """The column whose map `arr` is, or None."""
+        with self._lock:
+            for name, m in self._maps.items():
+                if m is arr:
+                    return name
+        return None
+
     # ---- accounting -----------------------------------------------------------
 
     def bytes_on_disk(self) -> int:
