@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { parseDisplayPointBudgetDraft } from '../lib/displayPointBudget';
 import { X, Settings as SettingsIcon } from 'lucide-react';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { RieglStatusBadge } from './RieglStatusBadge';
@@ -46,25 +47,42 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     };
   }, [isOpen]);
 
+  // Optimistically update local state and persist. Each control commits its own
+  // field so the dialog has no separate "Save" step. Persists are CHAINED:
+  // `updateSettings` is a read-modify-write over IPC, so two quick commits
+  // (a blur and a click on the same gesture) could otherwise interleave and
+  // the second overwrite the first; and the chain is what `close` waits on.
+  const persistRef = useRef<Promise<unknown>>(Promise.resolve());
+  const patch = useCallback((updates: Partial<AppSettings>) => {
+    setSettings((prev) => (prev ? { ...prev, ...updates } : prev));
+    persistRef.current = persistRef.current
+      .then(() => updateSettings(updates))
+      .catch(() => {});
+  }, []);
+
+  // Closing bumps the app's settings epoch, on which the viewer RE-READS the
+  // store. A text field commits on blur, and the blur that a click on Done
+  // causes lands a few microtasks before the click itself — so with a
+  // fire-and-forget persist the viewer's re-read raced the write and came
+  // back with the OLD value (observed: the display point budget staying at
+  // the default until the dialog was opened and closed a second time).
+  // Every close path therefore waits for the last persist to land first.
+  const close = useCallback(() => {
+    void persistRef.current.then(() => onClose());
+  }, [onClose]);
+
   // Esc closes. Capture at document level so it works regardless of focus.
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        onClose();
+        close();
       }
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
-  }, [isOpen, onClose]);
-
-  // Optimistically update local state and persist. Each control commits its own
-  // field so the dialog has no separate "Save" step.
-  const patch = useCallback((updates: Partial<AppSettings>) => {
-    setSettings((prev) => (prev ? { ...prev, ...updates } : prev));
-    updateSettings(updates).catch(() => {});
-  }, []);
+  }, [isOpen, close]);
 
   // The memory-budget field is optional (blank = use Helios's default), so it's a
   // raw text draft rather than a DebouncedNumberInput. Seed the draft from the
@@ -105,6 +123,17 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     const n = parseInt(trimmed, 10);
     patch({ memoryBudgetMb: Number.isFinite(n) && n > 0 ? n : null });
   }, [memoryBudgetDraft, patch]);
+
+  // Display point budget (millions of points): blank = the default 2 M.
+  const [pointBudgetDraft, setPointBudgetDraft] = useState('');
+  useEffect(() => {
+    setPointBudgetDraft(
+      settings?.displayPointBudgetM != null ? String(settings.displayPointBudgetM) : '',
+    );
+  }, [settings?.displayPointBudgetM]);
+  const commitPointBudget = useCallback(() => {
+    patch({ displayPointBudgetM: parseDisplayPointBudgetDraft(pointBudgetDraft) });
+  }, [pointBudgetDraft, patch]);
 
   // RiVLib is picked as a DIRECTORY (it's a folder of bin/include/lib), which
   // the dialog IPC already supports and which also allowlists the path for fs
@@ -180,7 +209,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onKeyDown={(e) => e.stopPropagation()}>
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={close} />
 
       <div
         data-testid="settings-dialog"
@@ -193,7 +222,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
           </div>
           <button
             data-testid="settings-dialog-close"
-            onClick={onClose}
+            onClick={close}
             className="p-1 rounded hover:bg-neutral-700 transition-colors"
           >
             <X className="w-4 h-4 text-neutral-400" />
@@ -348,6 +377,30 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 value={memoryBudgetDraft}
                 onChange={(e) => setMemoryBudgetDraft(e.target.value)}
                 onBlur={commitMemoryBudget}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
+                className="w-32 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
+              />
+            </div>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="flex-1">
+                <label className="block text-sm text-neutral-200">Display point budget (million points)</label>
+                <p className="text-[11px] text-neutral-500 leading-snug">
+                  How many points of a streamed cloud are drawn at once, across the whole scene. More shows
+                  finer detail on a large cloud at the cost of GPU memory and frame rate: 2 suits a laptop,
+                  a discrete GPU handles 8&ndash;10, and a machine that struggles wants 1. Leave blank for
+                  the default (2). Applies as soon as the dialog closes.
+                </p>
+              </div>
+              <input
+                type="text"
+                inputMode="decimal"
+                data-testid="settings-point-budget"
+                placeholder="2"
+                value={pointBudgetDraft}
+                onChange={(e) => setPointBudgetDraft(e.target.value)}
+                onBlur={commitPointBudget}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 }}
@@ -555,7 +608,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
           </span>
           <button
             data-testid="settings-dialog-done"
-            onClick={onClose}
+            onClick={close}
             className="px-4 py-1.5 text-sm bg-neutral-700 hover:bg-neutral-600 text-neutral-100 rounded-md transition-colors"
           >
             Done

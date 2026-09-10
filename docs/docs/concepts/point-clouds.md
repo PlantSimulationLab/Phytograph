@@ -48,10 +48,15 @@ first non-numeric row as a header if present.
 
 ## Performance notes
 
-Phytograph handles tens of millions of points in the viewer; the GPU
-draws them as a point primitive without LOD. If you find rotation
-choppy:
+Phytograph handles clouds of hundreds of millions of points in the
+viewer: an imported cloud is indexed into a level-of-detail octree and the
+GPU draws a fixed budget of points from it per frame (2 million by
+default), whatever the cloud's size, refining the area you look at. If you
+find rotation choppy:
 
+- **Lower the display point budget** in **Settings → Performance**
+  (1 million suits a machine without a discrete GPU); raise it to 8–10 on
+  a workstation for finer detail.
 - **Reduce point size** in the Scene panel — smaller points cost less.
 - **Resample** to a working subset, then re-import the full cloud at
   the end. The [Resample workflow](../workflows/clean-point-cloud.md#resample)

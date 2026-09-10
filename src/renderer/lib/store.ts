@@ -69,6 +69,11 @@ export interface AppSettings {
   // machine's physical RAM). Passed to the sidecar as an environment variable
   // at spawn, so a change takes effect on the next backend start.
   memoryBudgetMb: number | null;
+  // How many octree points the viewer keeps resident and draws per frame, in
+  // MILLIONS, across the whole scene (potree's point budget). Decides the
+  // detail of a large cloud and the GPU/RAM the view costs. null = the
+  // default (2 M, right for a laptop; a discrete GPU draws 10 M smoothly).
+  displayPointBudgetM: number | null;
   // Absolute path to the user's own RiVLib download, used to read RIEGL raw
   // scanner projects (.riproject / .rxp). RiVLib is proprietary and its licence
   // forbids redistribution, so Phytograph cannot ship it — the user downloads it
@@ -95,6 +100,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   missDistanceThreshold: 1001,
   syntheticScanMemoryBudgetMb: null,
   memoryBudgetMb: null,
+  displayPointBudgetM: null,
   rivlibPath: null,
 };
 

@@ -40,8 +40,10 @@ straight from plyfile's memory map (binary PLY; an ASCII PLY is parsed into
 RAM by plyfile itself), and the E57 converter converts and writes one scan
 at a time instead of accumulating every scan and concatenating — the LAS
 schema is decided from the scan headers' field lists and the offset placed
-at the first scanner position, both known before a point is read. PCD still
-goes through open3d's whole-file read.
+at the first scanner position, both known before a point is read. PCD
+still goes through open3d's whole-file read (its reader is not chunked),
+but writes its LAS in the same blocks, so the laspy record — the second
+full copy that converter used to hold — is one block at a time.
 
 ### Undo history is deltas, not snapshots
 
@@ -169,9 +171,32 @@ session's surviving hits in 2 M-row blocks (deletions, misses, world shift
 and translation applied) under a per-block lock; cloud-to-mesh distance
 consumes it and keeps only the float32 distance per point.
 
-Remaining candidates, each with its natural collar: local PCA wood/leaf
-features (the largest scale), normals (the search radius), DEM pre-binning
-(none, a per-block consumer of the same iterator).
+**The DEM pre-bin is bounded and no longer sort-bound.** `_compute_dem`
+reduces the cloud to one z per grid cell (a low percentile, the robust
+near-minimum) before anything is interpolated, so the grid work is bounded
+by `_DEM_MAX_CELLS` however many points arrive. The reduction itself used
+to cost ~48 B/pt of int64 temporaries plus an `np.lexsort` over two keys —
+measured 32 s at 20 M points, i.e. the DEM of a 100 M-point cloud would
+have spent nearly three minutes sorting. Cell ids are now int32 computed in
+2 M-row blocks (`_dem_cell_ids`, also used by the density layers), and the
+cell-then-z order comes from ONE composite float64 key (`_dem_cell_z_order`:
+`cell * span + (z - zmin)`, with `span` wider than the z range by a margin
+far above the key's float64 spacing so cells never interleave), which
+`np.argsort` orders in 2.6 s at 20 M points with 412 MB of transient
+against 777 MB before. The result is identical to lexsort's — pinned by a
+test with exact ties and cells up to the cap — to within the key's spacing,
+about 1e-9 of the z range, which decides only which of two z values closer
+than that is picked. The endpoint still materialises the hits, the ground
+subset and the first-return subset (~24 B/pt each); feeding the pre-bin from
+`_iter_session_hit_positions` is the next step there.
+
+Remaining candidates, each with its natural collar: normals (the search
+radius). **Wood/leaf is left global on purpose.** Its per-point PCA
+features are the only tileable stage (collar = the largest neighbourhood
+scale); the GMM threshold, the skeleton segments and the cylinder gate that
+follow are whole-tree operations on the voxel-decimated cloud
+(`PHYTOGRAPH_WOOD_MAX_POINTS`, 1.5 M), so tiling the features alone would
+not raise the cap — it stays a global-decimate tool with its cost stated.
 
 ### The octree LAS write no longer holds the session lock
 
@@ -217,6 +242,16 @@ budget (MB)** is passed to the sidecar as `PHYTOGRAPH_MEMORY_BUDGET_BYTES`
 at spawn (`memoryBudgetEnv()` in `src/main/backend.ts`, pinned by
 `memoryBudgetEnv.test.ts`), so it takes effect on the next backend start.
 Every large-cloud threshold in the backend derives from this number.
+
+The renderer's counterpart is **Settings → Performance → Display point
+budget (million points)**: potree's scene-wide point budget, the number of
+octree points kept resident and drawn per frame whatever the cloud's size
+(`DEFAULT_POINT_BUDGET` = 2 M, ~24 MB of positions on the GPU). It is
+stored in millions (`displayPointBudgetM`), resolved and clamped by
+`resolveDisplayPointBudget` (250 k – 30 M), re-read on every settings-dialog
+close like the marker scale, and only ever lowered *further* by the crop
+preview's overdraw guard. Rendering cost is O(budget), never O(N), so this
+is the one knob that trades detail for frame rate on a 100 M-point plot.
 
 `GET /health` reports the budget, the backend's resident set, and what is
 currently admitted against the budget; the slow-request log line
@@ -354,8 +389,8 @@ returns projected 1 km out, plus intensity, RGB, gps_time, a `ground_truth`
 column and a `target_index`/`target_count` pair.
 
 `backend-api/tests/bench/test_large_cloud_bench.py` (gated on
-`PHYTO_BENCH=1`) drives import → ground segmentation → split → delete +
-rebuild → LAZ export through the real HTTP API and records wall time and
+`PHYTO_BENCH=1`) drives import → ground segmentation → DTM → split →
+delete + rebuild → LAZ export through the real HTTP API and records wall time and
 peak resident memory of the backend *and its children* per stage, plus the
 agreement of the CSF result with the generator's ground truth. Results land
 in `perf/bench-large-<N>M-<timestamp>.json`.

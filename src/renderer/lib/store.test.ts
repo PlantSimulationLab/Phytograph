@@ -68,6 +68,7 @@ describe('store settings', () => {
       missDistanceThreshold: 1001,
       syntheticScanMemoryBudgetMb: null,
       memoryBudgetMb: null,
+      displayPointBudgetM: null,
       rivlibPath: null,
     });
   });
@@ -165,6 +166,7 @@ describe('store export/import', () => {
       missDistanceThreshold: 1001,
       syntheticScanMemoryBudgetMb: null,
       memoryBudgetMb: null,
+      displayPointBudgetM: null,
       rivlibPath: null,
     });
   });

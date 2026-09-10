@@ -191,6 +191,7 @@ import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
 import { JFAOutline, OutlineSelect } from './viewer/outline/JFAOutline';
 import { setPointBudget, DEFAULT_POINT_BUDGET, CROP_PREVIEW_POINT_BUDGET } from './viewer/potreeManager';
+import { resolveDisplayPointBudget } from '../lib/displayPointBudget';
 import { VoxelGridOverlay } from './viewer/renderers/VoxelGridOverlay';
 import { LADVoxelGrid } from './viewer/renderers/LADVoxelGrid';
 import { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
@@ -1688,6 +1689,10 @@ export default function PointCloudViewer({
   const [triangulateMaxPoints, setTriangulateMaxPoints] = useState(5_000_000);
   // Soft cap (MB) on the synthetic-scan ray-tracing buffers; null = Helios default.
   const [syntheticScanMemoryBudgetMb, setSyntheticScanMemoryBudgetMb] = useState<number | null>(null);
+  // Normal-viewing point budget for the shared potree manager (Settings →
+  // Performance). Re-read on every dialog close like the marker scale: it has
+  // no live Display control, so the setting IS the live value.
+  const [displayPointBudget, setDisplayPointBudget] = useState(DEFAULT_POINT_BUDGET);
   const settingsSeededRef = useRef(false);
   useEffect(() => {
     getSettings()
@@ -1695,6 +1700,7 @@ export default function PointCloudViewer({
         setTriangulateMaxPoints(s.triangulateMaxPoints);
         setSyntheticScanMemoryBudgetMb(s.syntheticScanMemoryBudgetMb);
         setScanMarkerScale(s.scanMarkerScale);
+        setDisplayPointBudget(resolveDisplayPointBudget(s.displayPointBudgetM, DEFAULT_POINT_BUDGET));
         // Background and point size are launch seeds (the Display panel owns the
         // live values), so only adopt them on the very first load — not on every
         // settings-dialog close, which would clobber a session tweak. Marker
@@ -2161,15 +2167,15 @@ export default function PointCloudViewer({
   const cropVolumePreviewActive =
     (editMode === 'crop' || isApplyingCrop) && !screenSpaceRegionActive;
   useEffect(() => {
-    const budget = cropVolumePreviewActive ? CROP_PREVIEW_POINT_BUDGET : DEFAULT_POINT_BUDGET;
+    const budget = cropVolumePreviewActive ? CROP_PREVIEW_POINT_BUDGET : displayPointBudget;
     setPointBudget(budget);
     // E2E hook: lets a test confirm the preview budget engages/restores.
     (window as { __pointBudget?: number }).__pointBudget = budget;
     return () => {
-      setPointBudget(DEFAULT_POINT_BUDGET);
-      (window as { __pointBudget?: number }).__pointBudget = DEFAULT_POINT_BUDGET;
+      setPointBudget(displayPointBudget);
+      (window as { __pointBudget?: number }).__pointBudget = displayPointBudget;
     };
-  }, [cropVolumePreviewActive]);
+  }, [cropVolumePreviewActive, displayPointBudget]);
   // When true, Apply leaves the source cloud untouched (hidden, so the viewport
   // looks the same) and puts the kept points in a new "… (cropped)" cloud. The
   // octree path routes through session `extract` (parent untouched) instead of
