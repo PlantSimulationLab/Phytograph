@@ -20886,6 +20886,140 @@ def export_point_cloud_las(request: PointCloudExportRequest, http_request: Reque
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
+def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
+                           columns: "Optional[List[str]]", translation,
+                           progress=None) -> dict:
+    """Stream a session to a LAS/LAZ file in row chunks - the export twin of
+    `_session_to_las`, without ever materialising the survivor set.
+
+    The generic export path reads `_read_points_and_extras` (a float64 copy of
+    every surviving point plus every column) and then builds ONE `laspy.LasData`
+    for all of them (another ~30-50 B/pt of quantised record) - at 100 M
+    points that is ~10 GB of transient beside the session, which no 16 GB
+    laptop survives. Here the survivor indices are taken once under the
+    session lock, then each `_LAS_WRITE_CHUNK` block is gathered under the
+    lock (a slice copy) and written outside it, so the transient is one block
+    and the lock is held for microseconds per block rather than for the LAZ
+    compression. An edit landing mid-export can therefore differ between
+    blocks - the PDAL streaming trade-off; the export modal is not a mutating
+    tool, so in practice the cloud is idle.
+
+    Column semantics match the generic path exactly: misses included, world
+    shift and the source translation added back, `columns` selecting the
+    scalar extra dims / RGB / intensity, the `timestamp` float64 field written
+    as a float32 `timestamp` extra dim (as the generic path does), and the
+    first class column populating the standard classification byte.
+    """
+    import laspy
+
+    with _cloud_session_lock:
+        keep = ~sess.deleted
+        idx = np.flatnonzero(keep)
+        n = int(idx.shape[0])
+        world_shift = (np.asarray(sess.world_shift, dtype=np.float64)
+                       if sess.world_shift is not None else np.zeros(3))
+        has_colors = sess.colors is not None
+        has_intensity = sess.intensity is not None
+        extra_slugs = [ed["slug"] for ed in sess.extra_dims_meta
+                       if ed["slug"] in sess.extras and sess.extras[ed["slug"]].shape[0] == len(sess.positions)]
+        has_timestamps = (sess.timestamps is not None and "timestamp" not in sess.extras
+                          and sess.timestamps.shape[0] == sess.positions.shape[0])
+        # bbox over the selection, block-wise so a memmapped session pays no copy.
+        pos_min = np.full(3, np.inf)
+        pos_max = np.full(3, -np.inf)
+        for start in range(0, n, _LAS_WRITE_CHUNK):
+            b = sess.positions[idx[start:start + _LAS_WRITE_CHUNK]]
+            if b.shape[0]:
+                pos_min = np.minimum(pos_min, b.min(axis=0))
+                pos_max = np.maximum(pos_max, b.max(axis=0))
+    shift = world_shift + (np.asarray(translation, dtype=np.float64).reshape(3)
+                           if translation is not None else 0.0)
+    if n == 0:
+        return dict(success=False, data=None, filename="", point_count=0,
+                    has_colors=False, format=fmt, error="No points provided")
+    pos_min = pos_min + shift
+    pos_max = pos_max + shift
+
+    wanted = set(columns) if columns else None
+    want_color = has_colors and (wanted is None or bool({"r", "g", "b"} & wanted))
+    want_intensity = has_intensity and (wanted is None or "intensity" in wanted)
+    export_slugs = [sl for sl in extra_slugs if wanted is None or sl in wanted]
+    write_timestamp = has_timestamps and (wanted is None or "timestamp" in wanted)
+    class_source = next(
+        (sl for sl in (MANUAL_CLASS_SLUG, "las_classification", GROUND_CLASS_SLUG, WOOD_CLASS_SLUG)
+         if sl in export_slugs), None)
+
+    def _stage(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+            _cancel_checkpoint(progress)
+
+    _stage(0.05, "Computing bounds")
+    header = laspy.LasHeader(point_format=3 if want_color else 1, version="1.4")
+    header.offsets = np.floor(pos_min)
+    header.scales = [0.001, 0.001, 0.001]
+    for slug in export_slugs:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
+    if write_timestamp:
+        header.add_extra_dim(laspy.ExtraBytesParams(name="timestamp", type=np.float32))
+
+    ext = ".laz" if fmt == "laz" else ".las"
+    tmp = dest.with_name(dest.name + ".partial" + ext)
+    try:
+        with laspy.open(str(tmp), mode="w", header=header) as writer:
+            for start in range(0, n, _LAS_WRITE_CHUNK):
+                block = idx[start:start + _LAS_WRITE_CHUNK]
+                m = int(block.shape[0])
+                # Three markers per block (gather, pack, write) so even a one-
+                # block export advances in visible steps rather than a single
+                # leap from "start" to "done" (the pill then reads as a hang).
+                base = 0.05 + 0.9 * start / n
+                share = 0.9 * m / n
+                _stage(base, "Reading points")
+                with _cloud_session_lock:
+                    bpos = np.asarray(sess.positions[block], dtype=np.float64) + shift
+                    bcol = sess.colors[block] if want_color else None
+                    bint = sess.intensity[block] if want_intensity else None
+                    bext = {sl: np.asarray(sess.extras[sl][block], dtype=np.float32) for sl in export_slugs}
+                    bts = (np.asarray(sess.timestamps[block], dtype=np.float32)
+                           if write_timestamp else None)
+                _stage(base + 0.3 * share, "Packing coordinates")
+                record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
+                record.x = bpos[:, 0]
+                record.y = bpos[:, 1]
+                record.z = bpos[:, 2]
+                if bcol is not None:
+                    record.red, record.green, record.blue = bcol[:, 0], bcol[:, 1], bcol[:, 2]
+                if bint is not None:
+                    record.intensity = bint
+                for sl, col in bext.items():
+                    record[sl] = col
+                if bts is not None:
+                    record["timestamp"] = bts
+                if class_source is not None:
+                    vals = np.rint(np.asarray(bext[class_source], dtype=np.float64))
+                    record.classification = np.clip(vals, 0, 255).astype(np.uint8)
+                _stage(base + 0.6 * share,
+                       "Compressing and writing" if ext == ".laz" else "Writing file")
+                writer.write_points(record)
+                del record, bpos, bcol, bint, bext, bts
+            _stage(0.95, "Finalising")
+            pad = 0.001
+            writer.header.mins = (pos_min - pad).tolist()
+            writer.header.maxs = (pos_max + pad).tolist()
+        _replace_with_retry(tmp, dest)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    if progress is not None:
+        progress(1.0, "Done")
+    return dict(success=True, data=None, filename=dest.name, point_count=n,
+                has_colors=want_color, format=fmt)
+
+
 def _do_point_cloud_export(
     request: PointCloudExportRequest, progress=None, cancel_event=None
 ) -> dict:
@@ -20934,6 +21068,14 @@ def _do_point_cloud_export(
         if progress is not None:
             progress(0.02, "Reading points")
         _cancel_checkpoint(progress)
+        # A session exported to a LAS/LAZ FILE streams straight from the session
+        # in blocks (`_export_session_to_las`) and never copies the survivor set.
+        if (fmt in ("las", "laz") and request.dest_path and src.session_id
+                and not getattr(src, "max_points", None)):
+            sess = _get_cloud_session(src.session_id)
+            return _export_session_to_las(
+                sess, _resolve_export_dest(request.dest_path), fmt=fmt,
+                columns=request.columns, translation=src.translation, progress=progress)
         # The read copies every surviving point plus every column; an export
         # of a large cloud is one of the biggest transients in the process.
         n_src = _source_point_count_estimate(src)

@@ -86,10 +86,22 @@ changes and what does not:
   a run that dies leaves directories that the next launch's dead-pid reaping
   removes (they live under the per-process spill root).
 
-What is *not* yet chunked: tools still call `positions[keep].copy()` through
-`_read_points_and_extras`, so a compute on a 100 M-point store still
-materialises a full copy — that is the tiled runner's job (next section of
-the plan), for which the store's `iter_chunks` is the input.
+**Export streams from the session.** A session exported to a LAS/LAZ *file*
+goes through `_export_session_to_las`: the survivor indices are taken once
+under the session lock, then each 2 M-row block is gathered under the lock
+and written outside it, so the transient is one block and the lock is never
+held across LAZ compression. The generic path (`_read_points_and_extras`
+plus one `laspy.LasData` for everything, ~10 GB of transient at 100 M
+points) remains for the base64 response and for text formats, which were
+already chunked at the write. Same columns, same classification byte, same
+point-format choice; intensity and RGB are written verbatim rather than
+through the generic path's float32 round trip.
+
+What is *not* yet chunked: compute tools still call `positions[keep].copy()`
+through `_read_points_and_extras`, so a tool on a 100 M-point store still
+materialises a full copy of the hits — the tiled runner (next section) is the
+answer for neighbourhood tools, and per-block reads for the point-local ones
+(C2M, DEM pre-binning).
 
 ## Tiled processing (the lidR engine)
 
