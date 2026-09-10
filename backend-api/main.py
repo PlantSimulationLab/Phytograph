@@ -5644,6 +5644,41 @@ def _compute_dem(
     pick = start + np.floor((counts - 1) * p).astype(np.int64)
     rep_z = z[order[pick]]
     del order, flat
+    return _dem_surface_from_reps(
+        uniq, rep_z, minx=minx, miny=miny, cell=cell, nx=nx, ny=ny, method=method,
+        fill_voids=fill_voids, footprint_xy=footprint_xy, sample_xy=sample_xy,
+        progress=progress)
+
+
+
+def _dem_surface_from_reps(
+    uniq: np.ndarray,
+    rep_z: np.ndarray,
+    *,
+    minx: float, miny: float, cell: float, nx: int, ny: int,
+    method: str = "tin",
+    fill_voids: bool = False,
+    footprint_xy: Optional[np.ndarray] = None,
+    footprint_grid: Optional[np.ndarray] = None,
+    sample_xy: Optional[np.ndarray] = None,
+    progress=None,
+) -> dict:
+    """The half of `_compute_dem` that works from the per-cell representatives:
+    `uniq` (sorted flat ids of populated cells) and `rep_z` (each cell's
+    percentile z), never from the points. Interpolates the grid, blanks outside
+    the representatives' hull, optionally fills voids, builds the mesh, and
+    samples ground z at `sample_xy`.
+
+    Split out so a streamed caller that computed the representatives in bounded
+    memory gets exactly the surface the in-memory path builds. `footprint_grid`
+    (a (ny, nx) or flat bool mask of cells holding any return) stands in for
+    `footprint_xy` when the caller never held all the returns at once."""
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    from scipy.interpolate import griddata
+
     rep_ci = uniq % nx
     rep_cj = uniq // nx
     rep_xy = np.column_stack([minx + (rep_ci + 0.5) * cell,
@@ -5704,7 +5739,9 @@ def _compute_dem(
         # so a dense-canopy DTM covers the whole scanned area instead of only the
         # sparse ground-return hull. Cells with no return anywhere stay void (we never
         # fabricate terrain past the actual scan). Fill value = nearest ground return.
-        if footprint_xy is not None and len(footprint_xy):
+        if footprint_grid is not None:
+            footprint = np.asarray(footprint_grid, dtype=bool).reshape(ny, nx)
+        elif footprint_xy is not None and len(footprint_xy):
             fci = np.clip(((footprint_xy[:, 0] - minx) / cell).astype(np.int64), 0, nx - 1)
             fcj = np.clip(((footprint_xy[:, 1] - miny) / cell).astype(np.int64), 0, ny - 1)
             footprint = np.zeros((ny, nx), dtype=bool)
@@ -5798,7 +5835,6 @@ def _compute_dem(
         # framed). None when sample_xy wasn't supplied.
         "sample_ground_z": sample_ground_z,
     }
-
 
 def _pack_dem_frame(result: dict) -> bytes:
     """Pack a `_compute_dem`/`_compute_dem_layers` result into a PHB1 frame:
