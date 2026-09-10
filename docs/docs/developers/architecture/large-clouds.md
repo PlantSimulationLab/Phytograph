@@ -230,10 +230,26 @@ plus its children (worker, PotreeConverter) above the idle baseline.
 | export LAZ | 2.2 s | 2.3 s |
 | LAS read alone (`_read_las_into_arrays`) | 0.22 s, 1138 MB peak | 0.43 s, 905 MB peak |
 
-The rebuild peaks are dominated by PotreeConverter's own working set, which
-is the next thing to measure at 30 M and 100 M (its chunking is what keeps
-it out-of-core; how much RAM it takes per run decides how many rebuilds can
-overlap under the budget).
+At 30 M points, store-backed from import, tiled ground segmentation and the
+streamed export (one run, same machine):
+
+| Stage | Time | Peak over baseline |
+|---|---|---|
+| import (store-backed) | 25 s | +7.7 GB |
+| ground segmentation (tiled, no rebuild) | 8 s | +8.4 GB |
+| split into ground + plant (3 rebuilds) | 30 s | +8.6 GB |
+| delete region + rebuild | 16 s | +7.2 GB |
+| export LAZ (streamed) | 5 s | +4.0 GB |
+
+Read the peaks with two caveats. They are resident-set sizes of the backend
+plus its children, so they include the session's memory-mapped pages (file-
+backed, reclaimable by the OS under pressure — about 1.9 GB here) and
+PotreeConverter's own working set during the rebuild stages; they are an
+upper bound on what the machine must find, not on what it must keep.
+Attributing the remainder (the worker's input copy, the tile plan's sort,
+CSF per tile) with a per-process breakdown is the next measurement, and the
+converter's footprint at 100 M decides how many rebuilds may overlap under
+the budget.
 
 ## Benchmark harness
 

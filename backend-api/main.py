@@ -32270,6 +32270,19 @@ def _session_survivor_hit_mask(sess: "CloudSession") -> np.ndarray:
     return np.ones(int(surv.sum()), dtype=bool)
 
 
+def _session_hit_positions_locked(sess: "CloudSession", hit: np.ndarray) -> np.ndarray:
+    """The hit survivors' positions as ONE contiguous copy.
+
+    `positions[~deleted][hit].copy()` made three full copies in a row (the
+    survivor gather, the hit gather, the copy) - 2.2 GB of transient at 30 M
+    points before the worker had even started. One index array and one
+    fancy-index gather is one copy, and works the same on a memmapped
+    session. Caller holds the lock; `hit` is survivor-relative
+    (`_session_survivor_hit_mask`)."""
+    idx = np.flatnonzero(~sess.deleted)[hit]
+    return np.ascontiguousarray(sess.positions[idx])
+
+
 def _ensure_label_column_locked(
     sess: "CloudSession",
     slug: str,
@@ -33191,7 +33204,7 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         # back over all survivors (misses default 0, dropped from the octree at
         # rebuild). See _session_survivor_hit_mask.
         hit = _session_survivor_hit_mask(sess)
-        pts = sess.positions[~sess.deleted][hit].copy()
+        pts = _session_hit_positions_locked(sess, hit)
     if len(pts) < 10:
         raise HTTPException(status_code=400, detail="Need at least 10 points for ground segmentation.")
     # Cost gate, BEFORE the worker is spawned: a cloth too fine for the extent
@@ -33307,7 +33320,7 @@ async def session_denoise(session_id: str, request: SessionDenoiseRequest,
         # derived from (measured elsewhere in this file at ~2,500x). See
         # _session_survivor_hit_mask.
         hit = _session_survivor_hit_mask(sess)
-        pts = sess.positions[~sess.deleted][hit].copy()
+        pts = _session_hit_positions_locked(sess, hit)
         already_denoised = denoise.NOISE_CLASS_SLUG in sess.extras
     if int(hit.sum()) < denoise.MIN_POINTS:
         raise HTTPException(
