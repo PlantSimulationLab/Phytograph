@@ -25140,18 +25140,30 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         used_slugs.add(slug)
         extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
 
-    x = vertex["x"].astype(np.float64)
-    y = vertex["y"].astype(np.float64)
-    z = vertex["z"].astype(np.float64)
-
-    # Build the per-point miss flag from the explicit column and/or non-finite
-    # coordinates (an organized PLY's empty grid cells).
-    is_miss = np.zeros(len(vertex), dtype=np.float32)
+    # `vertex` is plyfile's memory map of a binary PLY (ASCII PLY is parsed
+    # into RAM by plyfile itself). Nothing below materialises a full float64
+    # copy of a coordinate column: the miss flag, the finiteness mask and the
+    # bounds come from one pass in `_LAS_WRITE_CHUNK` blocks, and the LAS is
+    # written block by block from the same map. Before this the converter held
+    # x/y/z as three float64 copies plus one laspy record for every vertex
+    # (~60 B/pt of transient on top of the map).
+    n_vertex = int(len(vertex))
+    is_miss = np.zeros(n_vertex, dtype=np.float32)
     has_miss_info = False
     if miss_col is not None:
         is_miss = (np.asarray(vertex[miss_col]).astype(np.float64) != 0).astype(np.float32)
         has_miss_info = True
-    nonfinite = ~(np.isfinite(x) & np.isfinite(y) & np.isfinite(z))
+    nonfinite = np.zeros(n_vertex, dtype=bool)
+    xyz_min = np.full(3, np.inf)
+    for _a in range(0, n_vertex, _LAS_WRITE_CHUNK):
+        _b = min(n_vertex, _a + _LAS_WRITE_CHUNK)
+        _bx = np.asarray(vertex["x"][_a:_b], dtype=np.float64)
+        _by = np.asarray(vertex["y"][_a:_b], dtype=np.float64)
+        _bz = np.asarray(vertex["z"][_a:_b], dtype=np.float64)
+        _nf = ~(np.isfinite(_bx) & np.isfinite(_by) & np.isfinite(_bz))
+        nonfinite[_a:_b] = _nf
+        if (~_nf).any():
+            xyz_min = np.minimum(xyz_min, [_bx[~_nf].min(), _by[~_nf].min(), _bz[~_nf].min()])
     if nonfinite.any():
         is_miss[nonfinite] = 1.0
         has_miss_info = True
@@ -25172,42 +25184,52 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
     # 32-bit int range — see _session_to_las for the full rationale.
-    header.offsets = (np.floor([x[keep].min(), y[keep].min(), z[keep].min()]) if n else np.zeros(3))
+    header.offsets = (np.floor(xyz_min) if n else np.zeros(3))
     # Timestamp → standard float64 gps_time, never a float32 extra dim
     # (see `_split_timestamp_extra_dim`).
     extra_dims, ts_dim = _split_timestamp_extra_dim(extra_dims)
     for ed in extra_dims:
         header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
-
-    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
-    record.x = x[keep]
-    record.y = y[keep]
-    record.z = z[keep]
-    if rgb_cols:
-        # PLY RGB is 0-255 (uint8); LAS RGB is uint16. *256 keeps perceptual
-        # brightness and lets the renderer right-shift to recover 8-bit, the
-        # same convention as `_xyz_to_las`.
-        record.red = vertex[rgb_cols[0]][keep].astype(np.uint16) * 256
-        record.green = vertex[rgb_cols[1]][keep].astype(np.uint16) * 256
-        record.blue = vertex[rgb_cols[2]][keep].astype(np.uint16) * 256
-    if intensity_col is not None:
-        # Normalise the intensity/reflectance property's range to the LAS uint16
-        # field — handles dB / [0,1] / [0,255] / signed scales uniformly, instead
-        # of a fixed `* 256` that crushes all-negative columns to 0.
-        record.intensity = _intensity_to_las_uint16(vertex[intensity_col][keep])
-    for ed in extra_dims:
-        if ed["slug"] == _MISS_SLUG and ed.get("col") is None:
-            record[_MISS_SLUG] = is_miss[keep]
-        else:
-            record[ed["slug"]] = vertex[ed["col"]][keep].astype(np.float32)
     if ts_dim is not None:
-        ts_vals = np.asarray(vertex[ts_dim["col"]][keep], dtype=np.float64)
-        record.gps_time = ts_vals
-        if ts_vals.size and np.nanmax(np.abs(ts_vals)) > _GPS_WEEK_SECONDS:
+        # The clock-identity flag is a header field, so decide it before the
+        # first block is written: one pass over the timestamp column alone.
+        _ts_all = np.asarray(vertex[ts_dim["col"]], dtype=np.float64)
+        if _ts_all.size and np.nanmax(np.abs(_ts_all[keep])) > _GPS_WEEK_SECONDS:
             _mark_gps_time_absolute(header)
+        del _ts_all
 
+    # The intensity normaliser needs the column's range; give it the whole
+    # column once (one numeric column, not the record) and let it map blocks.
+    intensity_scaled = (_intensity_to_las_uint16(vertex[intensity_col][keep])
+                        if intensity_col is not None else None)
+
+    idx = np.flatnonzero(keep)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
-        writer.write_points(record)
+        for _start in range(0, n, _LAS_WRITE_CHUNK):
+            blk = idx[_start:_start + _LAS_WRITE_CHUNK]
+            m = int(blk.shape[0])
+            record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
+            record.x = np.asarray(vertex["x"][blk], dtype=np.float64)
+            record.y = np.asarray(vertex["y"][blk], dtype=np.float64)
+            record.z = np.asarray(vertex["z"][blk], dtype=np.float64)
+            if rgb_cols:
+                # PLY RGB is 0-255 (uint8); LAS RGB is uint16. *256 keeps
+                # perceptual brightness and lets the renderer right-shift to
+                # recover 8-bit, the same convention as `_xyz_to_las`.
+                record.red = np.asarray(vertex[rgb_cols[0]][blk]).astype(np.uint16) * 256
+                record.green = np.asarray(vertex[rgb_cols[1]][blk]).astype(np.uint16) * 256
+                record.blue = np.asarray(vertex[rgb_cols[2]][blk]).astype(np.uint16) * 256
+            if intensity_scaled is not None:
+                record.intensity = intensity_scaled[_start:_start + m]
+            for ed in extra_dims:
+                if ed["slug"] == _MISS_SLUG and ed.get("col") is None:
+                    record[_MISS_SLUG] = is_miss[blk]
+                else:
+                    record[ed["slug"]] = np.asarray(vertex[ed["col"]][blk]).astype(np.float32)
+            if ts_dim is not None:
+                record.gps_time = np.asarray(vertex[ts_dim["col"]][blk], dtype=np.float64)
+            writer.write_points(record)
+            del record
 
     # `ts_dim` is deliberately NOT in the sidecar. The sidecar is keyed by octree
     # BUFFER name, and the timestamp now reaches the octree as PotreeConverter's
@@ -25427,6 +25449,8 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
     import pye57
 
     e = pye57.E57(str(source_path))
+    writer = None
+    n = 0
     try:
         n_scans = e.scan_count
         if n_scans == 0:
@@ -25444,12 +25468,43 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
                             f"file has {n_scans}."))
             scan_range = range(scan_index, scan_index + 1)
 
-        all_xyz: List[np.ndarray] = []
-        all_miss: List[np.ndarray] = []
-        all_intensity: List[np.ndarray] = []
-        all_rgb: List[np.ndarray] = []
-        all_row: List[np.ndarray] = []
-        all_col: List[np.ndarray] = []
+        # Each scan is converted and WRITTEN before the next is read, so the
+        # transient is one scan's arrays rather than the whole project's (a
+        # 20-position project used to be accumulated in six lists and then
+        # concatenated - two copies of everything - before a single laspy
+        # record for all of it was built on top).
+        #
+        # The LAS schema must be fixed before the first write, and the row /
+        # column grid dims are the only part of it that depends on the data:
+        # decide them from the scan headers' field lists up front.
+        _grid_any = False
+        for _si in scan_range:
+            _fields = getattr(e.get_header(_si), "point_fields", None) or []
+            if {"rowIndex", "columnIndex"} <= set(_fields):
+                _grid_any = True
+                break
+        extra_dims = [{"slug": _MISS_SLUG, "label": _MISS_LABEL}]
+        if _grid_any:
+            extra_dims.append({"slug": "row_index", "label": "Row Index"})
+            extra_dims.append({"slug": "column_index", "label": "Column Index"})
+        header_las = laspy.LasHeader(point_format=3, version="1.4")
+        header_las.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+        # Offset at the first scanner position: LAS stores (value - offset) /
+        # 0.001 in an int32, i.e. +/- 2 147 km around the offset, so any
+        # terrestrial project fits around its first origin - and, unlike the
+        # data minimum, it is known before a point is read.
+        try:
+            _first_trans = np.asarray(e.get_header(scan_range[0]).translation, dtype=np.float64).reshape(3)
+        except Exception:
+            _first_trans = np.zeros(3)
+        header_las.offsets = np.floor(_first_trans)
+        for ed in extra_dims:
+            header_las.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+        writer = laspy.open(str(out_las), mode="w", header=header_las)
+        n = 0
+        miss_count = 0
+        xyz_min = np.full(3, np.inf)
+        xyz_max = np.full(3, -np.inf)
         any_intensity = False
         any_color = False
         any_grid = False
@@ -25552,18 +25607,17 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
             if unplaceable_miss.any():
                 world[unplaceable_miss] = trans  # at origin until C++ recovery
 
-            all_xyz.append(world)
-            all_miss.append(miss.astype(np.float32))
+            scan_miss = miss.astype(np.float32)
 
             # Preserve the structured-grid indices so downstream (Helios C++) can
             # recover unplaceable-miss directions from the raster.
             if {"rowIndex", "columnIndex"} <= keys:
-                all_row.append(np.asarray(raw["rowIndex"], dtype=np.float32))
-                all_col.append(np.asarray(raw["columnIndex"], dtype=np.float32))
+                scan_row = np.asarray(raw["rowIndex"], dtype=np.float32)
+                scan_col = np.asarray(raw["columnIndex"], dtype=np.float32)
                 any_grid = True
             else:
-                all_row.append(np.full(n_cell, -1.0, dtype=np.float32))
-                all_col.append(np.full(n_cell, -1.0, dtype=np.float32))
+                scan_row = np.full(n_cell, -1.0, dtype=np.float32)
+                scan_col = np.full(n_cell, -1.0, dtype=np.float32)
 
             if "intensity" in keys:
                 inten = np.asarray(raw["intensity"], dtype=np.float64)
@@ -25582,10 +25636,10 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
                 else:
                     scaled = np.zeros_like(inten)
                 scaled[miss] = 0.0
-                all_intensity.append(np.clip(scaled, 0, 65535).astype(np.float32))
+                scan_intensity = np.clip(scaled, 0, 65535).astype(np.float32)
                 any_intensity = True
             else:
-                all_intensity.append(np.zeros(n_cell, dtype=np.float32))
+                scan_intensity = None
 
             # RGB colour, when the scan carries it. E57 stores per-channel
             # colorRed/Green/Blue, usually uint8 0..255 but the spec allows other
@@ -25607,57 +25661,47 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
                     np.column_stack([cr, cg, cb]) * scale, 0, 255
                 ).astype(np.uint16)
                 rgb8[miss] = 0
-                all_rgb.append(rgb8)
+                scan_rgb = rgb8
                 any_color = True
             else:
-                all_rgb.append(np.zeros((n_cell, 3), dtype=np.uint16))
+                scan_rgb = None
+
+            # Write this scan now, in blocks, and let its arrays go.
+            for _a in range(0, n_cell, _LAS_WRITE_CHUNK):
+                _b = min(n_cell, _a + _LAS_WRITE_CHUNK)
+                record = laspy.ScaleAwarePointRecord.zeros(_b - _a, header=header_las)
+                record.x = world[_a:_b, 0]
+                record.y = world[_a:_b, 1]
+                record.z = world[_a:_b, 2]
+                if scan_intensity is not None:
+                    record.intensity = np.clip(scan_intensity[_a:_b], 0, 65535).astype(np.uint16)
+                if scan_rgb is not None:
+                    # Point format 3 carries RGB; *256 lifts 8-bit into the
+                    # 16-bit LAS channel, matching _ply_to_las / _pcd_to_las so
+                    # colours render identically regardless of source format.
+                    record.red = scan_rgb[_a:_b, 0] * 256
+                    record.green = scan_rgb[_a:_b, 1] * 256
+                    record.blue = scan_rgb[_a:_b, 2] * 256
+                record[_MISS_SLUG] = scan_miss[_a:_b]
+                if _grid_any:
+                    record["row_index"] = scan_row[_a:_b]
+                    record["column_index"] = scan_col[_a:_b]
+                writer.write_points(record)
+                del record
+            if n_cell:
+                xyz_min = np.minimum(xyz_min, world.min(axis=0))
+                xyz_max = np.maximum(xyz_max, world.max(axis=0))
+            n += int(n_cell)
+            miss_count += int(miss.sum())
+            del world, local, local_dir, scan_miss, scan_row, scan_col, scan_intensity, scan_rgb, raw
     finally:
         e.close()
-
-    xyz = np.concatenate(all_xyz, axis=0) if all_xyz else np.empty((0, 3), np.float64)
-    is_miss = np.concatenate(all_miss, axis=0) if all_miss else np.empty((0,), np.float32)
-    intensity = (np.concatenate(all_intensity, axis=0) if all_intensity
-                 else np.empty((0,), np.float32))
-    rgb = (np.concatenate(all_rgb, axis=0) if all_rgb
-           else np.empty((0, 3), np.uint16))
-    row_idx = np.concatenate(all_row, axis=0) if all_row else np.empty((0,), np.float32)
-    col_idx = np.concatenate(all_col, axis=0) if all_col else np.empty((0,), np.float32)
-    n = int(xyz.shape[0])
-
-    extra_dims = [{"slug": _MISS_SLUG, "label": _MISS_LABEL}]
-    if any_grid:
-        extra_dims.append({"slug": "row_index", "label": "Row Index"})
-        extra_dims.append({"slug": "column_index", "label": "Column Index"})
-
-    header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
-    # 32-bit int range — see _session_to_las for the full rationale.
-    header.offsets = (np.floor(xyz[:, :3].min(axis=0)) if n > 0 else np.zeros(3))
-    for ed in extra_dims:
-        header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
-
-    record = laspy.ScaleAwarePointRecord.zeros(n, header=header)
-    if n > 0:
-        record.x = xyz[:, 0]
-        record.y = xyz[:, 1]
-        record.z = xyz[:, 2]
-        if any_intensity:
-            record.intensity = np.clip(intensity, 0, 65535).astype(np.uint16)
-        if any_color:
-            # Point format 3 carries RGB; *256 lifts 8-bit into the 16-bit LAS
-            # channel, matching _ply_to_las / _pcd_to_las so colours render
-            # identically regardless of source format.
-            record.red = rgb[:, 0] * 256
-            record.green = rgb[:, 1] * 256
-            record.blue = rgb[:, 2] * 256
-        record[_MISS_SLUG] = is_miss
-        if any_grid:
-            record["row_index"] = row_idx
-            record["column_index"] = col_idx
-
-    with laspy.open(str(out_las), mode="w", header=header) as writer:
-        writer.write_points(record)
+        if writer is not None:
+            if n > 0:
+                pad = 0.001
+                writer.header.mins = (xyz_min - pad).tolist()
+                writer.header.maxs = (xyz_max + pad).tolist()
+            writer.close()
 
     _import_scan_meta[str(out_las.resolve())] = {
         "origin": (scan_origins[0] if scan_origins else [0.0, 0.0, 0.0]),
@@ -25667,8 +25711,8 @@ def _e57_to_las(source_path: _Path, out_las: _Path,
         # forwards this so a lone-E57 import auto-creates a Scan with populated
         # ScanParameters, mirroring the Helios-XML import path.
         "scan_params": (scan_params_list[0] if scan_params_list else {"origin": [0.0, 0.0, 0.0]}),
-        "has_misses": bool(is_miss.any()),
-        "miss_count": int(is_miss.sum()),
+        "has_misses": bool(miss_count > 0),
+        "miss_count": int(miss_count),
         "unplaceable_miss_count": unplaceable_misses,
     }
     return n, extra_dims

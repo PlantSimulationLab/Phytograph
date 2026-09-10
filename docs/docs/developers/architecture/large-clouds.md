@@ -35,9 +35,13 @@ Columns whose fate depends on their contents (constant standard dims and
 all-zero intensity are pruned; `gps_time` is kept only when it varies) are
 tracked per chunk in their native dtype and cast to float32 only if kept.
 The same chunked read backs `_file_miss_mask`, which used to load a whole
-LAS to get one byte per point. PLY, E57 and PCD still materialise their own
-arrays inside their converters before the (now chunked) LAS read; those are
-the next targets.
+LAS to get one byte per point. The PLY converter writes its LAS in blocks
+straight from plyfile's memory map (binary PLY; an ASCII PLY is parsed into
+RAM by plyfile itself), and the E57 converter converts and writes one scan
+at a time instead of accumulating every scan and concatenating — the LAS
+schema is decided from the scan headers' field lists and the offset placed
+at the first scanner position, both known before a point is read. PCD still
+goes through open3d's whole-file read.
 
 ### Undo history is deltas, not snapshots
 
