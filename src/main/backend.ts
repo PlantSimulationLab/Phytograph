@@ -6,6 +6,7 @@ import { existsSync, chmodSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { app, BrowserWindow } from 'electron';
+import Store from 'electron-store';
 import { EXPECTED_BACKEND_VERSION, BACKEND_PORT_PROD } from '../shared/constants.js';
 import { IPC, type BackendStatusPayload } from '../shared/ipc.js';
 import { backendLog } from './logger.js';
@@ -288,6 +289,31 @@ export async function startBackend(): Promise<void> {
  * Factored out of startBackend so a crash recovery can re-run JUST the spawn
  * (reusing the already-resolved port) without re-doing the version probe.
  */
+/**
+ * The user's memory budget from Settings ("Memory budget (MB)"), as the env
+ * var the backend's `memory_budget.py` reads (`PHYTOGRAPH_MEMORY_BUDGET_BYTES`).
+ * Empty when unset, so the backend's automatic default (half of physical RAM)
+ * applies — and empty rather than a default value here, because the machine's
+ * RAM is the backend's to measure. An explicit env var from the launching
+ * shell wins over the setting: `...process.env` precedes this in the spawn.
+ * Read straight from the persistent store rather than over IPC because the
+ * renderer may not exist yet when the backend is spawned.
+ */
+export function memoryBudgetEnv(): Record<string, string> {
+  if (process.env.PHYTOGRAPH_MEMORY_BUDGET_BYTES) return {};
+  try {
+    const store = new Store({ name: 'phytograph-store' });
+    const settings = store.get('settings') as { memoryBudgetMb?: unknown } | undefined;
+    const mb = settings?.memoryBudgetMb;
+    if (typeof mb === 'number' && Number.isFinite(mb) && mb > 0) {
+      return { PHYTOGRAPH_MEMORY_BUDGET_BYTES: String(Math.round(mb * 1024 * 1024)) };
+    }
+  } catch (err) {
+    console.warn('[backend] could not read the memory budget setting:', err);
+  }
+  return {};
+}
+
 function spawnChild(binPath: string, port: number): void {
   console.log(`Starting backend: ${binPath} on port ${port}`);
   // PHYTOGRAPH_RESOURCES tells the backend where extraResources live in the
@@ -316,6 +342,7 @@ function spawnChild(binPath: string, port: number): void {
         PHYTOGRAPH_RESOURCES: resourcesRoot(),
         PHYTOGRAPH_BACKEND_PORT: String(port),
         PHYTOGRAPH_OCTREE_CACHE_ROOT: resolveOctreeCacheRoot(),
+        ...memoryBudgetEnv(),
       },
     });
   } catch (err) {

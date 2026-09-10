@@ -63,6 +63,12 @@ export interface AppSettings {
   // fan-out is chunked to stay near this budget; results are unchanged). null =
   // leave Helios's automatic default (≈4 GiB on this CPU build) untouched.
   syntheticScanMemoryBudgetMb: number | null;
+  // Memory budget (MB) the backend plans large-cloud work against: how many
+  // operations may run at once, when a session moves to the on-disk store,
+  // when a run is expensive enough to prompt. null = automatic (half of the
+  // machine's physical RAM). Passed to the sidecar as an environment variable
+  // at spawn, so a change takes effect on the next backend start.
+  memoryBudgetMb: number | null;
   // Absolute path to the user's own RiVLib download, used to read RIEGL raw
   // scanner projects (.riproject / .rxp). RiVLib is proprietary and its licence
   // forbids redistribution, so Phytograph cannot ship it — the user downloads it
@@ -88,6 +94,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   scanMarkerScale: 1,
   missDistanceThreshold: 1001,
   syntheticScanMemoryBudgetMb: null,
+  memoryBudgetMb: null,
   rivlibPath: null,
 };
 

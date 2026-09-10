@@ -88,6 +88,24 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     patch({ syntheticScanMemoryBudgetMb: Number.isFinite(n) && n > 0 ? n : null });
   }, [budgetDraft, patch]);
 
+  // Backend memory budget: same optional-number shape as the scan budget above.
+  // Blank = automatic (half of physical RAM, decided by the backend at start).
+  const [memoryBudgetDraft, setMemoryBudgetDraft] = useState('');
+  useEffect(() => {
+    setMemoryBudgetDraft(
+      settings?.memoryBudgetMb != null ? String(settings.memoryBudgetMb) : '',
+    );
+  }, [settings?.memoryBudgetMb]);
+  const commitMemoryBudget = useCallback(() => {
+    const trimmed = memoryBudgetDraft.trim();
+    if (trimmed === '') {
+      patch({ memoryBudgetMb: null });
+      return;
+    }
+    const n = parseInt(trimmed, 10);
+    patch({ memoryBudgetMb: Number.isFinite(n) && n > 0 ? n : null });
+  }, [memoryBudgetDraft, patch]);
+
   // RiVLib is picked as a DIRECTORY (it's a folder of bin/include/lib), which
   // the dialog IPC already supports and which also allowlists the path for fs
   // access. Bumping `rieglRefresh` re-probes the badge immediately, so the user
@@ -306,6 +324,30 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 value={budgetDraft}
                 onChange={(e) => setBudgetDraft(e.target.value)}
                 onBlur={commitBudget}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
+                className="w-32 bg-neutral-700 text-neutral-200 text-sm rounded px-2 py-1.5 border border-neutral-600"
+              />
+            </div>
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="flex-1">
+                <label className="block text-sm text-neutral-200">Memory budget (MB)</label>
+                <p className="text-[11px] text-neutral-500 leading-snug">
+                  How much RAM the backend plans large point-cloud work against: how many heavy operations
+                  run at once, when a cloud is kept on disk instead of in memory, and when a run is expensive
+                  enough to ask before starting. Leave blank for automatic (half of this machine&rsquo;s RAM).
+                  Takes effect the next time Phytograph starts.
+                </p>
+              </div>
+              <input
+                type="text"
+                inputMode="numeric"
+                data-testid="settings-memory-budget"
+                placeholder="auto"
+                value={memoryBudgetDraft}
+                onChange={(e) => setMemoryBudgetDraft(e.target.value)}
+                onBlur={commitMemoryBudget}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 }}
