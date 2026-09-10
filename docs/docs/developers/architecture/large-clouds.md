@@ -109,6 +109,22 @@ materialises a full copy of the hits — the tiled runner (next section) is the
 answer for neighbourhood tools, and per-block reads for the point-local ones
 (C2M, DEM pre-binning).
 
+### A bake re-homes the store
+
+`bake` removes deleted rows for good, and the renderer's background refresh
+queue calls it after every crop. On a store-backed session it used to
+boolean-index every column, which pulled a full in-RAM copy of the survivors
+back into the process and left the store recording the pre-bake point
+count. The next eviction's write-back then refused the mismatch, the spill
+failed, and the sweep dropped the session: a cropped 100 M-point cloud was
+lost after 30 idle minutes. `_compact_session_store_locked` now gathers the
+survivors block by block into a new `<id>.g<N>.store` directory, points the
+session at its maps and unlinks the old directory. The old files are never
+truncated in place, because a streaming reader may still hold a map between
+its blocks. Session delete removes every generation. Pinned by
+`tests/test_bake_store_backed.py` through the real crop, bake, evict and
+restore API.
+
 ## Tiled processing (the lidR engine)
 
 `backend-api/tiled.py` runs a whole-cloud algorithm per XY tile plus a collar

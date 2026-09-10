@@ -29379,6 +29379,73 @@ def _session_reattach_store(sess: "CloudSession", store_dir) -> None:
     sess.store = store
 
 
+def _compact_session_store_locked(sess: "CloudSession", keep: np.ndarray) -> None:
+    """Compact a STORE-BACKED session to the rows in `keep`, on disk.
+
+    `bake` removes deleted rows by boolean-indexing every point-aligned array.
+    On memory-mapped columns that produced a full in-RAM copy of the survivors
+    (the whole cloud back in RAM, for exactly the sessions the store exists
+    for) and left the store recording the PRE-bake point count, so the next
+    eviction's write-back raised, the spill failed and the sweep dropped the
+    edited cloud. A store's point count is fixed at creation, so the survivors
+    are gathered `DEFAULT_CHUNK_ROWS` at a time into a NEW store directory and
+    the session is pointed at its maps.
+
+    The old files are never shrunk in place: a streaming reader
+    (`_iter_session_hit_positions`, `_session_to_las(block_lock=...)`) holds a
+    reference to the old maps between its blocks, and truncating a mapped file
+    under it is a SIGBUS. The old directory is unlinked instead; live maps
+    survive an unlink on POSIX, and on Windows the delete is best-effort, with
+    the per-process spill root reaped at the next start.
+
+    Caller holds `_cloud_session_lock`."""
+    old = sess.store
+    idx = np.flatnonzero(keep)
+    n_new = int(idx.shape[0])
+    new_root = _session_spill_root() / f"{sess.session_id}.g{old.generation + 1}.store"
+    if new_root.exists():
+        _shutil.rmtree(new_root, ignore_errors=True)
+    new = session_store.SessionStore.create(new_root, n_new, attrs=dict(old.attrs))
+    # Carry the generation forward so the next bake names a fresh directory.
+    while new.generation < old.generation + 1:
+        new.bump_generation()
+
+    def _gather(name, arr):
+        m = new.allocate_column(name, arr.dtype, arr.shape[1:])
+        for a, b in session_store.iter_ranges(n_new):
+            m[a:b] = arr[idx[a:b]]
+        return m
+
+    fields = {}
+    for f in _SESSION_STORE_ARRAY_FIELDS:
+        arr = getattr(sess, f, None)
+        if arr is None or f == "deleted_base":
+            continue                      # bake clears deleted_base itself
+        if f == "deleted":
+            fields[f] = new.allocate_column(f, np.bool_)   # nothing is deleted after a bake
+            continue
+        fields[f] = _gather(f, arr)
+    extras = {}
+    mapping: Dict[str, str] = {}
+    used: set = set()
+    for slug, arr in sess.extras.items():
+        col = _next_extra_column(new, used)
+        used.add(col)
+        extras[slug] = _gather(col, arr)
+        mapping[col] = slug
+    new.set_attr("extras", mapping)
+    new.set_attr("extras_order", list(sess.extras.keys()))
+    new.flush()
+
+    for f in _SESSION_STORE_ARRAY_FIELDS:
+        setattr(sess, f, fields.get(f))
+    sess.extras = extras
+    sess.store = new
+    old_root = old.root
+    old.close()
+    _delete_session_store_dir(old_root)
+
+
 def _delete_session_store_dir(store_dir) -> None:
     try:
         _shutil.rmtree(_Path(store_dir), ignore_errors=True)
@@ -29507,6 +29574,10 @@ def _drop_session_spill(session_id: str) -> None:
     store_dir = _session_store_dir(session_id)
     if store_dir.exists():
         _delete_session_store_dir(store_dir)
+    # A bake re-homes a store-backed session in `<id>.g<N>.store`
+    # (`_compact_session_store_locked`), which the fixed name above misses.
+    for later in _session_spill_root().glob(f"{session_id}.g*.store"):
+        _delete_session_store_dir(later)
 
 
 def _trim_session_spills() -> None:
@@ -32335,23 +32406,29 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
     # the session's source of truth matches the baked octree and further edits
     # start from the reduced set.
     with _cloud_session_lock:
-        keep = ~sess.deleted
-        sess.positions = sess.positions[keep]
-        if sess.colors is not None:
-            sess.colors = sess.colors[keep]
-        if sess.intensity is not None:
-            sess.intensity = sess.intensity[keep]
-        for slug in list(sess.extras.keys()):
-            sess.extras[slug] = sess.extras[slug][keep]
-        if sess.timestamps is not None:
-            sess.timestamps = sess.timestamps[keep]
-        # Per-pulse beam origins are point-aligned too. Missing this re-slice left
-        # `beam_origins` at the PRE-bake length, and `_session_to_lad_arrays`
-        # indexes it with a survivor-length mask -> IndexError (a 500 on LAD) for
-        # exactly the moving-platform scans its ground-truth-origin path serves.
-        if sess.beam_origins is not None:
-            sess.beam_origins = sess.beam_origins[keep]
-        sess.deleted = np.zeros(len(sess.positions), dtype=bool)
+        keep = np.asarray(~sess.deleted)
+        if sess.store is not None:
+            # Store-backed: compact ON DISK into a new store (see the helper).
+            # Nothing deleted means nothing to move; the maps stay as they are.
+            if not keep.all():
+                _compact_session_store_locked(sess, keep)
+        else:
+            sess.positions = sess.positions[keep]
+            if sess.colors is not None:
+                sess.colors = sess.colors[keep]
+            if sess.intensity is not None:
+                sess.intensity = sess.intensity[keep]
+            for slug in list(sess.extras.keys()):
+                sess.extras[slug] = sess.extras[slug][keep]
+            if sess.timestamps is not None:
+                sess.timestamps = sess.timestamps[keep]
+            # Per-pulse beam origins are point-aligned too. Missing this re-slice left
+            # `beam_origins` at the PRE-bake length, and `_session_to_lad_arrays`
+            # indexes it with a survivor-length mask -> IndexError (a 500 on LAD) for
+            # exactly the moving-platform scans its ground-truth-origin path serves.
+            if sess.beam_origins is not None:
+                sess.beam_origins = sess.beam_origins[keep]
+            sess.deleted = np.zeros(len(sess.positions), dtype=bool)
         sess.deleted_history = []
         sess.deleted_base = None
         # Bake COMPACTS every point-aligned array, so every absolute index the
