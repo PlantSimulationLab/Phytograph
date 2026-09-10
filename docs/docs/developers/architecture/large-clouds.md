@@ -91,6 +91,35 @@ What is *not* yet chunked: tools still call `positions[keep].copy()` through
 materialises a full copy — that is the tiled runner's job (next section of
 the plan), for which the store's `iter_chunks` is the input.
 
+## Tiled processing (the lidR engine)
+
+`backend-api/tiled.py` runs a whole-cloud algorithm per XY tile plus a collar
+of neighbouring points, keeps only the tile's own results, and merges — what
+lidR's `LAScatalog`, LAStools' `lastile -buffer` and PDAL's `filters.splitter`
+do. Points are binned once by cell id (one `argsort`), so a tile's core and
+collar are contiguous ranges of the sorted order rather than a pass over N.
+The collar is the algorithm's own scale; too small a collar shows up as
+seams, which `tests/test_tiled.py` checks separately within 0.5 m of tile
+boundaries rather than letting the whole-cloud average hide it.
+
+**Ground segmentation** is the first tool on it. From
+`PHYTOGRAPH_GROUND_TILE_MIN_POINTS` (default 4 M) up, `segment_ground` runs
+per tile of about `PHYTOGRAPH_GROUND_TILE_TARGET_POINTS` (3 M) points with a
+collar of 30 cloth resolutions (2–30 m). The CSF working set (two copies of
+the points plus the cloth, ~60 B/pt) is then bounded by one tile instead of
+the cloud, which is what keeps a 100 M-point run inside a 16 GB laptop's
+budget. With **Measure from the scan** on, the ground tolerance is measured
+once on an even stride sample and applied to every tile, so tiles cannot
+disagree about where the ground is; the session endpoint reports the plan
+(`tiled: {tiles, tile_m, buffer_m, …}`). Tiles run sequentially inside the
+killable worker for now; parallel tiles are the next step and need a spawn-
+based pool (the worker must not fork with libhelios loaded).
+
+Candidates for the same treatment, each with its natural collar: radius /
+voxel outlier removal (the radius), local PCA wood/leaf features (the largest
+scale), normals (the search radius), DEM pre-binning (none), C2M distance
+(none — purely per point).
+
 ## The memory budget
 
 `backend-api/memory_budget.py` measures the machine (via `psutil`, with an
@@ -98,7 +127,11 @@ the plan), for which the store's `iter_chunks` is the input.
 if pinned, otherwise `PHYTOGRAPH_MEMORY_BUDGET_FRACTION` (default 0.5) of
 physical RAM. A fraction rather than a constant so the same build scales from
 a 16 GB laptop (~8 GB budget) to a 64 GB workstation (~32 GB) without a
-setting. Every large-cloud threshold in the backend derives from this number.
+setting — and the user can still pin it: **Settings → Performance → Memory
+budget (MB)** is passed to the sidecar as `PHYTOGRAPH_MEMORY_BUDGET_BYTES`
+at spawn (`memoryBudgetEnv()` in `src/main/backend.ts`, pinned by
+`memoryBudgetEnv.test.ts`), so it takes effect on the next backend start.
+Every large-cloud threshold in the backend derives from this number.
 
 `GET /health` reports the budget, the backend's resident set, and what is
 currently admitted against the budget; the slow-request log line

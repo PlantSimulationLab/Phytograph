@@ -105,6 +105,14 @@ the run is under way. A cloth resolution far too fine for the cloud's extent
 (tens of millions of cloth cells) is refused with the coarsest resolution
 that would work — that combination hangs rather than merely slows.
 
+Very large clouds (above a few million points) are segmented in overlapping
+tiles behind the scenes, so the memory the run needs no longer grows with
+the cloud. The result is the same as an untiled run to within a fraction of
+a percent, including along tile edges; with **Measure from the scan** on,
+the tolerance is measured once for the whole cloud rather than per tile.
+The memory the estimate is judged against is **Settings → Performance →
+Memory budget (MB)** (automatic by default: half of this machine's RAM).
+
 ## Inspect and use the result
 
 The classification is stored as a scalar attribute named **Ground Class**.

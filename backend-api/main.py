@@ -29,6 +29,7 @@ import copy as _copy
 import denoise
 import memory_budget
 import session_store
+import tiled
 from pytexit import py2tex
 
 # ==================== PyHelios source submodule ====================
@@ -5327,8 +5328,17 @@ def _ground_cost_estimate(n_points: int, extent_m: float, cloth_resolution: floa
     t_csf = (_WORKER_STARTUP_S + n / _RATE_WORKER_STAGE_PTS_PER_S + n / _RATE_CSF_PTS_PER_S
              + nodes * max(1, int(iterations)) / _RATE_CLOTH_NODE_ITERS_PER_S)
     t_rebuild = _convert_seconds(rebuild_points)
-    # Parent copy of the hits + the worker's copy + the labels, plus the cloth.
-    bytes_needed = n * (24 + 24 + 8) + nodes * 100
+    # Parent copy of the hits + the worker's copy + the labels, plus CSF's own
+    # working set (two more copies and the cloth) - bounded by one tile when
+    # the run will be tiled (see _segment_ground_tiled).
+    if n >= _ground_tile_min_points():
+        tile_pts = min(n, _ground_tile_target_points())
+        tile_m = tiled.auto_tile_size(n, (extent_m, extent_m), target_points=tile_pts,
+                                      buffer_m=_ground_tile_buffer_m(cloth_resolution))
+        csf_bytes = tile_pts * 60 + _cloth_node_count(tile_m, cloth_resolution) * 100
+    else:
+        csf_bytes = n * 36 + nodes * 100
+    bytes_needed = n * (24 + 24 + 8) + csf_bytes
     breakdown = f"cloth filter ~{_fmt_duration(t_csf)}, octree rebuild ~{_fmt_duration(t_rebuild)}"
     return t_csf + t_rebuild, int(bytes_needed), breakdown
 
@@ -15079,9 +15089,22 @@ def segment_ground(
     time_step: float = 0.65,
     auto_class_threshold: bool = False,
     meta: "Optional[dict]" = None,
+    tile: "Optional[bool]" = None,
 ) -> np.ndarray:
     """Classify each point as ground (1) or plant (2) via the Cloth Simulation
     Filter (Zhang et al. 2016).
+
+    `tile` = None decides from the point count (`_ground_tile_min_points`):
+    a large cloud runs per buffered XY tile through `tiled.run_tiled`, which
+    bounds the CSF working set (its two copies of the points plus the cloth)
+    by one tile instead of the whole cloud - the whole-cloud form needs ~60 B
+    per point inside the worker on top of the parent's copy, which is what
+    put a 100 M-point run past a 16 GB laptop. The collar is 30 cloth
+    resolutions (2-30 m), the scale over which the cloth's answer at a point
+    can depend on its neighbours; `tests/test_tiled.py` pins the seam
+    agreement against the untiled result. With `auto_class_threshold` the
+    threshold is measured ONCE on a stride sample and applied to every tile,
+    so tiles cannot disagree about where the ground is.
 
     CSF drapes an inverted cloth over the point cloud and labels points the
     cloth settles onto as ground. Defaults here are tuned for close-range plant
@@ -15110,6 +15133,14 @@ def segment_ground(
     import tempfile
 
     n = len(points)
+    if tile is None:
+        tile = n >= _ground_tile_min_points()
+    if tile and n:
+        return _segment_ground_tiled(
+            points, cloth_resolution=cloth_resolution, rigidness=rigidness,
+            class_threshold=class_threshold, iterations=iterations,
+            slope_smooth=slope_smooth, time_step=time_step,
+            auto_class_threshold=auto_class_threshold, meta=meta)
     csf = CSF.CSF()
     csf.params.bSloopSmooth = bool(slope_smooth)
     csf.params.cloth_resolution = float(cloth_resolution)
@@ -15171,6 +15202,70 @@ def segment_ground(
         meta.setdefault("class_threshold", float(class_threshold))
         meta.setdefault("method", "manual")
         meta.setdefault("auto", False)
+    return labels
+
+
+def _ground_tile_min_points() -> int:
+    raw = os.environ.get("PHYTOGRAPH_GROUND_TILE_MIN_POINTS")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return tiled.MIN_POINTS_TO_TILE
+
+
+def _ground_tile_target_points() -> int:
+    raw = os.environ.get("PHYTOGRAPH_GROUND_TILE_TARGET_POINTS")
+    if raw is not None:
+        try:
+            return max(1000, int(raw))
+        except ValueError:
+            pass
+    return tiled.DEFAULT_TARGET_POINTS
+
+
+def _ground_tile_buffer_m(cloth_resolution: float) -> float:
+    """Collar width for tiled CSF: 30 cloth cells, clamped to 2-30 m (lidR's
+    default for ground classification is ~30 m on 0.5-1 m airborne cloths)."""
+    return float(np.clip(30.0 * float(cloth_resolution), 2.0, 30.0))
+
+
+def _segment_ground_tiled(points: np.ndarray, *, cloth_resolution: float, rigidness: int,
+                          class_threshold: float, iterations: int, slope_smooth: bool,
+                          time_step: float, auto_class_threshold: bool,
+                          meta: "Optional[dict]") -> np.ndarray:
+    """`segment_ground` per buffered XY tile (see its docstring)."""
+    n = len(points)
+    buffer_m = _ground_tile_buffer_m(cloth_resolution)
+    plan = tiled.TilePlan.build(points[:, :2], buffer_m=buffer_m,
+                                target_points=_ground_tile_target_points())
+    threshold = float(class_threshold)
+    method = "manual"
+    if auto_class_threshold:
+        # Measure the threshold once, on an even stride sample the untiled
+        # estimator can afford, then hold it fixed across the tiles.
+        stride = max(1, int(math.ceil(n / 2_000_000)))
+        sample_meta: dict = {}
+        segment_ground(np.ascontiguousarray(points[::stride]), cloth_resolution=cloth_resolution,
+                       rigidness=rigidness, class_threshold=class_threshold,
+                       iterations=iterations, slope_smooth=slope_smooth, time_step=time_step,
+                       auto_class_threshold=True, meta=sample_meta, tile=False)
+        threshold = float(sample_meta.get("class_threshold", class_threshold))
+        method = "auto (sampled)" if sample_meta.get("auto") else "manual"
+
+    def _one(chunk, core):
+        return segment_ground(chunk, cloth_resolution=cloth_resolution, rigidness=rigidness,
+                              class_threshold=threshold, iterations=iterations,
+                              slope_smooth=slope_smooth, time_step=time_step,
+                              auto_class_threshold=False, meta=None, tile=False)
+
+    labels = tiled.run_tiled(plan, points, _one, out_dtype=np.int32, fill=GROUND_CLASS_PLANT)
+    if meta is not None:
+        meta.setdefault("class_threshold", threshold)
+        meta.setdefault("method", method)
+        meta.setdefault("auto", method.startswith("auto"))
+        meta["tiled"] = plan.describe()
     return labels
 
 
@@ -33004,7 +33099,8 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
     common = {"session_id": session_id, "point_count": int(len(pts)),
               "class_threshold_used": gmeta.get("class_threshold"),
-              "class_threshold_method": gmeta.get("method")}
+              "class_threshold_method": gmeta.get("method"),
+              "tiled": gmeta.get("tiled")}
     # Deferred: the caller is about to rebuild this octree alongside the split's
     # children. Return NO octree fields — see `defer_octree`.
     if request.defer_octree:
