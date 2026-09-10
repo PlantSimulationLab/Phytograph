@@ -17,8 +17,21 @@ from logging.handlers import RotatingFileHandler
 # as a killable subprocess so the parent backend can SIGKILL it on Cancel. Done
 # at the very top, before the heavy matplotlib/uvicorn imports, so the worker
 # pays only for what it needs.
+# Spawn-pool re-entry comes FIRST. The tiled tools (tiled.run_tiled_parallel)
+# run their tiles in a `multiprocessing` spawn pool whose children are this
+# same binary; freeze_support() recognises a pool child from its argv (via
+# PyInstaller's multiprocessing runtime hook, on every platform), runs the
+# child's task loop and exits here - it must never fall through into the
+# seg-worker dispatch below or the server start, or every pool child would
+# rerun the whole segmentation (the worker's env is inherited). In dev the
+# children are `python -c` processes and this is a no-op.
+import multiprocessing as _mp
+_mp.freeze_support()
+
 _SEG_WORKER_DIR = os.environ.get("PHYTOGRAPH_SEG_WORKER")
-if _SEG_WORKER_DIR:
+# `__name__` guard for the same reason: a spawn child that imports this module
+# as `__mp_main__` must not start a second segmentation.
+if _SEG_WORKER_DIR and __name__ == "__main__":
     import seg_worker
     sys.exit(seg_worker.run(_SEG_WORKER_DIR))
 

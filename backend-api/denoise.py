@@ -452,7 +452,8 @@ def denoise_mask(points: np.ndarray, method: str = "ror",
     # query arrays by one tile. SOR is global by definition (its threshold is
     # a mean over the whole cloud) and stays untiled.
     if method in ("ror", "voxel_count") and len(usable) >= tile_min_points():
-        keep_sub, params_used, p50, p95, tile_info = _denoise_tiled(usable, method, params)
+        keep_sub, params_used, p50, p95, tile_info = _denoise_tiled(
+            usable, method, params, file_rows=np.flatnonzero(finite))
         keep = np.zeros(total, dtype=bool)
         keep[finite] = keep_sub
         return _finish(keep, total, n_non_finite, method, params_used, p50, p95,
@@ -562,7 +563,8 @@ def _tile_target_points() -> int:
     return TILE_TARGET_POINTS
 
 
-def _denoise_tiled(usable: np.ndarray, method: str, params: Optional[dict]):
+def _denoise_tiled(usable: np.ndarray, method: str, params: Optional[dict],
+                   file_rows: Optional[np.ndarray] = None):
     """ROR / voxel-count per buffered tile. Parameters are resolved ONCE, on a
     spatially contiguous sample (the most populated tile, capped), so every
     tile applies the same radius / voxel - a stride sample would overstate the
@@ -596,21 +598,41 @@ def _denoise_tiled(usable: np.ndarray, method: str, params: Optional[dict]):
 
     if method == "ror":
         buffer_m = float(params_used["radius"])
-        nb = int(params_used["nb_points"])
-
-        def fn(chunk, core):
-            return radius_outlier_mask(chunk, nb, buffer_m, tree=cKDTree(chunk))
+        job = ("denoise", "_ror_tile_job")
+        job_kwargs = {"nb_points": int(params_used["nb_points"]), "radius": buffer_m}
+        per_point = 80          # cKDTree + the (rows, k) query arrays
     else:
         buffer_m = float(params_used["voxel"])
-        mp = int(params_used["min_points"])
-        origin = usable.min(axis=0)
-
-        def fn(chunk, core):
-            return voxel_count_mask(chunk, buffer_m, mp, origin=origin)
+        job = ("denoise", "_voxel_tile_job")
+        job_kwargs = {"voxel": buffer_m, "min_points": int(params_used["min_points"]),
+                      "origin": usable.min(axis=0).tolist()}
+        per_point = 40
 
     plan = tiled.TilePlan.build(usable[:, :2], buffer_m=buffer_m, target_points=_tile_target_points())
-    keep = tiled.run_tiled(plan, usable, fn, out_dtype=bool, fill=True)
-    return keep, params_used, p50, p95, plan.describe()
+    import memory_budget
+    workers = tiled.worker_count(len(plan.tiles()), per_worker_bytes=_tile_target_points() * per_point,
+                                 budget_bytes=memory_budget.budget_bytes())
+    if workers > 1:
+        with tiled.staged_points(usable, file_rows=file_rows) as (path, rows):
+            keep = tiled.run_tiled_parallel(plan, path, job, workers=workers, job_kwargs=job_kwargs,
+                                            file_rows=rows, out_dtype=bool, fill=True)
+    else:
+        fn = _resolve_local_job(job[1])
+        keep = tiled.run_tiled(plan, usable, lambda chunk, core: fn(chunk, core, **job_kwargs),
+                               out_dtype=bool, fill=True)
+    return keep, params_used, p50, p95, {**plan.describe(), "workers": int(workers)}
+
+
+def _ror_tile_job(chunk, core, *, nb_points, radius):
+    return radius_outlier_mask(chunk, int(nb_points), float(radius), tree=cKDTree(chunk))
+
+
+def _voxel_tile_job(chunk, core, *, voxel, min_points, origin):
+    return voxel_count_mask(chunk, float(voxel), int(min_points), origin=np.asarray(origin, dtype=np.float64))
+
+
+def _resolve_local_job(name):
+    return {"_ror_tile_job": _ror_tile_job, "_voxel_tile_job": _voxel_tile_job}[name]
 
 
 def denoise_labels(points: np.ndarray, method: str = "ror",

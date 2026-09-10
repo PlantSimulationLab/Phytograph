@@ -64,7 +64,11 @@ def run(workdir: str) -> int:
             request = json.load(f)
         tool = request["tool"]
         params = request.get("params", {})
-        points = np.load(os.path.join(workdir, "input.npy"))
+        input_path = os.path.join(workdir, "input.npy")
+        points = np.load(input_path)
+        # The tiled tools can fan their tiles out to a spawn pool; the children
+        # memory-map THIS file rather than receiving the points by pickle.
+        os.environ["PHYTOGRAPH_TILE_POINTS_NPY"] = input_path
 
         if tool == "poisson":
             # Deliberately does NOT `import main`: the whole point is to run the

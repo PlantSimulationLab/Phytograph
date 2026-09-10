@@ -230,3 +230,138 @@ def iter_tiles(plan: TilePlan, points: np.ndarray) -> Iterator[Tuple[Tile, np.nd
         idx, core = plan.gather(tile)
         if idx.size:
             yield tile, idx, core, np.ascontiguousarray(points[idx])
+
+
+# ---- parallel tiles ----------------------------------------------------------------
+#
+# Tiles are independent, so they can run on every core - but only in separate
+# PROCESSES: the whole-cloud algorithms here (CSF, cKDTree queries) hold the
+# GIL or serialise on it, and threads would not help. The pool is `spawn`,
+# never fork: the caller may be the backend's killable worker, which has
+# open3d (and in the backend itself libhelios) loaded, and a forked copy of
+# either crashes in the post-fork window. Spawned children inherit the
+# worker's process group, so a cancel that `killpg`s the worker reaps them.
+#
+# The points reach the children through a `.npy` FILE (`points_path`), which
+# each child memory-maps and gathers its own tile from by index - the seg
+# worker already has its input staged as exactly that file. Only the tile's
+# core results travel back. A job is named by (module, function) so the task
+# pickles are a few strings plus one index array per tile.
+import multiprocessing as _mp
+import os as _os
+
+
+def worker_count(n_tiles: int, *, per_worker_bytes: int, budget_bytes: int,
+                 baseline_bytes: int = 400 * 1024 ** 2) -> int:
+    """How many pool processes to run: the env pin `PHYTOGRAPH_TILE_WORKERS`,
+    else min(cores, tiles, what the memory budget allows). Each child costs
+    `baseline_bytes` (a Python with numpy/scipy/CSF imported) plus one tile's
+    working set. 1 disables the pool (tiles run in-process)."""
+    raw = _os.environ.get("PHYTOGRAPH_TILE_WORKERS")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    cpu = _os.cpu_count() or 1
+    if n_tiles < 4 or cpu < 2:
+        return 1
+    fits = max(1, int(budget_bytes // max(1, per_worker_bytes + baseline_bytes)))
+    return int(max(1, min(cpu, n_tiles, fits)))
+
+
+def _resolve_job(module: str, name: str):
+    import importlib
+    obj = importlib.import_module(module)
+    for part in name.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+def _tile_task(args):
+    """Pool worker body: memmap the points file, gather the tile's rows, run
+    the job, and return only the core rows' results with their output rows."""
+    points_path, file_idx, out_idx, core, module, name, kwargs = args
+    points = np.load(points_path, mmap_mode="r")
+    chunk = np.ascontiguousarray(points[file_idx])
+    fn = _resolve_job(module, name)
+    res = np.asarray(fn(chunk, core, **kwargs))
+    if res.shape[0] != file_idx.shape[0]:
+        raise ValueError(f"tile job returned {res.shape[0]} values for {file_idx.shape[0]} points")
+    return out_idx, res[core]
+
+
+class staged_points:
+    """Context manager yielding `(path, file_rows)` for `run_tiled_parallel`.
+
+    Inside the backend's killable worker the input is already on disk
+    (`PHYTOGRAPH_TILE_POINTS_NPY`, set by seg_worker) and is reused; `file_rows`
+    maps the plan's rows onto that file when the caller tiled a SUBSET of it
+    (denoise drops non-finite rows first). Anywhere else the points are saved
+    to a temporary `.npy` for the pool's lifetime.
+    """
+
+    def __init__(self, points: np.ndarray, *, file_rows: Optional[np.ndarray] = None):
+        self._points = points
+        self._file_rows = file_rows
+        self._tmp = None
+
+    def __enter__(self):
+        path = _os.environ.get("PHYTOGRAPH_TILE_POINTS_NPY")
+        if path and _os.path.isfile(path):
+            try:
+                n_file = np.load(path, mmap_mode="r").shape[0]
+            except Exception:
+                n_file = -1
+            rows = self._file_rows
+            if rows is None and n_file == self._points.shape[0]:
+                return path, None
+            if rows is not None and n_file > 0 and (rows.size == 0 or int(rows.max()) < n_file):
+                return path, rows
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory(prefix="phyto_tiles_")
+        tmp_path = _os.path.join(self._tmp.name, "points.npy")
+        np.save(tmp_path, np.ascontiguousarray(self._points))
+        return tmp_path, None
+
+    def __exit__(self, *exc):
+        if self._tmp is not None:
+            self._tmp.cleanup()
+        return False
+
+
+def run_tiled_parallel(plan: TilePlan, points_path: str, job: Tuple[str, str], *,
+                       workers: int, job_kwargs: Optional[dict] = None,
+                       file_rows: Optional[np.ndarray] = None,
+                       out_dtype=np.int32, fill=0,
+                       progress: Optional[Callable[[float, str], None]] = None,
+                       should_cancel: Optional[Callable[[], bool]] = None) -> np.ndarray:
+    """`run_tiled` over a spawn pool of `workers` processes. `job` is
+    ("module", "function") resolving to `fn(chunk, core, **job_kwargs)`;
+    `points_path` is an `.npy` holding the plan's points (or a superset of
+    them, with `file_rows` mapping plan row -> file row)."""
+    out = np.full(plan.n, fill, dtype=out_dtype)
+    tiles = plan.tiles()
+    total = len(tiles)
+    if total == 0:
+        return out
+    module, name = job
+    kwargs = dict(job_kwargs or {})
+    tasks = []
+    for tile in tiles:
+        idx, core = plan.gather(tile)
+        if idx.size:
+            file_idx = idx if file_rows is None else file_rows[idx]
+            tasks.append((points_path, file_idx, idx[core], core, module, name, kwargs))
+    ctx = _mp.get_context("spawn")
+    done = 0
+    with ctx.Pool(processes=max(1, int(workers))) as pool:
+        for idx_core, res_core in pool.imap_unordered(_tile_task, tasks):
+            out[idx_core] = res_core
+            done += 1
+            if should_cancel is not None and should_cancel():
+                pool.terminate()
+                raise TiledCancelled()
+            if progress is not None:
+                progress(done / total, f"Tile {done} of {total}")
+    return out

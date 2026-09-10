@@ -127,9 +127,25 @@ the cloud, which is what keeps a 100 M-point run inside a 16 GB laptop's
 budget. With **Measure from the scan** on, the ground tolerance is measured
 once on an even stride sample and applied to every tile, so tiles cannot
 disagree about where the ground is; the session endpoint reports the plan
-(`tiled: {tiles, tile_m, buffer_m, …}`). Tiles run sequentially inside the
-killable worker for now; parallel tiles are the next step and need a spawn-
-based pool (the worker must not fork with libhelios loaded).
+(`tiled: {tiles, tile_m, buffer_m, workers, …}`).
+
+**Tiles run on every core.** `tiled.run_tiled_parallel` fans the tiles out
+to a `multiprocessing` **spawn** pool (never fork: the worker has open3d
+loaded and the backend libhelios, and a forked copy of either crashes in
+the post-fork window). Children memory-map the worker's staged `input.npy`
+(`PHYTOGRAPH_TILE_POINTS_NPY`, set by `seg_worker`) and gather their own
+tile by index, so a task pickle is a few strings plus one index array, and
+only the core rows' results come back. `tiled.worker_count` picks
+min(cores, tiles, what the memory budget allows at one tile plus ~400 MB
+per child); `PHYTOGRAPH_TILE_WORKERS` pins it, `1` disables the pool. The
+children inherit the worker's process group, so a cancel that `killpg`s the
+worker reaps them. In the frozen bundle the children are the backend
+binary itself: `backend_wrapper.py` calls `multiprocessing.freeze_support()`
+before anything else so a pool child runs its task loop and exits, and the
+seg-worker dispatch is guarded by `__name__ == "__main__"` so a child that
+imports the wrapper as `__mp_main__` cannot start a second segmentation.
+Both are pinned at source level, and the pool's answer is pinned equal to
+the sequential one for ground segmentation and both denoise criteria.
 
 **Outlier removal** (`denoise.py`) tiles its two local criteria the same
 way from `PHYTOGRAPH_DENOISE_TILE_MIN_POINTS` (4 M): radius outlier removal

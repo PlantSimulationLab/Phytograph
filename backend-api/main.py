@@ -15254,19 +15254,37 @@ def _segment_ground_tiled(points: np.ndarray, *, cloth_resolution: float, rigidn
         threshold = float(sample_meta.get("class_threshold", class_threshold))
         method = "auto (sampled)" if sample_meta.get("auto") else "manual"
 
-    def _one(chunk, core):
-        return segment_ground(chunk, cloth_resolution=cloth_resolution, rigidness=rigidness,
-                              class_threshold=threshold, iterations=iterations,
-                              slope_smooth=slope_smooth, time_step=time_step,
-                              auto_class_threshold=False, meta=None, tile=False)
-
-    labels = tiled.run_tiled(plan, points, _one, out_dtype=np.int32, fill=GROUND_CLASS_PLANT)
+    job_kwargs = dict(cloth_resolution=cloth_resolution, rigidness=rigidness,
+                      class_threshold=threshold, iterations=iterations,
+                      slope_smooth=slope_smooth, time_step=time_step)
+    n_tiles = len(plan.tiles())
+    # CSF's working set per tile: two copies of the points plus the cloth.
+    tile_pts = _ground_tile_target_points()
+    per_worker = tile_pts * 60 + _cloth_node_count(plan.tile_m + 2 * buffer_m, cloth_resolution) * 100
+    workers = tiled.worker_count(n_tiles, per_worker_bytes=per_worker,
+                                 budget_bytes=memory_budget.budget_bytes())
+    if workers > 1:
+        with tiled.staged_points(points) as (path, rows):
+            labels = tiled.run_tiled_parallel(
+                plan, path, ("main", "_ground_tile_job"), workers=workers,
+                job_kwargs=job_kwargs, file_rows=rows, out_dtype=np.int32,
+                fill=GROUND_CLASS_PLANT)
+    else:
+        labels = tiled.run_tiled(
+            plan, points, lambda chunk, core: _ground_tile_job(chunk, core, **job_kwargs),
+            out_dtype=np.int32, fill=GROUND_CLASS_PLANT)
     if meta is not None:
         meta.setdefault("class_threshold", threshold)
         meta.setdefault("method", method)
         meta.setdefault("auto", method.startswith("auto"))
-        meta["tiled"] = plan.describe()
+        meta["tiled"] = {**plan.describe(), "workers": int(workers)}
     return labels
+
+
+def _ground_tile_job(chunk: np.ndarray, core: np.ndarray, **params) -> np.ndarray:
+    """One tile of `_segment_ground_tiled` - module-level so a spawn-pool child
+    can resolve it by name (`tiled.run_tiled_parallel`)."""
+    return segment_ground(chunk, auto_class_threshold=False, meta=None, tile=False, **params)
 
 
 # ==================== WOOD/LEAF SEGMENTATION HELPER (geometric, non-ML) ====================
