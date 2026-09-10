@@ -15,14 +15,38 @@ uint16 (2 B/pt), timestamps as float64 (8 B/pt), and a one-byte delete mask.
 A typical terrestrial LAS import is ~57 B/pt; a RIEGL position with its
 thirteen attributes is ~87 B/pt. So:
 
-| Points | Resident session | Peak during import (2x) |
+| Points | Resident session | Peak during import |
 |---|---|---|
-| 10 M | 0.6–0.9 GB | 1.2–1.7 GB |
-| 30 M | 1.7–2.6 GB | 3.4–5.2 GB |
-| 100 M | 5.7–8.7 GB | 11–17 GB |
+| 10 M | 0.6–0.9 GB | ~0.7–1.0 GB |
+| 30 M | 1.7–2.6 GB | ~2–3 GB |
+| 100 M | 5.7–8.7 GB | ~6.5–10 GB |
 
 `memory_budget.bytes_per_point()` and `estimate_session_bytes()` are the
 single source of these numbers in code.
+
+### Import reads in chunks
+
+`_read_las_into_arrays` used to `reader.read()` the whole LAS and then
+`np.stack(...).astype(float64)` it, so the entire laspy record and the
+float64 position copy were resident at once — a 2x transient. It now sizes
+every column from the header and fills them from `chunk_iterator`
+(`_LAS_READ_CHUNK` = 2 M rows), so the peak is the session plus one chunk.
+Columns whose fate depends on their contents (constant standard dims and
+all-zero intensity are pruned; `gps_time` is kept only when it varies) are
+tracked per chunk in their native dtype and cast to float32 only if kept.
+The same chunked read backs `_file_miss_mask`, which used to load a whole
+LAS to get one byte per point. PLY, E57 and PCD still materialise their own
+arrays inside their converters before the (now chunked) LAS read; those are
+the next targets.
+
+### Undo history is deltas, not snapshots
+
+Each committed delete used to push `sess.deleted.copy()` — a full (N,) bool
+mask — onto `deleted_history`, so fifty erase clicks on a 100 M-point cloud
+were 5 GB of undo history, more than the positions. It now records the
+indices each step *newly* deleted and `reset_edits` replays them; when the
+bounded stack (`_MAX_DELETED_HISTORY`) drops its oldest step, that step's
+deletions fold into `deleted_base`, the floor the replay starts from.
 
 ## The memory budget
 
@@ -41,9 +65,9 @@ says what a slow request cost.
 ### Admission control
 
 Heavy paths declare their working set to `_ADMISSION.admit(bytes, label)`
-before allocating it: the import read (which briefly holds the LAS record
-and the float64 copy at once), the killable segmentation workers (parent
-copy + worker copy + labels), and export (a copy of every surviving column).
+before allocating it: the import read (the session's columns plus one
+chunk), the killable segmentation workers (parent copy + worker copy +
+labels), and export (a copy of every surviving column).
 A job waits until it fits beside what is already running; a job larger than
 the whole budget is admitted **alone** and logged rather than refused. The
 budget is advisory for a lone job and a hard cap only on concurrency, because
@@ -102,6 +126,26 @@ either way and only the coarse LOD nodes differ. Pin a method with
 to JSON 0.04 s, staging the worker's input 0.08 s. What made "ground
 segmentation above ~20 M points" slow was the three Poisson reconverts that
 followed it.
+
+## Measured so far (10 M points, M-series laptop, 10 cores)
+
+Synthetic terrestrial cloud from `tools/make_big_cloud.py` (10 % misses),
+through the real API via `tests/bench/`. Peak = resident set of the backend
+plus its children (worker, PotreeConverter) above the idle baseline.
+
+| Stage | Before (Poisson LOD, whole-file read) | After (random LOD from 2 M, chunked read) |
+|---|---|---|
+| import | 14.8 s, +2.9 GB | 9.7 s, +2.9 GB |
+| ground segmentation (no rebuild) | 2.4 s, +2.5 GB | 2.6 s, +2.5 GB |
+| split into ground + plant (3 rebuilds) | 16.5 s, +5.7 GB | 12.5 s, +4.1 GB |
+| delete region + rebuild | 11.0 s, +4.1 GB | 6.0 s, +3.1 GB |
+| export LAZ | 2.2 s | 2.3 s |
+| LAS read alone (`_read_las_into_arrays`) | 0.22 s, 1138 MB peak | 0.43 s, 905 MB peak |
+
+The rebuild peaks are dominated by PotreeConverter's own working set, which
+is the next thing to measure at 30 M and 100 M (its chunking is what keeps
+it out-of-core; how much RAM it takes per run decides how many rebuilds can
+overlap under the budget).
 
 ## Benchmark harness
 

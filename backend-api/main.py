@@ -23914,10 +23914,18 @@ def _file_miss_mask(file_path: str, ascii_format: Optional[str]) -> Optional[np.
         ext = os.path.splitext(file_path)[1].lower().lstrip('.')
         if ext in _LAS_EXTENSIONS:
             import laspy
-            las = laspy.read(file_path)
-            if _MISS_SLUG in set(las.point_format.dimension_names):
-                return np.asarray(las[_MISS_SLUG]).astype(np.float64) != 0
-            return None
+            # One column, one chunk at a time: this used to `laspy.read` the
+            # whole file to get a single byte per point.
+            with laspy.open(file_path) as reader:
+                if _MISS_SLUG not in set(reader.header.point_format.dimension_names):
+                    return None
+                out = np.empty(int(reader.header.point_count), dtype=bool)
+                off = 0
+                for chunk in reader.chunk_iterator(_LAS_READ_CHUNK):
+                    m = len(chunk)
+                    out[off:off + m] = np.asarray(chunk[_MISS_SLUG]).astype(np.float64) != 0
+                    off += m
+                return out[:off]
         if ext in _PANDAS_EXTENSIONS:
             # Only an explicit is_miss column counts; roles come from the same
             # tokenizer the loader uses, so the column index matches the file.
@@ -29198,7 +29206,14 @@ class CloudSession:
     extras: Dict[str, np.ndarray]    # slug -> (N,) float32 scalar extra-dim columns
     extra_dims_meta: List[dict]      # ordered [{slug, label}] for the octree sidecar
     deleted: np.ndarray              # (N,) bool — True == deleted (hidden)
-    deleted_history: List[np.ndarray]  # mask snapshots, one per committed delete (undo)
+    # Undo stack: one int64 index array per committed delete, holding the
+    # points that step NEWLY deleted (a delta, not a snapshot). `reset_edits`
+    # replays the first k over a cleared mask. Deltas because a snapshot is a
+    # full (N,) mask — fifty erase clicks on a 100 M-point cloud were 5 GB of
+    # undo history, more than the positions — while an erase touches thousands.
+    # INVARIANT: every path that mutates `deleted` either pushes here or
+    # clears this list (bake/filter/extract do), or a replayed undo is wrong.
+    deleted_history: List[np.ndarray]
     octree_cache_id: Optional[str]   # currently-built derived octree, or None if stale
     created_at: float
     last_accessed: float = 0.0       # bumped on every read/mutate; drives idle eviction
@@ -29211,6 +29226,10 @@ class CloudSession:
     # so direct constructions that predate this field (tests, internal helpers)
     # need no change — a session with no shift behaves exactly as before.
     world_shift: Optional[np.ndarray] = None  # (3,) float64 | None
+    # Deletions that fell off the bounded undo stack (see delete_cloud_region):
+    # the floor `reset_edits` replays the surviving deltas onto. None until the
+    # stack is first truncated; cleared wherever `deleted_history` is.
+    deleted_base: Optional[np.ndarray] = None
     # Explicitly recovered sky/miss points (see POST .../backfill-misses). A
     # SEPARATE lightweight buffer rather than rows interleaved into `positions`/
     # `extras`, so a sparse scan that is 30-50% sky doesn't pad every scalar
@@ -29479,8 +29498,22 @@ class LasReadResult:
     beam_origins: Optional[np.ndarray] = None
 
 
+# Rows per laspy chunk on the import read. 2 M rows of a full point-format-3
+# record is ~80 MB, which is the transient the read now costs instead of the
+# whole file plus a float64 copy.
+_LAS_READ_CHUNK = 2_000_000
+
+
+def _las_dim_dtype(dim) -> np.dtype:
+    """Native dtype of a laspy dimension; bit-packed sub-fields (return_number,
+    classification in point formats 0-5, ...) report no dtype and fit uint8."""
+    dt = getattr(dim, "dtype", None)
+    return np.dtype(dt) if dt is not None else np.dtype(np.uint8)
+
+
 def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
-    """Read a LAS file fully into RAM as the session's source-of-truth arrays.
+    """Read a LAS file into RAM as the session's source-of-truth arrays, in
+    chunks, straight into preallocated columns.
 
     Returns a `LasReadResult`. RGB/intensity are kept in LAS uint16 scale so the
     bake writer can round-trip them byte-for-byte; extras are the float32 extra-
@@ -29490,109 +29523,203 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
     ExtraBytes are read as float64 `beam_origins` and likewise kept out of `extras`.
     This is the ONE point where a normalised LAS is materialised into the session —
     used by create after `_source_to_las` converts whatever the source format was.
+
+    CHUNKED, deliberately. This used to be `reader.read()` followed by
+    `np.stack([x, y, z]).astype(float64)`, which held the ENTIRE laspy record
+    (~37 B/pt plus every extra dim) and the float64 position copy at once — an
+    import transient of roughly 2x the finished session, i.e. 11–17 GB for a
+    100 M-point cloud. Now the header sizes every column up front and each
+    `chunk_iterator` slice is written into place, so the peak is the session
+    plus one chunk (`_LAS_READ_CHUNK` rows). Columns whose contents are only
+    known after the read (constant standard dims, all-zero intensity) are
+    tracked per chunk in their NATIVE dtype and pruned or cast at the end, so
+    the candidates cost 1–2 B/pt while undecided rather than 4.
     """
     import laspy
+
     with laspy.open(str(las_path)) as reader:
-        las = reader.read()
-    positions = np.stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)], axis=1).astype(np.float64)
-    dim_names = set(las.point_format.dimension_names)
-    colors = None
-    if {"red", "green", "blue"} <= dim_names:
-        colors = np.stack([
-            np.asarray(las.red, dtype=np.uint16),
-            np.asarray(las.green, dtype=np.uint16),
-            np.asarray(las.blue, dtype=np.uint16),
-        ], axis=1)
-    intensity = None
-    if "intensity" in dim_names and np.any(np.asarray(las.intensity)):
-        intensity = np.asarray(las.intensity, dtype=np.uint16)
+        header = reader.header
+        pf = header.point_format
+        n = int(header.point_count)
+        dim_names = set(pf.dimension_names)
+        std_dims = list(pf.standard_dimensions)
+        extra_dims = list(pf.extra_dimensions)
 
-    # Detect per-pulse beam-origin ExtraBytes FIRST so their three columns are
-    # skipped by the generic extra-dim loop below (they must not also become lossy
-    # float32 display scalars). Read as float64 — these are world/UTM coordinates.
-    extra_by_lower = {d.name.lower(): d.name for d in las.point_format.extra_dimensions}
-    beam_origins: Optional[np.ndarray] = None
-    _origin_skip: set = set()
-    for ax, ay, az in _BEAM_ORIGIN_ALIAS_SETS:
-        if ax in extra_by_lower and ay in extra_by_lower and az in extra_by_lower:
-            nx, ny, nz = extra_by_lower[ax], extra_by_lower[ay], extra_by_lower[az]
-            beam_origins = np.stack([
-                np.asarray(las[nx], dtype=np.float64),
-                np.asarray(las[ny], dtype=np.float64),
-                np.asarray(las[nz], dtype=np.float64),
-            ], axis=1)
-            _origin_skip = {nx, ny, nz}
-            break
+        positions = np.empty((n, 3), dtype=np.float64)
+        has_colors = {"red", "green", "blue"} <= dim_names
+        colors = np.empty((n, 3), dtype=np.uint16) if has_colors else None
+        intensity = np.empty(n, dtype=np.uint16) if "intensity" in dim_names else None
+        intensity_nonzero = False
 
-    extras: Dict[str, np.ndarray] = {}
-    extra_dims_meta: List[dict] = []
-    for d in las.point_format.extra_dimensions:
-        name = d.name
-        if name in _origin_skip:
-            continue  # carried as float64 beam_origins, not a float32 scalar
-        # An ExtraBytes name is an arbitrary vendor string — RIEGL writes
-        # `Reflectance`, another exporter `refl`. Downstream tools key off the
-        # CANONICAL slug, so carrying the raw name verbatim meant a perfectly
-        # ordinary reflectance column was invisible to the reflectance colour
-        # mode purely because of its capital R. Resolve it; keep the file's own
-        # spelling as the LABEL so the UI still shows the user what their file
-        # called it.
+        # Detect per-pulse beam-origin ExtraBytes FIRST so their three columns are
+        # skipped by the generic extra-dim loop below (they must not also become
+        # lossy float32 display scalars). Read as float64 — world/UTM coordinates.
+        extra_by_lower = {d.name.lower(): d.name for d in extra_dims}
+        beam_origins: Optional[np.ndarray] = None
+        origin_names: "tuple[str, str, str] | None" = None
+        for ax, ay, az in _BEAM_ORIGIN_ALIAS_SETS:
+            if ax in extra_by_lower and ay in extra_by_lower and az in extra_by_lower:
+                origin_names = (extra_by_lower[ax], extra_by_lower[ay], extra_by_lower[az])
+                beam_origins = np.empty((n, 3), dtype=np.float64)
+                break
+        _origin_skip = set(origin_names or ())
+
+        # Extra dims → float32 columns keyed by canonical slug (see the slug
+        # rules below); the file's own spelling stays as the label.
+        extras: Dict[str, np.ndarray] = {}
+        extra_dims_meta: List[dict] = []
+        extra_sources: List["tuple[str, str]"] = []   # (file dim name, slug)
+        for d in extra_dims:
+            name = d.name
+            if name in _origin_skip:
+                continue  # carried as float64 beam_origins, not a float32 scalar
+            # An ExtraBytes name is an arbitrary vendor string — RIEGL writes
+            # `Reflectance`, another exporter `refl`. Downstream tools key off the
+            # CANONICAL slug, so carrying the raw name verbatim meant a perfectly
+            # ordinary reflectance column was invisible to the reflectance colour
+            # mode purely because of its capital R. Resolve it; keep the file's own
+            # spelling as the LABEL so the UI still shows the user what their file
+            # called it.
+            #
+            # Only when the canonical slug isn't already taken: a file carrying both
+            # `Reflectance` and `reflectance` would otherwise have the second clobber
+            # the first. First writer wins, matching `_dims_for_slug`'s ordering.
+            slug = _canonical_slug_for_name(name) or name
+            # The beam-origin slugs are only meaningful as a COMPLETE triple: the
+            # reader consumes ox/oy/oz together into float64 `beam_origins` and
+            # `_origin_skip` holds them when all three are present. Reaching here
+            # means the triple was INCOMPLETE (a lone `ox`, say), which is
+            # deliberately an ordinary scalar — renaming it to `origin_x` would
+            # advertise a triple that does not exist and could not be consumed.
+            if slug in _ORIGIN_SLUGS:
+                slug = name
+            if slug != name and slug in extras:
+                slug = name
+            extras[slug] = np.empty(n, dtype=np.float32)
+            extra_dims_meta.append({"slug": slug, "label": name})
+            extra_sources.append((name, slug))
+
+        # Candidate columns whose fate depends on their CONTENTS: the multi-return
+        # source dims and the remaining standard dims are carried only when they
+        # vary (a standard LAS dim exists, all-zero, on every point-format-3
+        # record, so "present" is not "populated"), and gps_time only when it
+        # varies. Read in native dtype; decide after the last chunk.
+        _las_multireturn = (
+            ("return_number", "target_index"),
+            ("number_of_returns", "target_count"),
+        )
+        candidates: Dict[str, dict] = {}   # dim name -> {"arr", "slug", "label", "first", "const"}
+        for src_dim, slug in _las_multireturn:
+            if src_dim in dim_names and slug not in extras:
+                candidates[src_dim] = {
+                    "arr": np.empty(n, dtype=_las_dim_dtype(pf.dimension_by_name(src_dim))),
+                    "slug": slug, "label": _MULTI_RETURN_LABELS[slug],
+                    "first": None, "const": True,
+                }
+        # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
+        # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
+        # fields. Without this they'd be dropped here — the octree is rebuilt from
+        # these session arrays (`_session_to_las` → PotreeConverter), NOT from the
+        # original file, so anything not in `extras` never reaches the scalar picker.
+        # Skip the dims handled elsewhere (positions/colors/intensity, the multi-
+        # return sources mapped above, bit-flags) and any all-constant column (an
+        # all-zero classification etc. is noise in the picker, not signal).
         #
-        # Only when the canonical slug isn't already taken: a file carrying both
-        # `Reflectance` and `reflectance` would otherwise have the second clobber
-        # the first. First writer wins, matching `_dims_for_slug`'s ordering.
-        slug = _canonical_slug_for_name(name) or name
-        # The beam-origin slugs are only meaningful as a COMPLETE triple: the
-        # reader consumes ox/oy/oz together into float64 `beam_origins` and
-        # `_origin_skip` holds them when all three are present. Reaching here
-        # means the triple was INCOMPLETE (a lone `ox`, say), which is
-        # deliberately an ordinary scalar — renaming it to `origin_x` would
-        # advertise a triple that does not exist and could not be consumed.
-        if slug in _ORIGIN_SLUGS:
-            slug = name
-        if slug != name and slug in extras:
-            slug = name
-        extras[slug] = np.asarray(las[name], dtype=np.float32)
-        extra_dims_meta.append({"slug": slug, "label": name})
+        # CRUCIAL: the slug is PREFIXED ('las_classification', …), not the bare LAS
+        # name. `_session_to_las` re-adds every extra-dim slug to the rebuilt LAS via
+        # add_extra_dim — and a slug that collides with a reserved standard-dim name
+        # (e.g. 'classification') makes laspy try to bit-pack the float column into
+        # the classification-flags byte and hard-crash the process. The 'las_' prefix
+        # keeps the slug clear of the standard schema; the label stays the clean name.
+        # Labelled "LAS <name>", not the bare name: PotreeConverter always emits
+        # its OWN built-in `classification` attribute (all zeros here, since it
+        # does not read our extra dims), so a bare label put two entries called
+        # "classification" in the colour-by list with nothing to tell them apart.
+        for d in std_dims:
+            name = d.name
+            if name in _LAS_STD_DIMS_SKIP or name in _LAS_MULTIRETURN_SRC:
+                continue
+            slug = f"las_{name}"
+            if slug in extras or name in extras:
+                continue
+            candidates[name] = {
+                "arr": np.empty(n, dtype=_las_dim_dtype(d)), "slug": slug,
+                "label": f"LAS {name}", "first": None, "const": True,
+            }
+        gps: Optional[np.ndarray] = np.empty(n, dtype=np.float64) if "gps_time" in dim_names else None
+        gps_first = None
+        gps_const = True
 
-    # Auto-map LAS native per-pulse multi-return dimensions to the canonical
-    # slugs Helios's LAD path reads (see `_MULTI_RETURN_SLUGS`). return_number
-    # is carried verbatim as target_index — Helios auto-detects 0- vs 1-based
-    # indexing, so no base conversion. Only mapped when the source dim is
-    # present and a same-named extra-dim wasn't already captured above.
-    #
-    # CRUCIALLY, only map a dim that actually carries data. return_number,
-    # number_of_returns and gps_time are STANDARD LAS dimensions present in every
-    # point-format-3 record, so they exist (all-zero) even on a plain XYZ/E57
-    # import that never had per-pulse data. Mapping those zeros would make the LAD
-    # path see phantom multi-return columns — flipping it to the full-waveform
-    # algorithm and running gapfillMisses() on garbage timestamps. Require a
-    # non-degenerate column (some non-zero value, and for indices not all-equal)
-    # so only genuinely populated airborne-style LAS triggers multi-return.
-    _las_multireturn = (
-        ("return_number", "target_index"),
-        ("number_of_returns", "target_count"),
-    )
-    for src_dim, slug in _las_multireturn:
-        if src_dim in dim_names and slug not in extras:
-            vals = np.asarray(las[src_dim])
-            if vals.size and np.any(vals != vals.flat[0]):  # not constant/all-zero
-                extras[slug] = vals.astype(np.float32)
-                extra_dims_meta.append({"slug": slug, "label": _MULTI_RETURN_LABELS[slug]})
+        off = 0
+        for chunk in reader.chunk_iterator(_LAS_READ_CHUNK):
+            m = len(chunk)
+            if m == 0:
+                continue
+            sl = slice(off, off + m)
+            positions[sl, 0] = chunk.x
+            positions[sl, 1] = chunk.y
+            positions[sl, 2] = chunk.z
+            if colors is not None:
+                colors[sl, 0] = chunk.red
+                colors[sl, 1] = chunk.green
+                colors[sl, 2] = chunk.blue
+            if intensity is not None:
+                vals = np.asarray(chunk.intensity, dtype=np.uint16)
+                intensity[sl] = vals
+                intensity_nonzero = intensity_nonzero or bool(np.any(vals))
+            if beam_origins is not None and origin_names is not None:
+                for k, nm in enumerate(origin_names):
+                    beam_origins[sl, k] = np.asarray(chunk[nm], dtype=np.float64)
+            for name, slug in extra_sources:
+                extras[slug][sl] = np.asarray(chunk[name], dtype=np.float32)
+            for name, cand in candidates.items():
+                vals = np.asarray(chunk[name])
+                cand["arr"][sl] = vals
+                if cand["const"]:
+                    if cand["first"] is None:
+                        cand["first"] = vals.flat[0]
+                    cand["const"] = bool(np.all(vals == cand["first"]))
+            if gps is not None:
+                vals = np.asarray(chunk["gps_time"], dtype=np.float64)
+                gps[sl] = vals
+                if gps_const:
+                    if gps_first is None:
+                        gps_first = vals.flat[0]
+                    gps_const = bool(np.all(vals == gps_first))
+            off += m
 
-    # gps_time is the LAD trajectory-join key — route it to a dedicated float64
-    # array, NOT the float32 `extras` dict (a float32 cast at adjusted-standard
-    # magnitude has ~32 s resolution and collapses every return onto one pose).
-    # Same non-degenerate guard as the multi-return dims: gps_time is a STANDARD
-    # dimension present (all-zero) on plain XYZ/E57 imports, so only carry it when
-    # it actually varies. The non-constant check runs on the original float64
-    # values, before any cast.
-    timestamps: Optional[np.ndarray] = None
-    gps_time_encoding: Optional[str] = None
-    if "gps_time" in dim_names:
-        _gps = np.asarray(las["gps_time"], dtype=np.float64)
-        if _gps.size and np.any(_gps != _gps.flat[0]):  # not constant/all-zero
-            timestamps = _gps
+        if off != n:
+            # A header that over- or under-states the count: keep what was read.
+            positions = positions[:off]
+            colors = colors[:off] if colors is not None else None
+            intensity = intensity[:off] if intensity is not None else None
+            beam_origins = beam_origins[:off] if beam_origins is not None else None
+            for slug in list(extras):
+                extras[slug] = extras[slug][:off]
+            for cand in candidates.values():
+                cand["arr"] = cand["arr"][:off]
+            gps = gps[:off] if gps is not None else None
+            n = off
+
+        if intensity is not None and not intensity_nonzero:
+            intensity = None
+
+        # Resolve the content-dependent candidates now that every chunk is in:
+        # keep (as float32) only those that actually vary.
+        for name, cand in candidates.items():
+            if n and not cand["const"]:
+                extras[cand["slug"]] = cand["arr"].astype(np.float32)
+                extra_dims_meta.append({"slug": cand["slug"], "label": cand["label"]})
+            del cand["arr"]
+
+        # gps_time is the LAD trajectory-join key — route it to a dedicated float64
+        # array, NOT the float32 `extras` dict (a float32 cast at adjusted-standard
+        # magnitude has ~32 s resolution and collapses every return onto one pose).
+        # Same non-degenerate guard as the multi-return dims.
+        timestamps: Optional[np.ndarray] = None
+        gps_time_encoding: Optional[str] = None
+        if gps is not None and n and not gps_const:
+            timestamps = gps
             # global_encoding bit 0 (laspy GpsTimeType): 1 = Adjusted-Standard GPS
             # seconds (absolute clock), 0 = GPS Week Time (seconds-into-week, no
             # epoch). Recorded so the moving-platform join can compare like-for-like
@@ -29601,14 +29728,14 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
             try:
                 gps_time_encoding = (
                     'adjusted_standard'
-                    if bool(las.header.global_encoding.gps_time_type)
+                    if bool(header.global_encoding.gps_time_type)
                     else 'gps_week'
                 )
             except Exception:
                 # Older/odd headers: fall back to the raw bit.
                 gps_time_encoding = (
                     'adjusted_standard'
-                    if (int(las.header.global_encoding.value) & 1)
+                    if (int(header.global_encoding.value) & 1)
                     else 'gps_week'
                 )
 
@@ -29622,8 +29749,7 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
     # visible columns: a lower-case `timestamp` holding the data, and an
     # upper-case `Timestamp` (the canonical channel) reading all zeros.
     #
-    # Resolved through the canonical table so any recognised spelling works, and
-    # the column is MOVED (not copied) so it cannot show up twice.
+    # Resolved through the canonical table so any recognised spelling works.
     if timestamps is None:
         _ts_key = next(
             (k for k in extras if _canonical_slug_for_name(k) == 'timestamp'), None)
@@ -29644,37 +29770,6 @@ def _read_las_into_arrays(las_path: _Path) -> "LasReadResult":
                 # consumer prefers the float64 one when both are present.
                 timestamps = _cand
 
-    # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
-    # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
-    # fields. Without this they'd be dropped here — the octree is rebuilt from
-    # these session arrays (`_session_to_las` → PotreeConverter), NOT from the
-    # original file, so anything not in `extras` never reaches the scalar picker.
-    # Skip the dims handled elsewhere (positions/colors/intensity, the multi-
-    # return sources mapped above, bit-flags) and any all-constant column (an
-    # all-zero classification etc. is noise in the picker, not signal).
-    #
-    # CRUCIAL: the slug is PREFIXED ('las_classification', …), not the bare LAS
-    # name. `_session_to_las` re-adds every extra-dim slug to the rebuilt LAS via
-    # add_extra_dim — and a slug that collides with a reserved standard-dim name
-    # (e.g. 'classification') makes laspy try to bit-pack the float column into
-    # the classification-flags byte and hard-crash the process. The 'las_' prefix
-    # keeps the slug clear of the standard schema; the label stays the clean name.
-    for d in las.point_format.standard_dimensions:
-        name = d.name
-        if (name in _LAS_STD_DIMS_SKIP or name in _LAS_MULTIRETURN_SRC):
-            continue
-        slug = f"las_{name}"
-        if slug in extras or name in extras:
-            continue
-        vals = np.asarray(las[name])
-        if vals.size and np.any(vals != vals.flat[0]):  # not constant
-            extras[slug] = vals.astype(np.float32)
-            # Label it "LAS <name>", not the bare name. PotreeConverter always
-            # emits its OWN built-in `classification` attribute (all zeros here,
-            # since it does not read our extra dims), so a bare label put two
-            # entries called "classification" in the colour-by list — one real,
-            # one empty, with nothing to tell them apart.
-            extra_dims_meta.append({"slug": slug, "label": f"LAS {name}"})
     return LasReadResult(
         positions=positions,
         colors=colors,
@@ -30264,13 +30359,12 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             )
             _report(0.25, "Loading points into memory…")
             _cancel_checkpoint(progress)
-            # The read materialises the whole LAS record AND the float64
-            # position copy at once (~2x the session), so declare that to the
-            # memory budget: two large imports then run one after the other
-            # instead of both paging.
+            # The read allocates the session's columns plus one chunk (see
+            # _read_las_into_arrays); declare that to the memory budget so two
+            # large imports run one after the other instead of both paging.
             n_in_file = _las_point_count(las_path) or 0
             with _ADMISSION.admit(
-                    n_in_file * 2 * memory_budget.bytes_per_point(
+                    int(n_in_file * 1.25) * memory_budget.bytes_per_point(
                         n_extras=len(source_extra_dims or []), colors=True,
                         intensity=True, timestamps=True),
                     f"import {n_in_file:,} pts"):
@@ -31090,16 +31184,23 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
         miss_arr = sess.extras.get(_MISS_SLUG)
         if miss_arr is not None:
             select = select & (miss_arr == 0)
+        # Record the indices this delete NEWLY removed (already-deleted points
+        # re-selected by an overlapping region are not this step's to undo), so
+        # `reset_edits` can replay the stack exactly. An empty delta is still a
+        # step: the renderer mirrors this stack one entry per committed delete.
+        newly = np.flatnonzero(select & ~sess.deleted).astype(np.int64)
         sess.deleted |= select
-        # Record the post-delete mask snapshot so undo can pop back to it. We
-        # store the boolean mask per applied delete (cheap: 1 bit/point) rather
-        # than replaying regions, so undo is exact regardless of edit kind.
-        sess.deleted_history.append(sess.deleted.copy())
-        # Bound the undo stack: each snapshot is a full (N,) bool mask, so an
-        # unbounded history grows RAM by ~1 byte/point per erase click. Keep only
-        # the most recent _MAX_DELETED_HISTORY snapshots (older undos are dropped).
+        sess.deleted_history.append(newly)
+        # Bound the undo stack. Deltas are cheap, but a stack of thousands of
+        # tiny erases is still a replay cost on every undo; keep the most recent
+        # _MAX_DELETED_HISTORY steps (older undos are dropped). Dropping the
+        # OLDEST would break replay-from-zero, so the dropped steps are folded
+        # into a permanent base: the mask keeps them, the stack forgets them.
         if len(sess.deleted_history) > _MAX_DELETED_HISTORY:
             sess.deleted_history = sess.deleted_history[-_MAX_DELETED_HISTORY:]
+            sess.deleted_base = sess.deleted.copy()
+            for entry in sess.deleted_history:
+                sess.deleted_base[entry] = False
         _mark_octree_stale_locked(sess)  # stale until bake; keep the drawn id pinned
         # INVARIANT: `octree_pose` set means "the cached octree is valid,
         # just in an older frame". With no cached octree at all that is false, so
@@ -31287,10 +31388,13 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
         k = 0 if request.edit_count is None else max(0, int(request.edit_count))
         k = min(k, len(sess.deleted_history))
         sess.deleted_history = sess.deleted_history[:k]
-        sess.deleted = (
-            sess.deleted_history[-1].copy() if k > 0
-            else np.zeros(len(sess.positions), dtype=bool)
-        )
+        # Replay the surviving deltas over the base (empty unless the stack was
+        # ever truncated — see delete_cloud_region).
+        base = getattr(sess, "deleted_base", None)
+        sess.deleted = (base.copy() if base is not None
+                        else np.zeros(len(sess.positions), dtype=bool))
+        for entry in sess.deleted_history:
+            sess.deleted[entry] = True
         _mark_octree_stale_locked(sess)
         sess.octree_pose = None   # see the invariant note in delete_cloud_region
         deleted_count = int(sess.deleted.sum())
@@ -31510,6 +31614,7 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
             sess.beam_origins = sess.beam_origins[keep]
         sess.deleted = np.zeros(len(sess.positions), dtype=bool)
         sess.deleted_history = []
+        sess.deleted_base = None
         # Bake COMPACTS every point-aligned array, so every absolute index the
         # label deltas hold is now invalid. Undo across a bake is therefore
         # impossible, not merely undesirable — clear it. (The label COLUMN
@@ -31954,6 +32059,7 @@ def session_split(session_id: str, request: SessionSplitRequest):
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[leftover_mask]] = True
         sess.deleted_history = []
+        sess.deleted_base = None
         sess.label_history = {}   # label undo must not reach across this commit either
         _mark_octree_stale_locked(sess)
         sess.octree_pose = None    # see the invariant note in delete_cloud_region
@@ -33233,6 +33339,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         # (Re-set below when the pose path keeps the existing octree.)
         _mark_octree_stale_locked(sess)
         sess.deleted_history = []
+        sess.deleted_base = None
         remaining = int((~sess.deleted).sum())
         sess.label_history = {}   # label undo must not reach across this commit either
         total = int(len(sess.positions))
@@ -33444,6 +33551,7 @@ def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[~keep]] = True
         sess.deleted_history = []
+        sess.deleted_base = None
         sess.label_history = {}   # label undo must not reach across this commit either
         _mark_octree_stale_locked(sess)
         sess.octree_pose = None    # see the invariant note in delete_cloud_region
