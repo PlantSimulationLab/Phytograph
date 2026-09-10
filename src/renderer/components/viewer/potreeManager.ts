@@ -120,6 +120,33 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
       };
     });
   }
+  // E2E seam: per-frame LOD health. `lruPoints` is what potree currently holds
+  // resident; it evicts (disposeSubtree, which drops a node's whole loaded
+  // subtree) whenever that exceeds 2 x pointBudget, while `updateVisibility`
+  // caps the VISIBLE set at 1 x pointBudget. When a scene's demand sits above
+  // the eviction threshold, nodes are disposed and re-streamed every frame and
+  // the user sees the cloud flicker with the camera completely still — so a
+  // test needs to watch these numbers across frames, not just sample one.
+  {
+    const g = globalThis as any;
+    let visibleNodes = 0;
+    let visiblePoints = 0;
+    for (const e of active) {
+      visibleNodes += (e.octree as any).visibleNodes?.length ?? 0;
+      visiblePoints += (e.octree as any).numVisiblePoints ?? 0;
+    }
+    const lru = (manager as any).lru;
+    g.__potreeFrameStats = {
+      frame: ((g.__potreeFrameStats?.frame ?? 0) as number) + 1,
+      clouds: active.length,
+      visibleNodes,
+      visiblePoints,
+      lruPoints: lru?.numPoints ?? 0,
+      lruItems: lru?.items?.size ?? 0,
+      pointBudget: manager.pointBudget,
+      evictAbove: manager.pointBudget * 2,
+    };
+  }
   // After the shared pass, so every callback sees final visibleNodes.
   for (const entry of active) entry.afterUpdate?.();
 }

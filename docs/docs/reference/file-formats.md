@@ -645,6 +645,15 @@ file…** when editing the scan. Supported formats:
   present, contributes a position-RMS quality note. High-rate SBETs are decimated to a
   few thousand poses (the join interpolates between them; the last record is always
   kept so the time span is preserved).
+- **Pick `sbet_<mission>.out`, not its neighbours.** POSPac writes about fifteen
+  different internal formats under the same `.out` extension, so the extension alone
+  says nothing about what is in the file. The one most easily picked by mistake is
+  `smrmsg_<mission>.out` — the accuracy companion, named like the SBET apart from the
+  prefix and written to the same directory. Phytograph checks the file's *contents*
+  (latitude, longitude and attitude must be physically possible radians) rather than
+  its name or size, and rejects a non-SBET with a message naming the likely mix-up.
+  The POSPac export receipt (`<mission>.log`, written beside the export) confirms
+  which file is which, along with the datum, grid and angle units used.
 - **Header-based column mapping.** When the first line is a header, columns are matched
   by name regardless of their order, with units in brackets ignored — `Time [s]`,
   `Easting`/`Northing`/`Height` (or `x`/`y`/`z`), `Roll`/`Pitch`/`Yaw` (or `heading`),

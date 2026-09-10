@@ -85,6 +85,7 @@ import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurat
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
 import { stopClickAfterTextSelection } from '../lib/textSelection';
+import { computeGridFloor } from '../lib/gridFloor';
 import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, createScanColorAllocator, isBackfillEligible, detectedReturnMode, missingMultiReturnColumns, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
 import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
@@ -6725,17 +6726,22 @@ export default function PointCloudViewer({
     // and hides the ground grid). Mirrors the staticBounds loop.
     for (const scan of scansWithParams) {
       if (!scan.visible) continue;
+      // params.origin / params.trajectory are WORLD-frame; these bounds are in the
+      // cloud's STORED frame (world - worldShift). Convert, or a georeferenced
+      // scan drags the bounds out to its full UTM magnitude and the camera frames
+      // on nothing. Mirrors the -worldShift the marker group renders through.
+      const [sx, sy, sz] = scan.data?.octree?.worldShift ?? [0, 0, 0];
       if (scan.params.trajectory) {
         for (const p of scan.params.trajectory.poses) {
-          min.x = Math.min(min.x, p.x); max.x = Math.max(max.x, p.x);
-          min.y = Math.min(min.y, p.y); max.y = Math.max(max.y, p.y);
-          min.z = Math.min(min.z, p.z); max.z = Math.max(max.z, p.z);
+          min.x = Math.min(min.x, p.x - sx); max.x = Math.max(max.x, p.x - sx);
+          min.y = Math.min(min.y, p.y - sy); max.y = Math.max(max.y, p.y - sy);
+          min.z = Math.min(min.z, p.z - sz); max.z = Math.max(max.z, p.z - sz);
         }
       } else {
         const o = scan.params.origin;
-        min.x = Math.min(min.x, o.x); max.x = Math.max(max.x, o.x);
-        min.y = Math.min(min.y, o.y); max.y = Math.max(max.y, o.y);
-        min.z = Math.min(min.z, o.z); max.z = Math.max(max.z, o.z);
+        min.x = Math.min(min.x, o.x - sx); max.x = Math.max(max.x, o.x - sx);
+        min.y = Math.min(min.y, o.y - sy); max.y = Math.max(max.y, o.y - sy);
+        min.z = Math.min(min.z, o.z - sz); max.z = Math.max(max.z, o.z - sz);
       }
     }
 
@@ -7088,6 +7094,7 @@ export default function PointCloudViewer({
     min: new THREE.Vector3(-5, -5, -5),
     max: new THREE.Vector3(5, 5, 5),
     center: new THREE.Vector3(0, 0, 0),
+    contentCenter: new THREE.Vector3(0, 0, 0),
     size: new THREE.Vector3(10, 10, 10),
     // Empty-scene default: the fallback box's own floor (see the `groundZ`
     // computation below for what this means once content exists).
@@ -7190,19 +7197,6 @@ export default function PointCloudViewer({
     // first-pose anchor origin) so a data-less moving scan frames its full path
     // instead of collapsing the camera onto one far-away point (a drone pass at
     // z=170 would otherwise blank the viewport and hide the ground grid).
-    for (const scan of scansWithParams) {
-      if (!scan.visible) continue;
-      if (scan.params.trajectory) {
-        for (const p of scan.params.trajectory.poses) {
-          min.min(corner.set(p.x, p.y, p.z));
-          max.max(corner);
-        }
-      } else {
-        const o = scan.params.origin;
-        min.min(corner.set(o.x, o.y, o.z));
-        max.max(corner);
-      }
-    }
 
     // Include skeleton bounds (original points, no positions)
     for (const skeleton of skeletons) {
@@ -7218,6 +7212,38 @@ export default function PointCloudViewer({
       }
     }
 
+    // CONTENT-ONLY bounds, snapshotted before the scanner/trajectory loop below.
+    // The scene origin's LATERAL position comes from this, not from the full box.
+    //
+    // Same reasoning as `groundZ` further down, one axis over: a scanner rig at
+    // head height is not the ground, and a flight path is not the plot. A drone
+    // survey's trajectory routinely runs wide of the mapped area — a turn or an
+    // approach leg that overshoots it — and folding that into the midpoint drags
+    // the default orbit pivot off the cloud, sometimes clean outside its
+    // footprint (measured on a real survey: pivot 11.7 m past the cloud's north
+    // edge, because one leg reached 90 m beyond it). The trajectory still counts
+    // toward `min`/`max` so the camera FRAMES the whole path and a data-less
+    // moving scan doesn't blank the viewport; it just no longer votes on where
+    // the centre is.
+    const contentMin = min.clone();
+    const contentMax = max.clone();
+
+    for (const scan of scansWithParams) {
+      if (!scan.visible) continue;
+      // WORLD-frame -> this box's STORED frame; see the combinedBounds twin.
+      const [sx, sy, sz] = scan.data?.octree?.worldShift ?? [0, 0, 0];
+      if (scan.params.trajectory) {
+        for (const p of scan.params.trajectory.poses) {
+          min.min(corner.set(p.x - sx, p.y - sy, p.z - sz));
+          max.max(corner);
+        }
+      } else {
+        const o = scan.params.origin;
+        min.min(corner.set(o.x - sx, o.y - sy, o.z - sz));
+        max.max(corner);
+      }
+    }
+
     if (!isFinite(min.x)) {
       const fallback = {
         min: new THREE.Vector3(-1, -1, -1),
@@ -7225,6 +7251,7 @@ export default function PointCloudViewer({
         center: new THREE.Vector3(0, 0, 0),
         size: new THREE.Vector3(2, 2, 2),
         groundZ: -1,
+        contentCenter: new THREE.Vector3(0, 0, 0),
       };
       stableStaticBoundsRef.current = fallback;
       return fallback;
@@ -7252,7 +7279,13 @@ export default function PointCloudViewer({
     }
     if (!isFinite(groundZ)) groundZ = min.z;
 
-    const result = { min, max, center, size, groundZ };
+    // No content at all (a data-less moving scan): fall back to the full centre,
+    // which is the trajectory's own midpoint — the only thing there is to look at.
+    const contentCenter = isFinite(contentMin.x)
+      ? new THREE.Vector3().addVectors(contentMin, contentMax).multiplyScalar(0.5)
+      : center.clone();
+
+    const result = { min, max, center, size, groundZ, contentCenter };
     stableStaticBoundsRef.current = result;
     return result;
   }, [clouds, meshes, skeletons, scansWithParams, meshPositions, meshRotations, meshScales]);
@@ -7382,10 +7415,15 @@ export default function PointCloudViewer({
   // pivot mid-drag. On an empty scene staticBounds falls back to a unit box
   // centered at (0,0,0) (so groundZ = −5); `sceneHasContent` gates the marker
   // off there anyway. The ref mirrors it for the async bake path.
+  //
+  // Laterally this is `contentCenter`, NOT `center`: the full box includes the
+  // scanner markers and the whole platform trajectory, so a drone leg that runs
+  // wide of the plot pushes the pivot off the cloud (measured: 11.7 m outside its
+  // north edge). See the contentCenter derivation in staticBounds.
   const sceneOrigin = useMemo<[number, number, number]>(
     () => sceneOriginOverride
       ?? scannerSceneOrigin
-      ?? [staticBounds.center.x, staticBounds.center.y, staticBounds.groundZ],
+      ?? [staticBounds.contentCenter.x, staticBounds.contentCenter.y, staticBounds.groundZ],
     [sceneOriginOverride, scannerSceneOrigin, staticBounds],
   );
   sceneOriginRef.current = sceneOrigin;
@@ -7542,11 +7580,11 @@ export default function PointCloudViewer({
     // only sub-zero content is noise can still snap the grid to 0.
     const floor = upAxis === 'z' ? staticBounds.groundZ : staticBounds.min[upAxis];
     const ceil = staticBounds.max[upAxis];
-    const sceneScale = Math.max(staticBounds.size.length(), 1e-6);
-    // Distance from 0 to the geometry's up-axis span (0 if the span straddles 0).
-    const distFromZero =
-      floor <= 0 && ceil >= 0 ? 0 : Math.min(Math.abs(floor), Math.abs(ceil));
-    return distFromZero <= sceneScale * 0.5 ? 0 : floor;
+    // See lib/gridFloor: snap to 0 only when the GROUND is near zero, measured
+    // against the scene's vertical extent. The rule this replaced asked whether
+    // the span straddled zero and compared against half the 3D DIAGONAL, which
+    // drew a georeferenced survey's ground plane through its own canopy.
+    return computeGridFloor(floor, ceil);
   }, [staticBounds, gridPlane]);
 
   // Determine what's currently selected. A cloud tool needs an actual
