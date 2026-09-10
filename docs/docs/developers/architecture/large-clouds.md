@@ -139,7 +139,14 @@ only the core rows' results come back. `tiled.worker_count` picks
 min(cores, tiles, what the memory budget allows at one tile plus ~400 MB
 per child); `PHYTOGRAPH_TILE_WORKERS` pins it, `1` disables the pool. The
 children inherit the worker's process group, so a cancel that `killpg`s the
-worker reaps them. In the frozen bundle the children are the backend
+worker reaps them. **A pool is only ever opened inside the seg worker**
+(`worker_count` returns 1 without `PHYTOGRAPH_SEG_WORKER`): multiprocessing's
+POSIX launcher forks before it execs, and the backend process has libhelios
+(GLFW) and open3d loaded — a forked copy of that dies with SIGSEGV in the
+post-fork window (the reason `_SegProc` uses `posix_spawn`), which leaves the
+pool blocked on its start-up pipe. Seen as a hang in pytest, whose process
+has `main` imported; the pool tests therefore drive `tests/tile_pool_probe.py`
+in a fresh interpreter launched with `posix_spawn`, never `subprocess.run`. In the frozen bundle the children are the backend
 binary itself: `backend_wrapper.py` calls `multiprocessing.freeze_support()`
 before anything else so a pool child runs its task loop and exits, and the
 seg-worker dispatch is guarded by `__name__ == "__main__"` so a child that
@@ -246,7 +253,7 @@ cloud on an M-series laptop:
 | LAS write (laspy, chunked) | 0.4 s |
 | sha1 of the LAS | 0.2 s |
 | PotreeConverter `-m poisson` | 32.2 s (0.31 M pts/s) |
-| PotreeConverter `-m random` | 5.1 s (1.97 M pts/s) |
+| PotreeConverter `-m random` | 5.1 s (1.97 M pts/s; 6.1 M pts/s on the 100 M cloud, where start-up no longer dominates) |
 
 The converter is the largest cost of every import, bake, filter, split and
 segmentation on a large cloud, and a ground segmentation with split
@@ -289,6 +296,27 @@ streamed export (one run, same machine):
 | split into ground + plant (3 rebuilds) | 30 s | +8.6 GB |
 | delete region + rebuild | 16 s | +7.2 GB |
 | export LAZ (streamed) | 5 s | +4.0 GB |
+
+At 100 M points (same machine, 32 GB; store-backed, tiled ground on a
+spawn pool, streamed export; the whole workflow in 4.4 min):
+
+| Stage | Time | Peak over baseline |
+|---|---|---|
+| import (store-backed) | 65 s | +13.3 GB |
+| ground segmentation (tiled, pooled, no rebuild) | 26 s | +12.7 GB |
+| split into ground + plant (3 rebuilds) | 84 s | +14.1 GB |
+| delete region + rebuild | 48 s | +9.0 GB |
+| export LAZ (streamed) | 15 s | +9.8 GB |
+
+PotreeConverter alone, measured with `/usr/bin/time -l` on the 100 M-point
+LAS (random sampling): 16 s and a **7.06 GB** peak resident set, about 70 B
+per point, in its own process. That is the largest single allocation any
+edit makes on a large cloud, and a ground segmentation with split launches
+three of them (parent plus two children). Every build is therefore admitted
+against the memory budget at `_POTREE_BYTES_PER_POINT` (72) per point, which
+serialises concurrent builds on a machine that cannot hold them side by side
+— on a 16 GB laptop (8 GB budget) the three converts of a 100 M split run
+one after another instead of stacking to 14 GB.
 
 Read the peaks with two caveats. They are resident-set sizes of the backend
 plus its children, so they include the session's memory-mapped pages (file-

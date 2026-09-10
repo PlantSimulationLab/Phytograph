@@ -5248,7 +5248,9 @@ _RATE_CLOTH_NODE_ITERS_PER_S = 50e6   # measured 60-105 M node-iterations/s
 _RATE_WORKER_STAGE_PTS_PER_S = 30e6   # np.save + np.load of the (N,3) float64
 _WORKER_STARTUP_S = 4.5               # seg_worker re-imports main + libhelios
 _RATE_LAS_WRITE_PTS_PER_S = 10e6      # _session_to_las incl. extras
-_RATE_CONVERT_PTS_PER_S = {"poisson": 0.3e6, "random": 1.8e6}   # PotreeConverter
+# PotreeConverter: 0.31 M pts/s poisson (10 M cloud); random measured 1.97 M
+# pts/s on 10 M and 6.1 M pts/s on 100 M (the 10 M run is mostly start-up).
+_RATE_CONVERT_PTS_PER_S = {"poisson": 0.3e6, "random": 3.0e6}
 # Above this estimated wall time the endpoint answers 409 with a `cost_warning`
 # instead of starting, and the panel offers "Segment Anyway".
 _COST_WARNING_SECONDS = float(os.environ.get("PHYTOGRAPH_COST_WARNING_SECONDS", "90"))
@@ -26763,6 +26765,15 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
 # pins one method (poisson | random | auto) and `_MIN_POINTS` moves the knee.
 _POTREE_SAMPLING_METHODS = ("poisson", "random")
 _POTREE_RANDOM_SAMPLING_MIN_POINTS = 2_000_000
+# PotreeConverter's own peak resident set, measured with `/usr/bin/time -l` on
+# the 100 M-point bench cloud (random sampling): 7.06 GB, i.e. ~70 B/pt, in
+# 16 s. That is the largest single allocation any edit makes on a large cloud,
+# and it lives in a child process the Python-side estimates never saw - a
+# ground segmentation with split runs THREE converts at once (parent + two
+# children), 14 GB+ on a 100 M cloud. Every build is therefore admitted
+# against the memory budget at this rate, which serialises concurrent builds
+# on a machine that cannot hold them side by side.
+_POTREE_BYTES_PER_POINT = 72
 
 
 def _potree_sampling_policy() -> str:
@@ -30757,7 +30768,10 @@ def _build_octree_from_las(
             staging_dir.mkdir(parents=True)
             try:
                 _report(0.2, "Building octree…")
-                _run_potree_converter(las_path, staging_dir, cancel_event=cancel_event)
+                n_pts = _las_point_count(las_path)
+                with _ADMISSION.admit((n_pts or 0) * _POTREE_BYTES_PER_POINT,
+                                      f"octree build {n_pts or 0:,} pts"):
+                    _run_potree_converter(las_path, staging_dir, cancel_event=cancel_event)
                 _write_octree_labels(staging_dir, extra_dims_meta)
                 _report(0.95, "Installing octree…")
                 _install_octree_dir(

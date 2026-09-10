@@ -263,6 +263,15 @@ def worker_count(n_tiles: int, *, per_worker_bytes: int, budget_bytes: int,
             return max(1, int(raw))
         except ValueError:
             pass
+    # Only a killable seg worker may open a pool. multiprocessing's POSIX
+    # launcher forks before it execs, and the backend process has libhelios
+    # (GLFW) and open3d loaded - a forked copy of that dies in the post-fork
+    # window (the reason _SegProc uses posix_spawn), which leaves the pool
+    # blocked on its start-up pipe. The worker never loads libhelios, so the
+    # fork there is safe. Anywhere else (the DEM's in-process ground call, a
+    # direct segment_ground in a test) the tiles run in-process.
+    if not _os.environ.get("PHYTOGRAPH_SEG_WORKER"):
+        return 1
     cpu = _os.cpu_count() or 1
     if n_tiles < 4 or cpu < 2:
         return 1
