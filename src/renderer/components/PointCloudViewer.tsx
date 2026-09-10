@@ -11336,8 +11336,11 @@ export default function PointCloudViewer({
         // When we're about to split, DEFER the parent's octree rebuild: it is the
         // single biggest cost of the whole run (measured 11.5 s on 1.2 M points,
         // against 4.4 s for the entire 2-way split) and it used to run alone, to
-        // completion, before the children even started. `rebuild_parent` below
-        // folds it into the same concurrent pool.
+        // completion, before the children even started. The split below builds
+        // only the children, and the parent (hidden once the split lands) is
+        // rebuilt afterwards by the background refresh queue: measured at 10 M
+        // points, 7.7 s for the children alone against 11.3 s with the parent
+        // in the same pool, whose builds compete for the same cores.
         const willSplit = groundSplitClouds && !!onAddCloud;
         const meta = await sessionSegmentGround(
           sessionId, { ...csfParams, defer_octree: willSplit, acknowledge_cost: acknowledgeCost },
@@ -11366,9 +11369,9 @@ export default function PointCloudViewer({
         if (willSplit) {
           setGroundSplitProgress({ label: 'Splitting into ground + plant clouds…', value: null });
           groundSplitRunIdRef.current = null;
-          const { children, parent } = await sessionExtractByColumn(sessionId, GROUND_CLASS_ATTRIBUTE, {
+          const { children } = await sessionExtractByColumn(sessionId, GROUND_CLASS_ATTRIBUTE, {
             includeMisses: true,
-            rebuildParent: true,
+            rebuildParent: false,
             signal: abort.signal,
             onProgress: (value, message) => setGroundSplitProgress({
               label: message || 'Splitting into ground + plant clouds…',
@@ -11399,9 +11402,10 @@ export default function PointCloudViewer({
             // indistinguishable gradients rather than the classes they are.
             setCloudColorMode(childId, { mode: 'scalar', field: GROUND_CLASS_ATTRIBUTE });
           }
-          // Adopt the parent's octree now that it has been rebuilt alongside the
-          // children (this is the update the deferred branch above skipped).
-          if (parent) onUpdateCloud(id, buildSessionOctreeData(parent, octreeInfo, baseName));
+          // The parent's octree still predates the ground_class column (the
+          // segmentation deferred it, and the backend marked it stale). Queue
+          // the rebuild; the refresh runner installs it when it lands.
+          octreeRefreshQueueRef.current?.enqueue(id, sessionId);
           // The parent still holds every point, so leaving it visible draws the
           // whole cloud on top of the children that were just split out of it —
           // z-fighting mush instead of a visible separation.
@@ -12122,9 +12126,9 @@ export default function PointCloudViewer({
         if (willSplit) {
           setWoodProgress({ label: 'Splitting into wood + leaf clouds…', value: null });
           woodSplitRunIdRef.current = null;
-          const { children, parent } = await sessionExtractByColumn(sessionId, WOOD_CLASS_ATTRIBUTE, {
+          const { children } = await sessionExtractByColumn(sessionId, WOOD_CLASS_ATTRIBUTE, {
             includeMisses: true,
-            rebuildParent: true,
+            rebuildParent: false,
             signal,
             onProgress: (value, message) => setWoodProgress({
               label: message || 'Splitting into wood + leaf clouds…',
@@ -12152,8 +12156,8 @@ export default function PointCloudViewer({
             // below would otherwise take the Wood / Leaf legend with it.
             setCloudColorMode(childId, { mode: 'scalar', field: WOOD_CLASS_ATTRIBUTE });
           }
-          // Adopt the parent's octree, rebuilt alongside the children.
-          if (parent) onUpdateCloud(id, buildSessionOctreeData(parent, octreeInfo, baseName));
+          // Queue the parent's rebuild in the background, as the ground split does.
+          octreeRefreshQueueRef.current?.enqueue(id, sessionId);
           // The parent still holds every point, so leaving it visible draws the
           // whole cloud on top of the two halves just split out of it.
           if (children.length > 0) onHideScan(id);

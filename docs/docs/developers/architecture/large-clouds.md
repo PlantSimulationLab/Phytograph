@@ -246,6 +246,16 @@ mask in the same state update that installs the rebuilt octree. A second
 filter on a cloud whose rebuild is still queued waits for it to settle
 first, because the rebuilt octree is what the next mask must be drawn over.
 
+The ground and wood/leaf splits follow the same rule for their parent. The
+segmentation defers the parent's octree (`defer_octree`) and now marks it
+stale, and the split builds only the children (`rebuild_parent: false`). The
+renderer then queues the parent's rebuild on the refresh queue; the parent is
+hidden once the split lands, so nothing waits on it. Measured at 10 M points,
+the children alone take 7.7 s against 11.3 s with the parent in the same
+build pool, where the three converter runs compete for the same cores. The
+stale mark is load-bearing: without it the queued bake would see no deletions,
+take its fast path and hand back the pre-column octree as current.
+
 
 ## The memory budget
 

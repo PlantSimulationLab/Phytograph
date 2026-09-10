@@ -632,9 +632,9 @@ def test_segment_ground_defer_octree_skips_the_rebuild_and_returns_no_octree(
         client, cache_root, tmp_path):
     """`defer_octree` skips the parent rebuild and returns NO octree fields.
 
-    The caller that sets it is about to POST `extract_by_column` with
-    `rebuild_parent`, which rebuilds this octree alongside the split's children
-    instead of ahead of them (15.8 s -> 11.7 s on 1.2 M points).
+    The caller that sets it is about to split, and the renderer then queues this
+    octree's rebuild in the background once the children land (measured at 10 M
+    points: children alone 7.7 s, children plus parent in one pool 11.3 s).
 
     Returning the PRE-column octree with its `cache_id`/`bounds` would be the
     stale-octree bug `bake` already guards against — the renderer would treat it
@@ -670,7 +670,18 @@ def test_segment_ground_defer_octree_skips_the_rebuild_and_returns_no_octree(
     sess = main._cloud_sessions[sid]
     assert "ground_class" in sess.extras
     assert len(sess.extras["ground_class"]) == len(sess.positions)
-    assert sess.octree_cache_id == before_cache, "octree was rebuilt despite defer_octree"
+    # Not rebuilt, but DECLARED stale: the octree on screen predates the column,
+    # so it stays pinned as the rendered one while `octree_cache_id` is cleared.
+    # Without that, the background bake the renderer queues after a split took
+    # bake's no-deletions fast path and returned the pre-column octree.
+    assert sess.octree_cache_id is None, "deferred octree was not marked stale"
+    assert sess.rendered_octree_cache_id == before_cache, "octree was rebuilt despite defer_octree"
+
+    # The follow-up background bake really rebuilds, and carries the column.
+    baked = decode_streamed_json(client.post(f"/api/cloud/session/{sid}/bake").content)
+    assert baked["cache_id"] != before_cache
+    assert "ground_class" in {a["name"] for a in baked.get("attributes", [])}
+    assert baked["point_count"] == len(sess.positions)
 
     # Without the flag the octree is rebuilt and reported, as before.
     res2 = client.post(f"/api/cloud/session/{sid}/segment_ground",

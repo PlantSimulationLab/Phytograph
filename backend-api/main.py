@@ -32412,7 +32412,10 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
             # Nothing deleted means nothing to move; the maps stay as they are.
             if not keep.all():
                 _compact_session_store_locked(sess, keep)
-        else:
+        elif not keep.all():
+            # Nothing deleted means nothing to drop: a full copy of every array
+            # under the global lock bought nothing (a deferred-column rebuild
+            # after a split is exactly this case).
             sess.positions = sess.positions[keep]
             if sess.colors is not None:
                 sess.colors = sess.colors[keep]
@@ -33523,6 +33526,11 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, GROUND_CLASS_SLUG, GROUND_CLASS_LABEL, labels)
+        if request.defer_octree:
+            # The cached octree predates the column. Say so, or the background
+            # bake that follows a split takes its no-deletions fast path and
+            # hands back that pre-column octree as current.
+            _mark_octree_stale_locked(sess)
     common = {"session_id": session_id, "point_count": int(len(pts)),
               "class_threshold_used": gmeta.get("class_threshold"),
               "class_threshold_method": gmeta.get("method"),
@@ -33940,6 +33948,10 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     labels[hit] = np.asarray(hit_labels)
     with _cloud_session_lock:
         _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
+        if request.defer_octree:
+            # See the ground handler: without this the background bake after a
+            # split reuses the pre-column octree.
+            _mark_octree_stale_locked(sess)
     common = {"session_id": session_id, "point_count": int(len(pts)), "warnings": warns}
     # Deferred: see `defer_octree` — the caller rebuilds this octree alongside
     # the split's children.
