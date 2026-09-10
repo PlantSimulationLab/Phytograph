@@ -187,6 +187,23 @@ can differ between blocks, which the next rebuild reconciles and the renderer
 masks in the meantime. Pinned by racing a slowed write against a request on
 another session.
 
+### Filter commits rebuild in the background
+
+`Remove points` on a session cloud used to await the reconversion inline:
+`session_filter` with `rebuild: true`, i.e. the point deletion (milliseconds)
+plus a full PotreeConverter run (a minute on a large plot) before the panel
+closed. It now commits with `rebuild: false` and hands the rebuild to the
+same `octreeRefreshQueue` that crop and erase use. Until the swap, the
+committed predicate stays on the cloud's edit state as `committedFilters`
+and is drawn through the very per-tile mask that showed the live preview,
+so nothing the user can see changes at the moment of commit; the scan row's
+count drops immediately from the backend's cumulative `deleted_count`. Every
+compute and export path reads the session arrays, so the cloud *is*
+filtered the moment the request returns. The refresh runner clears the
+mask in the same state update that installs the rebuilt octree. A second
+filter on a cloud whose rebuild is still queued waits for it to settle
+first, because the rebuilt octree is what the next mask must be drawn over.
+
 
 ## The memory budget
 

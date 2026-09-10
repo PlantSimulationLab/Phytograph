@@ -644,6 +644,10 @@ test('preview and commit agree on which points survive', async () => {
     const s = await maskStats(page);
     expect(s.full).toBe(60);
     expect(s.drawn).toBeGreaterThan(0);
+    // The mask is debounced behind the inputs, so a sample taken before it
+    // lands still draws all 60 — and 60 is not a preview of this filter. The
+    // range excludes Deviation 0 and 4, so a real preview hides something.
+    expect(s.drawn).toBeLessThan(s.full);
     previewed = s.drawn;
   }).toPass({ timeout: 20_000 });
 

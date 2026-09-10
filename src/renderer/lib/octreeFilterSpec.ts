@@ -140,6 +140,21 @@ export function resolveOctreeFilterSpec(
 
 // A stable string identifying what these clauses will do. Two specs with the
 // same key mask identically, so a tile already masked under it can be skipped.
+/**
+ * AND of two specs: every clause of both. Used to draw a committed-but-not-
+ * yet-rebuilt filter (`CloudEditState.committedFilters`) UNDER a live
+ * preview, so opening the Filter panel while the background rebuild is still
+ * running never re-shows the points the commit removed. Returns one input
+ * untouched when the other is empty, so the key — and therefore the applied
+ * mask — is unchanged in the common single-source case.
+ */
+export function mergeOctreeFilterSpecs(a: OctreeFilterSpec, b: OctreeFilterSpec): OctreeFilterSpec {
+  if (b.clauses.length === 0) return a;
+  if (a.clauses.length === 0) return b;
+  const clauses = [...a.clauses, ...b.clauses];
+  return { clauses, key: filterSpecKey(clauses) };
+}
+
 function filterSpecKey(clauses: readonly FilterClause[]): string {
   return clauses
     .map(c => {

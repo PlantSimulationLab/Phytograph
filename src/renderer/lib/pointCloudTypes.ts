@@ -293,6 +293,14 @@ export interface CloudEditState {
   // deletes, so the scan row's point count reflects the deletion immediately
   // (the octree metadata's pointCount only drops on bake). 0 when none pending.
   pendingDeletedCount?: number;
+  // A COMMITTED filter whose octree has not caught up yet. `Remove points`
+  // deletes the excluded points on the backend in milliseconds
+  // (`session_filter` with `rebuild: false`) and hands the PotreeConverter
+  // rebuild to the background refresh queue, exactly as crop does; until the
+  // rebuilt octree lands the same per-tile predicate that drew the live
+  // preview keeps drawing the filtered result. Cleared by the refresh runner
+  // in the same commit that swaps the octree in.
+  committedFilters?: CloudFilters;
   /**
    * A COMMITTED transform whose octree has not caught up yet.
    *

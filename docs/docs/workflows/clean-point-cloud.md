@@ -346,9 +346,9 @@ across its two output clouds.
     When you import a point cloud, Phytograph reads the file **once** and
     holds the points in memory as the working copy — the source of truth for
     every edit. Crop, erase, filter, and segment all operate on that
-    in-memory copy; the file is never re-read. Crops and filters rebuild the
-    displayed octree from the in-memory points (a brief step on large scans),
-    while erase deletes are applied as an instant visibility mask. Either way
+    in-memory copy; the file is never re-read. Crops, filters and erases
+    take effect instantly as a visibility mask, and the displayed octree is
+    rebuilt from the in-memory points in the background. Either way
     nothing touches the original file on disk — your edits live in the session
     until you **Export**.
 
@@ -494,14 +494,15 @@ cloud instead.
     exact count only comes from the commit itself.
 
 !!! info "Committing on a large cloud"
-    Committing applies the filter to the in-memory points and rebuilds the
-    displayed octree from the survivors (the file is not re-read). On a large
-    plot that rebuild takes a while, so a **progress pill** appears at the top
-    of the viewport while it runs and the commit button reads *Filtering…* —
-    there's no need to click it again. **Cancel** on the pill stops the work
-    for real (the conversion is killed, not just left running in the
-    background) and leaves the cloud untouched, so you can adjust the
-    selection and retry. A second filter composes on the first result, never
+    Committing applies the filter to the in-memory points (the file is not
+    re-read) and returns as soon as the points are removed; the excluded
+    points stay hidden by the same mask that drew the preview while the
+    displayed octree is rebuilt from the survivors in the background. On a
+    large plot a **progress pill** appears at the top of the viewport while
+    the commit runs and the commit button reads *Filtering…* — there's no
+    need to click it again. **Cancel** on the pill stops the work for real
+    and leaves the cloud untouched, so you can adjust the selection and
+    retry. A second filter composes on the first result, never
     re-admitting points an earlier filter removed.
 
 !!! tip "The class list reflects what's left"

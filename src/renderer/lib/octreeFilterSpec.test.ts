@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveOctreeFilterSpec, EMPTY_FILTER_SPEC } from './octreeFilterSpec';
+import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC } from './octreeFilterSpec';
 import { filterValueKeeps } from './pointCloudHelpers';
 import { ORIG_INTENSITY_ATTRIBUTE } from './pointPick';
 import type { CloudFilters } from './pointCloudTypes';
@@ -211,5 +211,36 @@ describe('resolveOctreeFilterSpec', () => {
       expect(specKey({ x: { min: 1, max: 2, enabled: true } }))
         .not.toBe(specKey({ y: { min: 1, max: 2, enabled: true } }));
     });
+  });
+});
+
+describe('mergeOctreeFilterSpecs', () => {
+  const x = (min: number, max: number): CloudFilters => ({
+    x: { min, max, enabled: true }, y: { min: 0, max: 1, enabled: false },
+    z: { min: 0, max: 1, enabled: false }, scalarFields: {},
+  });
+
+  it('returns the other spec untouched when one side is empty (same key, no re-mask)', () => {
+    const live = resolveOctreeFilterSpec(x(0, 5), null);
+    expect(mergeOctreeFilterSpecs(live, EMPTY_FILTER_SPEC)).toBe(live);
+    expect(mergeOctreeFilterSpecs(EMPTY_FILTER_SPEC, live)).toBe(live);
+    expect(mergeOctreeFilterSpecs(EMPTY_FILTER_SPEC, EMPTY_FILTER_SPEC)).toBe(EMPTY_FILTER_SPEC);
+  });
+
+  it('ANDs both clause lists under a key that differs from either input', () => {
+    const live = resolveOctreeFilterSpec(x(0, 5), null);
+    const committed = resolveOctreeFilterSpec(x(2, 9), null);
+    const merged = mergeOctreeFilterSpecs(live, committed);
+    expect(merged.clauses).toHaveLength(2);
+    expect(merged.clauses[0]).toBe(live.clauses[0]);
+    expect(merged.clauses[1]).toBe(committed.clauses[0]);
+    expect(merged.key).not.toBe(live.key);
+    expect(merged.key).not.toBe(committed.key);
+    // Order-sensitive key is fine — the same two inputs always arrive in the
+    // same order from the renderer — but both orders must at least agree on
+    // what survives: x in [2, 5].
+    expect(merged.clauses.every(c => filterValueKeeps(c.range, 3))).toBe(true);
+    expect(merged.clauses.every(c => filterValueKeeps(c.range, 1))).toBe(false);
+    expect(merged.clauses.every(c => filterValueKeeps(c.range, 7))).toBe(false);
   });
 });

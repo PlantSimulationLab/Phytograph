@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { CloudFilters, PointCloudData } from '../../../lib/pointCloudTypes';
-import { resolveOctreeFilterSpec, EMPTY_FILTER_SPEC } from '../../../lib/octreeFilterSpec';
+import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC } from '../../../lib/octreeFilterSpec';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
 import { isWideOctreeAttribute } from '../../../lib/octreeWideAttributes';
 import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
@@ -126,6 +126,15 @@ export interface OctreePointCloudProps {
    * at the full point budget (see the note in octreeCropMask.ts).
    */
   filters?: CloudFilters | null;
+  /**
+   * A COMMITTED filter whose octree has not caught up yet
+   * (`CloudEditState.committedFilters`): the points it excludes are already
+   * deleted on the backend, but the octree on screen still holds them until
+   * the background rebuild swaps it out. Drawn through the same mask as
+   * `filters`, ANDed with it, so a live preview opened meanwhile composes on
+   * the committed result rather than re-showing the removed points.
+   */
+  committedFilters?: CloudFilters | null;
   /**
    * Live manual-labelling preview, read through a REF.
    *
@@ -332,6 +341,7 @@ export function OctreePointCloud({
   slabBoxMatrix = null,
   cropMask = null,
   filters = null,
+  committedFilters = null,
   translation,
   rotation,
   pivot,
@@ -1052,8 +1062,11 @@ export function OctreePointCloud({
   // and the Active Filters list update immediately — while the GPU-side work
   // coalesces. Trailing edge only; a filter is meaningless mid-keystroke.
   const liveFilterSpec = useMemo(
-    () => resolveOctreeFilterSpec(filters, octree),
-    [filters, octree],
+    () => mergeOctreeFilterSpecs(
+      resolveOctreeFilterSpec(filters, octree),
+      resolveOctreeFilterSpec(committedFilters, octree),
+    ),
+    [filters, committedFilters, octree],
   );
   const [filterSpec, setFilterSpec] = useState(EMPTY_FILTER_SPEC);
   useEffect(() => {

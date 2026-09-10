@@ -4671,9 +4671,13 @@ export async function sessionFilter(
     onProgress?: BinaryFrameProgress;
     onRunId?: (runId: string) => void;
   },
-): Promise<CloudSessionBakeResult & { rebuilt: boolean }> {
+): Promise<CloudSessionBakeResult & { rebuilt: boolean; remaining_count?: number; deleted_count?: number; total_count?: number }> {
   try {
-    return await fetchJsonWithProgress<CloudSessionBakeResult & { rebuilt: boolean }>(
+    // With `rebuild: false` the response carries the counts only
+    // (`remaining_count` / `deleted_count` / `total_count`, `rebuilt: false`)
+    // and no octree fields — the caller keeps drawing through its mask and
+    // hands the rebuild to the background refresh queue.
+    return await fetchJsonWithProgress<CloudSessionBakeResult & { rebuilt: boolean; remaining_count?: number; deleted_count?: number; total_count?: number }>(
       `/api/cloud/session/${sessionId}/filter`,
       {
         region: options.region ?? null,

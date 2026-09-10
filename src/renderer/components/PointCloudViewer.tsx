@@ -3557,7 +3557,8 @@ export default function PointCloudViewer({
       const keep = baked.deleted_history_len ?? 0;
       const stack = cur.pendingDeletes ?? [];
       const remaining = keep > 0 ? stack.slice(Math.max(0, stack.length - keep)) : [];
-      if (remaining.length === stack.length && (cur.pendingDeletedCount ?? 0) === 0) return prev;
+      if (remaining.length === stack.length && (cur.pendingDeletedCount ?? 0) === 0
+          && !cur.committedFilters) return prev;
       const next = new Map(prev);
       next.set(cloudId, {
         ...cur,
@@ -3566,6 +3567,9 @@ export default function PointCloudViewer({
         // delete's own count was measured against the pre-bake array, and the
         // next delete_region overwrites this with a fresh cumulative figure.
         pendingDeletedCount: remaining.length === 0 ? 0 : cur.pendingDeletedCount,
+        // The rebuilt octree no longer holds the filtered-out points, so the
+        // committed filter's mask has nothing left to hide.
+        committedFilters: undefined,
       });
       return next;
     });
@@ -6101,6 +6105,12 @@ export default function PointCloudViewer({
     // and the surviving point totals for the summary toast.
     const touched: string[] = [];
     const emptied: { id: string; name: string }[] = [];
+    // Session clouds whose points are deleted but whose octree is still being
+    // rebuilt in the background: the state they keep until the swap.
+    const backgroundCommits: {
+      id: string; sessionId: string; filters: CloudFilters; deletedCount: number;
+      pendingDeletes: PendingDeleteRegion[];
+    }[] = [];
     let keptTotal = 0;
     let failed = 0;
 
@@ -6133,23 +6143,51 @@ export default function PointCloudViewer({
           const sessionId = octreeInfo.sessionId!;
           const args = buildOctreeFilterArgs(cloud, filters);
           try {
+            // A display rebuild still queued from an earlier crop or filter on
+            // this cloud must land first: its per-tile mask is what hides those
+            // earlier deletions, and the state written below replaces it. Then,
+            // as crop does, a committed-but-unrefreshed pose is folded into the
+            // octree so the frame the mask is drawn in is the session's frame.
+            await octreeRefreshQueueRef.current?.settle(cloud.id);
+            if (controller.signal.aborted) break;
+            if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) { failed++; continue; }
+            // Delete the excluded points on the array — and STOP. Like crop
+            // (see the plain-crop branch of the crop apply), the deletion is
+            // the whole edit: every compute and export path reads the session
+            // arrays, so the cloud is filtered the moment this returns. The
+            // PotreeConverter rebuild that used to be awaited here — a minute
+            // on a large plot — goes to the background refresh queue, and the
+            // filter's own per-tile predicate keeps drawing the result until
+            // the rebuilt octree is swapped in.
             const result = await sessionFilter(sessionId, {
               region: args.region ?? null,
               scalarFilters: args.scalarFilters ?? null,
-              rebuild: true,
+              rebuild: false,
               signal: controller.signal,
               // A null value is an indeterminate stage; the reporter holds the
               // bar at this cloud's slice start rather than snapping it to 0.
               onProgress: (value, progressLabel) => setFilterProgress(report(value, progressLabel)),
               onRunId: (runId) => { filterRunIdRef.current = runId; },
             });
+            // An empty result is refused by the backend (`point_count: 0`,
+            // nothing deleted, `remaining_count` still the pre-filter survivors);
+            // a committed deletion carries the counts and no `point_count`.
             if (result.point_count === 0) {
               emptied.push({ id: cloud.id, name });
               continue;
             }
-            onUpdateCloud(cloud.id, buildSessionOctreeData(result, octreeInfo, cloud.data.fileName ?? cloud.id, undefined, { diverged: true }));
+            const remaining = result.remaining_count ?? 0;
+            const before = editStatesRef.current.get(cloud.id);
+            backgroundCommits.push({
+              id: cloud.id, sessionId, filters, deletedCount: result.deleted_count ?? 0,
+              pendingDeletes: before?.pendingDeletes ?? [],
+            });
+            // Mark the cloud as diverged from its source file NOW (same reason
+            // as crop: a missing octree must be rebuilt from the session, never
+            // from the file that still holds the filtered-out points).
+            onUpdateCloud(cloud.id, cloud.data);
             touched.push(cloud.id);
-            keptTotal += result.point_count;
+            keptTotal += remaining;
           } catch (err) {
             // A user cancel is not a failure — the pill's Cancel already killed
             // the backend work, so report nothing and leave the remaining
@@ -6188,6 +6226,28 @@ export default function PointCloudViewer({
     }
 
     clearFilterStateForClouds(touched);
+    if (backgroundCommits.length > 0) {
+      // Applied after the reset above (functional updates apply in order):
+      // keep what still hides points the old octree contains — the erase
+      // brush's clip boxes and any committed pose — and add the filter as a
+      // per-tile mask plus the backend's cumulative deleted count, so the scan
+      // row drops with the deletion now rather than when the rebuild lands.
+      setEditStates(prev => {
+        const next = new Map(prev);
+        for (const c of backgroundCommits) {
+          const cur = next.get(c.id)
+            ?? { translation: { x: 0, y: 0, z: 0 }, erasedIndices: new Set<number>() };
+          next.set(c.id, {
+            ...cur,
+            pendingDeletes: c.pendingDeletes,
+            pendingDeletedCount: c.deletedCount,
+            committedFilters: c.filters,
+          });
+        }
+        return next;
+      });
+      for (const c of backgroundCommits) octreeRefreshQueueRef.current?.enqueue(c.id, c.sessionId);
+    }
     if (touched.length > 1) {
       showToast({
         title: `Filtered ${touched.length} scans to ${keptTotal.toLocaleString()} points`,
@@ -18391,6 +18451,11 @@ export default function PointCloudViewer({
                   // previewing only the primary would show a different set from
                   // the one Filter/Segment are about to act on.
                   filters={cloudFilters.get(cloud.id)}
+                  // After a commit the same predicate rides in the edit state
+                  // until the background rebuild swaps in an octree that no
+                  // longer holds the excluded points; a live preview opened
+                  // meanwhile is ANDed with it inside the renderer.
+                  committedFilters={getEditState(cloud.id).committedFilters ?? null}
                   // Live labelling preview — only for the cloud being labelled.
                   labelOverlayRef={
                     labelTargetCloud?.id === cloud.id ? labelOverlayRef : null

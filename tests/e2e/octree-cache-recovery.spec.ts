@@ -198,6 +198,12 @@ test('recovers an EDITED cloud from its live session, not from its source file',
     const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
     await expect(cloudRow).toBeVisible({ timeout: 20_000 });
     expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(60);
+    // The octree the filter starts from. The commit itself only deletes the
+    // points (the row's count drops behind a per-tile mask) and hands the
+    // reconversion to the background refresh queue, so the post-filter octree
+    // is recognised by its id CHANGING, not merely by an id being present.
+    await expect.poll(() => cloudRow.getAttribute('data-octree-cache-id'), { timeout: 30_000 }).not.toBeNull();
+    const importedCacheId = await cloudRow.getAttribute('data-octree-cache-id');
 
     // Diverge the cloud from its file: keep Deviation in [0,2] → 36 of 60.
     await page.getByTestId('tool-filter').click();
@@ -217,7 +223,7 @@ test('recovers an EDITED cloud from its live session, not from its source file',
     // so this doesn't depend on how many octree objects are momentarily mounted.
     await expect.poll(async () => {
       const id = await cloudRow.getAttribute('data-octree-cache-id');
-      return !!id && existsSync(join(octreeCacheRoot, id));
+      return !!id && id !== importedCacheId && existsSync(join(octreeCacheRoot, id));
     }, { timeout: 30_000 }).toBe(true);
     const editedCacheId = (await cloudRow.getAttribute('data-octree-cache-id'))!;
 
