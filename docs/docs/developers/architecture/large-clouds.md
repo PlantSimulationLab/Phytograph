@@ -127,10 +127,39 @@ disagree about where the ground is; the session endpoint reports the plan
 killable worker for now; parallel tiles are the next step and need a spawn-
 based pool (the worker must not fork with libhelios loaded).
 
-Candidates for the same treatment, each with its natural collar: radius /
-voxel outlier removal (the radius), local PCA wood/leaf features (the largest
-scale), normals (the search radius), DEM pre-binning (none), C2M distance
-(none — purely per point).
+**Outlier removal** (`denoise.py`) tiles its two local criteria the same
+way from `PHYTOGRAPH_DENOISE_TILE_MIN_POINTS` (4 M): radius outlier removal
+with a collar of the radius, voxel-count with a collar of the voxel and the
+grid anchored at one origin for every tile (a per-tile minimum would shift
+the grid at every seam). Parameters are resolved once, on every k-th small
+cell of a fine probe grid — spatially contiguous inside each cell, so the
+nearest-neighbour spacing is the true one, and spread across the cloud so a
+dense tile does not understate the sparse far field. SOR's threshold is a
+mean over the whole cloud by definition and stays untiled.
+
+**Point-local tools stream instead.** `_iter_session_hit_positions` yields a
+session's surviving hits in 2 M-row blocks (deletions, misses, world shift
+and translation applied) under a per-block lock; cloud-to-mesh distance
+consumes it and keeps only the float32 distance per point.
+
+Remaining candidates, each with its natural collar: local PCA wood/leaf
+features (the largest scale), normals (the search radius), DEM pre-binning
+(none, a per-block consumer of the same iterator).
+
+### The octree LAS write no longer holds the session lock
+
+`_session_rebuild` used to hold the global session lock across the whole
+`_session_to_las` encode — "the longest lock hold in the process", ~1 s per
+10 M points with extras, during which every other session request stalled.
+`_session_to_las(block_lock=…)` now snapshots the survivor set and the array
+*references* once under the lock and takes it again only per 2 M-row block
+for the gather; the laspy encode runs unlocked. Capturing references means a
+bake that replaces `positions` mid-write cannot desynchronise the block
+indices from the arrays they index; an in-place edit landing between blocks
+can differ between blocks, which the next rebuild reconciles and the renderer
+masks in the meantime. Pinned by racing a slowed write against a request on
+another session.
+
 
 ## The memory budget
 

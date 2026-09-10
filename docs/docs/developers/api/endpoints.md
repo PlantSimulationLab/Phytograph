@@ -107,7 +107,7 @@ SWIG C-extension bundled via `collectAll` in `scripts/build-backend.mjs`.
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/pointcloud/denoise` | `main.py`, `denoise.py` | Classify points into clean (1) / noise (2). Takes inline `points` or a `source` descriptor (full resolution, labels align 1:1). Returns per-point `labels`, the flagged count/fraction, the resolved parameters, and any warnings. Used for flat (in-memory) clouds |
+| POST | `/api/pointcloud/denoise` | `main.py`, `denoise.py` | Classify points into clean (1) / noise (2). Takes inline `points` or a `source` descriptor (full resolution, labels align 1:1). Returns per-point `labels`, the flagged count/fraction, the resolved parameters, and any warnings. Used for flat (in-memory) clouds. Above `PHYTOGRAPH_DENOISE_TILE_MIN_POINTS` (4 M) the radius and voxel criteria run per buffered tile with parameters resolved once (`stats.tiled`); SOR stays global |
 | POST | `/api/cloud/session/{id}/denoise` | `main.py`, `denoise.py` | Same classification on the session's in-RAM hit survivors, appending a `noise_class` column and rebuilding the octree so the flagged points render. Nothing is deleted — removal goes through `/filter` or `/split` |
 
 Three criteria, all in `backend-api/denoise.py` as index-preserving keep-masks:
@@ -295,7 +295,7 @@ sessions from the array. All of it is file-read-free after import.
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/c2m/distance` | `main.py` | Cloud-to-mesh distance |
+| POST | `/api/c2m/distance` | `main.py` | Cloud-to-mesh distance. A session source is streamed block by block (`_iter_session_hit_positions`) so the query never holds the whole cloud; only the float32 distance per point is kept |
 | POST | `/api/c2m/icp-register` | `main.py` | Cloud-to-mesh ICP |
 | POST | `/api/c2c/icp-register` | `main.py` | Cloud-to-cloud ICP |
 | POST | `/api/m2m/icp-register` | `main.py` | Mesh-to-mesh ICP |

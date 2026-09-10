@@ -71,6 +71,7 @@ it is offered for clouds too large for a KD-tree rather than as the default.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Optional
 
@@ -301,7 +302,8 @@ def radius_outlier_mask(points: np.ndarray, nb_points: int, radius: float, *,
     return keep
 
 
-def voxel_count_mask(points: np.ndarray, voxel: float, min_points: int) -> np.ndarray:
+def voxel_count_mask(points: np.ndarray, voxel: float, min_points: int,
+                     origin: "Optional[np.ndarray]" = None) -> np.ndarray:
     """Keep-mask: drop points whose voxel holds fewer than `min_points` returns.
 
     The O(N) method -- no KD-tree -- and so the one that stays usable on very
@@ -325,7 +327,11 @@ def voxel_count_mask(points: np.ndarray, voxel: float, min_points: int) -> np.nd
         return np.zeros(0, dtype=bool)
     if voxel <= 0:
         return np.ones(n, dtype=bool)
-    key = np.floor((points - points.min(axis=0)) / voxel).astype(np.int64)
+    # `origin` anchors the grid. The tiled path passes one origin for every
+    # tile so neighbouring tiles bin into the SAME voxels; a per-tile minimum
+    # would shift the grid at every seam and change the counts there.
+    o = points.min(axis=0) if origin is None else np.asarray(origin, dtype=np.float64)
+    key = np.floor((points - o) / voxel).astype(np.int64)
     spans = [int(s) + 1 for s in key.max(axis=0)]
     # Pack the 3-D key into one int64 when the grid fits, which avoids
     # np.unique's slow structured-array path. Fall back to the row-wise unique
@@ -441,6 +447,17 @@ def denoise_mask(points: np.ndarray, method: str = "ror",
     started = time.perf_counter()
     usable = pts[finite]
 
+    # Large clouds: the two LOCAL criteria run per buffered XY tile (the collar
+    # is the criterion's own radius / voxel), which bounds the KD-tree and the
+    # query arrays by one tile. SOR is global by definition (its threshold is
+    # a mean over the whole cloud) and stays untiled.
+    if method in ("ror", "voxel_count") and len(usable) >= tile_min_points():
+        keep_sub, params_used, p50, p95, tile_info = _denoise_tiled(usable, method, params)
+        keep = np.zeros(total, dtype=bool)
+        keep[finite] = keep_sub
+        return _finish(keep, total, n_non_finite, method, params_used, p50, p95,
+                       previously_denoised, started, tile_info)
+
     # ONE tree for the whole run: the spacing percentiles and the criterion all
     # query the same points, and a build over a 45.7 M-point scan measured
     # 15.7 s. Built only when something actually needs it, so a fully-manual
@@ -466,7 +483,12 @@ def denoise_mask(points: np.ndarray, method: str = "ror",
 
     keep = np.zeros(total, dtype=bool)  # non-finite rows stay False = noise
     keep[finite] = sub
+    return _finish(keep, total, n_non_finite, method, params_used, p50, p95,
+                   previously_denoised, started, None)
 
+
+def _finish(keep, total, n_non_finite, method, params_used, p50, p95,
+            previously_denoised, started, tile_info):
     flagged = int((~keep).sum())
     fraction = flagged / total if total else 0.0
     warnings: list[str] = []
@@ -507,7 +529,88 @@ def denoise_mask(points: np.ndarray, method: str = "ror",
         "warnings": warnings,
         "elapsed_s": round(time.perf_counter() - started, 3),
     }
+    if tile_info is not None:
+        stats["tiled"] = tile_info
     return keep, stats
+
+
+# Below this many (finite) points the local criteria run untiled; the collar
+# overhead and the per-tile tree builds are not worth it. Env-overridable so
+# the seam test can force tiling on a small cloud.
+TILE_MIN_POINTS = 4_000_000
+TILE_TARGET_POINTS = 3_000_000
+TILE_SAMPLE_POINTS = 2_000_000
+
+
+def tile_min_points() -> int:
+    raw = os.environ.get("PHYTOGRAPH_DENOISE_TILE_MIN_POINTS")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return TILE_MIN_POINTS
+
+
+def _tile_target_points() -> int:
+    raw = os.environ.get("PHYTOGRAPH_DENOISE_TILE_TARGET_POINTS")
+    if raw is not None:
+        try:
+            return max(1000, int(raw))
+        except ValueError:
+            pass
+    return TILE_TARGET_POINTS
+
+
+def _denoise_tiled(usable: np.ndarray, method: str, params: Optional[dict]):
+    """ROR / voxel-count per buffered tile. Parameters are resolved ONCE, on a
+    spatially contiguous sample (the most populated tile, capped), so every
+    tile applies the same radius / voxel - a stride sample would overstate the
+    spacing (thinning a surface by k widens its nearest-neighbour distance by
+    ~sqrt(k)), and per-tile resolution would let tiles disagree. The voxel grid
+    is anchored at the cloud minimum for the same reason (see voxel_count_mask).
+    """
+    import tiled
+
+    params = dict(params or {})
+    # Spacing sample: every k-th SMALL cell of a fine probe grid, so the sample
+    # is spatially contiguous inside each cell (true nearest-neighbour
+    # distances) while spanning the whole cloud's mix of densities (a single
+    # dense tile understates the spacing of the sparse far field, and the
+    # untiled run's parameters come from the whole cloud).
+    n_usable = len(usable)
+    probe = tiled.TilePlan.build(usable[:, :2],
+                                 target_points=max(20_000, min(100_000, n_usable // 50)))
+    cells = probe.tiles()
+    k = max(1, int(np.ceil(n_usable / TILE_SAMPLE_POINTS)))
+    parts = []
+    for i, t in enumerate(cells):
+        if i % k == 0:
+            a, b = probe.cell_range(t.ix, t.iy)
+            parts.append(probe.order[a:b])
+    sample_idx = np.concatenate(parts) if parts else np.arange(min(n_usable, TILE_SAMPLE_POINTS))
+    sample = usable[sample_idx]
+    sample_tree = cKDTree(sample) if (method == "ror" or needs_spacing(method, params)) else None
+    params_used, p50, p95 = resolve_params(sample, method, params, tree=sample_tree)
+    del sample_tree, sample
+
+    if method == "ror":
+        buffer_m = float(params_used["radius"])
+        nb = int(params_used["nb_points"])
+
+        def fn(chunk, core):
+            return radius_outlier_mask(chunk, nb, buffer_m, tree=cKDTree(chunk))
+    else:
+        buffer_m = float(params_used["voxel"])
+        mp = int(params_used["min_points"])
+        origin = usable.min(axis=0)
+
+        def fn(chunk, core):
+            return voxel_count_mask(chunk, buffer_m, mp, origin=origin)
+
+    plan = tiled.TilePlan.build(usable[:, :2], buffer_m=buffer_m, target_points=_tile_target_points())
+    keep = tiled.run_tiled(plan, usable, fn, out_dtype=bool, fill=True)
+    return keep, params_used, p50, p95, plan.describe()
 
 
 def denoise_labels(points: np.ndarray, method: str = "ror",

@@ -24234,6 +24234,41 @@ def _load_las_arrays(
     return positions, colors, intensity
 
 
+def _iter_session_hit_positions(src: "PointSource", rows: "Optional[int]" = None):
+    """Yield the world-frame positions `_read_points_from_source(src)` would
+    return for a SESSION source, one contiguous block at a time - the
+    streaming form for point-local tools (C2M, DEM pre-binning), which have no
+    reason to hold every surviving point at once.
+
+    Same selection as the whole-array read: deletions honoured, misses dropped
+    unless `include_misses`, `world_shift` and `translation` added. The survivor
+    indices are taken once under the session lock and each block is gathered
+    under it, so the working set is one block. `max_points` is not supported
+    here (stride sampling is what the whole-array read is for)."""
+    sess = _get_cloud_session(src.session_id)
+    with _cloud_session_lock:
+        positions = sess.positions
+        keep = ~sess.deleted
+        if not src.include_misses and _MISS_SLUG in sess.extras:
+            keep = keep & (sess.extras[_MISS_SLUG] == 0)
+        idx = np.flatnonzero(keep)
+        shift = (np.asarray(sess.world_shift, dtype=np.float64)
+                 if sess.world_shift is not None else np.zeros(3))
+    if src.translation is not None:
+        t = np.asarray(src.translation, dtype=np.float64)
+        if t.shape != (3,):
+            raise HTTPException(status_code=400,
+                                detail=f"translation must be [tx, ty, tz]; got {src.translation!r}")
+        shift = shift + t
+    n = int(idx.shape[0])
+    rows = int(rows) if rows else _LAS_WRITE_CHUNK    # defined later in the module
+    for start in range(0, n, max(1, rows)):
+        block = idx[start:start + rows]
+        with _cloud_session_lock:
+            b = np.asarray(positions[block], dtype=np.float64)
+        yield b + shift
+
+
 def _source_point_count_estimate(src: "PointSource") -> int:
     """How many points a `_read_points_and_extras(src)` call is about to copy,
     for the memory budget. Session sources answer from the in-RAM arrays; a file
@@ -30348,7 +30383,7 @@ _LAS_WRITE_CHUNK = 2_000_000
 
 
 def _session_to_las(sess: "CloudSession", out_las: _Path,
-                    exclude_misses: bool = False) -> int:
+                    exclude_misses: bool = False, block_lock=None) -> int:
     """Write the session's SURVIVING points (positions[~deleted] + all
     attributes) to a LAS, entirely from the in-RAM arrays — no source file read.
     Mirrors `_xyz_to_las`'s header/record layout so PotreeConverter ingests it
@@ -30360,14 +30395,42 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     hits-only; misses live in the session for LAD + the on-demand overlay. A bake
     (which round-trips the LAS back into the session) must NOT exclude them, or
     the misses would be lost — only the octree build passes True.
+
+    `block_lock`: when given, the caller does NOT hold the session lock; this
+    takes it once to snapshot the survivor set and the array references, then
+    once per `_LAS_WRITE_CHUNK` block for the gather. The write itself (the
+    laspy encode, most of the cost - ~1 s per 10 M points with extras) runs
+    unlocked. The array REFERENCES are captured up front, so a bake that
+    replaces `sess.positions` mid-write cannot desynchronise the block indices
+    from the arrays they were computed against; an in-place edit landing
+    between blocks (a delete, a label stroke) can differ between blocks, which
+    the next rebuild reconciles and the renderer masks meanwhile. Without it
+    the caller must hold the lock for the whole write, as before.
     """
     import laspy
-    keep = ~sess.deleted
-    if exclude_misses and _MISS_SLUG in sess.extras:
-        keep = keep & (sess.extras[_MISS_SLUG] == 0)
-    n = int(keep.sum())
-
-    pos = sess.positions[keep]
+    import contextlib
+    lock = block_lock if block_lock is not None else contextlib.nullcontext()
+    with lock:
+        positions = sess.positions
+        colors = sess.colors
+        intensity = sess.intensity
+        timestamps = sess.timestamps
+        extras_ref = dict(sess.extras)
+        keep = ~sess.deleted
+        if exclude_misses and _MISS_SLUG in extras_ref:
+            keep = keep & (extras_ref[_MISS_SLUG] == 0)
+        n = int(keep.sum())
+        idx = np.flatnonzero(keep)
+        # bbox over the selection, block-wise so a memmapped session pays no
+        # full copy (cheap - just the f64 xyz), computed before the chunked
+        # write so the header mins/maxs cover every chunk.
+        pos_min = np.full(3, np.inf)
+        pos_max = np.full(3, -np.inf)
+        for start in range(0, n, _LAS_WRITE_CHUNK):
+            b = positions[idx[start:start + _LAS_WRITE_CHUNK]]
+            if b.shape[0]:
+                pos_min = np.minimum(pos_min, b.min(axis=0))
+                pos_max = np.maximum(pos_max, b.max(axis=0))
     header = laspy.LasHeader(point_format=3, version="1.4")
     header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
     # Offset to the data minimum, NOT [0,0,0]: a LAS coordinate is stored as a
@@ -30376,7 +30439,7 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     # northings ~5.4e6 m) overflow that. Subtracting the per-axis minimum keeps
     # the stored ints small for any CRS; laspy re-applies offset on read, so
     # downstream coordinates are unchanged.
-    header.offsets = (np.floor(pos.min(axis=0)) if n else np.zeros(3, dtype=np.float64))
+    header.offsets = (np.floor(pos_min) if n else np.zeros(3, dtype=np.float64))
     # Drop a `timestamp` extra dim from the SCHEMA and write the float64
     # `sess.timestamps` to the standard gps_time field instead (below). Imports no
     # longer create such a dim, but a session restored from an octree built before
@@ -30396,12 +30459,6 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     if getattr(sess, "gps_time_encoding", None) == 'adjusted_standard':
         _mark_gps_time_absolute(header)
 
-    # bbox over the full selection (cheap — just the f64 xyz), computed before the
-    # chunked write so the header mins/maxs cover every chunk.
-    if n > 0:
-        pos_min = pos.min(axis=0)
-        pos_max = pos.max(axis=0)
-
     # Write the LAS in row chunks rather than materialising ONE laspy record for
     # all N survivors. `ScaleAwarePointRecord.zeros(n, header)` allocates a full
     # structured array (point-format-3 + every float32 extra dim ≈ tens of bytes
@@ -30417,21 +30474,24 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     _ts_is_extra = _ts_extra is None and any(
         _canonical_slug_for_name(str(ed.get("slug", ""))) == 'timestamp'
         for ed in _extra_dims_out)
-    idx = np.flatnonzero(keep)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         for start in range(0, n, _LAS_WRITE_CHUNK):
             block = idx[start:start + _LAS_WRITE_CHUNK]
             m = block.shape[0]
             record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
-            bpos = sess.positions[block]
+            with lock:
+                bpos = positions[block]
+                bcol = colors[block] if colors is not None else None
+                bint = intensity[block] if intensity is not None else None
+                bts = (timestamps[block] if (timestamps is not None and not _ts_is_extra) else None)
+                bext = {ed["slug"]: extras_ref[ed["slug"]][block] for ed in _extra_dims_out}
             record.x = bpos[:, 0]
             record.y = bpos[:, 1]
             record.z = bpos[:, 2]
-            if sess.colors is not None:
-                c = sess.colors[block]
-                record.red, record.green, record.blue = c[:, 0], c[:, 1], c[:, 2]
-            if sess.intensity is not None:
-                record.intensity = sess.intensity[block]
+            if bcol is not None:
+                record.red, record.green, record.blue = bcol[:, 0], bcol[:, 1], bcol[:, 2]
+            if bint is not None:
+                record.intensity = bint
             # Point format 3 HAS a gps_time field, but nothing wrote it, so it
             # stayed identically zero — PotreeConverter then reported an
             # all-zero range for `gps-time` and the renderer's degenerate-range
@@ -30445,12 +30505,12 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
             # columns for one quantity, so the Color-by picker offered
             # `gps-time` and `timestamp` with identical ranges and the same
             # "Timestamp" label — indistinguishable in the menu.
-            if sess.timestamps is not None and not _ts_is_extra:
-                record.gps_time = sess.timestamps[block]
+            if bts is not None:
+                record.gps_time = bts
             for ed in _extra_dims_out:
-                record[ed["slug"]] = sess.extras[ed["slug"]][block]
+                record[ed["slug"]] = bext[ed["slug"]]
             writer.write_points(record)
-            del record, bpos
+            del record, bpos, bcol, bint, bts, bext
         if n > 0:
             pad = 0.001  # matches header.scales — keeps boundary points in-bbox
             writer.header.mins = (pos_min - pad).tolist()
@@ -32453,12 +32513,20 @@ def _session_rebuild(
     writers contend for memory bandwidth and the same temp dir. The global lock
     had been providing that admission control by accident; this keeps the
     throttle and drops only the collateral damage to unrelated requests."""
+    import contextlib
     import tempfile
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "rebuilt.las"
-        with (_las_write_lock if private else _cloud_session_lock):
-            # Octree is hits-only (misses stay in the session for LAD/overlay).
-            _session_to_las(sess, las_path, exclude_misses=True)
+        # Octree is hits-only (misses stay in the session for LAD/overlay). A
+        # non-private session hands `_session_to_las` the global lock to take
+        # per BLOCK rather than holding it across the whole encode - the write
+        # was "the longest lock hold in the process" (~1 s per 10 M points with
+        # extras, i.e. ~10 s at 100 M during which every other session request
+        # stalled). See `_session_to_las` for what a mid-write edit can do.
+        with (_las_write_lock if private else contextlib.nullcontext()):
+            _session_to_las(sess, las_path, exclude_misses=True,
+                            block_lock=None if private else _cloud_session_lock)
+        with _cloud_session_lock:
             extra_dims_meta = list(sess.extra_dims_meta)
         cache_key, cache_dir, meta = _build_octree_from_las(
             las_path, extra_dims_meta,
@@ -34351,8 +34419,15 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
             progress(0.10, "Reading points")
 
         # Convert flat arrays to numpy arrays. The source reader already returns
-        # (N,3) — only the inline flat array needs reshaping.
-        if request.source is not None:
+        # (N,3) — only the inline flat array needs reshaping. A SESSION source
+        # is streamed block by block below (`_iter_session_hit_positions`) so
+        # the query never holds the whole cloud: `points` is then None.
+        points = None
+        streamed = bool(request.source is not None and request.source.session_id
+                        and not request.source.max_points)
+        if streamed:
+            pass
+        elif request.source is not None:
             points, _, _ = _read_points_from_source(request.source)
         else:
             # Defense in depth: an INLINE array is passed through verbatim, so
@@ -34367,7 +34442,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
         vertices = np.array(request.mesh_vertices, dtype=np.float64).reshape(-1, 3)
         triangles = np.array(request.mesh_indices, dtype=np.int32).reshape(-1, 3)
 
-        if len(points) == 0:
+        if points is not None and len(points) == 0:
             return dict(success=False, error="No points provided")
 
         if len(vertices) == 0 or len(triangles) == 0:
@@ -34375,7 +34450,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
 
         _cancel_checkpoint(progress)
         if progress is not None:
-            progress(0.50, "Building raycasting scene")
+            progress(0.30, "Building raycasting scene")
 
         # RECENTRE BEFORE THE float32 CAST. Open3D's RaycastingScene is Embree-
         # backed and accepts float32 only (a float64 tensor is rejected outright),
@@ -34397,7 +34472,6 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
         if not np.all(np.isfinite(origin)):
             origin = np.zeros(3, dtype=np.float64)
         vertices_local = vertices - origin
-        points_local = points - origin
 
         # Create Open3D triangle mesh
         mesh = o3d.t.geometry.TriangleMesh()
@@ -34410,11 +34484,39 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
 
         _cancel_checkpoint(progress)
         if progress is not None:
-            progress(0.90, "Computing distances")
+            progress(0.40, "Computing distances")
 
-        # Compute unsigned distances from each point to the mesh
-        query_points = o3d.core.Tensor(points_local, dtype=o3d.core.float32)
-        distances = scene.compute_distance(query_points).numpy()
+        # Compute unsigned distances from each point to the mesh, one block at
+        # a time: the query is per point, so the only full-length array is the
+        # float32 distance per point (4 B/pt), never a copy of the cloud.
+        def _blocks():
+            if streamed:
+                yield from _iter_session_hit_positions(request.source)
+            else:
+                for start in range(0, len(points), _LAS_WRITE_CHUNK):
+                    yield points[start:start + _LAS_WRITE_CHUNK]
+
+        dist_blocks = []
+        bb_min = np.full(3, np.inf)
+        bb_max = np.full(3, -np.inf)
+        n_done = 0
+        n_total = (_source_point_count_estimate(request.source) if streamed else len(points)) or 1
+        for blk in _blocks():
+            if blk.shape[0] == 0:
+                continue
+            bb_min = np.minimum(bb_min, blk.min(axis=0))
+            bb_max = np.maximum(bb_max, blk.max(axis=0))
+            q = o3d.core.Tensor((blk - origin).astype(np.float32), dtype=o3d.core.float32)
+            dist_blocks.append(scene.compute_distance(q).numpy().astype(np.float32))
+            n_done += int(blk.shape[0])
+            _cancel_checkpoint(progress)
+            if progress is not None:
+                progress(0.40 + 0.5 * min(1.0, n_done / n_total), "Computing distances")
+        if not dist_blocks:
+            return dict(success=False, error="No points provided")
+        distances = np.concatenate(dist_blocks) if len(dist_blocks) > 1 else dist_blocks[0]
+        del dist_blocks
+        n_points = int(distances.shape[0])
 
         # Compute statistics
         mean_dist = float(np.mean(distances))
@@ -34429,7 +34531,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
 
         # Coverage metrics (using adaptive thresholds based on data scale)
         # Use percentages of the bounding box diagonal as thresholds
-        bbox_diag = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
+        bbox_diag = float(np.linalg.norm(bb_max - bb_min))
         thresh_1mm = bbox_diag * 0.001  # 0.1% of diagonal
         thresh_5mm = bbox_diag * 0.005  # 0.5% of diagonal
         thresh_10mm = bbox_diag * 0.01  # 1% of diagonal
@@ -34455,7 +34557,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
             points_within_1mm=within_1mm,
             points_within_5mm=within_5mm,
             points_within_10mm=within_10mm,
-            point_count=len(points),
+            point_count=n_points,
         )
 
     except ScanCancelled:
