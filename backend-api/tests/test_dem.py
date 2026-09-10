@@ -920,3 +920,25 @@ def test_dem_cell_z_order_matches_lexsort():
     # Constant z (span degenerate) still groups by cell.
     order0 = main._dem_cell_z_order(flat, np.zeros(n))
     assert np.all(np.diff(flat[order0]) >= 0)
+
+
+def test_session_dem_is_admitted_against_the_memory_budget(monkeypatch):
+    """A session DEM materialises the hits and two subsets of them, so it is
+    admitted at `_DEM_BYTES_PER_POINT` per point of the session BEFORE the
+    arrays are gathered - two large DEMs queue instead of both peaking."""
+    pts, _ = _plane_cloud(n=2000)
+    sess = _make_session(pts)
+    monkeypatch.setattr(main, "_session_rebuild", lambda s: ("c", Path("/tmp"), {}))
+    seen = []
+    real = main._ADMISSION.admit
+
+    def spy(estimate, label):
+        seen.append((int(estimate), label))
+        return real(estimate, label)
+
+    monkeypatch.setattr(main._ADMISSION, "admit", spy)
+    req = main.SessionDemRequest(cell_size=0.5, auto_segment_ground=False)
+    r = main._do_session_dem(sess, req)
+    assert r["success"], r.get("error")
+    n = len(sess.positions)
+    assert (n * main._DEM_BYTES_PER_POINT, f"DEM on {n:,} pts") in seen

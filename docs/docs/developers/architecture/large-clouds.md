@@ -187,8 +187,9 @@ against 777 MB before. The result is identical to lexsort's — pinned by a
 test with exact ties and cells up to the cap — to within the key's spacing,
 about 1e-9 of the z range, which decides only which of two z values closer
 than that is picked. The endpoint still materialises the hits, the ground
-subset and the first-return subset (~24 B/pt each); feeding the pre-bin from
-`_iter_session_hit_positions` is the next step there.
+subset and the first-return subset (~24 B/pt each) — it is admitted against
+the budget for that — and keeps the intensity in its native dtype; feeding
+the pre-bin from `_iter_session_hit_positions` is the next step there.
 
 Remaining candidates, each with its natural collar: normals (the search
 radius). **Wood/leaf is left global on purpose.** Its per-point PCA
@@ -263,7 +264,10 @@ says what a slow request cost.
 Heavy paths declare their working set to `_ADMISSION.admit(bytes, label)`
 before allocating it: the import read (the session's columns plus one
 chunk), the killable segmentation workers (parent copy + worker copy +
-labels), and export (a copy of every surviving column).
+labels), export (a copy of every surviving column), every PotreeConverter
+run (72 B/pt, measured), and the session DEM (`_DEM_BYTES_PER_POINT` =
+112 B/pt: the hits plus the ground and first-return subsets, measured at
+10 M points).
 A job waits until it fits beside what is already running; a job larger than
 the whole budget is admitted **alone** and logged rather than refused. The
 budget is advisory for a lone job and a hard cap only on concurrency, because
@@ -337,6 +341,7 @@ plus its children (worker, PotreeConverter) above the idle baseline.
 | delete region + rebuild | 11.0 s, +4.1 GB | 6.0 s, +3.1 GB |
 | export LAZ | 2.2 s | 2.3 s |
 | LAS read alone (`_read_las_into_arrays`) | 0.22 s, 1138 MB peak | 0.43 s, 905 MB peak |
+| DTM from the ground column (0.5 m cells, TIN, no rebuild) | — | 3.5 s, +1.7 GB |
 
 At 30 M points, store-backed from import, tiled ground segmentation and the
 streamed export (one run, same machine):

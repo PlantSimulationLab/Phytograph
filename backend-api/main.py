@@ -33586,7 +33586,25 @@ class SessionDemRequest(BaseModel):
     add_height_column: bool = False
 
 
+# Transient bytes per surviving point a session DEM holds at its peak: the
+# hits (24), the ground and first-return subsets (up to 24 each), the uint16
+# intensity, the pre-bin's ids + sort order (12) and the density layers' cell
+# ids. Measured at 10 M points with a ground column: +1.1 GB over the session
+# itself, i.e. ~110 B/pt; the whole-cloud DSM/CHM shapes sit under this too.
+_DEM_BYTES_PER_POINT = 112
+
+
 def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress=None) -> dict:
+    """Session DEM/DSM/CHM worker, admitted against the memory budget at
+    `_DEM_BYTES_PER_POINT` so two large DEMs queue rather than both
+    materialising their subsets at once (the arrays are gathered inside)."""
+    with _cloud_session_lock:
+        n_est = int(len(sess.positions))
+    with _ADMISSION.admit(n_est * _DEM_BYTES_PER_POINT, f"DEM on {n_est:,} pts"):
+        return _do_session_dem_inner(sess, request, progress=progress)
+
+
+def _do_session_dem_inner(sess: "CloudSession", request: "SessionDemRequest", progress=None) -> dict:
     """Session DEM/DSM/CHM worker. The mesh is built in the session's (world_shift-
     subtracted) display coordinates so it aligns with the rendered octree; the
     `world_shift` rides in the result so raster export can recover true-world
@@ -33625,10 +33643,13 @@ def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress
             is_first = (_first_return_index_mask(ti_col[keep]) if ti_col is not None else None)
             # Per-hit intensity for the intensity raster: prefer the session's
             # first-class uint16 field, fall back to an 'intensity' extra column.
+            # Kept in its native dtype (uint16 / float32): the only consumer is
+            # the per-cell mean, whose bincount casts to float64 one call at a
+            # time, so a float64 copy here was 8 B/pt of resident for nothing.
             if sess.intensity is not None and len(sess.intensity) == len(surv):
-                intensity_hits = sess.intensity[keep].astype(np.float64)
+                intensity_hits = sess.intensity[keep]
             elif "intensity" in sess.extras and len(sess.extras["intensity"]) == len(surv):
-                intensity_hits = sess.extras["intensity"][keep].astype(np.float64)
+                intensity_hits = sess.extras["intensity"][keep]
             else:
                 intensity_hits = None
             world_shift = sess.world_shift
