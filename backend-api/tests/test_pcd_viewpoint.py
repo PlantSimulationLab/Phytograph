@@ -97,3 +97,37 @@ def test_pcd_to_las_identity_stashes_nothing(tmp_path):
     main._import_scan_meta.pop(str(out.resolve()), None)
     main._pcd_to_las(src, out)
     assert main._import_scan_meta.get(str(out.resolve())) is None
+
+
+def test_pcd_to_las_writes_in_blocks(tmp_path, monkeypatch):
+    """The LAS is written one `_LAS_WRITE_CHUNK` at a time; with a chunk that
+    does not divide the point count, every point and its colour still lands, in
+    order, in the same units a single write produced."""
+    import laspy
+
+    rng = np.random.default_rng(3)
+    n = 1003
+    xyz = rng.uniform(-50, 50, (n, 3))
+    rgb = rng.integers(0, 256, (n, 3))
+    lines = [
+        "# .PCD v0.7 - Point Cloud Data file format", "VERSION 0.7",
+        "FIELDS x y z rgb", "SIZE 4 4 4 4", "TYPE F F F U", "COUNT 1 1 1 1",
+        f"WIDTH {n}", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0", f"POINTS {n}", "DATA ascii",
+    ]
+    packed = (rgb[:, 0] << 16) | (rgb[:, 1] << 8) | rgb[:, 2]
+    lines += [f"{x:.4f} {y:.4f} {z:.4f} {c}" for (x, y, z), c in zip(xyz, packed)]
+    src = tmp_path / "blocks.pcd"
+    src.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+    monkeypatch.setattr(main, "_LAS_WRITE_CHUNK", 400)
+    out = tmp_path / "blocks.las"
+    count, _ = main._pcd_to_las(src, out)
+    assert count == n
+    las = laspy.read(str(out))
+    assert len(las.points) == n
+    got = np.column_stack([las.x, las.y, las.z])
+    np.testing.assert_allclose(got, np.round(xyz, 4), atol=1.5e-3)
+    # 8-bit colour scaled *256, as the single-write version stored it.
+    np.testing.assert_array_equal(np.asarray(las.red) // 256, rgb[:, 0])
+    np.testing.assert_array_equal(np.asarray(las.green) // 256, rgb[:, 1])
+    np.testing.assert_array_equal(np.asarray(las.blue) // 256, rgb[:, 2])

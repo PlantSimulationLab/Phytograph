@@ -148,6 +148,17 @@ def test_large_cloud_workflow(client, big_las, bench_root, monkeypatch):
                                 "rigidness": 3, "defer_octree": True})
         assert res.status_code == 200, res.text[:500]
 
+    with stage("dem_dtm"):
+        # Ground column already present from the stage above, so this is the
+        # pre-bin + TIN on the ground subset, no CSF and no rebuild.
+        res = client.post(f"/api/cloud/session/{sid}/dem",
+                          json={"surface_type": "dtm", "auto_segment_ground": False,
+                                "cell_size": 0.5, "method": "tin"})
+        assert res.status_code == 200, res.text[:500]
+        from tests.binframe import decode_bin_frame
+        dem_meta, _ = decode_bin_frame(res.content)
+        assert dem_meta.get("success", True), dem_meta
+
     with stage("split_by_ground_class"):
         res = client.post(f"/api/cloud/session/{sid}/extract_by_column",
                           json={"slug": main.GROUND_CLASS_SLUG, "include_misses": True,

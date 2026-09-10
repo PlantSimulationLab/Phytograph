@@ -874,3 +874,49 @@ def test_session_dem_all_points_when_no_ground_class(monkeypatch):
     assert r["success"], r.get("error")
     assert r["ground_source"] == "all_points"
     assert "warning" in r
+
+
+def test_dem_prebin_is_exact_per_cell_percentile_across_blocks(monkeypatch):
+    """The pre-bin computes cell ids in blocks (int32, bounded temporaries);
+    with a block size smaller than the cloud - and not dividing it - every
+    populated cell's representative must still be exactly the requested
+    percentile of that cell's z values, as a brute-force per-cell computation
+    gives it."""
+    rng = np.random.default_rng(7)
+    n = 10_007
+    pts = np.column_stack([rng.uniform(0, 10, n), rng.uniform(0, 6, n), rng.normal(0, 1, n)])
+    monkeypatch.setattr(main, "_DEM_BIN_BLOCK", 1000)
+    cell = 1.0
+    ids = main._dem_cell_ids(pts[:, :2], 0.0, 0.0, cell, 10, 6)
+    assert ids.dtype == np.int32
+    ci = np.clip((pts[:, 0] / cell).astype(np.int64), 0, 9)
+    cj = np.clip((pts[:, 1] / cell).astype(np.int64), 0, 5)
+    np.testing.assert_array_equal(ids, cj * 10 + ci)
+
+    r = main._compute_dem(pts, cell_size=cell, bbox=[0, 0, 10, 6], method="nearest",
+                          ground_percentile=25.0)
+    assert r["success"], r.get("error")
+    gz = np.asarray(r["grid_z"]).reshape(r["grid_ny"], r["grid_nx"])
+    for j in range(6):
+        for i in range(10):
+            zs = np.sort(pts[(ci == i) & (cj == j), 2])
+            assert len(zs) > 0
+            expect = zs[int(np.floor((len(zs) - 1) * 0.25))]
+            # "nearest" at a populated cell's own centre is that cell's representative.
+            assert gz[j, i] == pytest.approx(expect)
+
+
+def test_dem_cell_z_order_matches_lexsort():
+    """The composite-key sort orders by cell, then z, exactly as lexsort does -
+    including cells whose z values straddle the whole range and exact ties."""
+    rng = np.random.default_rng(11)
+    n = 50_000
+    flat = rng.integers(0, 3_999_999, n).astype(np.int32)   # up to _DEM_MAX_CELLS
+    z = np.round(rng.uniform(-500.0, 1500.0, n), 2)          # many exact ties
+    order = main._dem_cell_z_order(flat, z)
+    ref = np.lexsort((z, flat))
+    np.testing.assert_array_equal(flat[order], flat[ref])
+    np.testing.assert_array_equal(z[order], z[ref])
+    # Constant z (span degenerate) still groups by cell.
+    order0 = main._dem_cell_z_order(flat, np.zeros(n))
+    assert np.all(np.diff(flat[order0]) >= 0)
