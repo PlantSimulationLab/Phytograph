@@ -202,10 +202,22 @@ far above the key's float64 spacing so cells never interleave), which
 against 777 MB before. The result is identical to lexsort's — pinned by a
 test with exact ties and cells up to the cap — to within the key's spacing,
 about 1e-9 of the z range, which decides only which of two z values closer
-than that is picked. The endpoint still materialises the hits, the ground
-subset and the first-return subset (~24 B/pt each) — it is admitted against
-the budget for that — and keeps the intensity in its native dtype; feeding
-the pre-bin from `_iter_session_hit_positions` is the next step there.
+than that is picked. A session DEM of at least 5 M points
+(`PHYTOGRAPH_DEM_STREAM_MIN_POINTS`) no longer materialises the hits, the
+ground subset and the first-return subset (~24 B/pt each).
+`_do_session_dem_streamed` reads the session in 2 M-row blocks: one pass for
+subset counts and extents, one for per-row counts and the density,
+intensity and footprint grids, and one that appends each gridded point's
+cell id and z to band files cut at `_DEM_BAND_POINTS` (4 M). Each band is
+sorted alone, and its per-cell percentile is the one the whole-cloud sort
+would pick, because a band is a contiguous run of grid rows and cells never
+span rows. Height above ground is sampled per block from one interpolator.
+Everything after the per-cell representatives is shared with the in-memory
+path (`_dem_surface_from_reps`, `_dem_layers_result`, `_chm_from_surfaces`),
+and `tests/test_dem_streamed.py` requires the two to agree field by field
+for DTM, DSM and CHM, with and without void filling and height above ground.
+A cloud with no usable ground column and CSF requested still takes the
+in-memory path, since CSF needs every point at once.
 
 Remaining candidates, each with its natural collar: normals (the search
 radius). **Wood/leaf is left global on purpose.** Its per-point PCA

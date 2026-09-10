@@ -5559,6 +5559,28 @@ def _resolve_dem_points(request: "DemRequest") -> np.ndarray:
 
 
 
+def _dem_grid(minx: float, miny: float, maxx: float, maxy: float,
+              cell_size: Optional[float]) -> "Optional[tuple[float, int, int]]":
+    """(cell, nx, ny) for a DEM over [minx, maxx] x [miny, maxy], or None for a
+    degenerate extent. Raises ValueError past `_DEM_MAX_CELLS`. Shared by the
+    in-memory and streamed DEM so both size the grid identically."""
+    ext_x, ext_y = maxx - minx, maxy - miny
+    if not (ext_x > 0 and ext_y > 0):
+        return None
+    if cell_size is None or cell_size <= 0:
+        cell = float(np.clip(max(ext_x, ext_y) / 256.0, _DEM_CELL_MIN, _DEM_CELL_MAX))
+    else:
+        cell = float(cell_size)
+    nx = max(int(np.ceil(ext_x / cell)), 1)
+    ny = max(int(np.ceil(ext_y / cell)), 1)
+    if nx * ny > _DEM_MAX_CELLS:
+        raise ValueError(
+            f"Cell size {cell:g} m is too fine for this extent "
+            f"({nx:,}×{ny:,} = {nx*ny:,} cells; cap {_DEM_MAX_CELLS:,}). "
+            "Use a larger cell size.")
+    return cell, nx, ny
+
+
 def _compute_dem(
     points: np.ndarray,
     *,
@@ -5604,22 +5626,11 @@ def _compute_dem(
     else:
         minx, miny = float(xy[:, 0].min()), float(xy[:, 1].min())
         maxx, maxy = float(xy[:, 0].max()), float(xy[:, 1].max())
-    ext_x, ext_y = maxx - minx, maxy - miny
-    if not (ext_x > 0 and ext_y > 0):
+    grid = _dem_grid(minx, miny, maxx, maxy, cell_size)
+    if grid is None:
         return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
                 "num_vertices": 0, "error": "Point cloud has a degenerate XY extent."}
-
-    if cell_size is None or cell_size <= 0:
-        cell = float(np.clip(max(ext_x, ext_y) / 256.0, _DEM_CELL_MIN, _DEM_CELL_MAX))
-    else:
-        cell = float(cell_size)
-    nx = max(int(np.ceil(ext_x / cell)), 1)
-    ny = max(int(np.ceil(ext_y / cell)), 1)
-    if nx * ny > _DEM_MAX_CELLS:
-        raise ValueError(
-            f"Cell size {cell:g} m is too fine for this extent "
-            f"({nx:,}×{ny:,} = {nx*ny:,} cells; cap {_DEM_MAX_CELLS:,}). "
-            "Use a larger cell size.")
+    cell, nx, ny = grid
 
     _report(0.2, "Binning ground points")
     # --- Per-cell low-percentile pre-bin (robust near-minimum representative) ---
@@ -5649,6 +5660,30 @@ def _compute_dem(
         fill_voids=fill_voids, footprint_xy=footprint_xy, sample_xy=sample_xy,
         progress=progress)
 
+
+
+def _dem_ground_sampler(rep_xy: np.ndarray, rep_z: np.ndarray):
+    """Gap-free ground z at arbitrary XY from the per-cell representatives:
+    linear inside their hull, nearest representative outside. Built once and
+    called per block by the streamed DEM, so its triangulation is not rebuilt
+    for every block. `LinearNDInterpolator` / `NearestNDInterpolator` are what
+    `scipy.interpolate.griddata` constructs internally for 2-D input, so the
+    values are the ones a single `griddata` call gives."""
+    from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+
+    linear = LinearNDInterpolator(rep_xy, rep_z)
+    nearest = []
+
+    def sample(xy: np.ndarray) -> np.ndarray:
+        sg = linear(xy)
+        outside = ~np.isfinite(sg)
+        if outside.any():
+            if not nearest:
+                nearest.append(NearestNDInterpolator(rep_xy, rep_z))
+            sg[outside] = nearest[0](xy[outside])
+        return sg
+
+    return sample
 
 
 def _dem_surface_from_reps(
@@ -5805,11 +5840,7 @@ def _dem_surface_from_reps(
     # points to height 0 and read as "at ground level").
     sample_ground_z = None
     if sample_xy is not None and len(sample_xy):
-        sg = griddata(rep_xy, rep_z, sample_xy, method="linear")
-        outside = ~np.isfinite(sg)
-        if outside.any():
-            sg[outside] = griddata(rep_xy, rep_z, sample_xy[outside], method="nearest")
-        sample_ground_z = sg
+        sample_ground_z = _dem_ground_sampler(rep_xy, rep_z)(sample_xy)
 
     _report(0.95, "Packing DEM")
     return {
@@ -6152,6 +6183,17 @@ def _compute_chm(ground_pts: np.ndarray, surface_pts: np.ndarray, *, request,
                        fill_voids=request.fill_voids)
     if not dsm.get("success"):
         return dsm
+    return _chm_from_surfaces(dtm, dsm, progress=progress)
+
+
+def _chm_from_surfaces(dtm: dict, dsm: dict, progress=None) -> dict:
+    """CHM = DSM - DTM from two already-built surfaces on one grid: floor at 0,
+    pit-fill, and drape the mesh on the terrain. Shared by the in-memory and
+    streamed session DEM."""
+    def _sub(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
     if (dsm["grid_nx"], dsm["grid_ny"]) != (dtm["grid_nx"], dtm["grid_ny"]):
         return {"success": False, "method_used": "dem_chm", "num_triangles": 0,
                 "num_vertices": 0, "error": "DTM/DSM grids did not align for CHM."}
@@ -6314,6 +6356,38 @@ def _terrain_derivatives(elev: np.ndarray, cell: float) -> "dict[str, np.ndarray
     return {"slope": slope, "aspect": aspect, "hillshade": hillshade}
 
 
+def _dem_layers_result(dtm: dict, density: "dict[str, np.ndarray]") -> dict:
+    """Attach every scalar layer to a DTM result: elevation, the per-cell
+    `density` grids the caller measured (point_density, return_density and
+    optionally intensity, each (ny, nx) with NaN where unpopulated), and the
+    terrain derivatives, as flat grids plus per-vertex samples. Shared by the
+    in-memory and streamed session DEM."""
+    nx, ny, cell = dtm["grid_nx"], dtm["grid_ny"], dtm["grid_cell"]
+    elev = np.asarray(dtm["grid_z"], dtype=np.float64).reshape(ny, nx)
+    layers_2d: "dict[str, np.ndarray]" = {"elevation": elev}
+    layers_2d.update(density)
+    layers_2d.update(_terrain_derivatives(elev, cell))
+
+    # Per-output-vertex sampling: dtm["vertex_cells"] is the flat cell index of each
+    # surviving vertex, so a layer's per-vertex array is grid.ravel()[vertex_cells].
+    vcells = np.asarray(dtm["vertex_cells"], dtype=np.int64)
+    layers = {}
+    layer_vertex = {}
+    for name in _DEM_LAYER_NAMES:
+        g = layers_2d.get(name)
+        if g is None:
+            continue   # e.g. intensity when the cloud has none
+        flat = g.astype(np.float32).ravel()
+        finite = flat[np.isfinite(flat)]
+        lo = float(finite.min()) if finite.size else 0.0
+        hi = float(finite.max()) if finite.size else 1.0
+        layers[name] = {"grid": flat, "min": lo, "max": hi, "label": _DEM_LAYER_LABELS[name]}
+        layer_vertex[name] = flat[vcells]
+    dtm["layers"] = layers
+    dtm["layer_vertex"] = layer_vertex
+    return dtm
+
+
 def _compute_dem_layers(ground_pts: np.ndarray, all_pts: np.ndarray,
                         first_pts: np.ndarray, intensity: "Optional[np.ndarray]", *,
                         cell_size: "Optional[float]", bbox: "Optional[List[float]]",
@@ -6347,37 +6421,16 @@ def _compute_dem_layers(ground_pts: np.ndarray, all_pts: np.ndarray,
         return dtm
     nx, ny, cell = dtm["grid_nx"], dtm["grid_ny"], dtm["grid_cell"]
     minx, miny = dtm["grid_origin"]
-    elev = np.asarray(dtm["grid_z"], dtype=np.float64).reshape(ny, nx)
 
     _report(0.55, "Computing layers")
-    layers_2d: "dict[str, np.ndarray]" = {"elevation": elev}
-    layers_2d["point_density"] = _grid_cell_density(all_pts[:, :2], minx, miny, cell, nx, ny)
-    layers_2d["return_density"] = _grid_cell_density(first_pts[:, :2], minx, miny, cell, nx, ny)
+    density = {
+        "point_density": _grid_cell_density(all_pts[:, :2], minx, miny, cell, nx, ny),
+        "return_density": _grid_cell_density(first_pts[:, :2], minx, miny, cell, nx, ny),
+    }
     if intensity is not None and len(intensity) == len(all_pts):
-        layers_2d["intensity"] = _grid_cell_density(all_pts[:, :2], minx, miny, cell, nx, ny,
-                                                    values=np.asarray(intensity, dtype=np.float64))
-    layers_2d.update(_terrain_derivatives(elev, cell))
-
-    # Per-output-vertex sampling: dtm["vertex_cells"] is the flat cell index of each
-    # surviving vertex, so a layer's per-vertex array is grid.ravel()[vertex_cells].
-    vcells = np.asarray(dtm["vertex_cells"], dtype=np.int64)
-    layers = {}
-    layer_vertex = {}
-    for name in _DEM_LAYER_NAMES:
-        g = layers_2d.get(name)
-        if g is None:
-            continue   # e.g. intensity when the cloud has none
-        flat = g.astype(np.float32).ravel()
-        finite = flat[np.isfinite(flat)]
-        lo = float(finite.min()) if finite.size else 0.0
-        hi = float(finite.max()) if finite.size else 1.0
-        layers[name] = {"grid": flat, "min": lo, "max": hi, "label": _DEM_LAYER_LABELS[name]}
-        layer_vertex[name] = flat[vcells]
-
-    result = dtm
-    result["layers"] = layers
-    result["layer_vertex"] = layer_vertex
-    return result
+        density["intensity"] = _grid_cell_density(all_pts[:, :2], minx, miny, cell, nx, ny,
+                                                  values=np.asarray(intensity, dtype=np.float64))
+    return _dem_layers_result(dtm, density)
 
 
 def _do_dem(request: "DemRequest", progress=None) -> dict:
@@ -33715,12 +33768,378 @@ class SessionDemRequest(BaseModel):
 _DEM_BYTES_PER_POINT = 112
 
 
+# Session DEMs of at least this many points (PHYTOGRAPH_DEM_STREAM_MIN_POINTS)
+# take the streamed worker whenever it can reproduce the in-memory answer.
+_DEM_STREAM_MIN_POINTS_DEFAULT = 5_000_000
+# Gridded points per band in the streamed per-cell percentile. A band is what
+# the streamed worker holds in RAM at once (cell id + z + sort order, ~20 B/pt).
+_DEM_BAND_POINTS = 4_000_000
+
+
+def _dem_stream_min_points() -> int:
+    raw = os.environ.get("PHYTOGRAPH_DEM_STREAM_MIN_POINTS")
+    if not raw:
+        return _DEM_STREAM_MIN_POINTS_DEFAULT
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return _DEM_STREAM_MIN_POINTS_DEFAULT
+
+
+class _DemXYBox:
+    """Running count and XY extent of a point subset."""
+    __slots__ = ("n", "minx", "miny", "maxx", "maxy")
+
+    def __init__(self):
+        self.n = 0
+        self.minx = self.miny = np.inf
+        self.maxx = self.maxy = -np.inf
+
+    def add(self, xy: np.ndarray) -> None:
+        if len(xy):
+            self.n += int(len(xy))
+            self.minx = min(self.minx, float(xy[:, 0].min()))
+            self.miny = min(self.miny, float(xy[:, 1].min()))
+            self.maxx = max(self.maxx, float(xy[:, 0].max()))
+            self.maxy = max(self.maxy, float(xy[:, 1].max()))
+
+
+def _session_dem_blocks(snap: dict):
+    """Yield (survivor mask, hit mask, hit positions, is-ground, target_index,
+    intensity) for `_LAS_WRITE_CHUNK` rows of a session snapshot at a time.
+    Positions stay in the session's stored frame, as the in-memory DEM uses
+    them. Each block is gathered under the session lock."""
+    for a, b in session_store.iter_ranges(snap["n"], _LAS_WRITE_CHUNK):
+        with _cloud_session_lock:
+            surv = ~snap["deleted"][a:b]
+            hit = surv.copy()
+            if snap["miss"] is not None:
+                hit &= np.asarray(snap["miss"][a:b]) == 0
+            pos = np.asarray(snap["positions"][a:b][hit], dtype=np.float64)
+            ground = (np.asarray(snap["ground"][a:b])[hit] == GROUND_CLASS_GROUND
+                      if snap["ground"] is not None else None)
+            ti = np.asarray(snap["ti"][a:b])[hit] if snap["ti"] is not None else None
+            inten = (np.asarray(snap["intensity"][a:b])[hit]
+                     if snap["intensity"] is not None else None)
+        yield surv, hit, pos, ground, ti, inten
+
+
+def _do_session_dem_streamed(sess: "CloudSession", request: "SessionDemRequest",
+                             progress=None) -> "Optional[dict]":
+    """Session DEM/DSM/CHM in bounded memory, returning what
+    `_do_session_dem_inner` returns for the same session and request.
+
+    The in-memory worker copies the hits, the ground subset and the
+    first-return subset (~24 B/pt each) before gridding. This reads the session
+    in `_LAS_WRITE_CHUNK` blocks instead:
+
+      1. the count and extent of every subset, and the first-return index;
+      2. per-row counts of each gridded subset, plus the per-cell density,
+         intensity and footprint grids;
+      3. each gridded point's (cell id, z) appended to band files cut at about
+         `_DEM_BAND_POINTS`; each band is sorted alone and its per-cell
+         percentile taken, as the whole-cloud sort would take it;
+      4. with `add_height_column`, height above ground sampled per block.
+
+    Everything after the per-cell representatives is the in-memory code
+    (`_dem_surface_from_reps`, `_dem_layers_result`, `_chm_from_surfaces`).
+
+    Returns None when only the in-memory path can answer: no usable ground
+    column while `auto_segment_ground` is on (CSF needs every point at once)."""
+    import tempfile
+
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    method = request.method
+    surface = (request.surface_type or "dtm").lower()
+    if surface not in _DEM_SURFACE_TYPES:
+        return {"success": False, "method_used": f"dem_{surface}", "num_triangles": 0,
+                "num_vertices": 0, "error": f"Unknown surface type {request.surface_type!r}."}
+
+    def _err(msg):
+        return {"success": False, "method_used": f"dem_{method}", "num_triangles": 0,
+                "num_vertices": 0, "error": msg}
+
+    try:
+        with _cloud_session_lock:
+            n = int(len(sess.positions))
+            if sess.intensity is not None and len(sess.intensity) == n:
+                intensity_col = sess.intensity
+            elif "intensity" in sess.extras and len(sess.extras["intensity"]) == n:
+                intensity_col = sess.extras["intensity"]
+            else:
+                intensity_col = None
+            snap = {"n": n, "positions": sess.positions,
+                    "deleted": np.array(sess.deleted, dtype=bool),
+                    "miss": sess.extras.get(_MISS_SLUG),
+                    "ground": sess.extras.get(GROUND_CLASS_SLUG),
+                    "ti": sess.extras.get("target_index"),
+                    "intensity": intensity_col}
+            world_shift = sess.world_shift
+            crs_epsg = sess.crs_epsg
+
+        # ---- pass 1: counts and extents
+        _report(0.05, "Scanning points")
+        boxes = {"all": _DemXYBox(), "ground": _DemXYBox()}
+        ti_boxes: "dict[float, _DemXYBox]" = {}
+        n_surv = 0
+        for surv, _hit, pos, ground, ti, _inten in _session_dem_blocks(snap):
+            _cancel_checkpoint(progress)
+            n_surv += int(surv.sum())
+            xy = pos[:, :2]
+            boxes["all"].add(xy)
+            if ground is not None:
+                boxes["ground"].add(xy[ground])
+            if ti is not None:
+                valid = ti != _MISS_TARGET_INDEX
+                for v in np.unique(ti[valid]):
+                    ti_boxes.setdefault(float(v), _DemXYBox()).add(xy[ti == v])
+        if boxes["all"].n < 3:
+            return _err("Need at least 3 points to build a DEM.")
+
+        warning = None
+        if boxes["ground"].n >= 3:
+            ground_source, gsel = "column", "ground"
+        elif request.auto_segment_ground:
+            return None
+        else:
+            ground_source, gsel = "all_points", "all"
+            warning = "No ground classification; used all points (lowest returns)."
+        first_val = min(ti_boxes) if ti_boxes else None
+        if first_val is not None and ti_boxes[first_val].n >= 3:
+            ssel, surface_source = "first", "first_return"
+            boxes["first"] = ti_boxes[first_val]
+        else:
+            ssel, surface_source = "all", "all_points"
+
+        rb = request.bbox
+        if surface == "chm":
+            if rb and len(rb) == 4:
+                bbox = [float(v) for v in rb]
+            else:
+                g, f = boxes[gsel], boxes[ssel]
+                bbox = [min(g.minx, f.minx), min(g.miny, f.miny),
+                        max(g.maxx, f.maxx), max(g.maxy, f.maxy)]
+        else:
+            box = boxes[gsel if surface == "dtm" else ssel]
+            bbox = ([float(v) for v in rb] if rb is not None and len(rb) == 4
+                    else [box.minx, box.miny, box.maxx, box.maxy])
+        grid = _dem_grid(bbox[0], bbox[1], bbox[2], bbox[3], request.cell_size)
+        if grid is None:
+            return _err("Point cloud has a degenerate XY extent.")
+        cell, nx, ny = grid
+        minx, miny = bbox[0], bbox[1]
+        n_cells = nx * ny
+
+        if surface == "dtm":
+            grids = [("dtm", gsel, request.ground_percentile)]
+        elif surface == "dsm":
+            grids = [("dsm", ssel, _DSM_CELL_PERCENTILE)]
+        else:
+            grids = [("dtm", gsel, request.ground_percentile),
+                     ("dsm", ssel, _DSM_CELL_PERCENTILE)]
+
+        def _masks(ground, ti):
+            return {"all": None, "ground": ground,
+                    "first": (ti == first_val) if ssel == "first" else None}
+
+        # ---- pass 2: per-row counts, density, intensity and footprint grids
+        _report(0.2, "Binning points")
+        row_counts = {key: np.zeros(ny, dtype=np.int64) for key, _sel, _pct in grids}
+        all_counts = np.zeros(n_cells, dtype=np.int64) if surface == "dtm" else None
+        inten_tot = (np.zeros(n_cells, dtype=np.float64)
+                     if surface == "dtm" and intensity_col is not None else None)
+        surf_counts = np.zeros(n_cells, dtype=np.int64) if surface in ("dtm", "chm") else None
+        for _surv, _hit, pos, ground, ti, inten in _session_dem_blocks(snap):
+            _cancel_checkpoint(progress)
+            ids = _dem_cell_ids(pos[:, :2], minx, miny, cell, nx, ny)
+            masks = _masks(ground, ti)
+            for key, sel, _pct in grids:
+                m = masks[sel]
+                sub = ids if m is None else ids[m]
+                row_counts[key] += np.bincount(sub // nx, minlength=ny)
+            if all_counts is not None:
+                all_counts += np.bincount(ids, minlength=n_cells)
+                if inten_tot is not None:
+                    inten_tot += np.bincount(ids, weights=np.asarray(inten, dtype=np.float64),
+                                             minlength=n_cells)
+            if surf_counts is not None:
+                m = masks[ssel]
+                surf_counts += np.bincount(ids if m is None else ids[m], minlength=n_cells)
+
+        # ---- pass 3: band files, then the per-cell percentile band by band
+        _report(0.35, "Sorting points by cell")
+        target = max(1, int(_DEM_BAND_POINTS))
+        band_of_row = {key: (np.cumsum(h) - h) // target for key, h in row_counts.items()}
+        root = _session_spill_root()
+        root.mkdir(parents=True, exist_ok=True)
+        reps = {}
+        with tempfile.TemporaryDirectory(prefix="dem-bands-", dir=str(root)) as tmp:
+            tmpdir = _Path(tmp)
+            handles = {}
+            try:
+                for _surv, _hit, pos, ground, ti, _inten in _session_dem_blocks(snap):
+                    _cancel_checkpoint(progress)
+                    ids = _dem_cell_ids(pos[:, :2], minx, miny, cell, nx, ny)
+                    masks = _masks(ground, ti)
+                    for key, sel, _pct in grids:
+                        m = masks[sel]
+                        sub_ids = ids if m is None else ids[m]
+                        sub_z = pos[:, 2] if m is None else pos[m, 2]
+                        if not len(sub_ids):
+                            continue
+                        bands = band_of_row[key][sub_ids // nx]
+                        for band in np.unique(bands):
+                            in_band = bands == band
+                            fh = handles.get((key, int(band)))
+                            if fh is None:
+                                fh = (open(tmpdir / f"{key}-{int(band)}.ids", "wb"),
+                                      open(tmpdir / f"{key}-{int(band)}.z", "wb"))
+                                handles[(key, int(band))] = fh
+                            np.ascontiguousarray(sub_ids[in_band], dtype=np.int32).tofile(fh[0])
+                            np.ascontiguousarray(sub_z[in_band], dtype=np.float64).tofile(fh[1])
+            finally:
+                for fi, fz in handles.values():
+                    fi.close()
+                    fz.close()
+
+            _report(0.5, "Taking per-cell percentiles")
+            for key, _sel, pct in grids:
+                p = float(np.clip(pct, 0.0, 100.0)) / 100.0
+                uniq_parts, z_parts = [], []
+                n_bands = int(band_of_row[key].max()) + 1 if ny else 0
+                for band in range(n_bands):
+                    if (key, band) not in handles:
+                        continue
+                    ids = np.fromfile(tmpdir / f"{key}-{band}.ids", dtype=np.int32)
+                    z = np.fromfile(tmpdir / f"{key}-{band}.z", dtype=np.float64)
+                    order = _dem_cell_z_order(ids, z)
+                    ids_s = ids[order]
+                    uniq, start = np.unique(ids_s, return_index=True)
+                    counts = np.diff(np.append(start, len(ids_s)))
+                    pick = start + np.floor((counts - 1) * p).astype(np.int64)
+                    uniq_parts.append(uniq)
+                    z_parts.append(z[order[pick]])
+                    del ids, z, order, ids_s
+                reps[key] = (np.concatenate(uniq_parts) if uniq_parts else np.zeros(0, dtype=np.int32),
+                             np.concatenate(z_parts) if z_parts else np.zeros(0, dtype=np.float64))
+
+        _report(0.6, "Interpolating elevation grid")
+
+        def _surface(key, fill_voids, footprint):
+            uniq, rep_z = reps[key]
+            return _dem_surface_from_reps(
+                uniq, rep_z, minx=minx, miny=miny, cell=cell, nx=nx, ny=ny, method=method,
+                fill_voids=fill_voids, footprint_grid=footprint)
+
+        def _density(counts, totals=None):
+            c = counts.astype(np.float64)
+            populated = c > 0
+            out = np.full(n_cells, np.nan, dtype=np.float64)
+            out[populated] = (totals[populated] / c[populated]) if totals is not None else c[populated]
+            return out.reshape(ny, nx)
+
+        def _finalize(result):
+            result["surface_type"] = surface
+            result["world_shift"] = [float(v) for v in (world_shift if world_shift is not None
+                                                        else (0.0, 0.0, 0.0))]
+            if crs_epsg is not None:
+                result["crs_epsg"] = int(crs_epsg)
+            return result
+
+        if surface == "chm":
+            dtm = _surface("dtm", True, surf_counts > 0)
+            if not dtm.get("success"):
+                return dtm
+            dsm = _surface("dsm", request.fill_voids, None)
+            if not dsm.get("success"):
+                return dsm
+            result = _chm_from_surfaces(dtm, dsm, progress=progress)
+            if not result.get("success"):
+                return result
+            result["surface_source"] = surface_source
+            if warning:
+                result["warning"] = warning
+            return _finalize(result)
+
+        if surface == "dsm":
+            result = _surface("dsm", request.fill_voids, None)
+            if not result.get("success"):
+                return result
+            result.pop("sample_ground_z", None)
+            result["surface_source"] = surface_source
+            return _finalize(result)
+
+        dtm = _surface("dtm", request.fill_voids, all_counts > 0)
+        if not dtm.get("success"):
+            return dtm
+        density = {"point_density": _density(all_counts),
+                   "return_density": _density(surf_counts)}
+        if inten_tot is not None:
+            density["intensity"] = _density(all_counts, inten_tot)
+        result = _dem_layers_result(dtm, density)
+        result.pop("sample_ground_z", None)
+        result["ground_source"] = ground_source
+        _finalize(result)
+        if warning:
+            result["warning"] = warning
+
+        # ---- pass 4: height above ground, one block at a time
+        if request.add_height_column:
+            _report(0.85, "Measuring height above ground")
+            uniq, rep_z = reps["dtm"]
+            rep_xy = np.column_stack([minx + (uniq % nx + 0.5) * cell,
+                                      miny + (uniq // nx + 0.5) * cell])
+            sample = _dem_ground_sampler(rep_xy, rep_z)
+            hag = np.zeros(n_surv, dtype=np.float64)
+            offset = 0
+            for surv, hit, pos, _ground, _ti, _inten in _session_dem_blocks(snap):
+                _cancel_checkpoint(progress)
+                n_s = int(surv.sum())
+                if len(pos):
+                    hag_hits = pos[:, 2] - sample(pos[:, :2])
+                    hag_hits[~np.isfinite(hag_hits)] = 0.0
+                    hag[offset:offset + n_s][hit[surv]] = hag_hits
+                offset += n_s
+            with _cloud_session_lock:
+                _session_add_extra_column(sess, HEIGHT_ABOVE_GROUND_SLUG,
+                                          HEIGHT_ABOVE_GROUND_LABEL, hag)
+            cache_key, cache_dir, meta = _session_rebuild(sess)
+            result["cache_id"] = cache_key
+            result["cache_dir"] = str(cache_dir)
+            result["point_count"] = int(boxes["all"].n)
+            result.update(meta)
+        return result
+    except ScanCancelled:
+        raise
+    except ValueError as e:
+        return _err(str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return _err(f"DEM generation failed: {e}")
+
+
 def _do_session_dem(sess: "CloudSession", request: "SessionDemRequest", progress=None) -> dict:
-    """Session DEM/DSM/CHM worker, admitted against the memory budget at
-    `_DEM_BYTES_PER_POINT` so two large DEMs queue rather than both
-    materialising their subsets at once (the arrays are gathered inside)."""
+    """Session DEM/DSM/CHM. A cloud of at least `_dem_stream_min_points()` takes
+    the streamed worker, which reproduces the in-memory result in bounded
+    memory. Smaller clouds, and anything only the in-memory path can answer (CSF
+    on a cloud without a usable ground column), gather their subsets whole.
+    Each path is admitted against the memory budget at its own working set, one
+    after the other and never nested."""
     with _cloud_session_lock:
         n_est = int(len(sess.positions))
+        streams = (n_est >= _dem_stream_min_points()
+                   and (GROUND_CLASS_SLUG in sess.extras or not request.auto_segment_ground))
+    if streams:
+        estimate = (n_est * (2 + (16 if request.add_height_column else 0))
+                    + int(_DEM_BAND_POINTS) * 24 + int(_LAS_WRITE_CHUNK) * 64)
+        with _ADMISSION.admit(estimate, f"streamed DEM on {n_est:,} pts"):
+            out = _do_session_dem_streamed(sess, request, progress=progress)
+        if out is not None:
+            return out
     with _ADMISSION.admit(n_est * _DEM_BYTES_PER_POINT, f"DEM on {n_est:,} pts"):
         return _do_session_dem_inner(sess, request, progress=progress)
 
