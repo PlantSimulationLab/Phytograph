@@ -219,6 +219,20 @@ for DTM, DSM and CHM, with and without void filling and height above ground.
 A cloud with no usable ground column and CSF requested still takes the
 in-memory path, since CSF needs every point at once.
 
+Measured on the synthetic terrestrial clouds (DTM, 0.5 m cells, TIN, ground
+column present), one process per run. Peak is the resident set above the
+loaded session. For the store-backed 100 M cloud it includes the store pages
+the reads touch, which the OS can reclaim.
+
+| Points | In-memory | Streamed |
+|---|---|---|
+| 10 M | 4.1 s, +0.37 GB | 3.8 s, +0.35 GB |
+| 100 M | 18.3 s, +7.76 GB | 21.0 s, +1.87 GB |
+
+At 10 M the copies are small enough that the two paths cost the same; at
+100 M streaming trades about 15 % of wall time for a quarter of the memory,
+which is the difference between fitting and paging on the 16 GB baseline.
+
 Remaining candidates, each with its natural collar: normals (the search
 radius). **Wood/leaf is left global on purpose.** Its per-point PCA
 features are the only tileable stage (collar = the largest neighbourhood
