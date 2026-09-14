@@ -421,7 +421,9 @@ const CSV_FIXED_COLUMNS = [
   'index',
 ];
 
-function csvCell(v: string | number | undefined): string {
+// Exported so lib/measure.ts serialises with the same quoting rules rather than
+// growing a second, subtly different one.
+export function csvCell(v: string | number | undefined): string {
   if (v === undefined) return '';
   const s = String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;

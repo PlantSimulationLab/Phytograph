@@ -151,10 +151,15 @@ useful.
 ## Inspect a point
 
 Coloring by a scalar tells you how a value varies across the cloud; the
-**Pick Point** tool tells you what it is at *one* point.
+**Pick & Measure** tool tells you what it is at *one* point — and how far
+apart two of them are.
 
-1. Click **Pick Point** in the view controls at the top of the left column
-   (or find it in the command palette / **Tools → Pick Point**). The cursor
+The tool has four modes, selected in its panel. **Inspect** is the default and
+is described here; the three measurement modes are covered in
+[Measure distances and angles](#measure-distances-and-angles) below.
+
+1. Click **Pick & Measure** in the view controls at the top of the left column
+   (or find it in the command palette / **Tools → Pick & Measure**). The cursor
    becomes a crosshair.
 2. Click a point. A label appears, tethered to it by a dashed leader line,
    listing:
@@ -186,9 +191,50 @@ To copy the numbers out, use the **copy** icon on a label for that one point,
 or **Copy all (CSV)** in the panel for every label at once. Dismiss a single
 label with its **✕**, or clear them all from the panel.
 
-Labels are annotations, not scene objects: they aren't saved, aren't part of
-undo, and are dropped automatically if the cloud they point at is deleted,
-moved, or edited (so a label can never quietly point at the wrong place).
+Labels are annotations, not scene objects: they aren't saved and aren't part of
+undo. If you **move** the cloud they point at — a translate or a rotation —
+they travel with it, staying pinned to the same physical point. If the cloud's
+geometry is **rebuilt** instead — a crop applied, points erased or filtered,
+a re-bake — the labels on it are dropped, because the point a label named may
+no longer exist and a label can never be allowed to quietly point at the wrong
+place.
+
+## Measure distances and angles
+
+The same tool measures between points. Pick a mode in its panel, then click
+points in the viewport; every vertex snaps to a real point in the cloud, so a
+measurement is always between things you actually scanned.
+
+- **Distance** — click two points. The readout gives the straight-line
+  distance plus its **ΔX / ΔY / ΔZ** components.
+- **Path** — click as many points as you like and press ++enter++ to finish.
+  The readout gives the total length and each segment's length.
+- **Angle** — click three points. The angle is measured at the *second* one,
+  between the two arms, along with each arm's length.
+
+While you are placing a measurement:
+
+- ++backspace++ removes the last vertex you placed.
+- ++escape++ abandons the measurement in progress but leaves the tool armed;
+  press it again to disarm.
+
+Finished measurements stay on screen as you orbit, drawn as lines with a
+labelled readout. Copy one with its **copy** icon, or every measurement at
+once with **Copy all (CSV)** — the CSV carries each measurement's value *and*
+its vertex coordinates, so the number can be re-derived from the file alone.
+Delete one with its **✕**, or clear them all from the panel.
+
+Switching modes keeps what you have already placed, so inspect labels and
+measurements can sit on screen together. Measurements follow the same
+move-with-the-cloud and drop-on-rebuild rules as inspect labels.
+
+!!! note "Units"
+
+    Measurements are reported in **scene units, without a unit suffix**.
+    Phytograph does not currently record what unit a cloud was authored in —
+    an ASCII `.xyz` file carries no such metadata — so the readout gives you
+    the number and leaves the unit to you. For the great majority of data
+    (and everything Phytograph generates itself) that unit is metres.
 
 ## Adjust point size and colormap
 

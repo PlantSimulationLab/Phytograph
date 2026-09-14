@@ -34,7 +34,12 @@ start typing, use <kbd>↑</kbd>/<kbd>↓</kbd> to move through the results,
 | Clear the mesh selection | Left-click empty space |
 | Select a scan | Left-click its scanner marker (same as clicking its row in the **Scans** panel) |
 | Add/remove a scan from the selection | <kbd>⌘/Ctrl</kbd> + left-click its scanner marker |
-| Label a point (while **Pick Point** is armed) | Left-click the point |
+| Label a point (while **Pick & Measure** is armed, in Inspect mode) | Left-click the point |
+| Place a measurement vertex (while in a measurement mode) | Left-click the point |
+| Finish a **Path** measurement | <kbd>Enter</kbd> |
+| Remove the last measurement vertex | <kbd>Backspace</kbd> |
+| Abandon the measurement in progress (leaves the tool armed) | <kbd>Esc</kbd> |
+| Disarm **Pick & Measure** (with nothing in progress) | <kbd>Esc</kbd> |
 
 A voxel **grid** box is deliberately "click-through": because it usually
 encloses the very geometry it measures, clicking it selects whatever is
@@ -108,16 +113,20 @@ cloud); OFF unfreezes the view so you can reorient without closing the
 tool. Apply with the panel's **Apply Erase** button or discard with
 **Clear Strokes**. <kbd>E</kbd> only acts while the Erase tool is open.
 
-## Point picker
+## Pick & Measure
 
 | Shortcut | Action |
 |---|---|
-| <kbd>Esc</kbd> | Disarm the picker (placed labels stay) |
+| <kbd>Esc</kbd> | Abandon the measurement in progress; if none, disarm the tool (placed labels and measurements stay) |
+| <kbd>Enter</kbd> | Finish a **Path** measurement |
+| <kbd>Backspace</kbd> | Remove the last measurement vertex |
 
-The view stays fully interactive while the picker is armed: a **click**
-labels the point under the cursor, a **click-drag** orbits as usual. Clear
-the labels from the panel's **Clear all**, or dismiss one with its **✕**.
-See **[Inspect a point](../workflows/viewer-navigation.md#inspect-a-point)**.
+The view stays fully interactive while the tool is armed: a **click** labels
+the point under the cursor or places a measurement vertex (depending on the
+mode), and a **click-drag** orbits as usual. Clear what is placed from the
+panel's **Clear all**, or dismiss one with its **✕**.
+See **[Inspect a point](../workflows/viewer-navigation.md#inspect-a-point)**
+and **[Measure distances and angles](../workflows/viewer-navigation.md#measure-distances-and-angles)**.
 
 ## Transform gestures (Blender-style)
 

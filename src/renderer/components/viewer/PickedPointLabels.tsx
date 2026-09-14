@@ -199,8 +199,9 @@ const LABEL_MARGIN_PX = 8;
 // ── DOM overlay ────────────────────────────────────────────────────────────
 
 // Transient "Copied" acknowledgement, matching the 600 ms flash the viewer's
-// other copy-to-clipboard buttons use.
-function useCopyFlash(): [string | null, (id: string) => void] {
+// other copy-to-clipboard buttons use. Exported so the measurement overlay
+// shares one definition rather than growing a second timer with its own delay.
+export function useCopyFlash(): [string | null, (id: string) => void] {
   const [copied, setCopied] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flash = useCallback((id: string) => {

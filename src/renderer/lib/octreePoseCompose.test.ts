@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 
-import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint } from './octreePoseCompose';
+import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from './octreePoseCompose';
 import { applyOctreePose } from '../components/viewer/renderers/octreePose';
 import type { CloudEditState } from './pointCloudTypes';
 
@@ -321,5 +321,81 @@ describe('transformPoint', () => {
     expect(p[0]).toBeCloseTo(1, 6);
     expect(p[1]).toBeCloseTo(2, 6);
     expect(p[2]).toBeCloseTo(1, 6);
+  });
+});
+
+describe('unposePoint', () => {
+  // The inverse of transformPoint, used to carry a picked label or measurement
+  // vertex along when its cloud is transformed under it.
+  const pivot = { x: 2, y: 2, z: 0 };
+  const point: [number, number, number] = [7, -1.25, 2];
+
+  const cases: { t: { x: number; y: number; z: number }; r: { x: number; y: number; z: number } }[] = [
+    { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 0 } },
+    { t: { x: 3, y: -2, z: 0.5 }, r: { x: 0, y: 0, z: 0 } },
+    { t: { x: 0, y: 0, z: 0 }, r: { x: 0, y: 0, z: 90 } },
+    // MULTI-AXIS is the case that matters: negating the Euler components
+    // happens to work for every single-axis rotation, so a suite that only
+    // tested those would pass against the broken implementation.
+    { t: { x: 1.5, y: 4, z: -3 }, r: { x: 30, y: 40, z: 50 } },
+    { t: { x: -2, y: 0.25, z: 8 }, r: { x: 15, y: -40, z: 110 } },
+  ];
+
+  for (const { t, r } of cases) {
+    it(`round-trips transformPoint for t=${JSON.stringify(t)} r=${JSON.stringify(r)}`, () => {
+      const there = transformPoint(point, t, r, pivot);
+      const back = unposePoint(there, t, r, pivot);
+      expect(back[0]).toBeCloseTo(point[0], 9);
+      expect(back[1]).toBeCloseTo(point[1], 9);
+      expect(back[2]).toBeCloseTo(point[2], 9);
+    });
+  }
+
+  it('is NOT the same as negating the Euler angles on a multi-axis rotation', () => {
+    // Pins the actual defect. R_XYZ(−rx,−ry,−rz) undoes each rotation but keeps
+    // the original ORDER, whereas an inverse must reverse it too. This asserts
+    // the naive form is genuinely wrong, so nobody "simplifies" unposePoint
+    // back into it — the round-trip tests above would then fail, but this one
+    // says why.
+    const r = { x: 30, y: 40, z: 50 };
+    const t = { x: 0, y: 0, z: 0 };
+    const there = transformPoint(point, t, r, pivot);
+    const naive = transformPoint(there, t, { x: -r.x, y: -r.y, z: -r.z }, pivot);
+    const correct = unposePoint(there, t, r, pivot);
+
+    // The naive "inverse" misses by a wide margin...
+    const naiveErr = Math.hypot(
+      naive[0] - point[0], naive[1] - point[1], naive[2] - point[2],
+    );
+    expect(naiveErr).toBeGreaterThan(1);
+    // ...while the real one is exact.
+    const realErr = Math.hypot(
+      correct[0] - point[0], correct[1] - point[1], correct[2] - point[2],
+    );
+    expect(realErr).toBeLessThan(1e-9);
+  });
+
+  it('survives a chain of transforms without drifting', () => {
+    // Why anchors are stored pose-free and re-posed rather than nudged by a
+    // delta each time: ten successive edits must be as exact as one.
+    let p = point;
+    const poses = [
+      { t: { x: 1, y: 0, z: 0 }, r: { x: 0, y: 0, z: 10 } },
+      { t: { x: 0, y: 2, z: 0 }, r: { x: 20, y: 0, z: 0 } },
+      { t: { x: -3, y: 1, z: 4 }, r: { x: 5, y: 35, z: -15 } },
+    ];
+    for (let i = 0; i < 10; i++) {
+      const pose = poses[i % poses.length];
+      p = transformPoint(p, pose.t, pose.r, pivot);
+      p = unposePoint(p, pose.t, pose.r, pivot);
+    }
+    expect(p[0]).toBeCloseTo(point[0], 9);
+    expect(p[1]).toBeCloseTo(point[1], 9);
+    expect(p[2]).toBeCloseTo(point[2], 9);
+  });
+
+  it('is a pure subtraction when there is no rotation', () => {
+    const p = unposePoint([5, 5, 5], { x: 1, y: 2, z: 3 }, { x: 0, y: 0, z: 0 }, pivot);
+    expect(p).toEqual([4, 3, 2]);
   });
 });

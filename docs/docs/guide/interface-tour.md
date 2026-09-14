@@ -42,8 +42,9 @@ confirmation first because it can&rsquo;t be undone.
 
 A vertical column down the left side. At the top are the **view** controls
 (command-palette search, **Set Scene Origin** — the rotation pivot — and
-**Pick Point**, which labels individual points with their coordinates and
-attributes) and the **snap-view** gizmo. Below those are two always-visible blocks —
+**Pick & Measure**, which labels individual points with their coordinates and
+attributes, and measures distances, path lengths and angles between them) and
+the **snap-view** gizmo. Below those are two always-visible blocks —
 **Create** and **Tools**:
 
 | Block | Buttons |
@@ -113,10 +114,12 @@ adapts as you zoom: the cell size steps through round values (…10 cm,
 20 cm, 50 cm, 1 m, 2 m, 5 m…) so cells stay legible instead of packing
 together, with a heavier line every fifth cell.
 
-Labels dropped by the **Pick Point** tool also live here: each one is a small
-bubble tethered by a dashed leader line to the point it describes, and it
-stays pinned to that point as you orbit. See
-[Inspect a point](../workflows/viewer-navigation.md#inspect-a-point).
+Labels dropped by the **Pick & Measure** tool also live here: each one is a
+small bubble tethered by a dashed leader line to the point it describes, and it
+stays pinned to that point as you orbit. Measurements appear the same way, with
+the measured line drawn through the cloud. See
+[Inspect a point](../workflows/viewer-navigation.md#inspect-a-point) and
+[Measure distances and angles](../workflows/viewer-navigation.md#measure-distances-and-angles).
 
 ## Right-side scene panel
 

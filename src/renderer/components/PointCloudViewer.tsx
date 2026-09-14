@@ -5,7 +5,7 @@ import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
 import { OctreeRefreshQueue, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
-import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint } from '../lib/octreePoseCompose';
+import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
@@ -216,12 +216,31 @@ import { OriginPicker } from './viewer/gizmos/OriginPicker';
 import { SceneOriginMarker } from './viewer/gizmos/SceneOriginMarker';
 import type { PointCloudOctree } from 'potree-core';
 import { PointPicker, type PointPickHit } from './viewer/gizmos/PointPicker';
-import { PointPickerPanel } from './viewer/panels/PointPickerPanel';
+import { PointPickerPanel, type PickerMode } from './viewer/panels/PointPickerPanel';
 import {
   PickedPointLabels,
   PickedPointProjector,
   usePickedPointOverlay,
 } from './viewer/PickedPointLabels';
+import { MeasureLines } from './viewer/gizmos/MeasureLines';
+import {
+  MeasureLabels,
+  MeasureProjector,
+  useMeasureOverlay,
+} from './viewer/MeasureLabels';
+import {
+  autoCommitsAt,
+  isComplete,
+  measurementsToCsv,
+  type Measurement,
+  type MeasureVertex,
+} from '../lib/measure';
+import {
+  anchorFate,
+  geometryKey,
+  rigidPoseKey,
+  type AnchorKeys,
+} from '../lib/anchorSignature';
 import {
   buildAttributeRows,
   displayToLocal,
@@ -2092,6 +2111,32 @@ export default function PointCloudViewer({
   const pickSeqRef = useRef(0);
   const pickedOverlay = usePickedPointOverlay();
 
+  // ── Measurement (the same armed picker, doing something else with a click) ─
+  // `pickerMode` decides what a pick means: 'inspect' places a label (the
+  // original behaviour), the rest accumulate vertices into a Measurement.
+  // A mode rather than a second tool — they share the armed viewport, the pick
+  // path and the Escape handling, so two tools would only have to exclude each
+  // other and duplicate all of it.
+  const [pickerMode, setPickerMode] = useState<PickerMode>('inspect');
+  const [measurements, setMeasurements] = useState<Measurement[]>([]);
+  // Vertices of the measurement being placed. Committed into `measurements`
+  // once the kind's arity is met (distance/angle) or the user closes it
+  // (polyline).
+  const [pendingVertices, setPendingVertices] = useState<MeasureVertex[]>([]);
+  // Mirrors `pendingVertices`. The commit decision ("does this click complete
+  // the measurement?") reads THIS, not the state, so it can happen outside any
+  // updater — React StrictMode double-invokes updaters in dev, and an updater
+  // that committed a measurement as a side effect would commit it twice.
+  // Re-synced from state on every render below, so an update from any other
+  // path (mode switch, tool close, carry-along) cannot leave it stale.
+  const pendingVerticesRef = useRef<MeasureVertex[]>(pendingVertices);
+  pendingVerticesRef.current = pendingVertices;
+  const measureSeqRef = useRef(0);
+  const measureOverlay = useMeasureOverlay();
+  // Set from the commit callback below; read by the Enter key handler, which is
+  // declared long before it. Same TDZ dodge as sceneOriginRef.
+  const commitPendingMeasurementRef = useRef<(() => void) | null>(null);
+
   // NOTE: placing the scene origin deliberately does NOT move the camera — the
   // view stays exactly where it was. It IS what the view turns about, though:
   // it's handed to CameraController as `orbitPivot`, which rotates the whole view
@@ -2709,9 +2754,16 @@ export default function PointCloudViewer({
     if (except !== 'export') setShowExportPanel(false);
     if (except !== 'morph') setShowMorphPopup(false);
     if (except !== 'scene-origin') { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }
-    // Closing the picker only disarms it — placed labels persist, so they can
-    // still be read while another tool is open.
-    if (except !== 'point-pick') { setShowPointPickerPanel(false); setPointPickMode(false); }
+    // Closing the picker only disarms it — placed labels and committed
+    // measurements persist, so they can still be read while another tool is
+    // open. The HALF-placed measurement is dropped, though: its vertices are
+    // not a measurement yet, and leaving them armed across a tool switch would
+    // have the next pick silently extend something the user had moved on from.
+    if (except !== 'point-pick') {
+      setShowPointPickerPanel(false);
+      setPointPickMode(false);
+      setPendingVertices([]);
+    }
     // Closing the label tool only hides the panel — uncommitted strokes persist
     // so they are not lost by opening another tool (same as point-pick).
     if (except !== 'label') setShowLabelPanel(false);
@@ -6497,9 +6549,42 @@ export default function PointCloudViewer({
       }
       // Escape also disarms the point picker (its placed labels stay — clearing
       // those is what the panel's Clear all button is for).
+      //
+      // Innermost first, matching the editMode block above: while a measurement
+      // is half-placed, Escape abandons THAT and leaves the tool armed, so a
+      // misplaced first vertex costs one keystroke rather than re-opening the
+      // tool. Only once nothing is in progress does Escape disarm.
       if (e.key === 'Escape' && pointPickMode) {
         e.preventDefault();
-        setPointPickMode(false);
+        if (pendingVertices.length > 0) setPendingVertices([]);
+        else setPointPickMode(false);
+      }
+      // Enter closes an in-progress polyline, the way it closes a crop polygon;
+      // Backspace pops the last vertex. Both are guarded on focus, like the
+      // f/e/l shortcuts above: the scene tree has an inline rename field that is
+      // reachable while the picker is armed, and without the guard Backspace
+      // would eat the keystroke and silently delete a placed vertex instead of
+      // a character (and Enter would close the polyline rather than confirm the
+      // rename).
+      //
+      // The commit goes through a ref because that callback is declared much
+      // further down — the same reason sceneOriginRef exists for the early
+      // callbacks.
+      if ((e.key === 'Enter' || e.key === 'Backspace') && pointPickMode && pendingVertices.length > 0) {
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing) {
+          if (e.key === 'Enter') {
+            if (pickerMode === 'polyline') {
+              e.preventDefault();
+              commitPendingMeasurementRef.current?.();
+            }
+          } else {
+            e.preventDefault();
+            setPendingVertices(prev => prev.slice(0, -1));
+          }
+        }
       }
       // Backspace: pop the last polygon vertex while drawing.
       if (e.key === 'Backspace' && (editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
@@ -6509,7 +6594,7 @@ export default function PointCloudViewer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected, closePolygonFrom]);
+  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected, closePolygonFrom, pendingVertices, pickerMode]);
 
   // Track shift key state for mixed selection (cloud + mesh)
   useEffect(() => {
@@ -7404,6 +7489,40 @@ export default function PointCloudViewer({
     const local = displayToLocal(hit.position, displayOffsetRef.current);
     const world = localToWorld(local, worldShift);
 
+    // ── Measurement modes: accumulate a vertex ─────────────────────────────
+    //
+    // Same hit, same frames — only what we do with it differs. A measurement
+    // needs no attributes, so the (cheap but non-zero) attribute sampling below
+    // is skipped entirely.
+    const mode = pickerMode;
+    if (mode !== 'inspect') {
+      const vertex: MeasureVertex = { world, local, cloudId: cloud.id };
+      // Decided OUTSIDE any state updater, against a ref that mirrors the
+      // pending list. A `setPendingVertices(prev => …)` that also called
+      // `setMeasurements` and bumped `measureSeqRef` would be an impure
+      // updater, and React StrictMode double-invokes updaters in dev to expose
+      // exactly that — committing every distance and angle twice.
+      const next = [...pendingVerticesRef.current, vertex];
+      // Distance and angle commit themselves the moment their arity is met; a
+      // polyline grows until the user closes it (Enter / double-click).
+      if (autoCommitsAt(mode, next.length)) {
+        const committed: Measurement = {
+          id: `measure-${measureSeqRef.current}`,
+          seq: measureSeqRef.current++,
+          kind: mode,
+          vertices: next,
+          hasShift: hasNonZeroShift(worldShift),
+        };
+        pendingVerticesRef.current = [];
+        setPendingVertices([]);
+        setMeasurements((ms) => [...ms, committed]);
+      } else {
+        pendingVerticesRef.current = next;
+        setPendingVertices(next);
+      }
+      return;
+    }
+
     // Octree hits arrive with the values already on them; a flat cloud's
     // arrays are sampled here by the index the raycast reported.
     const values = hit.sourceIndex !== undefined
@@ -7425,7 +7544,46 @@ export default function PointCloudViewer({
         sourceIndex: hit.sourceIndex,
       },
     ]);
+  }, [clouds, pickerMode]);
+
+  // Close the polyline being drawn (Enter, or the panel). A polyline needs at
+  // least two vertices to be a measurement; a single stray click is discarded
+  // rather than committed as a zero-length line.
+  const commitPendingMeasurement = useCallback(() => {
+    // Read from the ref and commit with plain setters, for the StrictMode
+    // reason spelled out in handlePointPick: a state updater must be pure.
+    const prev = pendingVerticesRef.current;
+    if (prev.length === 0) return;
+    pendingVerticesRef.current = [];
+    setPendingVertices([]);
+    if (!isComplete('polyline', prev.length)) return;
+    setMeasurements((ms) => [
+      ...ms,
+      {
+        id: `measure-${measureSeqRef.current}`,
+        seq: measureSeqRef.current++,
+        kind: 'polyline',
+        vertices: prev,
+        hasShift: prev.some((v) => {
+          const c = clouds.find((cl) => cl.id === v.cloudId);
+          return hasNonZeroShift(c?.data.octree?.worldShift ?? null);
+        }),
+      },
+    ]);
   }, [clouds]);
+
+  commitPendingMeasurementRef.current = commitPendingMeasurement;
+
+  const dismissMeasurement = useCallback((id: string) => {
+    setMeasurements((prev) => prev.filter((m) => m.id !== id));
+  }, []);
+
+  const copyMeasurements = useCallback(() => {
+    if (measurements.length === 0) return;
+    navigator.clipboard.writeText(measurementsToCsv(measurements));
+    setPickedCopied(true);
+    setTimeout(() => setPickedCopied(false), 600);
+  }, [measurements]);
 
   const dismissPickedPoint = useCallback((id: string) => {
     setPickedPoints((prev) => prev.filter((p) => p.id !== id));
@@ -7450,46 +7608,173 @@ export default function PointCloudViewer({
     [cloudDataById],
   );
 
-  // A label is anchored to a FIXED world position, so it goes stale the moment
-  // its cloud moves or its geometry is rebuilt underneath it — a baked or draft
-  // transform, an applied crop/erase, a filter, a re-bake. Signature covers all
-  // of those; when a cloud's signature changes (or the cloud disappears), its
-  // labels are dropped rather than left pointing at empty space.
-  const cloudAnchorSignature = useMemo(() => {
-    const sig = new Map<string, string>();
+  // ── Anchor upkeep: carry on a move, drop on a rebuild ────────────────────
+  //
+  // A picked label and a measurement vertex are both ANCHORS: a fixed position
+  // attached to a cloud. Two different things can happen to that cloud, and
+  // they call for opposite responses:
+  //
+  //   * the cloud MOVES (draft or committed translate/rotate) — every point is
+  //     still there, so the anchor rides along. A measurement's distance and
+  //     angle are invariant under a rigid transform, so dropping one here
+  //     would discard the user's work for no reason. This is what the previous
+  //     single-signature version got wrong: nudging a cloud one metre silently
+  //     deleted every label on it.
+  //   * the cloud's GEOMETRY changes (crop applied, erase, filter, re-bake,
+  //     split) — the anchored point may no longer exist and cannot be carried
+  //     anywhere meaningful, so the anchor is dropped rather than left pointing
+  //     confidently at the wrong place.
+  //
+  // The split lives in lib/anchorSignature.ts; the movement reuses
+  // `transformPoint`, which already exists for exactly this ("a point that
+  // rides along with a cloud ... lands exactly where the rendered cloud puts
+  // it") and shares its matrix with `transformBoundsAabb`, so a carried anchor
+  // cannot drift away from the cloud it is attached to.
+  // The pose each cloud is currently DRAWN at, by id. `getCloudPose` is the same
+  // resolver the renderer uses, so an anchor moved through it lands exactly
+  // where the cloud does.
+  //
+  // `sceneOrigin` is in the deps even though `getCloudPose` reads it through a
+  // ref: the pivot is part of the drawn pose, so moving the scene origin moves
+  // a rotated cloud on screen. Without it this memo would hand the effect below
+  // a STALE pivot, which the next genuine edit would then invert against.
+  const cloudPoseById = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof getCloudPose>>();
+    for (const c of clouds) m.set(c.id, getCloudPose(c));
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clouds, getCloudPose, sceneOrigin]);
+
+  const cloudAnchorKeys = useMemo(() => {
+    const keys = new Map<string, AnchorKeys>();
     for (const c of clouds) {
       const es = getEditState(c.id);
-      const t = es.translation;
-      const r = getEditRotation(c.id);
-      // `storedPose` is part of WHERE THE CLOUD IS, so a picked label anchored
-      // before a committed transform must be dropped by it. Without this the
-      // signature would be unchanged across a commit (the draft returns to zero
-      // and the cacheId no longer moves), and stale labels would survive.
-      const sp = es.storedPose;
-      sig.set(c.id, [
-        t.x, t.y, t.z, r.x, r.y, r.z,
-        c.data.pointCount,
-        c.data.octree?.cacheId ?? '',
-        es.pendingDeletedCount ?? 0,
-        es.erasedIndices.size,
-        sp ? `${sp.translation.x},${sp.translation.y},${sp.translation.z},`
-           + `${sp.rotation.x},${sp.rotation.y},${sp.rotation.z},${sp.cacheId}` : '',
-      ].join('|'));
-    }
-    return sig;
-  }, [clouds, getEditState, getEditRotation]);
-  const anchorSigRef = useRef(cloudAnchorSignature);
-  useEffect(() => {
-    const prevSig = anchorSigRef.current;
-    anchorSigRef.current = cloudAnchorSignature;
-    setPickedPoints((prev) => {
-      const kept = prev.filter((p) => {
-        const now = cloudAnchorSignature.get(p.cloudId);
-        return now !== undefined && now === prevSig.get(p.cloudId);
+      // Keyed off the RESOLVED pose — the one `getCloudPose` hands the renderer
+      // and `moveAnchor` inverts — rather than off the raw edit state. Two
+      // reasons: the PIVOT is part of where a rotated cloud is drawn (moving
+      // the scene origin swings it, with the edit state unchanged), and keying
+      // off the same value the movement uses means the two cannot disagree
+      // about what "the cloud moved" means.
+      const pose = cloudPoseById.get(c.id);
+      keys.set(c.id, {
+        pose: rigidPoseKey({
+          translation: pose?.translation ?? es.translation,
+          rotation: pose?.rotation ?? getEditRotation(c.id),
+          pivot: pose?.pivot,
+        }),
+        geometry: geometryKey({
+          pointCount: c.data.pointCount,
+          cacheId: c.data.octree?.cacheId,
+          pendingDeletedCount: es.pendingDeletedCount,
+          erasedCount: es.erasedIndices.size,
+        }),
       });
-      return kept.length === prev.length ? prev : kept;
+    }
+    return keys;
+  }, [clouds, getEditState, getEditRotation, cloudPoseById]);
+
+  const cloudPoseRef = useRef(cloudPoseById);
+
+  const anchorKeysRef = useRef(cloudAnchorKeys);
+  useEffect(() => {
+    const prevKeys = anchorKeysRef.current;
+    const prevPoses = cloudPoseRef.current;
+    anchorKeysRef.current = cloudAnchorKeys;
+    cloudPoseRef.current = cloudPoseById;
+
+    // Move a single anchor from the cloud's previous drawn pose to its current
+    // one. Rather than composing a delta matrix (which accumulates float error
+    // across a chain of edits), the point is taken back to the cloud's
+    // POSE-FREE frame and re-posed — so N successive transforms are as exact as
+    // one.
+    //
+    // LOCAL FRAME ONLY. The pose's pivot is a local-frame point
+    // (`renderPivot(sceneOrigin, bounds.center)`), so rotating a WORLD
+    // coordinate about it computes R·(local + shift − pivot) + pivot instead of
+    // R·(local − pivot) + pivot + shift — an error of (R·shift − shift), which
+    // on a UTM cloud under a 90° turn is thousands of kilometres. `world` is a
+    // pure function of `local` (world = local + worldShift), so it is
+    // re-derived by the caller rather than transformed.
+    const moveLocal = (cloudId: string, p: [number, number, number]): [number, number, number] => {
+      const before = prevPoses.get(cloudId);
+      const after = cloudPoseById.get(cloudId);
+      if (!before || !after) return p;
+      const unposed = unposePoint(p, before.translation, before.rotation, before.pivot);
+      return transformPoint(unposed, after.translation, after.rotation, after.pivot);
+    };
+
+    // A cloud's persistent import-time shift, for re-deriving `world` after a
+    // move. Absent (or zero) on an unshifted cloud, where world === local.
+    const shiftFor = (cloudId: string) =>
+      clouds.find((c) => c.id === cloudId)?.data.octree?.worldShift ?? null;
+
+    // Move an anchor and return BOTH frames, consistently.
+    const moveAnchor = (cloudId: string, local: [number, number, number]) => {
+      const movedLocal = moveLocal(cloudId, local);
+      return { local: movedLocal, world: localToWorld(movedLocal, shiftFor(cloudId)) };
+    };
+
+    const fateFor = (cloudId: string) =>
+      anchorFate(prevKeys.get(cloudId), cloudAnchorKeys.get(cloudId));
+
+    setPickedPoints((prev) => {
+      let changed = false;
+      const next: typeof prev = [];
+      for (const p of prev) {
+        const fate = fateFor(p.cloudId);
+        if (fate.kind === 'drop') { changed = true; continue; }
+        if (fate.kind === 'move') {
+          next.push({ ...p, ...moveAnchor(p.cloudId, p.local) });
+          changed = true;
+          continue;
+        }
+        next.push(p);
+      }
+      return changed ? next : prev;
     });
-  }, [cloudAnchorSignature]);
+
+    setMeasurements((prev) => {
+      let changed = false;
+      const next: Measurement[] = [];
+      for (const m of prev) {
+        // A measurement can span two clouds, so each vertex is judged — and
+        // moved — by its OWN cloud. One dropped vertex invalidates the whole
+        // measurement: a distance with one endpoint missing is not a distance.
+        if (m.vertices.some((v) => fateFor(v.cloudId).kind === 'drop')) {
+          changed = true;
+          continue;
+        }
+        if (m.vertices.some((v) => fateFor(v.cloudId).kind === 'move')) {
+          next.push({
+            ...m,
+            vertices: m.vertices.map((v) =>
+              fateFor(v.cloudId).kind === 'move'
+                ? { ...v, ...moveAnchor(v.cloudId, v.local) }
+                : v,
+            ),
+          });
+          changed = true;
+          continue;
+        }
+        next.push(m);
+      }
+      return changed ? next : prev;
+    });
+
+    // The in-progress measurement follows the same rules: carry its placed
+    // vertices through a move, abandon it outright if any cloud it touches was
+    // rebuilt mid-measurement.
+    setPendingVertices((prev) => {
+      if (prev.length === 0) return prev;
+      if (prev.some((v) => fateFor(v.cloudId).kind === 'drop')) return [];
+      if (!prev.some((v) => fateFor(v.cloudId).kind === 'move')) return prev;
+      return prev.map((v) =>
+        fateFor(v.cloudId).kind === 'move'
+          ? { ...v, ...moveAnchor(v.cloudId, v.local) }
+          : v,
+      );
+    });
+  }, [cloudAnchorKeys, cloudPoseById, clouds]);
 
   // World-space coordinate of the ground-grid plane along the up-axis (z for
   // z-up, y for y-up). The natural ground reference in a local coordinate system
@@ -7583,7 +7868,7 @@ export default function PointCloudViewer({
       // Also a scene control rather than an analysis tool (no `toolGroup`, so it
       // renders in the View Controls box beside Set Scene Origin, not the Tools
       // palette) — it inspects whatever is visible and needs no selection.
-      { id: 'pick-point', name: 'Pick Point', keywords: ['point', 'inspect', 'identify', 'query', 'coordinates', 'attribute', 'scalar', 'label', 'probe'], action: () => { const open = showPointPickerPanel; closeAllToolPanels('point-pick'); setShowPointPickerPanel(!open); setPointPickMode(!open); }, category: 'View', requires: null, icon: MousePointerClick, testId: 'tool-point-pick', isActive: () => showPointPickerPanel },
+      { id: 'pick-point', name: 'Pick & Measure', keywords: ['point', 'inspect', 'identify', 'query', 'coordinates', 'attribute', 'scalar', 'label', 'probe', 'measure', 'distance', 'length', 'angle', 'ruler', 'polyline', 'path', 'span'], action: () => { const open = showPointPickerPanel; closeAllToolPanels('point-pick'); setShowPointPickerPanel(!open); setPointPickMode(!open); }, category: 'View', requires: null, icon: MousePointerClick, testId: 'tool-point-pick', isActive: () => showPointPickerPanel },
       { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
@@ -19069,9 +19354,10 @@ export default function PointCloudViewer({
           />
         )}
 
-        {/* Point picker. Armed from the Pick Point control; each click labels
-            the point under the cursor. Picks across EVERY visible octree cloud
-            plus the flat ones, so it needs no selection. */}
+        {/* Point picker. Armed from the Pick & Measure control; each click
+            either labels the point under the cursor or places a measurement
+            vertex, depending on `pickerMode`. Picks across EVERY visible octree
+            cloud plus the flat ones, so it needs no selection. */}
         {/* Cross-section: two ground-plane clicks place the centreline, reusing
             the crop tool's raycaster rather than a new gizmo. The wireframe
             shows where the slab sits; the projection override flattens the view
@@ -19178,6 +19464,20 @@ export default function PointCloudViewer({
           points={pickedPoints}
           displayOffset={displayOffset}
           registry={pickedOverlay}
+        />
+
+        {/* Measurement geometry + its readouts. Both are mounted
+            unconditionally, like the picked labels: closing the panel disarms
+            the tool but a committed measurement stays on screen to be read. */}
+        <MeasureLines
+          measurements={measurements}
+          pending={pendingVertices}
+          displayOffset={displayOffset}
+        />
+        <MeasureProjector
+          measurements={measurements}
+          displayOffset={displayOffset}
+          registry={measureOverlay}
         />
 
         {/* Scene-origin marker (Blender-style red/white 3D cursor), rendered in
@@ -21586,10 +21886,11 @@ export default function PointCloudViewer({
           >
             <Crosshair className={`w-4 h-4 ${showSceneOriginPanel ? 'text-white' : 'text-neutral-300'}`} />
           </button>
-          {/* Pick Point — inspect a single point's coordinates and scalar
-              attributes. Like Set Scene Origin it's an inspection control that
-              works on whatever is visible (no selection needed), so it lives
-              here rather than in the analysis Tools palette. */}
+          {/* Pick & Measure — inspect a point's coordinates and attributes, or
+              measure a distance / path / angle between points. Like Set Scene
+              Origin it's an inspection control that works on whatever is
+              visible (no selection needed), so it lives here rather than in the
+              analysis Tools palette. */}
           <button
             data-testid="tool-point-pick"
             onClick={() => {
@@ -21601,7 +21902,7 @@ export default function PointCloudViewer({
             className={`p-2 rounded transition-colors flex items-center justify-center ${
               showPointPickerPanel ? 'bg-green-600 text-white' : 'hover:bg-neutral-700'
             }`}
-            title="Pick Point — click a point to read its coordinates and attributes"
+            title="Pick & Measure — read a point's coordinates, or measure distance, path length and angle"
           >
             <MousePointerClick className={`w-4 h-4 ${showPointPickerPanel ? 'text-white' : 'text-neutral-300'}`} />
           </button>
@@ -22797,11 +23098,21 @@ export default function PointCloudViewer({
       {showPointPickerPanel && (
         <PointPickerPanel
           armed={pointPickMode}
-          count={pickedPoints.length}
+          mode={pickerMode}
+          pickedCount={pickedPoints.length}
+          measurementCount={measurements.length}
+          pendingCount={pendingVertices.length}
           copied={pickedCopied}
+          // Switching mode abandons the half-placed measurement (its vertices
+          // mean something different under another kind) but keeps everything
+          // already committed, so inspect labels and measurements coexist.
+          onModeChange={(m) => { setPickerMode(m); setPendingVertices([]); }}
           onToggleArmed={() => setPointPickMode(m => !m)}
-          onCopyAll={copyPickedPoints}
-          onClearAll={() => setPickedPoints([])}
+          onCopyAll={pickerMode === 'inspect' ? copyPickedPoints : copyMeasurements}
+          onClearAll={() => {
+            if (pickerMode === 'inspect') setPickedPoints([]);
+            else { setMeasurements([]); setPendingVertices([]); }
+          }}
           onClose={() => { setShowPointPickerPanel(false); setPointPickMode(false); }}
         />
       )}
@@ -22809,6 +23120,11 @@ export default function PointCloudViewer({
         points={pickedPoints}
         registry={pickedOverlay}
         onDismiss={dismissPickedPoint}
+      />
+      <MeasureLabels
+        measurements={measurements}
+        registry={measureOverlay}
+        onDismiss={dismissMeasurement}
       />
 
       {/* Plant Growth Panel - shows when plant mesh is selected and growth panel is open */}
