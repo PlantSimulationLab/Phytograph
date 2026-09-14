@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.83.0"
+BACKEND_VERSION = "0.84.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -22008,6 +22008,69 @@ def _robust_extent(positions: "np.ndarray") -> "Optional[List[float]]":
     return [float(max(0.0, hi[i] - lo[i])) for i in range(3)]
 
 
+def _robust_attribute_ranges(
+    intensity: "Optional[np.ndarray]",
+    extras: "Optional[Dict[str, np.ndarray]]",
+) -> "Dict[str, List[float]]":
+    """Outlier-resistant [lo, hi] per numeric attribute, keyed by slug.
+
+    The colorbar's twin of `_robust_extent`, and it exists for the same reason:
+    the domain a colormap is stretched across is set by its most extreme value,
+    so a handful of noise returns — a hot specular spike in reflectance, a bird
+    above the canopy in z — push the end of the ramp out to where nothing lives.
+    Every real point then crowds into a narrow band of the colormap and the
+    structure the user is trying to read washes out to one flat colour.
+
+    Computed HERE because this is the one place the full arrays are in RAM: the
+    octree carries only PotreeConverter's absolute per-attribute extrema, and a
+    cloud's points are never re-read from the file after import. Same percentiles
+    as the extent box, so "robust" has exactly one definition in the codebase.
+
+    CATEGORICAL COLUMNS ARE INCLUDED ON PURPOSE. Trimming 1% off a class-ID
+    column would drop the rarest class from the palette, so these ranges must
+    never be used for one — but that decision cannot be made here. A field is
+    categorical or continuous by the user's import-wizard choice, which lives in
+    the renderer's process-wide registries (`classification.ts`) and can be
+    flipped AFTER import; a backend-side exclusion list would be a second source
+    of truth that silently goes stale the moment the user changes their mind.
+    So this reports the percentile for everything numeric and the renderer, which
+    alone knows the answer, decides what to consult it for. See
+    `robustScalarRange` in src/renderer/lib/robustColorRange.ts for the gate.
+
+    Returns {} rather than None when nothing qualifies, so callers can merge it
+    unconditionally; a slug is simply absent when its column is non-finite,
+    empty, or degenerate (lo == hi), in which case the consumer keeps the raw
+    extrema it already has.
+    """
+    out: Dict[str, List[float]] = {}
+    if np is None:
+        return out
+
+    def _add(slug: str, arr: "Optional[np.ndarray]") -> None:
+        if arr is None:
+            return
+        a = np.asarray(arr)
+        if a.ndim != 1 or a.size == 0:
+            return
+        finite = a[np.isfinite(a)]
+        if finite.size == 0:
+            return
+        lo = float(np.percentile(finite, _EXTENT_LOW_PERCENTILE))
+        hi = float(np.percentile(finite, _EXTENT_HIGH_PERCENTILE))
+        # A degenerate span (constant column, or a tail so thin the percentiles
+        # coincide) carries no information the raw extrema don't. Omit it and
+        # let the consumer fall back rather than emit an inverted or zero-width
+        # range the shader would have to guard against.
+        if not (hi > lo):
+            return
+        out[slug] = [lo, hi]
+
+    _add("intensity", intensity)
+    for slug, arr in (extras or {}).items():
+        _add(slug, arr)
+    return out
+
+
 def _autodetect_misses(
     positions: "np.ndarray",
     extras: Dict[str, "np.ndarray"],
@@ -30431,6 +30494,25 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         # dominate a percentile span exactly as they do the raw bounding box.
         robust_extent = _robust_extent(_gz_src)
         robust_bounds = _robust_aabb(_gz_src)
+        # Per-attribute percentile ranges for the colorbar. Hits-only like the
+        # two above: a miss shell is a synthetic far-field value on every column
+        # it carries, and it skews a scalar percentile exactly as it skews the
+        # extent.
+        def _hits_only(arr):
+            # The mask is one bool per point; only apply it to a column that is
+            # actually per-point and 1-D. An extra that is neither (a stray
+            # scalar, an (n,3) block) is passed through untouched — the range
+            # helper skips anything it can't read as a column anyway, and a
+            # shape-mismatched index here would raise mid-import.
+            if arr is None or _gz_mask is None:
+                return arr
+            a = np.asarray(arr)
+            return a[_gz_mask] if (a.ndim == 1 and a.shape[0] == _gz_mask.shape[0]) else arr
+
+        robust_attribute_ranges = _robust_attribute_ranges(
+            _hits_only(intensity),
+            {k: _hits_only(v) for k, v in (extras or {}).items()},
+        )
         # Median nearest-neighbour spacing, for the ground tool's ALS/close-range
         # regime switch (see _ALS_SPACING_M). Measured HERE rather than when the
         # panel opens because the renderer holds no positions for an octree
@@ -30612,6 +30694,12 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             # needs its CENTRE: with far outliers the raw box centre sits out in
             # empty space, so a camera converging on it stalls short of the data.
             "robust_bounds": robust_bounds,
+            # Per-attribute percentile ranges for the colorbar (see
+            # `_robust_attribute_ranges`). The octree metadata carries only
+            # absolute extrema, so a single hot return stretches a scalar ramp
+            # out to where no points are. Includes categorical columns — the
+            # renderer decides what to apply them to.
+            "robust_attribute_ranges": robust_attribute_ranges,
             # Median nearest-neighbour spacing (see `_regime_point_spacing`). The
             # ground tool switches CSF recipe on it: close-range and airborne
             # clouds want opposite cloth resolutions, and the renderer cannot
@@ -31717,6 +31805,48 @@ def _session_observed_classes_locked(sess: "CloudSession") -> dict:
     return out
 
 
+def _session_robust_color_stats_locked(sess: "CloudSession") -> dict:
+    """{"robust_bounds": {...}, "robust_attribute_ranges": {...}} recomputed over
+    the points that SURVIVE and are real returns. Caller holds the lock.
+
+    These are the colorbar's outlier-resistant domains (see `_robust_aabb` and
+    `_robust_attribute_ranges`). They are measured at import over the arrays in
+    RAM, and they cannot be recovered from the octree afterwards: PotreeConverter
+    writes only absolute extrema, and the source file is never re-read.
+
+    So an edit that rewrites the octree has to re-measure them here, or the
+    renderer's rebuild finds them missing and silently falls back to raw extrema
+    — the colorbar snaps back to being set by one noise point, and the feature
+    looks like it randomly stopped working after a crop. Re-measuring is also the
+    only CORRECT answer: cropping away the outlier genuinely changes the
+    percentile, so carrying the import-time values forward would be stale.
+
+    Attached in `_session_rebuild` for the same reason `octree_pose` is cleared
+    and `observed_classes` is attached there — every edit funnels through that
+    one function, and a per-caller attach is a rule someone eventually forgets.
+
+    Hits-and-alive for the same reason as its siblings: a miss sits ~1 km out
+    along the beam and would dominate a percentile exactly as it dominates the
+    raw box, and a deleted point is not on screen.
+    """
+    editable = _session_editable_mask_locked(sess)
+    if not editable.any():
+        return {}
+    out: dict = {}
+    bounds = _robust_aabb(sess.positions[editable])
+    if bounds is not None:
+        out["robust_bounds"] = bounds
+    ranges = _robust_attribute_ranges(
+        sess.intensity[editable] if sess.intensity is not None else None,
+        {k: v[editable] for k, v in sess.extras.items()
+         if v is not None and np.asarray(v).ndim == 1
+         and np.asarray(v).shape[0] == editable.shape[0]},
+    )
+    if ranges:
+        out["robust_attribute_ranges"] = ranges
+    return out
+
+
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
     """Append (or replace) a per-point scalar extra-dim column on the session
     array. `values` is aligned to the SURVIVING points (positions[~deleted]);
@@ -31805,7 +31935,15 @@ def _session_rebuild(
         # function, so a per-caller attach is a rule someone eventually forgets —
         # and forgetting leaves the renderer listing classes the cloud no longer
         # contains. See `_session_observed_classes_locked`.
-        meta = {**meta, "observed_classes": _session_observed_classes_locked(sess)}
+        # Outlier-resistant colorbar domains, re-measured for the same reason and
+        # at the same chokepoint — see `_session_robust_color_stats_locked`.
+        # Without this every edit drops them and the colorbar silently reverts to
+        # raw extrema, i.e. back to being set by a single noise point.
+        meta = {
+            **meta,
+            "observed_classes": _session_observed_classes_locked(sess),
+            **_session_robust_color_stats_locked(sess),
+        }
     return cache_key, cache_dir, meta
 
 

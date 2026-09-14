@@ -1025,6 +1025,32 @@ export function buildPointCloudFromOctree(
       asciiFormat: asciiFormat ?? null,
       attributeRanges,
       attributeLabels,
+      // Percentile [lo, hi] per attribute slug, from the cloud-session create
+      // response (see `_robust_attribute_ranges`). The colorbar prefers these
+      // over `attributeRanges`, whose PotreeConverter extrema are absolute and
+      // so are set by the single most extreme value in the column. Absent for
+      // plain OctreeMetadata callers and for any column the backend found
+      // degenerate; consumers fall back to attributeRanges.
+      //
+      // Includes CATEGORICAL slugs — the backend cannot know which are which
+      // (the user picks that in the import wizard and can change it later), so
+      // never consult this without first checking the attribute is continuous.
+      robustAttributeRanges: (() => {
+        const rr = (meta as OctreeMetadata & { robust_attribute_ranges?: unknown })
+          .robust_attribute_ranges;
+        if (!rr || typeof rr !== 'object') return undefined;
+        const out: Record<string, [number, number]> = {};
+        for (const [slug, v] of Object.entries(rr as Record<string, unknown>)) {
+          if (
+            Array.isArray(v) && v.length === 2
+            && typeof v[0] === 'number' && typeof v[1] === 'number'
+            && isFinite(v[0]) && isFinite(v[1]) && v[1] > v[0]
+          ) {
+            out[slug] = [v[0], v[1]];
+          }
+        }
+        return Object.keys(out).length > 0 ? out : undefined;
+      })(),
       // Exact per-slug class lists from the backend session (see
       // OctreeMetadata.observed_classes). Categorical schemes prefer this over
       // attributeRanges, which cannot express gaps or a non-zero floor.

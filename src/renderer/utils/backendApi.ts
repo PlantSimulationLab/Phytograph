@@ -4148,6 +4148,12 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // content's centre — unlike `tight_bounds`', which far outliers drag into
   // empty space. null on a degenerate cloud.
   robust_bounds?: { min: [number, number, number]; max: [number, number, number] } | null;
+  // Outlier-resistant [lo, hi] per attribute slug (see `_robust_attribute_ranges`
+  // in main.py) — the colorbar's domain, as opposed to the absolute extrema the
+  // octree metadata carries. Keyed by slug, degenerate columns omitted, `{}` when
+  // nothing qualified. Includes categorical slugs: the backend cannot tell them
+  // apart, so the renderer gates on its own classification registries.
+  robust_attribute_ranges?: Record<string, [number, number]> | null;
   // Median 3D nearest-neighbour spacing (see `_regime_point_spacing` in
   // main.py). The ground tool switches CSF recipe on it — airborne and
   // close-range clouds want opposite cloth resolutions. Measured at import

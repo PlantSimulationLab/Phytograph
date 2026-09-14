@@ -178,6 +178,7 @@ import {
   type LegendEntry,
 } from '../lib/colorChannel';
 import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE } from '../lib/classification';
+import { robustScalarRange } from '../lib/robustColorRange';
 import { buildNoiseParams, formatFlaggedSummary, formatMultiScanSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
 import { denoisePoints, sessionDenoise, type DenoiseStats, type NoiseMethod, type NoiseParams } from '../utils/backendApi';
@@ -10126,6 +10127,14 @@ export default function PointCloudViewer({
         missOctreeCacheId: session.miss_octree_cache_id ?? null,
         ...(Object.keys(attributeRanges).length > 0 ? { attributeRanges } : {}),
         ...(Object.keys(attributeLabels).length > 0 ? { attributeLabels } : {}),
+        // The colorbar's outlier-resistant per-attribute domains. Carried for
+        // the same reason attributeRanges is: this literal is hand-built rather
+        // than produced by buildPointCloudFromOctree, so anything it forgets is
+        // simply absent — and an absent robust range silently reverts a
+        // synthetic scan's scalar colorbars to raw extrema.
+        ...(session.robust_attribute_ranges
+          ? { robustAttributeRanges: session.robust_attribute_ranges }
+          : {}),
       };
     }
 
@@ -10142,6 +10151,12 @@ export default function PointCloudViewer({
         size: new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ),
       },
       fileName,
+      // Same provenance as the octree ref above: present on the cloud-session
+      // create response, and the height/X/Y colorbar falls back to the raw
+      // (outlier-set) box without it.
+      ...(session?.robust_bounds
+        ? { robustBounds: { min: session.robust_bounds.min, max: session.robust_bounds.max } }
+        : {}),
       octree,
     };
   }, []);
@@ -17885,9 +17900,40 @@ export default function PointCloudViewer({
   ): { min: number; max: number; label: string } | null => {
     if (!cloud) return null;
     const d = cloud.data;
-    if (mode === 'x') return { min: d.bounds.min.x, max: d.bounds.max.x, label: 'X' };
-    if (mode === 'y') return { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
-    if (mode === 'height') return { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
+    // Axis modes: the percentile box when the backend measured one, else the
+    // raw AABB. A colormap stretched to the raw box is stretched to its single
+    // most extreme point, so one bird above the canopy or one multipath return
+    // below the ground compresses the whole scene into a sliver of the ramp.
+    const rb = d.robustBounds;
+    if (mode === 'x') {
+      return rb
+        ? { min: rb.min[0], max: rb.max[0], label: 'X' }
+        : { min: d.bounds.min.x, max: d.bounds.max.x, label: 'X' };
+    }
+    if (mode === 'y') {
+      return rb
+        ? { min: rb.min[1], max: rb.max[1], label: 'Y' }
+        : { min: d.bounds.min.y, max: d.bounds.max.y, label: 'Y' };
+    }
+    if (mode === 'height') {
+      return rb
+        ? { min: rb.min[2], max: rb.max[2], label: 'Z (Height)' }
+        : { min: d.bounds.min.z, max: d.bounds.max.z, label: 'Z (Height)' };
+    }
+    // Intensity keeps its fixed 0..1 domain and is NOT made robust here.
+    //
+    // For a flat cloud that is already true: the parser min-max normalises the
+    // column into 0..1 at import (pointCloudParsers.ts), so the domain is 0..1
+    // by construction. The outlier damage there happens during that
+    // normalisation, upstream of any range this function could return — fixing
+    // it means changing the parser, not this line.
+    //
+    // An octree cloud never reaches the scalar branch below under `intensity`
+    // either: the slug is in OCTREE_BUILTIN_ATTRIBUTES, so octreeScalarFieldOptions
+    // filters it out of the Color-by picker and `field` can never be 'intensity'.
+    // Such a cloud takes this branch and is handed 0..1 against a raw 16-bit
+    // buffer — a pre-existing bug, unchanged here, see OctreePointCloud.tsx's
+    // intensityRange handling.
     if (mode === 'intensity') return { min: 0, max: 1, label: 'Intensity' };
     if (mode === 'scalar' && field) {
       // Flat clouds carry per-field min/max in scalarFields; octree clouds
@@ -17895,12 +17941,14 @@ export default function PointCloudViewer({
       // the human-readable label for the colorbar caption when we have one.
       if (d.scalarFields?.[field]) {
         const f = d.scalarFields[field];
-        return { min: f.min, max: f.max, label: field };
+        const robust = robustScalarRange(d, field, [f.min, f.max]);
+        return { min: robust[0], max: robust[1], label: field };
       }
       const r = d.octree?.attributeRanges?.[field];
       if (r && r.min.length > 0 && r.max.length > 0) {
         const label = d.octree?.attributeLabels?.[field] ?? field;
-        return { min: r.min[0], max: r.max[0], label };
+        const robust = robustScalarRange(d, field, [r.min[0], r.max[0]]);
+        return { min: robust[0], max: robust[1], label };
       }
     }
     return null;
