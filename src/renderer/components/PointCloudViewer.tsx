@@ -10847,6 +10847,15 @@ export default function PointCloudViewer({
             message: `Triangulated ${response.pointsUsed.toLocaleString()} of ${totalPoints.toLocaleString()} merged points (Settings → Triangulate max points). Raise the cap for more detail.`,
           });
         }
+        // Merging overlapping scans is the most likely way to produce coincident
+        // points, so this is exactly where it's worth saying so.
+        if (response.duplicatesDropped) {
+          showToast({
+            type: 'warning',
+            title: 'Duplicate points removed',
+            message: `Dropped ${response.duplicatesDropped.toLocaleString()} duplicate coordinate(s) before Ball Pivoting. Coincident points add no surface, so the mesh is unaffected.`,
+          });
+        }
         showToast({
           type: 'success',
           title: 'Triangulation Complete',
@@ -10860,6 +10869,7 @@ export default function PointCloudViewer({
       const newMeshes: MeshEntry[] = [];
       let totalTriangles = 0;
       let downsampledNote: string | null = null;
+      let duplicatesDropped = 0;
       for (let cloudIdx = 0; cloudIdx < targets.length; cloudIdx++) {
         const cloud = targets[cloudIdx];
         const ps = await buildPointSource(cloud);
@@ -10940,6 +10950,7 @@ export default function PointCloudViewer({
         ) {
           downsampledNote = `${response.pointsUsed.toLocaleString()} of ${cloud.data.pointCount.toLocaleString()} points (Settings → Triangulate max points)`;
         }
+        duplicatesDropped += response.duplicatesDropped ?? 0;
       }
 
       addMeshes(newMeshes, 'Triangulate');
@@ -10951,6 +10962,13 @@ export default function PointCloudViewer({
           type: 'warning',
           title: 'Cloud downsampled for triangulation',
           message: `Triangulated ${downsampledNote}. Raise the cap for more detail.`,
+        });
+      }
+      if (duplicatesDropped) {
+        showToast({
+          type: 'warning',
+          title: 'Duplicate points removed',
+          message: `Dropped ${duplicatesDropped.toLocaleString()} duplicate coordinate(s) before Ball Pivoting. Coincident points add no surface, so the mesh is unaffected.`,
         });
       }
       showToast({

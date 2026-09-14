@@ -218,6 +218,11 @@ export interface TriangulationResult {
   // pointsUsed < cloud size, which a crop alone also makes true — gate the
   // "downsampled" warning on THIS, not on the count comparison.
   downsampled?: boolean;
+  // Exact duplicate coordinates dropped before Ball Pivoting (0 for the other
+  // methods, which don't dedup). Coincident points add no surface and, past 50%
+  // of the cloud, collapse the auto ball radius to 0 — which Open3D rejects as
+  // an "invalid, negative radius". `pointsUsed` is already net of them.
+  duplicatesDropped?: number;
   // Per-triangle grid cell (0xffffffff = outside) when the request pinned the
   // mesh to a `grid`. Aligned 1:1 with `triangles`. Undefined when not pinned.
   triangleCellIds?: Uint32Array;
@@ -759,6 +764,7 @@ export async function triangulatePointCloud(
     methodUsed: meta.method_used as string,
     pointsUsed: meta.points_used as number | undefined,
     downsampled: meta.downsampled as boolean | undefined,
+    duplicatesDropped: meta.duplicates_dropped as number | undefined,
     triangleCellIds: buffers.triangle_cell_ids as Uint32Array | undefined,
   };
 }

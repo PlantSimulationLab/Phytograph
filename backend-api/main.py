@@ -4340,6 +4340,11 @@ class TriangulationResponse(BaseModel):
     # points. The renderer keys its "downsampled" warning toast off THIS, not off
     # points_used < cloud size (which a crop alone also makes true).
     downsampled: Optional[bool] = None
+    # Exact duplicate coordinates removed before Ball Pivoting (0 for every other
+    # method, which doesn't dedup). Coincident points add no surface and, past 50%
+    # of the cloud, collapse the auto ball radius to 0 — so they're dropped and
+    # REPORTED rather than silently absorbed. `points_used` is already net of them.
+    duplicates_dropped: Optional[int] = None
     # Per-triangle grid cell (row-major i + nx*(j + ny*k)) when the request pinned
     # the mesh to a `grid`; -1 (packed as the uint32 sentinel 0xffffffff) means the
     # centroid fell outside every cell. Aligned 1:1 with `triangles`. Empty when no
@@ -4347,21 +4352,58 @@ class TriangulationResponse(BaseModel):
     triangle_cell_ids: List[int] = []
 
 
+# Open3D's BPA rejects any radius <= 0, and its error message calls a ZERO radius
+# "negative" — so a duplicate-heavy cloud fails with a diagnosis pointing at the
+# wrong value. Duplicates are the real cause: `compute_nearest_neighbor_distance`
+# returns 0.0 for every point coincident with another, so once MORE THAN HALF the
+# points are duplicates the median collapses to 0.0 and the auto ladder becomes
+# [0, 0, 0]. Every rung is validated, so one zero poisons the whole ladder.
+# Duplicates arrive from merged overlapping scans, a re-imported export, or a
+# quantizing decimation. The non-zero spacing estimate here and the dedup in
+# `_do_open3d_triangulation` both exist to keep that out of Open3D's hands.
+def _nn_spacing(o3d, points_np):
+    """Reference nearest-neighbour spacing for a point array: the median over the
+    NON-ZERO distances. A zero is an exact duplicate, which carries no spacing
+    information — including them biases the estimate toward 0 and, past 50%
+    duplicates, pins it AT 0. Returns 0.0 only when every point is coincident
+    (no spacing exists at all), which callers must treat as un-meshable."""
+    import numpy as np
+    probe = o3d.geometry.PointCloud()
+    probe.points = o3d.utility.Vector3dVector(points_np)
+    nn = np.asarray(probe.compute_nearest_neighbor_distance())
+    nz = nn[nn > 0]
+    if nz.size == 0:
+        return 0.0
+    return float(np.median(nz))
+
+
+def _ball_pivot_radii(o3d, points_np):
+    """Auto radius ladder ([median, 2x, 4x] of non-zero NN spacing), or None when
+    the cloud is fully degenerate (every point coincident). Shared by the
+    single-pass and adaptive-tiled paths so both estimate radii identically."""
+    ref = _nn_spacing(o3d, points_np)
+    if ref <= 0:
+        return None
+    return [ref, ref * 2, ref * 4]
+
+
 def _ball_pivot_mesh(o3d, points_np, radii=None):
     """Run BPA on a point array with cheap centroid-facing normals + an auto radius
-    ladder ([median, 2x, 4x] of NN spacing). Returns an open3d TriangleMesh. Shared
-    by the single-pass and adaptive-tiled paths so both estimate radii identically.
+    ladder ([median, 2x, 4x] of NN spacing). Returns an open3d TriangleMesh, or
+    None when the cloud is too degenerate to derive a radius from. Shared by the
+    single-pass and adaptive-tiled paths so both estimate radii identically.
     `radii` overrides the auto ladder (an explicit user value)."""
     import numpy as np
+    if radii is None:
+        radii = _ball_pivot_radii(o3d, points_np)
+        if radii is None:
+            return None
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points_np)
     pcd.estimate_normals()
     centroid = points_np.mean(axis=0)
     pcd.orient_normals_towards_camera_location(centroid)
     pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
-    if radii is None:
-        ref = float(np.median(np.asarray(pcd.compute_nearest_neighbor_distance())))
-        radii = [ref, ref * 2, ref * 4]
     return o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
         pcd, o3d.utility.DoubleVector(radii))
 
@@ -4392,9 +4434,14 @@ def _adaptive_ball_pivot(o3d, points_np, ckpt=None):
         return None
 
     # Cheap global density-spread probe: tile only when spacing is non-uniform.
+    # Measured over NON-ZERO distances only — a zero is an exact duplicate, which
+    # is not a spacing, and leaving them in drags both the median and the p90 down
+    # (past 50% duplicates the median hits 0 and the ratio is undefined). Callers
+    # dedup upstream, so this is belt-and-braces for any other entry point.
     probe = o3d.geometry.PointCloud()
     probe.points = o3d.utility.Vector3dVector(points_np)
     nn = np.asarray(probe.compute_nearest_neighbor_distance())
+    nn = nn[nn > 0]
     med = float(np.median(nn)) if nn.size else 0.0
     if med <= 0:
         return None
@@ -4427,6 +4474,8 @@ def _adaptive_ball_pivot(o3d, points_np, ckpt=None):
             if ckpt is not None:
                 ckpt()
             mesh = _ball_pivot_mesh(o3d, P)
+            if mesh is None:
+                continue  # tile is fully coincident — no spacing to derive a ball from
             tv = np.asarray(mesh.vertices)
             tt = np.asarray(mesh.triangles)
             if tt.shape[0] == 0:
@@ -4484,6 +4533,19 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                     "num_triangles": 0, "num_vertices": 0, "points_used": 0,
                     "error": "crop_box must be [min_x, min_y, min_z, max_x, max_y, max_z]"}
         cropping = request.crop_box is not None
+
+        # Reject a non-positive explicit radius here rather than at the Open3D call,
+        # which reports ANY radius <= 0 as "negative" and names no offending value.
+        # The UI already guards r > 0, so this is for direct API callers.
+        if request.method == "ball_pivoting" and request.radii is not None:
+            bad = [r for r in request.radii
+                   if not math.isfinite(r) or r <= 0]
+            if bad or not request.radii:
+                return {"success": False, "method_used": request.method,
+                        "num_triangles": 0, "num_vertices": 0, "points_used": 0,
+                        "error": (f"Ball radii must be positive, finite numbers; got {bad}."
+                                  if bad else
+                                  "radii must contain at least one positive value.")}
 
         # Resolve order with crop-to-grid: the per-source `max_points` cap (the
         # "Triangulate max points" setting) stride-downsamples inside
@@ -4560,6 +4622,34 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             return {"success": False, "method_used": request.method,
                     "num_triangles": 0, "num_vertices": 0, "points_used": points_used,
                     "error": err}
+
+        # Drop exact duplicate coordinates before Ball Pivoting.
+        #
+        # BPA rolls a ball over the surface; coincident points add no surface, and
+        # past 50% duplicates they take over the nearest-neighbour distribution and
+        # collapse the auto radius to 0 — which Open3D rejects as an "invalid,
+        # negative radius" (see the comment above `_nn_spacing`). Deduping is the
+        # honest fix rather than only hardening the estimate: the duplicates would
+        # contribute nothing to the mesh even if a radius survived them.
+        #
+        # BPA only. Poisson solves over a weighted field and alpha/delaunay build a
+        # tetrahedralization, so duplicates are harmless there and dropping them
+        # would silently change long-standing output for no benefit.
+        duplicates_dropped = 0
+        if request.method == "ball_pivoting" and len(points) > 1:
+            _report(0.12, "Removing duplicate points")
+            before = len(points)
+            points = np.unique(points, axis=0)
+            duplicates_dropped = before - len(points)
+            points_used = int(len(points))
+            if duplicates_dropped and len(points) < 3:
+                return {"success": False, "method_used": request.method,
+                        "num_triangles": 0, "num_vertices": 0,
+                        "points_used": points_used,
+                        "duplicates_dropped": duplicates_dropped,
+                        "error": (f"Only {points_used} distinct point(s) remain after "
+                                  f"removing {duplicates_dropped:,} duplicate coordinate(s) "
+                                  "— not enough distinct geometry to triangulate.")}
 
         # Create Open3D point cloud
         _report(0.15, "Preparing point cloud")
@@ -4643,9 +4733,19 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                     pcd.orient_normals_towards_camera_location(centroid)
                     pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
                 if request.radii is None:
-                    distances = pcd.compute_nearest_neighbor_distance()
-                    ref_dist = float(np.median(distances))
-                    radii = o3d.utility.DoubleVector([ref_dist, ref_dist * 2, ref_dist * 4])
+                    auto = _ball_pivot_radii(o3d, np.asarray(pcd.points))
+                    if auto is None:
+                        # Every remaining point is coincident, so there is no spacing
+                        # to size a ball from. Say that, rather than handing Open3D a
+                        # 0 and surfacing its "negative radius" message.
+                        return {"success": False, "method_used": request.method,
+                                "num_triangles": 0, "num_vertices": 0,
+                                "points_used": points_used,
+                                "duplicates_dropped": duplicates_dropped,
+                                "error": ("All points share the same coordinate, so no "
+                                          "ball radius can be derived. Ball Pivoting needs "
+                                          "points spread over a surface.")}
+                    radii = o3d.utility.DoubleVector(auto)
                 else:
                     radii = o3d.utility.DoubleVector(request.radii)
                 mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pcd, radii)
@@ -4817,6 +4917,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             "method_used": method_used,
             "points_used": points_used,
             "downsampled": was_downsampled,
+            "duplicates_dropped": duplicates_dropped,
             "triangle_cell_ids": triangle_cell_ids,
         }
 
