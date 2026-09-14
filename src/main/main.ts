@@ -476,7 +476,9 @@ app.whenReady().then(async () => {
   // toast (App.tsx); also pop the native crash dialog so the user gets the
   // log/report/reload actions, not just a dismissable toast. Suppressed under
   // E2E (a native modal would hang the Playwright driver).
-  if (!isE2E) setBackendFailedHandler(() => showBackendFailedDialog(restartBackendAndReload));
+  if (!isE2E) {
+    setBackendFailedHandler((cause) => showBackendFailedDialog(restartBackendAndReload, cause));
+  }
 
   // Kick off the backend's (slow, ~10-20s cold) start NOW, before the synchronous
   // post-mortem dialog below — otherwise that modal blocks the event loop and the

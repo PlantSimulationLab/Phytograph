@@ -86,6 +86,65 @@ describe('describeExit', () => {
   });
 });
 
+// A backend that cannot LOAD is not a crash to retry — it is the wrong machine.
+// The Linux AppImage is compiled on ubuntu-24.04 and needs glibc 2.38+, so on
+// Ubuntu 22.04 / RHEL 8-9 the window opens and the sidecar dies instantly. Before
+// this classifier the user saw an app that silently did nothing, and the crash
+// dialog offered a Reload that could never succeed.
+describe('classifyBackendFailure', () => {
+  let classifyBackendFailure: typeof import('./backend.js').classifyBackendFailure;
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ classifyBackendFailure } = await import('./backend.js'));
+  });
+
+  // Verbatim from the Ubuntu 22.04 HPC node where this was found.
+  const REAL_GLIBC_FAILURE = [
+    '[PYI-10069:ERROR] Failed to load Python shared library',
+    "'/tmp/.mount_PhytogitPFFl/resources/resources/phytograph_backend/_internal/libpython3.11.so.1.0':",
+    "/lib/x86_64-linux-gnu/libm.so.6: version `GLIBC_2.38' not found",
+  ];
+
+  it('recognises the real glibc loader error and names the version needed', () => {
+    const cause = classifyBackendFailure(REAL_GLIBC_FAILURE);
+    expect(cause).toBeTruthy();
+    expect(cause).toContain('GLIBC_2.38');
+    expect(cause).toMatch(/glibc/i);
+  });
+
+  it('tells the user retrying cannot help', () => {
+    // The whole point: the old dialog offered Reload, which loops forever.
+    expect(classifyBackendFailure(REAL_GLIBC_FAILURE)).toMatch(/will not help/i);
+  });
+
+  it('points at a check the user can actually run', () => {
+    expect(classifyBackendFailure(REAL_GLIBC_FAILURE)).toContain('ldd --version');
+  });
+
+  it('recognises a libstdc++ (GLIBCXX) mismatch too', () => {
+    const cause = classifyBackendFailure([
+      "./phytograph_backend: /lib/libstdc++.so.6: version `GLIBCXX_3.4.32' not found",
+    ]);
+    expect(cause).toContain('GLIBCXX_3.4.32');
+  });
+
+  it('recognises a missing shared library', () => {
+    const cause = classifyBackendFailure([
+      './phytograph_backend: error while loading shared libraries: libGL.so.1: cannot open shared object file',
+    ]);
+    expect(cause).toContain('libGL.so.1');
+  });
+
+  it('returns null for an ordinary crash, leaving the normal restart path alone', () => {
+    // Must NOT hijack a real crash: those are retryable and the generic dialog
+    // (with its Reload button) is the right response.
+    expect(classifyBackendFailure(['Traceback (most recent call last):', 'MemoryError'])).toBeNull();
+    expect(classifyBackendFailure([])).toBeNull();
+    // A log line that merely mentions glibc is not a loader failure.
+    expect(classifyBackendFailure(['INFO: built against GLIBC_2.38'])).toBeNull();
+  });
+});
+
 describe('restart budget (Bug B: healthy /version must not reset it)', () => {
   let startBackend: typeof import('./backend.js').startBackend;
   let setBackendFailedHandler: typeof import('./backend.js').setBackendFailedHandler;

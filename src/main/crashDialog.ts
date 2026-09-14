@@ -218,8 +218,26 @@ let childProcessHandlerInstalled = false;
  * the same native crash dialog. The renderer is alive here, so Reload reloads
  * it (which re-runs initBackendUrl and lets the user retry); Report/View Logs
  * behave identically to the renderer-crash path.
+ *
+ * `cause` is a diagnosed, user-readable reason from classifyBackendFailure()
+ * when the supervisor recognised one. It changes the dialog in two ways, both
+ * deliberate: the reason is shown instead of the generic "try reloading" copy,
+ * and **no Reload button is offered**. These causes (an OS too old for the
+ * build, a missing system library) cannot be fixed by retrying, and a button
+ * that silently does nothing is worse than no button — it sends the user round
+ * a loop instead of telling them the truth.
  */
-export function showBackendFailedDialog(reload: () => void): void {
+export function showBackendFailedDialog(reload: () => void, cause?: string | null): void {
+  if (cause) {
+    void showCrashDialog({
+      message: 'Phytograph cannot run on this system.',
+      detail: `${cause}\n\nUse View Logs for the full error, or Report to send it to us.`,
+      reportContext: 'backend failed (unsupported system)',
+      // No onReload: reloading cannot resolve an environment mismatch.
+    });
+    return;
+  }
+
   void showCrashDialog({
     message: 'The compute backend stopped and could not be restarted.',
     detail:

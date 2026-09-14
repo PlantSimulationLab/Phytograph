@@ -490,9 +490,15 @@ process via [`electron-log`](https://github.com/megahertz/electron-log)
 
 | OS | Log directory |
 |---|---|
-| macOS | `~/Library/Logs/Phytograph/` |
-| Windows | `%APPDATA%\Phytograph\logs\` |
-| Linux | `~/.config/Phytograph/logs/` |
+| macOS | `~/Library/Logs/phytograph/` |
+| Windows | `%APPDATA%\phytograph\logs\` |
+| Linux | `~/.config/phytograph/logs/` |
+
+Lowercase: electron-log derives the directory from the app name, and
+`app.getName()` returns `phytograph` even though `main.ts` calls
+`app.setName('Phytograph')` — Electron does not recompute cached paths after
+`setName`. The octree cache below is a *different* directory that genuinely is
+capitalised, because the backend hardcodes it. Only Linux shows the difference.
 
 Each launch writes to its own `main-<timestamp>-pid<n>.log` (via the file
 transport's `resolvePathFn`), so a bug report carries just that session instead
