@@ -1742,6 +1742,19 @@ export interface LADResponse {
   dropped_columns?: number;
   // EPSG shared by every source scan, else null. Drives raster georeferencing.
   crs_epsg?: number | null;
+  // What the inversion inferred from target_count for pulses whose returns are
+  // no longer in the cloud (a crop to the grid). hidden_after were placed beyond
+  // the grid and counted as transmitted; hidden_ambiguous could not be placed
+  // (the cloud was cropped INSIDE the grid). null when the native library
+  // predates the tally.
+  cropped_returns?: {
+    beams_with_hidden_returns: number;
+    hidden_before: number;
+    hidden_after: number;
+    hidden_ambiguous: number;
+    beams_ambiguous: number;
+    standins_ignored: number;
+  } | null;
   warnings: string[];
   error?: string;
 }

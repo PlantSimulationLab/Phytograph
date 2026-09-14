@@ -90,10 +90,19 @@ class _FakeCloud:
             return getattr(self, "_gapfill_codes", [])
         return []
 
+    # What getCroppedReturnStats() reports after the inversion. A test sets the
+    # class attribute; None means "nothing inferred" (all zeros).
+    cropped_stats = None
+
     def calculateLeafArea(self, ctx, min_hits, element_width=None, Gtheta=None):
         # Uncertainty is always on now: _do_lad_computation passes element_width.
         # Gtheta is supplied only on the moving-platform (beam-based) path.
         self.calls.append(("calculateLeafArea", min_hits, element_width, Gtheta))
+
+    def getCroppedReturnStats(self):
+        zeros = {"beams_with_hidden_returns": 0, "hidden_before": 0, "hidden_after": 0,
+                 "hidden_ambiguous": 0, "beams_ambiguous": 0, "standins_ignored": 0}
+        return dict(zeros, **(_FakeCloud.cropped_stats or {}))
 
     def getGridCellCount(self):
         return self.gridcells
@@ -178,6 +187,7 @@ def stub_pyhelios(monkeypatch):
     import sys
     import types
     _FakeCloud.instances = []
+    _FakeCloud.cropped_stats = None
     fake = types.ModuleType("pyhelios")
     fake.LiDARCloud = _FakeCloud
     fake.Context = _FakeContext
@@ -337,6 +347,123 @@ class TestLADRequestShaping:
         assert result["had_miss_points"] is True
         # Not the "no misses / no timestamp" warning — misses ARE present.
         assert not any("likely to be inaccurate" in w for w in result["warnings"])
+
+    def test_ambiguous_cropped_returns_warn(self, tmp_path, stub_pyhelios):
+        # The inversion reports returns it could not place (removed from BETWEEN
+        # two surviving returns, i.e. inside the grid). That is a bias the user
+        # must hear about; the tally rides the result too.
+        stub_pyhelios.cropped_stats = {
+            "beams_with_hidden_returns": 5, "hidden_before": 1, "hidden_after": 7,
+            "hidden_ambiguous": 3, "beams_ambiguous": 2, "standins_ignored": 0}
+        result = main._do_lad_computation(_single_return_request(tmp_path))
+
+        assert result["success"] is True
+        assert result["cropped_returns"] == {
+            "beams_with_hidden_returns": 5, "hidden_before": 1, "hidden_after": 7,
+            "hidden_ambiguous": 3, "beams_ambiguous": 2, "standins_ignored": 0}
+        amb = [w for w in result["warnings"] if "cannot be placed" in w]
+        assert len(amb) == 1
+        assert "2 pulses" in amb[0] and "3 returns" in amb[0]
+        # One message per inversion: the ambiguity warning supersedes the
+        # "recovered beyond the grid" note.
+        assert not any("counted them as transmitted" in w for w in result["warnings"])
+
+    def test_beyond_grid_recovery_is_reported(self, tmp_path, stub_pyhelios):
+        # A cloud cropped to the grid: returns placed beyond it were counted as
+        # transmitted. Reported so the user knows the inversion relied on the
+        # count, but not as a problem.
+        stub_pyhelios.cropped_stats = {"beams_with_hidden_returns": 4, "hidden_after": 9}
+        result = main._do_lad_computation(_single_return_request(tmp_path))
+
+        assert result["success"] is True
+        note = [w for w in result["warnings"] if "counted them as transmitted" in w]
+        assert len(note) == 1
+        assert "4 pulses" in note[0] and "9 of those" in note[0]
+        assert not any("cannot be placed" in w for w in result["warnings"])
+
+    def test_complete_pulses_say_nothing(self, tmp_path, stub_pyhelios):
+        result = main._do_lad_computation(_single_return_request(tmp_path))
+        assert result["success"] is True
+        assert result["cropped_returns"]["beams_with_hidden_returns"] == 0
+        assert not any("transmitted" in w or "cannot be placed" in w
+                       for w in result["warnings"])
+
+    def test_native_lib_without_tally_still_inverts(self, tmp_path, stub_pyhelios, monkeypatch):
+        # An older bundle has no getCroppedReturnStats: the inversion runs and the
+        # field is None rather than the request failing.
+        monkeypatch.delattr(_FakeCloud, "getCroppedReturnStats")
+        result = main._do_lad_computation(_single_return_request(tmp_path))
+        assert result["success"] is True
+        assert result["cropped_returns"] is None
+
+    @staticmethod
+    def _session_with_deletions(session_id, deleted_rows):
+        # Three hits inside the 1 m grid box at (0,0,0.5), one hit outside it,
+        # and one sky miss. `deleted_rows` picks which rows are deleted.
+        positions = np.array([
+            [0.1, 0.1, 0.5], [-0.1, 0.0, 0.6], [0.2, -0.1, 0.4],   # inside grid
+            [2.0, 2.0, 2.0],                                       # outside grid
+            [9.0, 9.0, 9.0],                                       # miss
+        ], dtype=np.float64)
+        deleted = np.zeros(len(positions), dtype=bool)
+        deleted[list(deleted_rows)] = True
+        sess = main.CloudSession(
+            session_id=session_id, source_path="/nonexistent.xyz", ascii_format="x y z is_miss",
+            column_plan=None, positions=positions, colors=None, intensity=None,
+            extras={"is_miss": np.array([0, 0, 0, 0, 1], dtype=np.float32)},
+            extra_dims_meta=[{"slug": "is_miss", "label": "is_miss"}],
+            deleted=deleted, deleted_history=[], octree_cache_id=None, created_at=0.0)
+        with main._cloud_session_lock:
+            main._cloud_sessions[session_id] = sess
+        return sess
+
+    def _session_request(self, session_id):
+        scan = main.HeliosScanEntry(session_id=session_id, origin=[0, 0, 5], return_type="single")
+        return main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+
+    def test_deleted_points_inside_grid_warn(self, stub_pyhelios):
+        # One hit deleted INSIDE the grid box (plus one outside, which is fine).
+        # The inference can only place removed returns before or beyond the
+        # grid, so this deletion biases the voxels around it — say so, with the
+        # count of the offending points only.
+        self._session_with_deletions("lad-del-in", deleted_rows=[1, 3])
+        try:
+            result = main._do_lad_computation(self._session_request("lad-del-in"))
+        finally:
+            main._cloud_sessions.pop("lad-del-in", None)
+        assert result["success"] is True, result.get("error")
+        w = [x for x in result["warnings"] if "deleted points inside the voxel grid" in x]
+        assert len(w) == 1
+        assert "1 deleted" in w[0]
+
+    def test_deleted_points_outside_grid_do_not_warn(self, stub_pyhelios):
+        # Cropping to the grid is the case the inference handles exactly.
+        self._session_with_deletions("lad-del-out", deleted_rows=[3])
+        try:
+            result = main._do_lad_computation(self._session_request("lad-del-out"))
+        finally:
+            main._cloud_sessions.pop("lad-del-out", None)
+        assert result["success"] is True, result.get("error")
+        assert not any("deleted points inside the voxel grid" in x for x in result["warnings"])
+
+    def test_deleted_points_inside_rotated_grid_use_the_rotated_box(self, stub_pyhelios):
+        # A point at (0.6, 0, 0.5) is outside an axis-aligned 1 m box but inside
+        # the same box rotated 45 degrees (its x-extent reaches 0.707).
+        positions = np.array([[0.1, 0.1, 0.5], [0.6, 0.0, 0.5], [9.0, 9.0, 9.0]])
+        sess = main.CloudSession(
+            session_id="lad-del-rot", source_path="/nonexistent.xyz", ascii_format="x y z is_miss",
+            column_plan=None, positions=positions, colors=None, intensity=None,
+            extras={"is_miss": np.array([0, 0, 1], dtype=np.float32)},
+            extra_dims_meta=[{"slug": "is_miss", "label": "is_miss"}],
+            deleted=np.array([False, True, False]), deleted_history=[],
+            octree_cache_id=None, created_at=0.0)
+        axis = main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1)
+        rot = main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1, rotation=45.0)
+        assert main._count_deleted_inside_grid(sess, axis) == 0
+        assert main._count_deleted_inside_grid(sess, rot) == 1
 
     def test_stale_session_never_falls_back_to_file(self, tmp_path, stub_pyhelios):
         # A stale session id (backend restarted since import) must FAIL, even
@@ -1127,6 +1254,92 @@ class TestLeafCubeMultiReturnLAD:
 
 @pytest.mark.skipif(not os.path.isfile(_MULTI_XYZ),
                     reason="multi-return leafcube fixture not present")
+def _build_multi_session(tmp_path, session_id: str):
+    """Import the multi-return fixture through the column plan and register it
+    as a live CloudSession (the way create_cloud_session does), returning it.
+    The caller pops it from `main._cloud_sessions` when done."""
+    import laspy  # noqa: F401  (session create needs it)
+
+    resp = main._preview_ascii(_MULTI_XYZ, _MULTI_FORMAT, 20)
+    entries = [
+        main.ColumnPlanEntry(
+            index=c.index, role=c.detected_role,
+            slug=(c.suggested_slug if c.detected_role == "extra" else None),
+            label=(c.suggested_label if c.detected_role == "extra" else None),
+            categorical=False,
+        )
+        for c in resp.columns
+    ]
+    plan = main.ColumnPlan(columns=entries, rgb_is_255=False)
+
+    las_path, _, source_extra_dims, _, _ = main._source_to_las(
+        main._Path(_MULTI_XYZ), _MULTI_FORMAT, tmp_path, plan)
+    _r = main._read_las_into_arrays(las_path)
+    # The per-pulse columns survived the round-trip under canonical slugs.
+    # `timestamp` is the exception: it rides the dedicated float64 field, not
+    # the float32 extras, because a float32 cast has a 62 ms step at full GPS
+    # week-seconds — enough to collapse the pulse grouping these tests rely on.
+    assert {"target_index", "target_count"} <= set(_r.extras), sorted(_r.extras)
+    assert _r.timestamps is not None, "timestamp was not carried"
+
+    sess = main.CloudSession(
+        session_id=session_id,
+        source_path=_MULTI_XYZ,
+        ascii_format=_MULTI_FORMAT,
+        column_plan=plan,
+        positions=_r.positions, colors=_r.colors, intensity=_r.intensity,
+        extras=_r.extras, extra_dims_meta=_r.extra_dims_meta,
+        timestamps=_r.timestamps,
+        deleted=np.zeros(len(_r.positions), dtype=bool),
+        deleted_history=[],
+        octree_cache_id=None,
+        created_at=0.0,
+    )
+    with main._cloud_session_lock:
+        main._cloud_sessions[session_id] = sess
+    return sess
+
+
+def _backfill_session(session_id: str) -> dict:
+    """Run the explicit Backfill Misses step on a live session (the fixture
+    carries a timestamp but no recorded misses, and LAD no longer gapfills
+    silently). The endpoint streams PHP1 markers + a JSON tail; drain it to
+    the result dict."""
+    import asyncio
+    import json as _json
+
+    resp = main.backfill_cloud_misses(
+        session_id,
+        main.BackfillMissesRequest(
+            origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
+            theta_min=0, theta_max=180, phi_min=0, phi_max=360),
+        http_request=None)
+
+    async def _collect():
+        return b"".join([c if isinstance(c, (bytes, bytearray)) else c.encode()
+                         async for c in resp.body_iterator])
+    raw = asyncio.run(_collect())
+    i = 0
+    while i + 8 <= len(raw) and raw[i:i + 4] == b"PHP1":
+        mlen = int.from_bytes(raw[i + 4:i + 8], "little")
+        i += 8 + mlen
+    while i < len(raw) and raw[i:i + 1] in (b" ", b"\n", b"\t"):
+        i += 1
+    return _json.loads(raw[i:])
+
+
+def _multi_session_request(session_id: str):
+    scan = main.HeliosScanEntry(
+        session_id=session_id, origin=_FIXTURE_ORIGIN,
+        n_theta=800, n_phi=1600, theta_min=0, theta_max=180,
+        phi_min=0, phi_max=360, return_type="multi")
+    return main.LADComputeRequest(
+        scans=[scan],
+        grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+        lmax=0.04, max_aspect_ratio=10, min_voxel_hits=1)
+
+
+
 class TestMultiReturnImportColumnMapping:
     """Regression guard for the import-wizard losing the per-pulse multi-return
     columns.
@@ -1231,93 +1444,110 @@ class TestMultiReturnImportColumnMapping:
         LAD no longer gapfills silently), then run LAD with session_id. Must run
         the multi-return algorithm and recover LAD ~2.0 — not the ~0.11 the
         zeroed-column regression produced."""
-        import asyncio
         pytest.importorskip("pyhelios")
-        import laspy  # noqa: F401  (session create needs it)
-
-        resp = main._preview_ascii(_MULTI_XYZ, _MULTI_FORMAT, 20)
-        entries = [
-            main.ColumnPlanEntry(
-                index=c.index, role=c.detected_role,
-                slug=(c.suggested_slug if c.detected_role == "extra" else None),
-                label=(c.suggested_label if c.detected_role == "extra" else None),
-                categorical=False,
-            )
-            for c in resp.columns
-        ]
-        plan = main.ColumnPlan(columns=entries, rgb_is_255=False)
-
-        # Build the session arrays the same way create_cloud_session does.
-        las_path, _, source_extra_dims, _, _ = main._source_to_las(
-            main._Path(_MULTI_XYZ), _MULTI_FORMAT, tmp_path, plan)
-        _r = main._read_las_into_arrays(las_path)
-        positions, colors, intensity = _r.positions, _r.colors, _r.intensity
-        extras, extra_dims_meta = _r.extras, _r.extra_dims_meta
-        # The per-pulse columns survived the round-trip under canonical slugs.
-        # `timestamp` is the exception: it rides the dedicated float64 field, not
-        # the float32 extras, because a float32 cast has a 62 ms step at full GPS
-        # week-seconds — enough to collapse the pulse grouping this test exists
-        # to verify.
-        assert {"target_index", "target_count"} <= set(extras), sorted(extras)
-        assert _r.timestamps is not None, "timestamp was not carried"
-
-        sess = main.CloudSession(
-            session_id="testmr01",
-            source_path=_MULTI_XYZ,
-            ascii_format=_MULTI_FORMAT,
-            column_plan=plan,
-            positions=positions, colors=colors, intensity=intensity,
-            extras=extras, extra_dims_meta=extra_dims_meta,
-            timestamps=_r.timestamps,
-            deleted=np.zeros(len(positions), dtype=bool),
-            deleted_history=[],
-            octree_cache_id=None,
-            created_at=0.0,
-        )
-        with main._cloud_session_lock:
-            main._cloud_sessions["testmr01"] = sess
+        sess = _build_multi_session(tmp_path, "testmr01")
         try:
-            # Backfill Misses first: recover the sky points from the timestamp and
-            # persist them in the session, the way the UI step does. The endpoint
-            # streams PHP1 markers + a JSON tail; drain it to the result dict.
-            import json as _json
-            resp = main.backfill_cloud_misses(
-                "testmr01",
-                main.BackfillMissesRequest(
-                    origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
-                    theta_min=0, theta_max=180, phi_min=0, phi_max=360),
-                http_request=None)
-
-            async def _collect():
-                return b"".join([c if isinstance(c, (bytes, bytearray)) else c.encode()
-                                 async for c in resp.body_iterator])
-            raw = asyncio.run(_collect())
-            i = 0
-            while i + 8 <= len(raw) and raw[i:i + 4] == b"PHP1":
-                mlen = int.from_bytes(raw[i + 4:i + 8], "little")
-                i += 8 + mlen
-            while i < len(raw) and raw[i:i + 1] in (b" ", b"\n", b"\t"):
-                i += 1
-            bf = _json.loads(raw[i:])
+            bf = _backfill_session("testmr01")
             assert bf["has_misses"] is True
             assert bf["backfilled"] > 0
             assert sess.backfilled_misses is not None
-
-            scan = main.HeliosScanEntry(
-                session_id="testmr01", origin=_FIXTURE_ORIGIN,
-                n_theta=800, n_phi=1600, theta_min=0, theta_max=180,
-                phi_min=0, phi_max=360, return_type="multi")
-            req = main.LADComputeRequest(
-                scans=[scan],
-                grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
-                lmax=0.04, max_aspect_ratio=10, min_voxel_hits=1)
-            result = main._do_lad_computation(req)
+            # The timestamp gapfill stamps every synthesised miss with its own
+            # reconstructed pulse time, and the buffer carries them: Helios
+            # groups beams by timestamp, so misses without their own would all
+            # be ONE transmitted beam.
+            ts = sess.backfilled_misses.get("timestamp")
+            assert ts is not None and ts.shape[0] == bf["backfilled"]
+            assert len(np.unique(ts)) > 0.99 * ts.shape[0], "miss timestamps collide"
+            result = main._do_lad_computation(_multi_session_request("testmr01"))
         finally:
             main._cloud_sessions.pop("testmr01", None)
 
         assert result["success"] is True, result.get("error")
         assert result["return_mode"] == "multi"
         assert result["cells"][0]["lad"] == pytest.approx(2.0, rel=0.15)
+
+    def test_cropping_to_the_grid_does_not_change_lad(self, tmp_path):
+        """The user's case: a cloud cropped to the voxel grid. Every return of a
+        mixed pulse (one inside the grid, others beyond it) that lies OUTSIDE the
+        grid is deleted in the session; target_index/target_count survive. The
+        inversion must recover the deleted beyond-grid returns from the count
+        and reproduce the uncropped LAD, and the result must say it did so.
+        Without the inference the surviving in-grid return would be the whole
+        beam and LAD would come out high (pinned by the helios self-test)."""
+        pytest.importorskip("pyhelios")
+        import collections
+
+        sess = _build_multi_session(tmp_path, "testmr02")
+
+        def _req():
+            # Pin G(theta): the triangulated estimate moves slightly with the
+            # deleted points, and this test is about the transmission counts.
+            req = _multi_session_request("testmr02")
+            req.gtheta = 0.5
+            req.gtheta_override = True
+            return req
+
+        try:
+            _backfill_session("testmr02")
+            baseline = main._do_lad_computation(_req())
+            assert baseline["success"] is True, baseline.get("error")
+            assert baseline["cropped_returns"]["hidden_after"] == 0
+
+            # Delete the outside-grid returns of every pulse that also has an
+            # inside-grid return. Pulses with no inside return keep everything, so
+            # the fired-beam population is unchanged and only the per-beam counts
+            # are cropped — the inference's exact case.
+            pos = sess.positions
+            inside = ((np.abs(pos[:, 0]) <= 0.5) & (np.abs(pos[:, 1]) <= 0.5)
+                      & (pos[:, 2] >= 0.0) & (pos[:, 2] <= 1.0))
+            has_inside = collections.defaultdict(bool)
+            for t, ins in zip(sess.timestamps, inside):
+                has_inside[t] |= bool(ins)
+            mixed = np.array([has_inside[t] for t in sess.timestamps])
+            sess.deleted = (~inside) & mixed
+            n_deleted = int(sess.deleted.sum())
+            assert n_deleted > 100, n_deleted
+
+            cropped = main._do_lad_computation(_req())
+
+            # Negative control: the same crop with the per-pulse columns gone,
+            # so nothing can be inferred and the surviving in-grid return is
+            # the whole beam.
+            sess.extras.pop("target_index")
+            sess.extras.pop("target_count")
+            legacy = main._do_lad_computation(_req())
+        finally:
+            main._cloud_sessions.pop("testmr02", None)
+
+        assert cropped["success"] is True, cropped.get("error")
+        st = cropped["cropped_returns"]
+        assert st["hidden_after"] == n_deleted
+        assert st["hidden_ambiguous"] == 0
+        assert st["beams_with_hidden_returns"] > 0
+        # Not bit-exact: the fixture's returns are energy-weighted centroids of a
+        # diverging beam's sub-rays, so a pulse's returns are not collinear and
+        # deleting the farthest one moves the beam direction Helios traces by up
+        # to the divergence. That is a property of the fixture, not of the
+        # inference (which the helios self-test pins exactly); 1% against the
+        # ~15% the crop costs without the inference is the signal here.
+        assert cropped["cells"][0]["lad"] == pytest.approx(
+            baseline["cells"][0]["lad"], rel=1e-2)
+        assert legacy["success"] is True, legacy.get("error")
+        assert legacy["cropped_returns"]["beams_with_hidden_returns"] == 0
+        # Without the inference the crop moves the answer by ~15%. The DIRECTION
+        # is not asserted: this fixture records its partial misses as far
+        # returns, so cropping them leaves the voxel almost fully intercepted
+        # (P ~ 0.1), where Helios's inversion clamps a > 5 to (1-P)/(dr*G) and
+        # the result comes out LOW rather than high. A real cropped scan keeps
+        # its sky misses and never reaches that regime; the helios self-test
+        # pins the physical direction on a two-pulse case.
+        rel = abs(legacy["cells"][0]["lad"] - baseline["cells"][0]["lad"]) / baseline["cells"][0]["lad"]
+        assert rel > 0.05, (legacy["cells"][0]["lad"], baseline["cells"][0]["lad"])
+        # The result says what happened, and does NOT claim the crop was inside
+        # the grid.
+        assert any("counted them as transmitted" in w for w in cropped["warnings"])
+        assert not any("deleted points inside the voxel grid" in w for w in cropped["warnings"])
+        assert not any("cannot be placed" in w for w in cropped["warnings"])
 
 
 class TestSingleReturnMissImportColumnMapping:

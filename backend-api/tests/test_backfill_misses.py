@@ -55,9 +55,15 @@ class _FakeCloud:
     # them apart from the hit data alone.
     grid_path = False
 
+    # Whether gapfillMisses() stamps each synthesised miss with a reconstructed
+    # pulse time, as the C++ timestamp path does (and the row/column path when the
+    # scan carried times). Off models a timeless raster.
+    stamp_timestamps = True
+
     def __init__(self):
         self.calls = []
         self._hit_xyz = np.empty((0, 3), np.float32)
+        self._ts = np.empty((0,), np.float64)
         self._codes = np.empty((0,), np.float64)
         self._row = np.empty((0,), np.float64)
         self._col = np.empty((0,), np.float64)
@@ -85,6 +91,8 @@ class _FakeCloud:
                 self._row = np.asarray(vals, dtype=np.float64)[:, i]
             elif lab == "column" and vals is not None:
                 self._col = np.asarray(vals, dtype=np.float64)[:, i]
+            elif lab == "timestamp" and vals is not None:
+                self._ts = np.asarray(vals, dtype=np.float64)[:, i]
 
     def gapfillMisses(self):
         self.calls.append(("gapfill",))
@@ -95,6 +103,15 @@ class _FakeCloud:
                          dtype=np.float32)
         self._hit_xyz = np.vstack([self._hit_xyz, synth]) if self._hit_xyz.size else synth
         self._codes = np.concatenate([self._codes, np.ones(self.SYNTH, np.float64)])
+        n_hits = self._codes.shape[0] - self.SYNTH
+        if self._ts.shape[0] != n_hits:
+            self._ts = np.full(n_hits, np.nan, np.float64)
+        if _FakeCloud.stamp_timestamps:
+            # Each synthesised miss gets its own reconstructed pulse time.
+            self._ts = np.concatenate(
+                [self._ts, 1000.0 + np.arange(self.SYNTH, dtype=np.float64)])
+        else:
+            self._ts = np.concatenate([self._ts, np.full(self.SYNTH, np.nan, np.float64)])
         if _FakeCloud.grid_path:
             # Row/column path: each synthesised miss knows the empty cell it fills.
             self._row = np.concatenate(
@@ -114,7 +131,7 @@ class _FakeCloud:
 
     def getHitDataColumnArray(self, label, absent_value=-9999.0):
         """Columnar bulk read; `absent_value` where the label was never set."""
-        col = {"row": self._row, "column": self._col}.get(label)
+        col = {"row": self._row, "column": self._col, "timestamp": self._ts}.get(label)
         if col is None:
             return np.full(self._codes.shape[0], absent_value, np.float64)
         return np.where(np.isnan(col), absent_value, col)
@@ -134,6 +151,7 @@ def stub_pyhelios(monkeypatch):
     _FakeCloud.instances = []
     _FakeCloud.gapfill_error = None
     _FakeCloud.grid_path = False
+    _FakeCloud.stamp_timestamps = True
     fake = types.ModuleType("pyhelios")
     fake.LiDARCloud = _FakeCloud
     monkeypatch.setitem(sys.modules, "pyhelios", fake)
@@ -249,6 +267,24 @@ def test_timestamp_session_backfills_and_populates_buffer(stub_pyhelios):
     assert sess.backfilled_misses["directions"].shape == (_FakeCloud.SYNTH, 3)
     np.testing.assert_array_equal(sess.positions, before_positions)
     assert "is_miss" not in sess.extras  # not interleaved into the column arrays
+    # Each synthesised miss carries its own reconstructed pulse time.
+    ts = sess.backfilled_misses["timestamp"]
+    assert ts.shape == (_FakeCloud.SYNTH,)
+    assert len(np.unique(ts)) == _FakeCloud.SYNTH
+
+
+def test_timeless_gapfill_leaves_no_timestamp_in_buffer(stub_pyhelios):
+    # A gapfill that stamps no time on its misses (a timeless raster) must not
+    # invent one in the buffer; the LAD read path supplies distinct sentinels.
+    _FakeCloud.stamp_timestamps = False
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+    _call(sess.session_id, origin=[0, 0, 5])
+    assert "timestamp" not in sess.backfilled_misses
 
 
 def test_grid_only_session_relabels_row_column(stub_pyhelios):
@@ -603,6 +639,49 @@ def test_session_to_lad_arrays_appends_buffer_as_misses(stub_pyhelios):
     # First rows are hits (0), appended rows are misses (1).
     assert miss_col[:len(_TS_POSITIONS)].tolist() == [0.0, 0.0, 0.0]
     assert miss_col[len(_TS_POSITIONS):].tolist() == [1.0] * _FakeCloud.SYNTH
+    # Every miss reaches Helios with its OWN timestamp — Helios groups beams by
+    # shared timestamp, so equal values would fold the sky population into one
+    # transmitted pulse. Here the buffer carries the reconstructed pulse times.
+    ts_col = vals[:, labels.index("timestamp")]
+    assert len(np.unique(ts_col)) == len(_TS_POSITIONS) + _FakeCloud.SYNTH
+
+
+def test_uniquify_miss_timestamps_separates_collisions_by_one_ulp():
+    # A synthesised miss that landed on a real pulse's time (the gapfiller dedupes
+    # by raster cell, not by time) must become its own beam without moving
+    # measurably: one float step, so a trajectory join still resolves the same
+    # pose. Duplicates among the misses themselves are separated the same way.
+    hits = np.array([100.0, 101.0, 102.0])
+    misses = np.array([100.0, 150.0, 150.0, 200.0])
+    out = main._uniquify_miss_timestamps(misses, hits)
+    assert len(np.unique(np.concatenate([hits, out]))) == 7
+    assert out[0] != 100.0 and abs(out[0] - 100.0) < 1e-9
+    assert abs(out[1] - 150.0) < 1e-9 and abs(out[2] - 150.0) < 1e-9 and out[1] != out[2]
+    assert out[3] == 200.0
+    # No collisions: untouched.
+    np.testing.assert_array_equal(main._uniquify_miss_timestamps(np.array([5.0, 6.0]), hits),
+                                  np.array([5.0, 6.0]))
+
+
+def test_session_to_lad_arrays_gives_timeless_misses_distinct_sentinels(stub_pyhelios):
+    # Same contract when the buffer has no pulse times: distinct sentinels, none
+    # colliding with a hit's time or with each other, all below any real clock.
+    _FakeCloud.stamp_timestamps = False
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+    _call(sess.session_id, origin=[0, 0, 5])
+    assert "timestamp" not in sess.backfilled_misses
+
+    xyz, dirs, labels, vals, flags = main._session_to_lad_arrays(sess, [0, 0, 5])
+    ts_col = vals[:, labels.index("timestamp")]
+    miss_ts = ts_col[len(_TS_POSITIONS):]
+    assert len(np.unique(ts_col)) == len(_TS_POSITIONS) + _FakeCloud.SYNTH
+    assert (miss_ts < 0).all()
+    assert (miss_ts < ts_col[:len(_TS_POSITIONS)].min()).all()
 
     # The backfill endpoint itself must NOT see the buffer (operates on raw hits).
     rxyz, *_rest, rflags = main._session_to_lad_arrays(

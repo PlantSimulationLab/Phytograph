@@ -9901,14 +9901,70 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
     return xyz, dirs, labels, vals, flags
 
 
+# Base of the per-miss sentinel timestamps handed to Helios when a backfilled
+# miss buffer carries no pulse times (see _append_backfilled_misses). Distinct
+# per miss (base - k) and far below any real clock, so no miss ever shares a
+# beam with another miss or with a hit.
+_MISS_SENTINEL_TIMESTAMP_BASE = -1.0e12
+
+
+def _uniquify_miss_timestamps(miss_ts: "np.ndarray", hit_ts: "np.ndarray") -> "np.ndarray":
+    """Return `miss_ts` with every value distinct from every other miss and from
+    every hit timestamp, moving a colliding value by the smallest possible float
+    steps (np.nextafter). A beam is a shared timestamp, so a collision would
+    either merge two pulses or trip Helios's target_count check; a nudge of a
+    few ulps changes nothing a trajectory join can resolve. Values that still
+    collide after a bounded number of nudges fall back to distinct sentinels.
+    """
+    import numpy as np
+
+    out = np.array(miss_ts, dtype=np.float64, copy=True)
+    if out.size == 0:
+        return out
+    hit_u = np.unique(np.asarray(hit_ts, dtype=np.float64))
+    collide = np.zeros(out.shape[0], dtype=bool)
+    for _ in range(16):
+        # Vectorised: a backfilled buffer can hold tens of millions of misses.
+        collide = np.isin(out, hit_u)
+        _, first_idx = np.unique(out, return_index=True)
+        dup = np.ones(out.shape[0], dtype=bool)
+        dup[first_idx] = False  # every non-first occurrence of a repeated value
+        collide |= dup
+        if not collide.any():
+            return out
+        out[collide] = np.nextafter(out[collide], np.inf)
+    # Pathological input (a raster of identical times): give the leftovers
+    # sentinels so the inversion still sees one beam per miss.
+    leftovers = np.where(collide)[0]
+    out[leftovers] = _MISS_SENTINEL_TIMESTAMP_BASE - 1.0e6 - np.arange(leftovers.size, dtype=np.float64)
+    return out
+
+
 def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     """Append a session's backfilled-miss buffer to assembled LAD hit arrays.
 
     Hits carry `is_miss`=0; the appended misses carry `is_miss`=1 (creating the
-    column if the hits lacked it). Direction rows come from the buffer; timestamp/
-    origin columns are filled where both the hit arrays and the buffer carry them
-    (else 0 for the miss rows, which Helios ignores for sky points). Returns the
-    extended (xyz, dirs, labels, vals, flags) with `has_misses` True.
+    column if the hits lacked it). Direction rows come from the buffer; origin
+    columns are filled where both the hit arrays and the buffer carry them (else
+    0 for the miss rows).
+
+    `timestamp` is NOT ignored for sky points: Helios groups returns into beams
+    by shared timestamp (`groupHitsByTimestamp`), so misses that all carried the
+    same value would be ONE beam — one transmitted pulse standing in for the
+    whole sky population, which collapses the transmission denominator and
+    biases LAD high. Measured: 50 misses at timestamp 0 invert exactly like a
+    single miss. So when the hits carry a timestamp column, every appended miss
+    gets its own: the buffer's reconstructed pulse time when the gapfill wrote
+    one (which also lets a moving scan's trajectory join place the miss at its
+    real emission point), else a distinct sentinel far below any real clock
+    (negative, so it can never collide with GPS or relative time).
+
+    A reconstructed time can still coincide with a real pulse's — the gapfiller
+    dedupes by raster cell, not by time (4 of 41,612 on the multi-return
+    fixture) — and Helios REFUSES a beam whose member count exceeds the pulse's
+    declared target_count. `_uniquify_miss_timestamps` nudges such a miss by one
+    float step, which keeps the join unchanged and makes it its own beam.
+    Returns the extended (xyz, dirs, labels, vals, flags) with `has_misses` True.
     """
     import numpy as np
 
@@ -9932,8 +9988,13 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     for slug in labels:
         if slug == _MISS_SLUG:
             miss_cols.append(np.ones(n_miss, np.float64))
-        elif slug == 'timestamp' and backfilled.get("timestamp") is not None:
-            miss_cols.append(np.asarray(backfilled["timestamp"], dtype=np.float64))
+        elif slug == 'timestamp':
+            if backfilled.get("timestamp") is not None:
+                miss_ts = np.asarray(backfilled["timestamp"], dtype=np.float64)
+            else:
+                miss_ts = _MISS_SENTINEL_TIMESTAMP_BASE - np.arange(n_miss, dtype=np.float64)
+            hit_ts = hit_vals[:, labels.index('timestamp')] if n_hits > 0 else np.empty(0)
+            miss_cols.append(_uniquify_miss_timestamps(miss_ts, hit_ts))
         elif slug in ('origin_x', 'origin_y', 'origin_z') and backfilled.get("origins") is not None:
             axis = {'origin_x': 0, 'origin_y': 1, 'origin_z': 2}[slug]
             miss_cols.append(np.asarray(backfilled["origins"], dtype=np.float64)[:, axis])
@@ -10239,6 +10300,14 @@ def _run_gapfill_extract(cloud):
     none, and this returns None. Read through the columnar bulk getter for the
     same reason as everything else here — a per-hit loop is unaffordable at
     scale — with the absent sentinel telling the two paths apart.
+
+    `timestamp` is the per-miss pulse time when the C++ wrote one (the
+    timestamp path stamps every synthesised miss with its reconstructed pulse
+    time; the row/column path does when the scan carried times), else None.
+    It matters because the LAD inversion groups returns into BEAMS by shared
+    timestamp: every miss handed to Helios with the same time is one beam, so
+    a miss population without its own times would count as a single
+    transmitted pulse. Returns (synth_xyz, count, grid, timestamp).
     """
     import numpy as np
 
@@ -10276,7 +10345,18 @@ def _run_gapfill_extract(cloud):
             break
         grid[slug] = np.ascontiguousarray(vals)
 
-    return synth_xyz, int(mask.sum()), (grid or None)
+    synth_ts = None
+    try:
+        ts_col = np.asarray(cloud.getHitDataColumnArray("timestamp", _ABSENT),
+                            dtype=np.float64)
+        if ts_col.shape[0] == mask.shape[0]:
+            ts_vals = ts_col[mask]
+            if ts_vals.size > 0 and not (ts_vals == _ABSENT).any():
+                synth_ts = np.ascontiguousarray(ts_vals)
+    except Exception:  # noqa: BLE001 - an absent column is just "no timestamps"
+        synth_ts = None
+
+    return synth_xyz, int(mask.sum()), (grid or None), synth_ts
 
 
 def _dem_in_lad_frame(dem: "DemRaster", lad_shift) -> "DemRaster":
@@ -10420,6 +10500,63 @@ def _sample_dem_columns(grid_center, grid_size, grid_nx, grid_ny, grid_nz,
             kept_mask[col] = True
 
     return column_offsets, kept_mask, dropped
+
+
+def _count_deleted_inside_grid(sess: "CloudSession", grid: "HeliosGrid") -> int:
+    """Hits (never misses) a session has DELETED whose position lies inside the
+    LAD voxel box.
+
+    The inversion recovers returns removed from a pulse from `target_count`, but
+    it can only place them BEFORE or BEYOND the grid (see
+    `LiDARcloud::inferHiddenReturns`); a return deleted from inside the grid is
+    either unplaceable or misplaced, and either way the voxels around it read as
+    more transmitted than they are. Session deletions keep their coordinates in
+    the `deleted` mask until a bake compacts them, so this is a plain box test
+    in the session's own frame (the grid center is in that frame too; the moving
+    path's `lad_shift` recenters both sides equally). The box is the base voxel
+    box inverse-rotated about its center, stretched in z to cover any terrain-
+    following column offsets, the way `_cull_to_grid` covers them.
+    """
+    deleted = getattr(sess, "deleted", None)
+    if deleted is None or not bool(np.any(deleted)):
+        return 0
+    pos = np.asarray(sess.positions[deleted], dtype=np.float64)
+    miss = sess.extras.get(_MISS_SLUG) if getattr(sess, "extras", None) else None
+    if miss is not None and len(miss) == len(sess.positions):
+        pos = pos[np.asarray(miss)[deleted] == 0]
+    if pos.shape[0] == 0:
+        return 0
+    center = np.asarray(grid.center, dtype=np.float64)
+    half = np.asarray(grid.size, dtype=np.float64) / 2.0
+    rot = math.radians(float(getattr(grid, "rotation", 0.0) or 0.0))
+    d = pos - center
+    if abs(rot) > 1e-12:
+        c, s_ = math.cos(-rot), math.sin(-rot)
+        x = d[:, 0] * c - d[:, 1] * s_
+        y = d[:, 0] * s_ + d[:, 1] * c
+        d = np.column_stack([x, y, d[:, 2]])
+    lo = -half.copy()
+    hi = half.copy()
+    offs = getattr(grid, "column_offsets", None)
+    if offs:
+        lo[2] += float(min(offs))
+        hi[2] += float(max(offs))
+    inside = np.all((d >= lo) & (d <= hi), axis=1)
+    return int(inside.sum())
+
+
+def _lad_cropped_return_stats(cloud) -> "Optional[dict]":
+    """What the inversion inferred from `target_count`, or None when the native
+    library predates `getCroppedReturnStats` (the getter is a helios-core
+    addition; an older bundle must still invert, just without the tally)."""
+    getter = getattr(cloud, "getCroppedReturnStats", None)
+    if getter is None:
+        return None
+    try:
+        st = getter()
+    except Exception:  # noqa: BLE001 - older native lib: no tally, not a failure
+        return None
+    return {k: int(v) for k, v in dict(st).items()}
 
 
 def _do_lad_computation(request: "LADComputeRequest", progress=None,
@@ -10604,6 +10741,20 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             if sess is not None:
                 with _cloud_session_lock:
                     xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(sess, origin)
+                    n_deleted_in_grid = _count_deleted_inside_grid(sess, request.grid)
+                if n_deleted_in_grid > 0:
+                    _lbl = (getattr(scan_entry, 'label', None)
+                            or os.path.basename(scan_entry.file_path or '')
+                            or 'this scan')
+                    warnings.append(
+                        f"Scan '{_lbl}' has {n_deleted_in_grid:,} deleted points inside "
+                        "the voxel grid (a crop, erase, filter or class deletion). The "
+                        "inversion can place a pulse's removed returns before or beyond "
+                        "the grid from its target count, but not inside it, so voxels "
+                        "around those deletions will read as more transmitted than they "
+                        "are. Undo the edit, or delete only outside the grid, for an "
+                        "unbiased result."
+                    )
             elif scan_entry.points:
                 xyz, dirs, labels, vals, scan_flags = _inline_to_lad_arrays(
                     scan_entry.points, scan_entry.scalar_columns, origin)
@@ -11061,6 +11212,32 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             else:
                 cloud.calculateLeafArea(ctx, min_hits, element_width)
 
+        # What the inversion recovered from target_count (see
+        # LiDARcloud::inferHiddenReturns). Beyond-grid returns are the expected
+        # signature of a cloud cropped to the grid and are simply reported;
+        # ambiguous ones mean the cloud was cropped INSIDE the grid, which the
+        # inference cannot repair.
+        cropped_returns = _lad_cropped_return_stats(cloud)
+        if cropped_returns is not None:
+            if cropped_returns.get("hidden_ambiguous", 0) > 0:
+                warnings.append(
+                    f"{cropped_returns['beams_ambiguous']:,} pulses have returns removed "
+                    "from BETWEEN two surviving returns, so those returns were inside the "
+                    f"voxel grid and cannot be placed ({cropped_returns['hidden_ambiguous']:,} "
+                    "returns left out of the inversion). Voxels along those beams will "
+                    "read as more transmitted than they are. This happens when a cloud "
+                    "is filtered inside the grid, e.g. keeping only leaf-classified "
+                    "points; keep every return and size the grid to the tree instead."
+                )
+            elif cropped_returns.get("hidden_after", 0) > 0:
+                warnings.append(
+                    f"{cropped_returns['beams_with_hidden_returns']:,} pulses had returns "
+                    "removed from the cloud; their target count placed "
+                    f"{cropped_returns['hidden_after']:,} of those beyond the voxel grid "
+                    "and counted them as transmitted, so cropping to the grid did not "
+                    "bias the result."
+                )
+
         def _clean(x):
             """NaN -> None so the value survives JSON serialization."""
             return None if (x != x) else x
@@ -11318,6 +11495,9 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "gtheta_profile": gtheta_profile_out,
             "gapfilled_misses": 0,  # LAD no longer gapfills; misses come from Backfill Misses / source
             "had_miss_points": any_has_misses,
+            # Returns the inversion inferred from target_count (None when the
+            # native library predates the tally). See _lad_cropped_return_stats.
+            "cropped_returns": cropped_returns,
             # None unless every source scan agreed on a CRS; drives raster georeferencing.
             "crs_epsg": result_crs_epsg,
             "method_used": "helios",
@@ -30727,7 +30907,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
     # activity while it runs.
     _report(None, "Reconstructing misses")
     try:
-        synth_xyz, count, synth_grid = _run_gapfill_extract(cloud)
+        synth_xyz, count, synth_grid, synth_ts = _run_gapfill_extract(cloud)
     except Exception as exc:
         # Helios raises (HeliosRuntimeError) when it can't reconstruct the scan
         # grid — e.g. a sparse row/column raster ("too few populated scan rows"),
@@ -30753,6 +30933,11 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "positions": synth_xyz,
         "directions": synth_dirs,
     }
+    if synth_ts is not None and synth_ts.shape[0] == synth_xyz.shape[0]:
+        # Each synthesised miss's own pulse time. The LAD inversion groups
+        # returns into beams by shared timestamp, so these keep every miss its
+        # own transmitted pulse (see _append_backfilled_misses for the fallback).
+        buffer["timestamp"] = synth_ts
     if synth_grid:
         # The raster address of each synthesised miss, when the row/column path
         # produced one (the timestamp path forms no raster and supplies none).
