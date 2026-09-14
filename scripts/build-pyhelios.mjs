@@ -44,6 +44,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { applyToolchainCheck } from './toolchain-check.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -92,10 +93,25 @@ function resolvePython() {
 
 const python = resolvePython();
 
+// Verify a C++ translation unit actually COMPILES before handing off to
+// build_helios.py, whose own check only probes `gcc --version` / `clang
+// --version` and so reports "No suitable compiler found" for a machine that has
+// three working compilers and a broken xcode-select pointer. On macOS this
+// returns a DEVELOPER_DIR to build with when the active one is unusable; see
+// scripts/toolchain-check.mjs for why it auto-recovers rather than failing.
+const toolchainDeveloperDir = applyToolchainCheck('build-pyhelios');
+
 function runStep(label, cmd, cmdArgs, opts = {}) {
   console.log(`[build-pyhelios] ${label}`);
   console.log(`[build-pyhelios]   ${cmd} ${cmdArgs.join(' ')}`);
-  const r = spawnSync(cmd, cmdArgs, { stdio: 'inherit', ...opts });
+  // DEVELOPER_DIR goes on LAST, after any caller-supplied env: the preflight has
+  // already established that the ambient one cannot compile C++ (it may itself be
+  // an exported-but-broken value), so the recovered dir must win. Spreading
+  // opts.env afterwards would silently drop the fix for a future call site.
+  const env = toolchainDeveloperDir
+    ? { ...process.env, ...(opts.env || {}), DEVELOPER_DIR: toolchainDeveloperDir }
+    : opts.env;
+  const r = spawnSync(cmd, cmdArgs, { stdio: 'inherit', ...opts, ...(env ? { env } : {}) });
   if (r.error) {
     console.error(`[build-pyhelios] failed to spawn: ${r.error.message}`);
     process.exit(1);

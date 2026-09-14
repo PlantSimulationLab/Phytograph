@@ -132,6 +132,67 @@ A **user cancel** is deliberately different: it aborts with no reason, stays a
 plain `AbortError`, and callers swallow it silently. Don't collapse the two, or
 a real timeout goes back to being invisible.
 
+## `No suitable compiler found (gcc or clang)` when building PyHelios
+
+Almost always means `xcode-select` points at a **broken Xcode**, not that a
+compiler is missing. A macOS update can leave stale Xcode support frameworks in
+`/Library/Developer/PrivateFrameworks/`, after which the active developer
+directory's `xcrun`/`xcodebuild` shim fails to load:
+
+```
+Symbol not found: _XPCTypeBool
+  Referenced from: /Library/Developer/PrivateFrameworks/CoreDevice.framework
+  Expected in:     /Library/Apple/System/Library/PrivateFrameworks/Mercury.framework
+```
+
+`/usr/bin/cc`, `/usr/bin/clang` and `/usr/bin/c++` are all shims through that
+directory, so every one of them fails. PyHelios's build script probes
+`gcc --version` then `clang --version`, sees both fail, and reports the missing
+compiler — which is why the message is misleading.
+
+Diagnose it in under a second:
+
+```bash
+npm run check:toolchain
+```
+
+Two symptoms confirm this specific failure:
+
+- **C compiles, C++ does not.** With no working shim, clang resolves no sysroot
+  and therefore searches no SDK. The libc++ headers live *only* in the SDK, so
+  the build gets as far as ~78% (freetype, glfw, glew, libjpeg are all C) and
+  dies on the first C++ file with `fatal error: 'set' file not found`.
+- **The Command Line Tools installer keeps reopening.** When the broken shim
+  can't resolve a tool it calls `xcode-select: Failed to locate 'clang++',
+  requesting installation of command line developer tools`. Every failed compile
+  re-triggers it.
+
+**Reinstalling the Command Line Tools cannot fix this** — the pointer is wrong,
+not the payload. Repoint it instead:
+
+```bash
+sudo xcode-select -s /Library/Developer/CommandLineTools
+```
+
+The Command Line Tools alone are sufficient to build Phytograph; a working Xcode
+is not required. To repair Xcode itself, launch `Xcode.app` once so it reinstalls
+its components.
+
+Builds are **not blocked** while the machine is in this state:
+`scripts/build-pyhelios.mjs` compiles a C++ sentinel before starting, and if the
+active directory is unusable but the Command Line Tools work, it builds with
+`DEVELOPER_DIR` pointed at them and prints a warning every build until you run
+the command above. That override is per-process and changes nothing on the
+system.
+
+Don't trust `pkgutil` or the installer to confirm a healthy toolchain here — both
+reported success throughout an outage where nothing could compile C++. Only
+compiling proves it:
+
+```bash
+clang++ --version && echo '#include <set>' | clang++ -x c++ -fsyntax-only -
+```
+
 ## Plant generation / Helios features fail in dev only
 
 PyHelios is built from the source submodule, not a pip wheel. Its native lib
