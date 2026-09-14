@@ -115,6 +115,31 @@ describe('RieglStatusBadge', () => {
     expect(badge.getAttribute('title')).toMatch(/out of date/i);
   });
 
+  it('reports unavailable, not update pending, when a stale image is not the blocker', async () => {
+    // `imageStale` is a fact about the image and stays true while RiVLib is
+    // unset or Docker is stopped. The self-heal needs both, so in that state
+    // nothing will ever update the image — and a badge reading "update
+    // pending" would sit there forever pointing at the wrong problem. Seen on
+    // a fresh dev profile with no RiVLib path: the tooltip said "RiVLib has not
+    // been configured" while the label promised an update.
+    for (const gap of [{ rivlibValid: false }, { dockerPresent: false }]) {
+      vi.mocked(getRieglStatus).mockResolvedValue({
+        ...READY,
+        ...gap,
+        available: false,
+        imageStale: true,
+        reason: 'RiVLib has not been configured.',
+      } as never);
+      const { unmount } = render(<RieglStatusBadge rivlibPath={null} />);
+
+      const badge = await waitFor(() => screen.getByTestId('riegl-status-badge'));
+      await waitFor(() => expect(badge.dataset.state).toBe('unavailable'));
+      expect(badge.textContent).toMatch(/unavailable/i);
+      expect(badge.textContent).not.toMatch(/update pending/i);
+      unmount();
+    }
+  });
+
   it('still reports a genuinely missing image as unavailable', async () => {
     vi.mocked(getRieglStatus).mockResolvedValue({
       ...READY,
