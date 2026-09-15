@@ -58,6 +58,19 @@ class _FakeCloud:
     def addHitPointsWithData(self, scanID, xyz, dirs, labels, vals):
         self.calls.append(("addHitPointsWithData", scanID, len(xyz), tuple(labels or [])))
 
+    # The native bulk path the backend ingests through (helios-core v1.3.86).
+    # Recorded in the same tuple shape as addHitPointsWithData above.
+    def addHitPointsBulk(self, scanID, xyz, dir_spherical=None, labels=None, values=None):
+        self.calls.append(("addHitPointsBulk", scanID, len(xyz), tuple(labels or [])))
+
+    def reserveHitPoints(self, hit_count):
+        self.calls.append(("reserveHitPoints", int(hit_count)))
+
+    _triangulation_sink = None
+
+    def setTriangulationSink(self, callback):
+        self._triangulation_sink = callback
+
     # Keyword name mirrors the real LiDARCloud.addGrid EXACTLY (PyHelios master
     # calls it column_z_offsets; the Phytograph Helios branch it came from used
     # column_offsets). A stub that keeps the old spelling would swallow the
@@ -75,9 +88,14 @@ class _FakeCloud:
 
     def triangulateHitPoints(self, lmax, aspect):
         self.calls.append(("triangulate", lmax, aspect))
+        # A streaming sink receives the triangles and the cloud keeps none,
+        # exactly as the native triangulation does.
+        if self._triangulation_sink is not None:
+            self._triangulation_sink(0, np.zeros((100, 9), np.float32), np.zeros((100, 2), np.int32))
+            self._streamed = True
 
     def getTriangleCount(self):
-        return 100
+        return 0 if getattr(self, "_streamed", False) else 100
 
     def gapfillMisses(self):
         self.calls.append(("gapfill",))

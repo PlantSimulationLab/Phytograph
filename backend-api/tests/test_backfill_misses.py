@@ -94,6 +94,14 @@ class _FakeCloud:
             elif lab == "timestamp" and vals is not None:
                 self._ts = np.asarray(vals, dtype=np.float64)[:, i]
 
+    # The native bulk path the backend ingests through (helios-core v1.3.86);
+    # modelled by the same recording as addHitPointsWithData.
+    def addHitPointsBulk(self, scanID, xyz, dir_spherical=None, labels=None, values=None):
+        self.addHitPointsWithData(scanID, xyz, dir_spherical, labels, values)
+
+    def reserveHitPoints(self, hit_count):
+        self.calls.append(("reserveHitPoints", int(hit_count)))
+
     def gapfillMisses(self):
         self.calls.append(("gapfill",))
         if _FakeCloud.gapfill_error is not None:

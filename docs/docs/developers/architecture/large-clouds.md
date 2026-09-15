@@ -283,6 +283,57 @@ stale mark is load-bearing: without it the queued bake would see no deletions,
 take its fast path and hand back the pre-column octree as current.
 
 
+## PyHelios streaming and bulk APIs (helios-core v1.3.86)
+
+PyHelios v0.1.32 exposes the lidar plugin's large-cloud APIs. The backend
+uses four of them; each streaming path has a default-on environment switch
+so a test can compare it with the retained path on the same input.
+
+**Synthetic scans stream their chunks** (`PHYTOGRAPH_SYNTH_SCAN_STREAM`).
+`setSyntheticScanHitSink` fires after each traced chunk lands in the native
+cloud; the handler reads the chunk through the bulk readers and releases it
+with `deleteHitPoints(first, count)`. Chunks are always the tail of the cloud
+and earlier ones are already gone, so the bulk readers return exactly the
+chunk, and the native cloud never holds more than one chunk rather than every
+return of the scan. Chunk size follows `synthetic_scan_memory_budget_mb`.
+`TestStreamedScan` in `tests/test_lidar_scan.py` forces a multi-chunk,
+two-scanner trace with misses and requires the streamed result to equal the
+retained one exactly.
+
+**Leaf-area triangulation keeps no mesh** (`PHYTOGRAPH_LAD_TRI_STREAM`). The
+inversion needs only the per-voxel leaf-angle sums, which the cloud keeps
+either way, and nothing in `_do_lad_computation` reads the triangles. So
+`setTriangulationSink` counts each scan's triangles and drops them. The
+triangle count guard reads the sink's tally, because a streamed cloud reports
+zero. `TestTriangulationSink` pins exact per-cell equality with the retained
+mesh and that the streamed cloud holds no triangles. Helios triangulation
+itself still retains its mesh, since the mesh is what that endpoint returns.
+
+**Hits are ingested in bulk at float64.** Leaf area, scan export and miss
+backfill call `addHitPointsBulk` through `_add_hits_bulk`, after one
+`reserveHitPoints` for the whole cloud. `addHitPointsWithData` cast
+coordinates to float32 and grew the hit array by reallocation, holding old and
+new buffers at once. A NaN value now leaves that label absent on that hit,
+where the old path stored a NaN the C++ read as present.
+
+**Large grids invert a block at a time.** `calculateLeafAreaBlock` sizes the
+per-voxel accumulators, and their per-thread copies, to a block of the
+lattice. Tiling is not free: every block call re-walks every beam of every
+scan. `_lad_block_cells_limit` therefore tiles only when the estimated scratch
+(`_LAD_SCRATCH_BYTES_PER_CELL_THREAD` per voxel per thread) exceeds a quarter
+of the memory budget, and `_lad_lattice_blocks` uses the fewest blocks that
+fit, in whole voxel columns. Each block reports progress and honours cancel.
+Terrain-following grids are not a regular lattice and keep the single call;
+a large grid Helios does not recognise as a lattice is inverted whole, with a
+warning. Hidden-return inference is per scan and ignores the block, so the
+cropped-return statistics after the last block are the whole-grid figures.
+`PHYTOGRAPH_LAD_BLOCK_CELLS` pins the block size; `tests/test_lad_blocks.py`
+forces single-voxel blocks on both the triangulated and supplied-G(theta)
+paths and requires exactly the whole-grid result.
+
+Per-scan column readers are not used yet: every place that reads a native
+cloud back either holds a single scan or needs all of it.
+
 ## The memory budget
 
 `backend-api/memory_budget.py` measures the machine (via `psutil`, with an

@@ -1100,3 +1100,61 @@ class TestRetainedFields:
         sess = main._cloud_sessions[out["session_id"]]
         slugs = {ed["slug"] for ed in sess.extra_dims_meta}
         assert "timestamp" in slugs and "target_count" in slugs
+
+
+class TestStreamedScan:
+    """A synthetic scan hands each traced chunk to a sink that reads it and
+    releases it (helios-core v1.3.86), so the native cloud holds one chunk rather
+    than every return. The result must be exactly the one produced with every
+    return retained until the trace ends."""
+
+    def _scan(self, client, monkeypatch, stream):
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+        chunks = []
+        real_set = LiDARCloud.setSyntheticScanHitSink
+
+        def counting_set(self, callback):
+            if callback is None:
+                return real_set(self, None)
+
+            def wrapped(first, count):
+                chunks.append(int(count))
+                return callback(first, count)
+            return real_set(self, wrapped)
+
+        monkeypatch.setattr(LiDARCloud, "setSyntheticScanHitSink", counting_set)
+        monkeypatch.setenv("PHYTOGRAPH_SYNTH_SCAN_STREAM", "1" if stream else "0")
+        big = dict(n_theta=700, n_phi=700)
+        resp = client.post("/api/lidar/scan", json={
+            "meshes": [{"vertices": _PYRAMID_VERTS, "triangles": _PYRAMID_TRIS,
+                        "colors": [[1.0, 0.0, 0.0]] * len(_PYRAMID_VERTS)}],
+            "scanners": [{**_scanner("top"), **big},
+                         {**_scanner("side", origin=(2.5, 0.0, 0.4)), **big}],
+            "record_misses": True,
+            # A tiny transient budget forces the trace into several chunks.
+            "synthetic_scan_memory_budget_mb": 1,
+        })
+        monkeypatch.undo()
+        assert resp.status_code == 200, resp.text
+        body = decode_lidar_scan(resp.content)
+        assert body["success"] is True, body.get("error")
+        return body, chunks
+
+    def test_streamed_scan_matches_the_retained_scan(self, client, monkeypatch):
+        retained, retained_chunks = self._scan(client, monkeypatch, stream=False)
+        streamed, streamed_chunks = self._scan(client, monkeypatch, stream=True)
+        assert retained_chunks == []
+        # Not vacuous: the streamed trace really arrived in several chunks.
+        assert len(streamed_chunks) >= 2, streamed_chunks
+
+        assert [r["scanner_id"] for r in streamed["results"]] == \
+               [r["scanner_id"] for r in retained["results"]]
+        for a, b in zip(retained["results"], streamed["results"]):
+            assert a["num_points"] > 0
+            assert b["num_points"] == a["num_points"]
+            np.testing.assert_array_equal(np.asarray(b["points"]), np.asarray(a["points"]))
+            assert b["scalars"].keys() == a["scalars"].keys()
+            for key in a["scalars"]:
+                np.testing.assert_array_equal(np.asarray(b["scalars"][key]),
+                                              np.asarray(a["scalars"][key]), err_msg=key)

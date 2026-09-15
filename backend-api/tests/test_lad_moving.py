@@ -74,7 +74,7 @@ class TestMovingShaping:
         la_call = next(c for c in cloud.calls if c[0] == "calculateLeafArea")
         assert la_call[3] == pytest.approx(0.42)
         # Per-beam origins were written into the hit data map.
-        ahp = next(c for c in cloud.calls if c[0] == "addHitPointsWithData")
+        ahp = next(c for c in cloud.calls if c[0] == "addHitPointsBulk")
         labels = ahp[3]
         assert {"origin_x", "origin_y", "origin_z"}.issubset(set(labels))
 

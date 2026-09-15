@@ -53,6 +53,9 @@ def _capture_mesh(request, monkeypatch):
         captured["scan"] = np.asarray(scan, dtype=np.int32)
 
     monkeypatch.setattr(LiDARCloud, "triangulateHitPoints", spy)
+    # Production LAD streams its triangles to a counting sink and keeps no mesh,
+    # so reading it back off the cloud needs the retained path for this capture.
+    monkeypatch.setenv("PHYTOGRAPH_LAD_TRI_STREAM", "0")
     result = main._do_lad_computation(request)
     monkeypatch.undo()
 
@@ -189,3 +192,49 @@ class TestReuseValidationAndFrame:
         frame = self._frame(self._meta(), verts, indices, scan_ids[:-1])
         with pytest.raises(ValueError, match="one per triangle|expected"):
             main._decode_lad_request_frame(frame)
+
+
+@pytest.mark.skipif(not os.path.isfile(_FIXTURE_XYZ),
+                    reason="lad-leafcube fixture not present")
+class TestTriangulationSink:
+
+    def test_streamed_triangulation_gives_the_retained_result(self, monkeypatch):
+        """Leaf-area triangulation streams each scan's triangles to a sink that
+        counts and drops them (helios-core v1.3.86), because the inversion needs
+        only the per-voxel leaf-angle sums the cloud keeps either way. The result
+        must be exactly the one computed with the whole mesh retained."""
+        pytest.importorskip("pyhelios")
+        req = _request(nx=2, ny=2, nz=2)
+        monkeypatch.setenv("PHYTOGRAPH_LAD_TRI_STREAM", "0")
+        retained = main._do_lad_computation(req)
+        monkeypatch.setenv("PHYTOGRAPH_LAD_TRI_STREAM", "1")
+        streamed = main._do_lad_computation(req)
+        assert retained["success"] is True, retained.get("error")
+        assert streamed["success"] is True, streamed.get("error")
+
+        a = _cells_by_octant(retained)
+        b = _cells_by_octant(streamed)
+        assert a.keys() == b.keys()
+        for key in a:
+            assert b[key]["lad"] == a[key]["lad"], \
+                f"cell {key} lad: retained {a[key]['lad']} vs streamed {b[key]['lad']}"
+            assert b[key]["gtheta"] == a[key]["gtheta"], \
+                f"cell {key} gtheta: retained {a[key]['gtheta']} vs streamed {b[key]['gtheta']}"
+
+    def test_streamed_run_keeps_no_mesh(self, monkeypatch):
+        """Not vacuous: on the streaming path the cloud really holds no triangles
+        after triangulating, so the memory saving is real."""
+        pytest.importorskip("pyhelios")
+        from pyhelios import LiDARCloud
+        counts = {}
+        real = LiDARCloud.triangulateHitPoints
+
+        def spy(self, lmax, max_aspect_ratio):
+            real(self, lmax, max_aspect_ratio)
+            counts["retained"] = self.getTriangleCount()
+
+        monkeypatch.setattr(LiDARCloud, "triangulateHitPoints", spy)
+        monkeypatch.setenv("PHYTOGRAPH_LAD_TRI_STREAM", "1")
+        result = main._do_lad_computation(_request())
+        assert result["success"] is True, result.get("error")
+        assert counts["retained"] == 0

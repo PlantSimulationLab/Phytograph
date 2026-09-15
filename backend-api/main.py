@@ -11221,6 +11221,9 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         _report(0.45, "Building voxel grid")
         cloud = LiDARCloud()
         cloud.disableMessages()
+        # One reservation for every scan's hits removes the growth transient
+        # (old and new buffers both live on each reallocation).
+        cloud.reserveHitPoints(int(sum(e["xyz"].shape[0] for e in scans_arrays)))
         for entry, scan_entry in zip(scans_arrays, request.scans):
             sid = cloud.addScan(
                 origin=entry["origin"],
@@ -11232,9 +11235,8 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 beam_divergence=((scan_entry.beam_divergence or 0.0) / 1000.0),
             )
             if entry["xyz"].shape[0] > 0:
-                cloud.addHitPointsWithData(
-                    sid, entry["xyz"], entry["dirs"],
-                    entry["labels"], entry["vals"])
+                _add_hits_bulk(cloud, sid, entry["xyz"], entry["dirs"],
+                               entry["labels"], entry["vals"])
         # Honor the grid box's azimuthal rotation. Helios stores the cells in the
         # rotated frame, so getCellCenter returns rotated centers and the beam
         # tracing / Beer's-law inversion run against the rotated voxels — matching
@@ -11452,8 +11454,22 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         else:
             _ckpt()
             _report(0.55, "Triangulating hit points")
-            cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
-            if cloud.getTriangleCount() == 0:
+            # The inversion needs only the per-voxel leaf-angle sums, which the
+            # cloud keeps with or without the mesh, and nothing below reads the
+            # triangles. So stream each scan's triangles to a sink that counts and
+            # drops them, instead of retaining the whole mesh through the inversion.
+            triangles_streamed = [0]
+            tri_streams = _lad_triangulation_streams()
+            if tri_streams:
+                cloud.setTriangulationSink(
+                    lambda _scan_id, vertices, _ids: triangles_streamed.__setitem__(
+                        0, triangles_streamed[0] + int(len(vertices))))
+            try:
+                cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
+            finally:
+                if tri_streams:
+                    cloud.setTriangulationSink(None)
+            if (triangles_streamed[0] if tri_streams else cloud.getTriangleCount()) == 0:
                 return {
                     "success": False,
                     "cells": [],
@@ -11500,19 +11516,51 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             )
         _ckpt()
         _report(0.80, "Inverting Beer's law")
-        with Context() as ctx:
-            if use_supplied_gtheta:
-                # Beam-based inversion: traverses each beam from its own origin
-                # (getHitOrigin), uses the supplied G(theta), no triangulation.
-                # Works for moving-platform scans and static scans with a G(theta)
-                # override. A per-cell vector (vertical-profile override) is passed
-                # straight through; otherwise a single scalar is broadcast.
-                cloud.calculateLeafArea(
-                    ctx, min_hits, element_width,
-                    Gtheta=(gtheta_per_cell if gtheta_per_cell is not None
-                            else supplied_gtheta))
+        gtheta_arg = None
+        if use_supplied_gtheta:
+            # Beam-based inversion: traverses each beam from its own origin
+            # (getHitOrigin), uses the supplied G(theta), no triangulation.
+            # Works for moving-platform scans and static scans with a G(theta)
+            # override. A per-cell vector (vertical-profile override) is passed
+            # straight through; otherwise a single scalar is broadcast.
+            gtheta_arg = gtheta_per_cell if gtheta_per_cell is not None else supplied_gtheta
+
+        # A grid too large for its inversion scratch is inverted a block of the
+        # lattice at a time (helios-core v1.3.86), so the per-voxel accumulators
+        # (and their per-thread copies) are sized to the block. Blocks need a
+        # regular lattice; terrain-following columns are offset in z, so those
+        # grids keep the single call.
+        blocks = None
+        block_limit = _lad_block_cells_limit(int(grid_nx) * int(grid_ny) * int(grid_nz))
+        if block_limit is not None and column_offsets is None:
+            try:
+                lattice_n = [int(v) for v in cloud.getGridGlobalCount()]
+            except Exception as exc:
+                warnings.append(
+                    "The voxel grid was too large to invert in one pass but is not "
+                    f"recognised as a regular lattice ({exc}); it was inverted whole, "
+                    "which needs more memory.")
             else:
-                cloud.calculateLeafArea(ctx, min_hits, element_width)
+                if block_limit < lattice_n[0] * lattice_n[1] * lattice_n[2]:
+                    blocks = _lad_lattice_blocks(*lattice_n, block_limit)
+
+        with Context() as ctx:
+            if blocks is None:
+                if gtheta_arg is None:
+                    cloud.calculateLeafArea(ctx, min_hits, element_width)
+                else:
+                    cloud.calculateLeafArea(ctx, min_hits, element_width, Gtheta=gtheta_arg)
+            else:
+                for block_index, (ijk_lo, ijk_hi) in enumerate(blocks):
+                    _ckpt()
+                    _report(0.80 + 0.10 * block_index / len(blocks),
+                            f"Inverting Beer's law (block {block_index + 1} of {len(blocks)})")
+                    if gtheta_arg is None:
+                        cloud.calculateLeafAreaBlock(ctx, list(ijk_lo), list(ijk_hi),
+                                                     min_hits, element_width)
+                    else:
+                        cloud.calculateLeafAreaBlock(ctx, list(ijk_lo), list(ijk_hi),
+                                                     min_hits, element_width, Gtheta=gtheta_arg)
 
         # What the inversion recovered from target_count (see
         # LiDARcloud::inferHiddenReturns). Beyond-grid returns are the expected
@@ -13636,7 +13684,7 @@ def _do_scan_export_xml(request: "ScanExportRequest", base: str,
         sid = cloud.getScanCount() - 1
         if xyz.shape[0] > 0:
             dirs = _directions_from_origin(xyz, origin)
-            cloud.addHitPointsWithData(sid, xyz, dirs, labels, vals)
+            _add_hits_bulk(cloud, sid, xyz, dirs, labels, vals)
         total_points += int(xyz.shape[0])
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -14043,6 +14091,89 @@ _ENGINE_OPTIONAL_FIELDS = frozenset({"deviation", "nRaysHit"})
 # path and routed to the dedicated CloudSession.timestamps field — the float32
 # copy stays in extras for octree color-by / backfill-UI display.
 _LIDAR_FLOAT64_HIT_FIELDS = frozenset({"timestamp"})
+
+
+def _env_flag_on(name: str) -> bool:
+    """A default-on switch: anything but 0/false/no/off counts as on."""
+    return os.environ.get(name, "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _synthetic_scan_streams() -> bool:
+    """Whether a synthetic scan hands each traced chunk to a sink and releases it
+    (PHYTOGRAPH_SYNTH_SCAN_STREAM, default on). Off keeps every return in the
+    native cloud until the trace ends, as before helios-core v1.3.86."""
+    return _env_flag_on("PHYTOGRAPH_SYNTH_SCAN_STREAM")
+
+
+def _lad_triangulation_streams() -> bool:
+    """Whether leaf-area triangulation streams its triangles to a counting sink
+    instead of retaining the mesh (PHYTOGRAPH_LAD_TRI_STREAM, default on)."""
+    return _env_flag_on("PHYTOGRAPH_LAD_TRI_STREAM")
+
+
+# Conservative inversion scratch per voxel per OpenMP thread: the per-voxel
+# transmission numerator/denominator/sum-of-squares arrays, the bounded path-length
+# histogram, and G(theta), each duplicated per thread during the beam walk.
+_LAD_SCRATCH_BYTES_PER_CELL_THREAD = 256
+
+
+def _lad_block_cells_limit(n_cells: int) -> Optional[int]:
+    """Largest number of voxels to invert in one `calculateLeafAreaBlock` call, or
+    None to invert the whole grid in one `calculateLeafArea` call.
+
+    Tiling is not free: every block call re-walks every beam of every scan, so B
+    blocks cost about B times the beam loop. It is therefore used only when the
+    inversion's per-voxel scratch (per thread) would take more than a quarter of the
+    memory budget, with the fewest blocks that fit. PHYTOGRAPH_LAD_BLOCK_CELLS pins
+    the block size (a positive integer), for tuning and tests."""
+    raw = os.environ.get("PHYTOGRAPH_LAD_BLOCK_CELLS")
+    if raw:
+        try:
+            pinned = int(float(raw))
+        except ValueError:
+            pinned = 0
+        return pinned if pinned > 0 else None
+    per_cell = _LAD_SCRATCH_BYTES_PER_CELL_THREAD * max(1, os.cpu_count() or 1)
+    allowance = memory_budget.budget_bytes() // 4
+    if n_cells * per_cell <= allowance:
+        return None
+    return max(1, int(allowance // per_cell))
+
+
+def _lad_lattice_blocks(nx: int, ny: int, nz: int, max_cells: int) -> "List[tuple]":
+    """Inclusive ((i,j,k)_min, (i,j,k)_max) ranges that tile an nx x ny x nz lattice
+    exactly once, each holding at most `max_cells` voxels. Blocks keep whole voxel
+    columns while a column fits, so a block is a rectangle of the grid's footprint."""
+    max_cells = max(1, int(max_cells))
+    tz = max(1, min(nz, max_cells))
+    columns = max(1, max_cells // tz)
+    tx = max(1, min(nx, int(math.isqrt(columns))))
+    ty = max(1, min(ny, columns // tx))
+    blocks = []
+    for k0 in range(0, nz, tz):
+        for j0 in range(0, ny, ty):
+            for i0 in range(0, nx, tx):
+                blocks.append(((i0, j0, k0),
+                               (min(i0 + tx, nx) - 1, min(j0 + ty, ny) - 1, min(k0 + tz, nz) - 1)))
+    return blocks
+
+
+def _add_hits_bulk(cloud, scan_id: int, xyz, dirs, labels, vals) -> None:
+    """Append a scan's hits through the native bulk path (helios-core v1.3.86).
+
+    Positions go in at float64: `addHitPointsWithData` cast them to float32 on
+    the way, which quantises coordinates away from the origin. Values are float64
+    columns written directly, and a NaN leaves that label absent on that hit
+    rather than stored as a NaN the C++ would read as present."""
+    xyz = np.ascontiguousarray(xyz, dtype=np.float64)
+    if xyz.shape[0] == 0:
+        return
+    dirs = None if dirs is None else np.ascontiguousarray(dirs, dtype=np.float64)
+    labels = list(labels or [])
+    values = (np.ascontiguousarray(vals, dtype=np.float64).reshape(xyz.shape[0], len(labels))
+              if labels else None)
+    cloud.addHitPointsBulk(scan_id, xyz, dir_spherical=dirs,
+                           labels=labels or None, values=values)
 
 # Soft ceiling on a moving scan's total pulse count. A real PRF over a long flight
 # is genuinely millions of pulses (we fire them — physically faithful), but past
@@ -14628,6 +14759,58 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                     lidar.setProgressCallback(_on_scan_progress)
                 else:
                     _report(None, "Ray-tracing scene")
+
+                # Every quantity the result needs, per hit. Decided before the trace
+                # because a streaming sink reads it chunk by chunk during the trace.
+                fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + engine_optionals + primitive_extras
+                # A moving-platform scan records each beam's own emission origin and
+                # firing index; pull them too so the result cloud carries the
+                # per-beam geometry the leaf-area inversion needs (origin_x/y/z) —
+                # static scans don't write these, so the columns come back all-NaN
+                # and are dropped when the session is built.
+                any_moving_scan = any(s.trajectory is not None for s in request.scanners)
+                if any_moving_scan:
+                    fields_to_read = fields_to_read + ["origin_x", "origin_y", "origin_z", "pulse_id"]
+
+                def _read_hit_block():
+                    """Every quantity for the hits the cloud holds now, in a handful of
+                    bulk FFI calls. A per-hit loop was ~13 FFI crossings per hit."""
+                    block_xyz, block_rgb = lidar.getHitsXYZRGBArrays()   # (n,3),(n,3) f32
+                    count = int(block_xyz.shape[0])
+                    fields = {f: lidar.getHitDataArray(f) for f in fields_to_read}
+                    # Precision-sensitive fields (timestamp) read additionally at
+                    # float64 via the columnar path; absent_value=np.nan matches the
+                    # float32 path's NaN-where-absent semantics so the all-NaN drop
+                    # and LAD NaN-guards stay consistent (a -9999 sentinel would
+                    # survive those filters and poison the trajectory join).
+                    return {
+                        "xyz": block_xyz,
+                        "rgb": block_rgb,
+                        "scan_ids": lidar.getHitScanIDArray(),         # (n,) int32
+                        # isHitMiss is only meaningful when misses were recorded.
+                        "miss": (lidar.getHitMissArray() if record_misses
+                                 else np.zeros(count, dtype=np.int32)),
+                        "fields": fields,
+                        "f64": {f: lidar.getHitDataColumnArray(f, absent_value=np.nan)
+                                for f in fields_to_read if f in _LIDAR_FLOAT64_HIT_FIELDS},
+                    }
+
+                # Streaming (helios-core v1.3.86): after each traced chunk lands, read
+                # it and release it with deleteHitPoints, so the native cloud holds
+                # one chunk rather than every return of the scan. The chunks are
+                # always the tail of the cloud and earlier ones are gone, so the bulk
+                # readers above return exactly the chunk.
+                hit_blocks = []
+                scan_streams = _synthetic_scan_streams()
+
+                def _on_hit_chunk(first, count):
+                    if count <= 0:
+                        return
+                    hit_blocks.append(_read_hit_block())
+                    lidar.deleteHitPoints(first, count)
+
+                if scan_streams:
+                    lidar.setSyntheticScanHitSink(_on_hit_chunk)
                 lidar.syntheticScan(
                     ctx,
                     rays_per_pulse=int(request.rays_per_pulse),
@@ -14641,6 +14824,8 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # (the LiDARCloud context manager would also release it on exit).
                 if n_scanners > 1:
                     lidar.setProgressCallback(None)
+                if scan_streams:
+                    lidar.setSyntheticScanHitSink(None)
 
                 _prof["raytrace"] = time.perf_counter()
                 # The C++ trace may have stopped early on a cancel — surface it as
@@ -14653,32 +14838,25 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # doesHitDataExist/getHitData per field), which dominated scan time
                 # on million-hit clouds. Pull every quantity for ALL hits in a
                 # handful of FFI calls, then partition per scanner with numpy masks.
-                fields_to_read = _LIDAR_STANDARD_HIT_FIELDS + engine_optionals + primitive_extras
-                # A moving-platform scan records each beam's own emission origin and
-                # firing index; pull them too so the result cloud carries the
-                # per-beam geometry the leaf-area inversion needs (origin_x/y/z) —
-                # static scans don't write these, so the columns come back all-NaN
-                # and are dropped when the session is built.
-                any_moving_scan = any(s.trajectory is not None for s in request.scanners)
-                if any_moving_scan:
-                    fields_to_read = fields_to_read + ["origin_x", "origin_y", "origin_z", "pulse_id"]
-                n = lidar.getHitCount()
+                if not scan_streams and lidar.getHitCount() > 0:
+                    hit_blocks.append(_read_hit_block())
+                n = int(sum(b["xyz"].shape[0] for b in hit_blocks))
                 if n > 0:
-                    all_xyz, all_rgb = lidar.getHitsXYZRGBArrays()   # (n,3),(n,3) f32
-                    all_scan_ids = lidar.getHitScanIDArray()         # (n,) int32
-                    # isHitMiss is only meaningful when misses were recorded; skip
-                    # the FFI pass otherwise (every hit is a real return).
-                    all_miss = (lidar.getHitMissArray() if record_misses
-                                else np.zeros(n, dtype=np.int32))    # (n,) int32, 1==miss
-                    # Each field is (n,) f32, NaN where the label is absent for a hit.
-                    all_fields = {f: lidar.getHitDataArray(f) for f in fields_to_read}
-                    # Precision-sensitive fields (timestamp) read additionally at
-                    # float64 via the columnar path; absent_value=np.nan matches the
-                    # float32 path's NaN-where-absent semantics so the all-NaN drop
-                    # and LAD NaN-guards stay consistent (a -9999 sentinel would
-                    # survive those filters and poison the trajectory join).
-                    fields_f64 = {f: lidar.getHitDataColumnArray(f, absent_value=np.nan)
-                                  for f in fields_to_read if f in _LIDAR_FLOAT64_HIT_FIELDS}
+                    if len(hit_blocks) == 1:
+                        only = hit_blocks[0]
+                        all_xyz, all_rgb = only["xyz"], only["rgb"]
+                        all_scan_ids, all_miss = only["scan_ids"], only["miss"]
+                        all_fields, fields_f64 = only["fields"], only["f64"]
+                    else:
+                        all_xyz = np.concatenate([b["xyz"] for b in hit_blocks])
+                        all_rgb = np.concatenate([b["rgb"] for b in hit_blocks])
+                        all_scan_ids = np.concatenate([b["scan_ids"] for b in hit_blocks])
+                        all_miss = np.concatenate([b["miss"] for b in hit_blocks])
+                        all_fields = {f: np.concatenate([b["fields"][f] for b in hit_blocks])
+                                      for f in fields_to_read}
+                        fields_f64 = {f: np.concatenate([b["f64"][f] for b in hit_blocks])
+                                      for f in hit_blocks[0]["f64"]}
+                    hit_blocks.clear()
                 else:
                     all_xyz = np.empty((0, 3), np.float32)
                     all_rgb = np.empty((0, 3), np.float32)
@@ -32656,7 +32834,8 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
     )
     if n_pts > 0:
         _report(0.15, f"Building cloud ({n_pts:,} points)")
-        cloud.addHitPointsWithData(sid, xyz, dirs, cloud_labels, cloud_vals)
+        cloud.reserveHitPoints(int(n_pts))
+        _add_hits_bulk(cloud, sid, xyz, dirs, cloud_labels, cloud_vals)
 
     # The gapfill itself is one opaque C++ call — report an INDETERMINATE stage
     # (None fraction → pulsing bar, like LAD's ray-trace step) so the UI shows

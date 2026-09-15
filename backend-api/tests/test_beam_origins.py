@@ -248,7 +248,7 @@ def test_lad_uses_beam_origins_and_bypasses_trajectory(stub_pyhelios):
         assert result["success"] is True, result.get("error")
 
         cloud = stub_pyhelios.instances[-1]
-        ahp = next(c for c in cloud.calls if c[0] == "addHitPointsWithData")
+        ahp = next(c for c in cloud.calls if c[0] == "addHitPointsBulk")
         labels = ahp[3]
         assert {"origin_x", "origin_y", "origin_z"}.issubset(set(labels))
         # Trajectory was ignored in favour of explicit origins → a warning says so.
