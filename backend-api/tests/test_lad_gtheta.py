@@ -208,3 +208,37 @@ def test_constant_passthrough_and_validation():
     for bad in (0.0, -0.1, 1.5):
         with pytest.raises(ValueError):
             L.gtheta_constant(bad)
+
+
+# ---------------------------------------------------------------------------
+# Memory: G is integrated over EVERY beam of the scan.
+# ---------------------------------------------------------------------------
+def test_g_of_theta_memory_does_not_scale_with_beams_times_leaf_angles():
+    """The kernel is (beams x leaf-angle samples). Built whole it was a float64
+    matrix of that size with ~6 temporaries alive at once: 1.7 GB for the
+    33 k-point leaf-cube fixture, and hundreds of GB for a large scan with a
+    supplied G(theta) (every moving-platform LAD). Evaluated in beam blocks the
+    peak is bounded by the block, and the result is unchanged."""
+    import tracemalloc
+
+    rng = np.random.default_rng(3)
+    beams = rng.uniform(0.01, math.pi / 2 - 0.01, 12_000)
+    tl = _theta_grid()
+    dens = L.dewit_density("planophile", tl)
+
+    tracemalloc.start()
+    try:
+        g = L.g_of_theta(dens, tl, beams)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # Whole, one (12 000 x 2048) float64 array alone is 196 MB.
+    assert peak < 96 * 2**20, f"g_of_theta peaked at {peak / 2**20:.0f} MB"
+
+    # Same values as the whole-matrix evaluation, on a slice small enough to build.
+    few = beams[:500]
+    dtheta = math.pi / (2.0 * len(tl))
+    norm = dens / (np.sum(dens) * dtheta)
+    tb = L._fold_beam_zenith(few)
+    whole = np.sum(L._A_kernel(tb[:, None], tl[None, :]) * norm[None, :], axis=1) * dtheta
+    np.testing.assert_allclose(g[:500], whole, rtol=1e-12, atol=0)

@@ -66,6 +66,9 @@ DEWIT_NAMES = (
 # Number of inclination samples used for the numerical integral over theta_L. The
 # integrand is smooth, so a modest grid is accurate to well under 1e-3.
 _N_THETA_L = 2048
+# Kernel elements (beams x leaf-angle samples) evaluated at once in `g_of_theta`:
+# 1 M float64 = 8 MB per temporary, ~50 MB peak across the kernel's temporaries.
+_KERNEL_BLOCK_ELEMENTS = 1 << 20
 
 
 def _theta_L_grid() -> np.ndarray:
@@ -155,10 +158,17 @@ def g_of_theta(g_L_density: np.ndarray, theta_L: np.ndarray,
     if norm <= 0:
         raise ValueError("Leaf-inclination density integrates to zero; cannot derive G(theta).")
     dens = dens / norm
-    tb = _fold_beam_zenith(theta_beam)
-    # A: (n_beam, n_theta_L); integrate over theta_L.
-    A = _A_kernel(tb[:, None], tl[None, :])
-    return np.sum(A * dens[None, :], axis=1) * dtheta
+    tb = np.atleast_1d(_fold_beam_zenith(theta_beam))
+    # A is (n_beam, n_theta_L); integrate over theta_L. Built in beam blocks: the
+    # kernel keeps ~6 temporaries of that shape alive, and n_beam is every beam
+    # of the scan, so one whole matrix was 1.7 GB on a 33 k-point cloud.
+    rows = max(1, _KERNEL_BLOCK_ELEMENTS // len(tl))
+    g = np.empty(tb.shape[0], dtype=float)
+    for start in range(0, tb.shape[0], rows):
+        block = tb[start:start + rows]
+        A = _A_kernel(block[:, None], tl[None, :])
+        g[start:start + len(block)] = np.sum(A * dens[None, :], axis=1) * dtheta
+    return g
 
 
 def _gtheta_eff(g_L_density: np.ndarray, beam_zenith_samples: np.ndarray) -> float:
