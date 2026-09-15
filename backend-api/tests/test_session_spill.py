@@ -154,6 +154,10 @@ def test_every_cloudsession_field_survives_the_round_trip(spill_root):
     sess.gps_time_encoding = "adjusted_standard"
     sess.beam_origins = np.zeros((n, 3), dtype=np.float64)
     sess.crs_epsg = 32610
+    sess.source_units = "ft"
+    sess.source_unit_scale = 0.3048
+    # The delta undo history's base mask (None until the history is trimmed).
+    sess.deleted_base = np.zeros(n, dtype=bool)
     sess.label_dirty = {"ground_class": True}
     sess.octree_pose = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
     sess.rendered_octree_cache_id = "rendered-full"
