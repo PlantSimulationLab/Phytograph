@@ -140,3 +140,55 @@ def test_the_miss_column_itself_is_not_offered_as_a_colour_domain():
     sess.extras[main._MISS_SLUG] = np.zeros(n, dtype=np.float32)
     ranges = main._session_robust_color_stats_locked(sess)["robust_attribute_ranges"]
     assert main._MISS_SLUG not in ranges
+
+
+def _registered(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
+    sess = _session()
+    sess.session_id = "bake-robust"
+    with main._cloud_session_lock:
+        main._cloud_sessions[sess.session_id] = sess
+    return sess
+
+
+def _assert_robust(meta):
+    assert "robust_bounds" in meta, "bake dropped robust_bounds"
+    assert "robust_attribute_ranges" in meta, "bake dropped robust_attribute_ranges"
+    assert "reflectance" in meta["robust_attribute_ranges"]
+    assert meta["robust_bounds"]["max"][2] < 10.0
+    assert "observed_classes" in meta, "bake dropped observed_classes"
+
+
+def test_bake_response_carries_the_robust_domains(monkeypatch, tmp_path):
+    """`bake` does NOT go through `_session_rebuild`: it builds its octree
+    directly, so it has to attach these itself. The renderer's background
+    refresh queue calls bake after every crop and every filter commit, so a bake
+    that omits them reverts the colorbar to raw extrema after the edit."""
+    sess = _registered(monkeypatch, tmp_path)
+    try:
+        # A deletion that keeps the outlier, so bake rebuilds and the robust
+        # domain must still reject it.
+        with main._cloud_session_lock:
+            sess.deleted[:5] = True
+        out = main._do_bake_cloud_session(sess.session_id)
+        assert out["baked"] is True
+        _assert_robust(out)
+    finally:
+        with main._cloud_session_lock:
+            main._cloud_sessions.pop(sess.session_id, None)
+
+
+def test_bake_fast_path_carries_the_robust_domains(monkeypatch, tmp_path):
+    """With nothing deleted and a current octree, bake returns that octree
+    without rebuilding; the response must still carry the domains."""
+    sess = _registered(monkeypatch, tmp_path)
+    try:
+        key, _dir, _meta = main._session_rebuild(sess)
+        with main._cloud_session_lock:
+            sess.octree_cache_id = key
+        out = main._do_bake_cloud_session(sess.session_id)
+        assert out["baked"] is False and out["cache_id"] == key
+        _assert_robust(out)
+    finally:
+        with main._cloud_session_lock:
+            main._cloud_sessions.pop(sess.session_id, None)

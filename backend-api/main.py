@@ -33369,6 +33369,22 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
     }
 
 
+def _bake_display_stats_locked(sess: "CloudSession") -> dict:
+    """The per-edit display metadata `_session_rebuild` attaches, for `bake`.
+
+    `bake` builds its octree through `_build_octree_from_las` directly rather than
+    `_session_rebuild`, so it does not pass the chokepoint that attaches the exact
+    class lists and the outlier-resistant colorbar domains. The renderer's
+    background refresh queue bakes after every crop and every filter commit, and
+    rebuilds its cloud data from that response, so without these the colorbar fell
+    back to raw extrema and the class list went stale after the edit. Caller holds
+    the lock."""
+    return {
+        "observed_classes": _session_observed_classes_locked(sess),
+        **_session_robust_color_stats_locked(sess),
+    }
+
+
 def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
     """Worker for POST .../bake — see the endpoint docstring.
 
@@ -33403,10 +33419,12 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         cache_dir = _octree_cache_root() / (sess.octree_cache_id or "")
         if sess.octree_cache_id and (cache_dir / "metadata.json").is_file():
             meta = _read_octree_metadata(cache_dir)
+            with _cloud_session_lock:
+                display_stats = _bake_display_stats_locked(sess)
             return {
                 "session_id": session_id, "point_count": int(len(sess.positions)),
                 "baked": False, "cache_id": sess.octree_cache_id,
-                "cache_dir": str(cache_dir), **meta,
+                "cache_dir": str(cache_dir), **meta, **display_stats,
             }
 
     import tempfile
@@ -33501,6 +33519,7 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         # rather than assuming zero, or a delete racing a background rebuild
         # would desynchronise the two and misaddress a later undo.
         history_len = len(sess.deleted_history)
+        display_stats = _bake_display_stats_locked(sess)
 
     return {
         "session_id": session_id,
@@ -33511,6 +33530,7 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         "miss_octree_cache_id": miss_cache_id,
         "deleted_history_len": history_len,
         **meta,
+        **display_stats,
     }
 
 
