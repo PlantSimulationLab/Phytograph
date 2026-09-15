@@ -104,13 +104,25 @@ test('the first import seeds the origin at the mean of the scanner positions', a
   expect(Math.abs(sceneCenter[1] - STATION_MEAN[1])).toBeGreaterThan(0.5);
 
   // Reset is offered against the seed (it is not the plain default) and lands
-  // on the scene centre at ground level.
+  // on the centre of the POINT DATA at ground level. Laterally that is not the
+  // scene box centre: the box also frames the scanner markers so the camera can
+  // see them, but scanners and trajectories do not vote on where the pivot goes
+  // (a drone leg overshooting the plot once put it 11.7 m off the cloud). The
+  // data centre is read from each scan row's own bounds.
+  const scanBounds = await page.getByTestId('scans-panel').locator('[data-testid="scan-row"]')
+    .evaluateAll((rows) => rows.map((r) => r.getAttribute('data-scan-bounds')!.split(',').map(parseFloat)));
+  const dataMin = [0, 1].map((a) => Math.min(...scanBounds.map((b) => b[a])));
+  const dataMax = [0, 1].map((a) => Math.max(...scanBounds.map((b) => b[a + 3])));
+  const dataCenter = [0, 1].map((a) => (dataMin[a] + dataMax[a]) / 2);
+  // Not vacuous either: the stations drag the box centre well away from the data.
+  expect(Math.hypot(sceneCenter[0] - dataCenter[0], sceneCenter[1] - dataCenter[1])).toBeGreaterThan(1);
+
   const reset = page.getByTestId('scene-origin-clear');
   await expect(reset).toBeEnabled();
   await reset.click();
   await expect(panel).toHaveAttribute('data-origin-source', 'default');
   const afterReset = await readOrigin();
-  expectClose(afterReset.slice(0, 2), sceneCenter.slice(0, 2), 0.15);
+  expectClose(afterReset.slice(0, 2), dataCenter, 0.15);
   const sceneMinZ = parseFloat((await viewer.getAttribute('data-scene-min-z'))!);
   expect(Math.abs(afterReset[2] - sceneMinZ)).toBeLessThan(0.15);
   // …which is a different place from the seed, or the reset proved nothing.
