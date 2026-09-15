@@ -27136,6 +27136,18 @@ def _evict_octree_cache(max_bytes: int,
 # How a value column reads, used to pre-tick the wizard's "categorical" box.
 _CATEGORICAL_MAX_DISTINCT = 32
 
+# Header names of continuous scanner measurements whose values are small
+# integers, so the value-shape sniff alone would mistake them for labels.
+_CONTINUOUS_MEASURE_NAMES = frozenset({'deviation'})
+
+
+def _is_continuous_measure_name(name: Optional[str]) -> bool:
+    """True for a header naming a known continuous measurement, ignoring case
+    and a trailing unit bracket (RiSCAN writes 'Deviation[]')."""
+    if not name:
+        return False
+    return re.sub(r'\[[^\]]*\]', '', name).strip().lower() in _CONTINUOUS_MEASURE_NAMES
+
 # Hard cap on how far the delimiter sniff will read looking for a data row. A
 # well-formed file answers on line 1 or 2 (legend row, then data); anything that
 # hasn't answered within this many lines is not going to. The cap exists so a
@@ -27239,10 +27251,16 @@ def _read_ascii_sample_rows(file_path: str, delimiter: Optional[str],
     return rows
 
 
-def _column_type_hint(values: List[str]) -> str:
+def _column_type_hint(values: List[str], name: Optional[str] = None) -> str:
     """Sniff a value shape from sampled string tokens. 'categorical' when the
     column is small non-negative integers with few distinct values (a class /
-    label column); else integer/float/empty."""
+    label column); else integer/float/empty.
+
+    `name` (the column's header, if any) vetoes the categorical guess for
+    known continuous measurements that merely LOOK like class labels in a
+    sample — RIEGL's pulse-shape deviation is a small non-negative integer
+    (RiSCAN exports commonly cap it at ~15), so the value shape alone would
+    offer to colour it as discrete classes."""
     nonblank = [v for v in values if v != '']
     if not nonblank:
         return 'empty'
@@ -27250,6 +27268,8 @@ def _column_type_hint(values: List[str]) -> str:
     if all_int:
         ints = [int(v) for v in nonblank]
         distinct = set(ints)
+        if _is_continuous_measure_name(name):
+            return 'integer'
         if all(i >= 0 for i in ints) and len(distinct) <= _CATEGORICAL_MAX_DISTINCT:
             return 'categorical'
         return 'integer'
@@ -27362,7 +27382,10 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             detected_role=detected_role,
             suggested_label=suggested_label,
             suggested_slug=suggested_slug,
-            type_hint=_column_type_hint(col_values),
+            type_hint=_column_type_hint(
+                col_values,
+                header_names[i] if header_names is not None and i < len(header_names) else role,
+            ),
             remappable=True,
         ))
 
@@ -27450,7 +27473,7 @@ def _preview_ply(file_path: str) -> PointCloudPreviewResponse:
             index=i, header_name=name, detected_role=role,
             suggested_label=_humanize_extra_dim_label(name) if is_extra else name,
             suggested_slug=_sanitize_extra_dim_name(name) if is_extra else '',
-            type_hint=_column_type_hint(col_values) if sample_rows else ('float' if is_extra else 'float'),
+            type_hint=_column_type_hint(col_values, name) if sample_rows else ('float' if is_extra else 'float'),
             remappable=False,
         ))
     warning = None if is_ascii else "Binary PLY: preview rows unavailable (fields shown from header)."

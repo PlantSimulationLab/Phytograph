@@ -71,6 +71,38 @@ def test_preview_headered_xyz_with_extra_scalars(client, tmp_path: Path):
     assert body["sample_rows"][0][:3] == ["0.0", "0.0", "0.0"]
 
 
+def test_preview_deviation_is_not_suggested_as_label(client, tmp_path: Path):
+    # RiSCAN-derived export (x,y,z,deviation,scan,...): RIEGL pulse-shape
+    # deviation is small non-negative integers, the same value shape as a class
+    # column, but it is a continuous measurement — only its NAME can tell. The
+    # genuine grouping column beside it must still get the categorical hint.
+    f = tmp_path / "tree.asc"
+    f.write_text(
+        "x,y,z,deviation,scan\n"
+        "16.91,4.11,-0.70,1,1\n"
+        "16.90,4.14,-0.70,3,1\n"
+        "16.95,4.08,-0.70,8,2\n"
+        "16.95,4.06,-0.70,11,2\n"
+    )
+    res = client.post("/api/pointcloud/preview", json={"file_path": str(f)})
+    assert res.status_code == 200, res.text
+    cols = {c["header_name"]: c for c in res.json()["columns"]}
+    assert cols["deviation"]["type_hint"] == "integer"
+    assert cols["scan"]["type_hint"] == "categorical"
+
+
+def test_column_type_hint_deviation_name_forms():
+    ints = ["0", "3", "15"]
+    for name in ("deviation", "Deviation", "Deviation[]", " DEVIATION "):
+        assert main._column_type_hint(ints, name) == "integer", name
+    # The veto is by name only: an unnamed or differently named column with the
+    # same values keeps the categorical guess, and non-integer values are
+    # untouched.
+    assert main._column_type_hint(ints) == "categorical"
+    assert main._column_type_hint(ints, "deviation_class") == "categorical"
+    assert main._column_type_hint(["1.5", "2.0"], "Deviation") == "float"
+
+
 def test_preview_commented_header_recovers_labels_and_roles(client, tmp_path: Path):
     # A '#'-commented column legend (some exporters write the header as a comment
     # so loaders that honour comment='#' skip it as data). Preview must recover
