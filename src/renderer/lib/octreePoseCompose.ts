@@ -98,6 +98,35 @@ export function transformPoint(
 }
 
 /**
+ * The exact inverse of `transformPoint`: take a point that is currently drawn
+ * under (rotation about `pivot`, then translation) back to its pose-free
+ * position.
+ *
+ * ── Why this cannot negate the Euler angles ───────────────────────────────
+ * `R_XYZ(−rx, −ry, −rz)` is the inverse of `R_XYZ(rx, ry, rz)` ONLY when at
+ * most one axis is non-zero — negating the angles undoes each rotation but
+ * leaves them applied in the SAME order, whereas an inverse must also reverse
+ * the order (the inverse of X·Y·Z is Z⁻¹·Y⁻¹·X⁻¹). For r = (30°, 40°, 50°) the
+ * naive version round-trips (1, 2, 3) to (−1.44, 1.05, 3.29).
+ *
+ * Inverting the matrix sidesteps the ordering question entirely, and reuses the
+ * same `poseToMatrix` the forward direction uses, so the two cannot drift.
+ */
+export function unposePoint(
+  point: readonly [number, number, number],
+  translation: { x: number; y: number; z: number },
+  rotationDeg: { x: number; y: number; z: number },
+  pivot: { x: number; y: number; z: number },
+): [number, number, number] {
+  if (isZeroRotation(rotationDeg)) {
+    return [point[0] - translation.x, point[1] - translation.y, point[2] - translation.z];
+  }
+  const inv = poseToMatrix(translation, rotationDeg, pivot).invert();
+  const v = new THREE.Vector3(point[0], point[1], point[2]).applyMatrix4(inv);
+  return [v.x, v.y, v.z];
+}
+
+/**
  * Resolve the pose the octree (and its miss shell) should render at.
  *
  * `cacheId` is the cloud's CURRENT octree id; `livePivot` is the pivot the

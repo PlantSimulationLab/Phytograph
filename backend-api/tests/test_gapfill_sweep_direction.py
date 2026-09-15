@@ -21,6 +21,14 @@ rather than passing vacuously: the scan is built with strictly DECREASING zenith
 which is the only orientation that triggers it. `test_ascending_sweep_also_terminates`
 is the control — it passed before the fix too, so on its own it would prove nothing;
 its job is to show the fix didn't break the orientation that already worked.
+
+The fixture must also be a scan the gapfiller will ACCEPT, which is a moving target:
+helios-core 1.3.86 added two validity guards (a raster needs more than one column to
+measure column spacing, and the reconstructed column period must be long enough to
+hold a column's pulses), and the original single-azimuth fixture tripped the first.
+Keep the assertion that gapfilling actually ADDS points — it is what distinguishes
+"the loops ran and terminated" from "the loops never ran", and only the former says
+anything about the bug.
 """
 
 import os
@@ -39,6 +47,15 @@ pytestmark = pytest.mark.skipif(
 # this work in well under a second, while the broken code never finishes at all.
 _TIMEOUT_S = 90
 
+# The fixture's raw return count: `_N_PER_COLUMN` returns in each of `_N_COLUMNS`
+# raster columns. Kept here rather than as a bare literal in the assertions
+# because the gapfill must be shown to ADD points on top of them, so the number
+# has to track the fixture — and the fixture grew a second column when
+# helios-core 1.3.86 started rejecting single-column rasters.
+_N_PER_COLUMN = 600
+_N_COLUMNS = 3
+_N_RETURNS = _N_PER_COLUMN * _N_COLUMNS
+
 
 # Run the native call in a SEPARATE PROCESS so a hang can be killed: an infinite
 # loop inside C++ never returns to the interpreter, so it ignores Python signals
@@ -56,17 +73,27 @@ _CHILD = textwrap.dedent(
     theta_lo_deg, theta_hi_deg = 25.0, 130.0
 
     origin = np.zeros(3)
-    # One sweep of returns marching monotonically through zenith. `descending`
+    # Sweeps of returns marching monotonically through zenith. `descending`
     # is the whole point of the test: it flips the sign of dtheta_avg.
-    n = 600
-    zen = np.linspace(theta_lo_deg + 5.0, theta_hi_deg - 5.0, n)
+    n_per = int(sys.argv[2])
+    n_cols = int(sys.argv[3])
+    zen1 = np.linspace(theta_lo_deg + 5.0, theta_hi_deg - 5.0, n_per)
     if descending:
-        zen = zen[::-1]
+        zen1 = zen1[::-1]
     # The +-5 deg inset leaves a gap at each end of the sweep so BOTH edge
     # extrapolation loops actually run; with no gap they are skipped entirely
     # and the bug is never reached.
-    az = np.full(n, 30.0)
-    r = np.full(n, 10.0)
+    #
+    # SEVERAL columns, not one. gapfillMisses() reconstructs the raster, and
+    # measures the column spacing from the gaps between the columns' first-pulse
+    # times — so a scan whose returns all share one azimuth has no spacing to
+    # measure and is rejected outright (helios-core >= 1.3.86). A single column
+    # was enough to reach the extrapolation loops on the old library, but it is a
+    # degenerate raster, and the fixture has to be a scan the gapfiller will
+    # accept before it can say anything about how that gapfiller loops.
+    zen = np.tile(zen1, n_cols)
+    az = np.repeat(30.0 + 0.09 * np.arange(n_cols), n_per)
+    r = np.full(zen.shape[0], 10.0)
     zr, ar = np.radians(zen), np.radians(az)
     xyz = np.column_stack([
         r * np.sin(zr) * np.cos(ar),
@@ -77,7 +104,19 @@ _CHILD = textwrap.dedent(
     dirs = (d / np.linalg.norm(d, axis=1, keepdims=True)).astype(np.float32)
     # Strictly increasing timestamps: the gapfiller sorts on them and derives
     # dt_avg / dtheta_avg from consecutive pairs.
-    ts = np.arange(n, dtype=np.float64).reshape(-1, 1) * 1e-6
+    #
+    # The column period has to be long enough to hold the pulses of a column, or
+    # the reconstruction concludes the beam angles contradict the declared zenith
+    # range and refuses the scan. The declared range spans more pulses than the
+    # +-5 deg inset actually fills, so step WITHIN a column by `period` and start
+    # each column a full declared-column later, with margin.
+    period = 1e-6
+    step_deg = abs(zen1[1] - zen1[0])
+    col_pulses = int(math.ceil((theta_hi_deg - theta_lo_deg) / step_deg))
+    col_span = (col_pulses + 50) * period
+    ts = (np.repeat(np.arange(n_cols, dtype=np.float64) * col_span, n_per)
+          + np.tile(np.arange(n_per, dtype=np.float64) * period, n_cols)
+          ).reshape(-1, 1)
 
     cloud = LiDARCloud()
     cloud.disableMessages()
@@ -99,7 +138,8 @@ def _gapfill_or_timeout(descending):
     import subprocess
 
     proc = subprocess.Popen(
-        [sys.executable, "-c", _CHILD, "1" if descending else "0"],
+        [sys.executable, "-c", _CHILD, "1" if descending else "0",
+         str(_N_PER_COLUMN), str(_N_COLUMNS)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
@@ -128,7 +168,9 @@ def test_descending_sweep_terminates():
     # Termination is the property under test, but assert the call did real work
     # rather than bailing out early — a version that returned immediately without
     # filling anything would also "terminate".
-    assert hits > 600, f"expected gapfilled misses on top of the 600 returns, got {hits}"
+    assert hits > _N_RETURNS, (
+        f"expected gapfilled misses on top of the {_N_RETURNS} returns, got {hits}"
+    )
 
 
 def test_ascending_sweep_also_terminates():
@@ -138,4 +180,6 @@ def test_ascending_sweep_also_terminates():
     fix. It is here so a regression that merely inverts the sign is still caught.
     """
     hits = _gapfill_or_timeout(descending=False)
-    assert hits > 600, f"expected gapfilled misses on top of the 600 returns, got {hits}"
+    assert hits > _N_RETURNS, (
+        f"expected gapfilled misses on top of the {_N_RETURNS} returns, got {hits}"
+    )

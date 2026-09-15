@@ -85,7 +85,9 @@ Method-specific parameters:
 === "Ball Pivot"
 
     - **Auto radius** *(default on)* — the ball-pivot radius is computed
-      from the median nearest-neighbour spacing of the cloud.
+      from the median nearest-neighbour spacing of the cloud. Points that
+      share an exact coordinate are ignored when measuring that spacing
+      (see *Duplicate points* below).
     - Untick it to set the **radius** manually (in meters). A good value
       is ~1.5–2× the average point spacing.
     - **Grid** — optionally pin the mesh to a voxel box (the same selector the
@@ -99,6 +101,20 @@ Method-specific parameters:
       selector warns you; triangulate each scan separately to keep it
       LAD-re-usable. The Meshes panel shows whether a ball-pivot mesh is
       *"re-usable for leaf-area inversion"* or why it isn't.
+
+    !!! note "Duplicate points are removed first"
+
+        Points sharing an exact coordinate are dropped before meshing, and
+        a toast tells you how many. This is not a loss of detail —
+        coincident points describe no surface, so the mesh is identical
+        either way. Duplicates commonly arrive from merging overlapping
+        scans, re-importing a previously exported cloud, or a decimation
+        that snaps coordinates to a grid.
+
+        They are removed because they also distort the **Auto radius**:
+        the spacing between two coincident points is zero, so a cloud that
+        is mostly duplicates would compute a radius of zero and fail to
+        mesh at all.
 
 === "Poisson"
 

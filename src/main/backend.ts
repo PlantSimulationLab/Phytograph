@@ -53,6 +53,68 @@ export function describeExit(code: number | null, signal: NodeJS.Signals | null)
   return `crashed (code=${code})`;
 }
 
+// The last few stderr lines the sidecar produced, kept so a terminal failure can
+// say WHY. Nothing else retains them: the tee below writes to the log file and to
+// this process's stderr, and a packaged app launched from a desktop icon has no
+// terminal to read. Small on purpose — this exists to quote a loader error, not
+// to mirror the log.
+const STDERR_TAIL_MAX = 40;
+const stderrTail: string[] = [];
+
+function recordStderr(line: string): void {
+  stderrTail.push(line);
+  if (stderrTail.length > STDERR_TAIL_MAX) stderrTail.shift();
+}
+
+/** The retained stderr tail, oldest first. Exported for tests. */
+export function getBackendStderrTail(): string[] {
+  return [...stderrTail];
+}
+
+/**
+ * Recognise failures that are about the MACHINE, not about Phytograph — the ones
+ * where restarting cannot possibly help and the honest answer is "this build
+ * can't run here".
+ *
+ * The motivating case: the Linux AppImage is compiled on ubuntu-24.04 and needs
+ * glibc 2.38+, so on Ubuntu 22.04 / RHEL 8-9 the window opens and the backend
+ * dies instantly with a loader error. Before this, the user saw an app that
+ * silently did nothing, and the crash dialog offered a Reload that could never
+ * succeed. Pure string → cause so it is unit-testable; returns null when the
+ * failure is an ordinary crash.
+ */
+export function classifyBackendFailure(stderr: string[]): string | null {
+  const text = stderr.join('\n');
+
+  const glibc = /version `?GLIBC_([0-9.]+)'? not found/.exec(text);
+  if (glibc) {
+    return (
+      `This system's C library (glibc) is older than this build of Phytograph requires — ` +
+      `it needs GLIBC_${glibc[1]} or newer.\n\n` +
+      `Phytograph cannot run on this machine. Restarting will not help. ` +
+      `Check your version with "ldd --version"; the Linux build needs glibc 2.38+ ` +
+      `(Ubuntu 23.10+, Debian 13, Fedora 39+), and does not run on Ubuntu 22.04 ` +
+      `or RHEL/Rocky 8-9.`
+    );
+  }
+
+  const libstdcxx = /version `?GLIBCXX_([0-9.]+)'? not found/.exec(text);
+  if (libstdcxx) {
+    return (
+      `This system's C++ runtime (libstdc++) is older than this build requires — ` +
+      `it needs GLIBCXX_${libstdcxx[1]} or newer.\n\n` +
+      `Phytograph cannot run on this machine, and restarting will not help.`
+    );
+  }
+
+  const missingLib = /error while loading shared libraries: ([^:]+):/.exec(text);
+  if (missingLib) {
+    return `A system library Phytograph depends on is missing: ${missingLib[1]}.`;
+  }
+
+  return null;
+}
+
 let child: ChildProcess | null = null;
 
 // The port this app instance's backend lives on. Resolved once in
@@ -94,10 +156,19 @@ export function setBackendWindowGetter(getter: () => BrowserWindow | null): void
 // Called when the sidecar exhausts its restart budget ('failed'). main.ts wires
 // this to the native crash dialog. Kept as a callback so the supervisor stays
 // decoupled from the dialog/UI module.
-let onBackendFailed: () => void = () => {};
+//
+// `cause` carries a recognised, human-readable reason when there is one (see
+// classifyBackendFailure) so the dialog can say what actually went wrong instead
+// of offering a generic "Reload" that, for an unsupported OS, cannot ever work.
+let onBackendFailed: (cause?: string | null) => void = () => {};
 
-export function setBackendFailedHandler(handler: () => void): void {
+export function setBackendFailedHandler(handler: (cause?: string | null) => void): void {
   onBackendFailed = handler;
+}
+
+/** Report the terminal failure, with a diagnosed cause when one is recognisable. */
+function reportBackendFailed(): void {
+  onBackendFailed(classifyBackendFailure(stderrTail));
 }
 
 function emitBackendStatus(payload: BackendStatusPayload): void {
@@ -368,8 +439,14 @@ function spawnChild(binPath: string, port: number): void {
   // own stdout/stderr (terminal in dev) AND (b) teed line-by-line into the
   // unified session log under the [backend] scope, so packaged builds — where
   // there's no terminal — still capture the sidecar's diagnostics.
+  // stderr is additionally retained as a short tail (see recordStderr) so that a
+  // terminal failure can name its cause — e.g. a glibc loader error, which is
+  // otherwise invisible in a packaged app with no terminal attached.
   const outTee = makeLineTee((line) => backendLog.info(line));
-  const errTee = makeLineTee((line) => backendLog.info(line));
+  const errTee = makeLineTee((line) => {
+    backendLog.info(line);
+    recordStderr(line);
+  });
   child.stdout?.on('data', (buf) => {
     process.stdout.write(`[Backend stdout]: ${buf}`);
     outTee(buf);
@@ -429,7 +506,7 @@ function handleUnexpectedExit(
   if (restartAttempts >= MAX_RESTART_ATTEMPTS) {
     console.error(`[Backend] ${how} and exhausted ${MAX_RESTART_ATTEMPTS} restart attempts; giving up.`);
     emitBackendStatus({ status: 'failed', port });
-    onBackendFailed();
+    reportBackendFailed();
     return;
   }
   const delay = RESTART_BACKOFF_MS[Math.min(restartAttempts, RESTART_BACKOFF_MS.length - 1)];
@@ -443,7 +520,7 @@ function handleUnexpectedExit(
     if (!existsSync(binPath)) {
       console.error(`[Backend] binary missing at ${binPath}; cannot respawn.`);
       emitBackendStatus({ status: 'failed', port });
-      onBackendFailed();
+      reportBackendFailed();
       return;
     }
     spawnChild(binPath, port);

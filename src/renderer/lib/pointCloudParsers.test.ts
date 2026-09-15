@@ -1017,7 +1017,44 @@ describe('parsePointCloudFromPath', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toContain('/api/cloud/session/create');
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null, role_overrides: null });
+    // `source_units: null` is the no-unit-chosen case — the backend reads it as
+    // "no scaling", which is exactly what every import did before units existed.
+    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null, role_overrides: null, source_units: null });
+  });
+
+  it('forwards the wizard source unit, which the backend scales positions by', async () => {
+    // The unit is applied ONCE, at session create, before the world shift and
+    // before the intermediate LAS write. If it does not reach this request
+    // there is no second chance — the session and its octree already exist in
+    // the wrong scale.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse());
+    await parsePointCloudFromPath(
+      '/p/feet.las', null, null, undefined, null, undefined, null, null,
+      undefined, null, null, 'ftUS',
+    );
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.source_units).toBe('ftUS');
+  });
+
+  it('records the unit provenance the backend echoes back', async () => {
+    // Provenance, not a second scaling: positions are already metres. The UI
+    // needs it to explain why a scan's coordinates differ from its file.
+    vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse({
+      source_units: 'ftUS', source_unit_scale: 0.30480060960121924,
+    }));
+    const data = await parsePointCloudFromPath('/p/feet.las');
+    expect(data.octree?.sourceUnits).toBe('ftUS');
+    expect(data.octree?.sourceUnitScale).toBeCloseTo(0.3048006096, 9);
+  });
+
+  it('ignores an unrecognised unit from the backend rather than storing it', async () => {
+    // A slug the renderer does not know is a version mismatch, not data. Storing
+    // it would put an unrenderable value in the UI; null is honest.
+    vi.spyOn(global, 'fetch').mockResolvedValue(makeOctreeMetadataResponse({
+      source_units: 'furlong', source_unit_scale: 201.168,
+    }));
+    const data = await parsePointCloudFromPath('/p/odd.las');
+    expect(data.octree?.sourceUnits).toBeNull();
   });
 
   it('forwards the wizard column plan, carrying a skipped column as role "skip"', async () => {

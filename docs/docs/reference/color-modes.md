@@ -48,6 +48,13 @@ unambiguously instead of stacking anonymous colorbars.
   fill the same gradient. Hiding a cloud re-tightens the scale to what
   remains visible, and a cloud colored by a *different* variable never
   affects it. The **Min/Max** inputs window this shared scale.
+- **The scale ignores outliers.** Its ends come from the 1st and 99th
+  percentile of the data, not the single lowest and highest values. A few
+  noise points far above the scene — a bird, a multipath return, a stray
+  from a mis-registered scan — would otherwise set the top of the scale
+  on their own, leaving every real point crowded into a sliver of the
+  colormap. Points outside the range still draw, in the end colors. Type
+  the true extremes into **Min/Max** if you want the full span.
 - **The stack stops growing at three.** Beyond that, the remaining
   entries collapse into a compact list of one-line rows; click a row to
   expand it. The selected object keeps a full-size entry, outlined in
@@ -106,8 +113,15 @@ Field names come from the file's header row when present (so
 `Reflectance[dB]` shows as **Reflectance [dB]**); files without a header
 fall back to positional names. The selected field's value range drives
 the colorbar — pooled across every visible cloud carrying that same field,
-as described under [The legend stack](#the-legend-stack) — and the
-**Min/Max** inputs let you window it.
+and trimmed to the 1st–99th percentile so a few extreme values can't
+flatten the scale, as described under
+[The legend stack](#the-legend-stack) — and the **Min/Max** inputs let
+you window it.
+
+!!! note
+    Fields shown as **labels** (classifications, tree IDs, and any column
+    you marked *Label* during import) are never trimmed — every class keeps
+    its own color, including the rarest ones.
 
 !!! note
     Clouds imported before their attributes were carried (XYZ/CSV extras:

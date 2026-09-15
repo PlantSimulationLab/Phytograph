@@ -1,7 +1,7 @@
 {
   "name": "phytograph",
   "private": true,
-  "version": "0.84.0",
+  "version": "0.86.0",
   "description": "Phytograph desktop app.",
   "author": "Phytograph",
   "main": "dist-main/main.js",
@@ -33,6 +33,8 @@
     "test:unit:coverage": "vitest run --coverage",
     "test:backend": "node scripts/run-pytest.mjs",
     "check:backend": "node scripts/check-backend-bundle.mjs",
+    "check:toolchain": "node scripts/toolchain-check.mjs",
+    "check:glibc": "node scripts/check-glibc-floor.mjs",
     "test:e2e": "npm run check:backend && playwright test",
     "test:e2e:profile": "npm run check:backend && node scripts/monitor-resources.mjs --timeline perf/e2e-timeline.jsonl -- npx playwright test",
     "test:smoke-packaged": "node scripts/smoke-packaged-app.mjs",

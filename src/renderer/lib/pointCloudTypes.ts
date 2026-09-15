@@ -8,6 +8,7 @@ import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationM
 import type { ScanParameters } from './scanParameters';
 import type { ClassPalette } from './classPalettes';
 import type { SlabRegionPayload } from './crossSection';
+import type { LengthUnit } from './units';
 
 // potree-core's RequestManager interface isn't re-exported from the package
 // root in v2.0.15. The shape is small and stable, so mirror it locally
@@ -57,6 +58,17 @@ export interface OctreeRef {
   // cloud kept its original coordinates. Provenance + lets world-coord readouts
   // add it back; the backend session restores world coords for downstream ops.
   worldShift?: [number, number, number] | null;
+  // The length unit the SOURCE FILE was in, and the factor applied to reach
+  // metres. PROVENANCE ONLY: positions are already metres everywhere in the
+  // app, exactly as `worldShift` records a shift that has already been
+  // subtracted. Kept so the UI can explain why a scan's coordinates differ
+  // from the file it came from.
+  //
+  // `sourceUnitScale === 1` means "known to be metres"; `undefined`/`null`
+  // means the scan predates units or was never asked — different states, so
+  // they are not collapsed.
+  sourceUnits?: LengthUnit | null;
+  sourceUnitScale?: number | null;
   asciiFormat?: string | null; // Helios <ASCII_format> hint, when known
   // Optional per-attribute min/max from PotreeConverter's metadata.
   // Keyed by attribute name ("intensity", "rgb", "classification", …).
@@ -64,6 +76,23 @@ export interface OctreeRef {
   // heightMin/Max + intensityRange uniforms — without them the gradient
   // lookups all hit the same texel and the cloud renders solid colour.
   attributeRanges?: Record<string, { min: number[]; max: number[] }>;
+  // Outlier-resistant [lo, hi] per attribute slug — the 1st-99th percentile of
+  // the column, measured by the backend at import over the hit points (see
+  // `_robust_attribute_ranges` in main.py).
+  //
+  // This is what a COLORBAR should stretch across. `attributeRanges` above is
+  // PotreeConverter's absolute extrema, so one hot return or one noise spike
+  // sets the end of the ramp and every real point crowds into a fraction of the
+  // colormap. Cannot be derived renderer-side: rejecting the tail needs the
+  // values, and an octree cloud holds none.
+  //
+  // CONTAINS CATEGORICAL SLUGS TOO. Whether a column is a class ID or a
+  // measurement is the user's import-wizard choice, held in this process's
+  // `classification.ts` registries and changeable after import — so the backend
+  // reports the percentile for everything and the gate lives here. Trimming a
+  // class-ID range drops the rarest class from the palette, so always resolve
+  // the categorical scheme FIRST and only reach for this when there is none.
+  robustAttributeRanges?: Record<string, [number, number]>;
   // Exact distinct integer values per attribute slug, computed by the backend
   // over the points that actually survive (alive AND not sky/miss).
   //

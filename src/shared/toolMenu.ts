@@ -38,7 +38,7 @@ export const TOOLS_MENU: ToolMenuSection[] = [
     items: [
       { id: 'cloud-translate', label: 'Transform Point Cloud' },
       { id: 'set-scene-origin', label: 'Set Scene Origin' },
-      { id: 'pick-point', label: 'Pick Point' },
+      { id: 'pick-point', label: 'Pick & Measure' },
       { id: 'cloud-crop', label: 'Crop Point Cloud' },
       { id: 'cloud-erase', label: 'Erase Brush' },
       { id: 'cloud-cross-section', label: 'Cross-section' },

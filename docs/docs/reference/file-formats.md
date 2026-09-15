@@ -147,6 +147,45 @@ features keep these usable:
   measurements, or backend operations — so keeping large coordinates stays a
   fully supported choice.
 
+### Measurement units
+
+Phytograph stores and reports everything in **metres**. Scans are converted at
+import, so what a format can say about its own unit decides whether you are
+asked:
+
+| Format | Declares a unit? | What happens |
+|---|---|---|
+| **LAS / LAZ** | Yes, when it carries a CRS | Read from the coordinate reference system — a State Plane zone in US survey feet is detected as such |
+| **E57** | Fixed by the spec | Always metres; the format has no other option |
+| **RIEGL** `.rxp` / `.riproject` | Fixed by the format | Always metres (scanner-local) |
+| **PTX** | No | Defaults to metres; change it in the wizard |
+| **PLY / PCD** | No | Defaults to metres; change it in the wizard |
+| **ASCII** (`.xyz`, `.csv`, `.txt`, `.pts`, `.asc`) | No | Defaults to metres; change it in the wizard |
+
+A LAS/LAZ **without** a CRS carries no unit either, and is treated like the
+formats that cannot declare one. Two further cases are also treated as
+undeclared, because a single scale factor cannot describe them honestly:
+
+- **A geographic (latitude/longitude) CRS.** Degrees are not a length, and
+  there is no constant that converts them — the metres-per-degree of longitude
+  depends on latitude. Such a file needs reprojection, which Phytograph does not
+  do; its coordinates are left exactly as they are.
+- **A CRS whose axes disagree**, such as horizontal US survey feet with vertical
+  metres (a standard US survey configuration). Scaling all three axes by one
+  factor would leave the horizontal correct and divide every elevation by 3.28.
+
+In both cases the wizard asks rather than guessing.
+
+The source unit is recorded with the scan. See
+[Source units](../workflows/import-export.md#source-units).
+
+!!! warning "Export is in metres, not the original unit"
+
+    A global **shift** is undone on export, restoring the original coordinate
+    magnitudes — but the **unit conversion is not**. A survey imported in feet
+    exports as metres. The numbers will differ from the source file by the
+    conversion factor.
+
 ### Sky/miss points
 
 The [leaf-area-density inversion](../concepts/leaf-area-density.md) needs to know

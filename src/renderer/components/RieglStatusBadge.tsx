@@ -120,9 +120,20 @@ export function RieglStatusBadge({
   // would overstate the problem and send them hunting for a fix that isn't
   // needed. It still isn't "ready" either — something will happen first — so it
   // gets its own informational state rather than being folded into either.
+  //
+  // But ONLY when staleness is the thing actually in the way. `imageStale` is a
+  // fact about the image and stays true while Docker is stopped or RiVLib is
+  // unset — and in that case the self-heal never runs, because the rebuild
+  // needs both (see _resolve_riegl_runtime). Ranking stale first then showed
+  // "update pending" indefinitely on a fresh dev profile with no RiVLib path,
+  // while the tooltip and the Settings checklist both said the real blocker
+  // was the unset folder. So the badge follows the backend's own ordering:
+  // the prerequisites first, and "pending" only once they are met.
+  const staleIsTheBlocker =
+    status.imageStale && status.dockerPresent && status.rivlibValid;
   const state: 'ready' | 'stale' | 'unavailable' = status.available
     ? 'ready'
-    : status.imageStale
+    : staleIsTheBlocker
       ? 'stale'
       : 'unavailable';
 

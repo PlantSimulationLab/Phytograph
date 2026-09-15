@@ -666,6 +666,23 @@ jobs:
           fi
           echo "PASS: PotreeConverter launches"
 
+      # How old a Linux can run what we just built. The answer is decided by the
+      # BUILD HOST — PyInstaller bundles its libpython/libstdc++, and libhelios
+      # and PotreeConverter link against its glibc — so nobody picks this number
+      # and nothing else in the job can see it.
+      #
+      # In particular the smoke tests above cannot: they launch the binaries on
+      # THIS runner, where a 24.04-built bundle runs perfectly. A glibc floor
+      # only breaks on somebody else's machine. That is how v0.68.0 shipped an
+      # AppImage needing GLIBC_2.38 while the docs said "most distros", and a
+      # user on Ubuntu 22.04 got a window that opened onto a dead backend.
+      #
+      # Deliberately NOT gated on a cache hit: a bundle restored from a cache
+      # saved by a different runner image is exactly the case this has to catch.
+      - name: Verify glibc floor (Linux)
+        if: runner.os == 'Linux' && !inputs.signing_test
+        run: node scripts/check-glibc-floor.mjs
+
       - name: Verify PotreeConverter binary (Windows)
         if: runner.os == 'Windows' && !inputs.signing_test
         shell: pwsh

@@ -7,9 +7,9 @@ point clouds, meshes, and procedural plant models.
 📖 **Full documentation & user guide**: <https://plantsimulationlab.github.io/Phytograph/>
 
 Phytograph runs on **macOS** (Apple Silicon and Intel), **Windows 10/11**,
-and **Linux** (x64). It ships as a single self-contained app with its own
-embedded scientific Python environment — you don't need to install Python,
-Conda, or anything else.
+and **Linux** (x64, glibc 2.38 or newer). It ships as a single self-contained
+app with its own embedded scientific Python environment — you don't need to
+install Python, Conda, or anything else.
 
 ---
 
@@ -23,15 +23,24 @@ Get the latest installer from the
 | macOS (Apple Silicon — M1/M2/M3/M4) | [`Phytograph-arm64.dmg`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-arm64.dmg) |
 | macOS (Intel) | [`Phytograph-x64.dmg`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-x64.dmg) |
 | Windows 10/11 | [`Phytograph-Setup.exe`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-Setup.exe) |
-| Linux (most distros) | [`Phytograph-x86_64.AppImage`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-x86_64.AppImage) |
+| Linux (x64, glibc 2.38+) | [`Phytograph-x86_64.AppImage`](https://github.com/PlantSimulationLab/Phytograph/releases/latest/download/Phytograph-x86_64.AppImage) |
 
 - **macOS** — open the `.dmg`, drag **Phytograph** into **Applications**, and
   launch it. The build is signed and notarized by Apple, so it opens with a
   normal double-click.
 - **Windows** — run the installer. If SmartScreen warns you, choose
   **More info → Run anyway**.
-- **Linux** — `chmod +x Phytograph-x86_64.AppImage` and run it. (Needs FUSE;
-  on a minimal install use `--appimage-extract-and-run`.)
+- **Linux** — run it **from a terminal**: `chmod +x Phytograph-x86_64.AppImage`
+  then `./Phytograph-x86_64.AppImage`. Double-clicking often does nothing —
+  GNOME Files and similar managers refuse to launch executables. (Also needs
+  FUSE; on a minimal install use `--appimage-extract-and-run`.)
+
+  **Requires glibc 2.38 or newer** — Ubuntu 23.10+ (24.04 LTS), Debian 13,
+  Fedora 39+, or a current rolling release. Check yours with `ldd --version`.
+  It does **not** run on Ubuntu 22.04 LTS, Debian 12, or RHEL/Rocky/Alma 8–9:
+  the app window opens but the compute backend cannot start, and the log shows
+  a loader error naming `GLIBC_2.38`. See the
+  [install guide](https://plantsimulationlab.github.io/Phytograph/guide/install/#install-on-linux).
 
 The first launch takes about 30 seconds while the bundled Python environment
 unpacks itself; subsequent launches are instant.

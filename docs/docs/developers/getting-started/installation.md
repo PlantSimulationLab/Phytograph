@@ -4,7 +4,11 @@
 
 - **Node.js 20+** (`node --version` should show v20 or later)
 - **Python 3.11** (3.12 also works locally; CI uses 3.11)
-- **Xcode Command Line Tools** on macOS (`xcode-select --install`)
+- **Xcode Command Line Tools** on macOS (`xcode-select --install`). Verify the
+  C++ toolchain actually works with `npm run check:toolchain` — a macOS update
+  can leave `xcode-select` pointing at a broken Xcode, which reports as a
+  *missing compiler* even though several are installed (see
+  [Troubleshooting](../troubleshooting.md)).
 - For signed macOS releases (CI): an Apple Developer ID Application certificate
 
 ## First-time setup

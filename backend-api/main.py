@@ -248,7 +248,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.84.0"
+BACKEND_VERSION = "0.86.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -4381,6 +4381,11 @@ class TriangulationResponse(BaseModel):
     # points. The renderer keys its "downsampled" warning toast off THIS, not off
     # points_used < cloud size (which a crop alone also makes true).
     downsampled: Optional[bool] = None
+    # Exact duplicate coordinates removed before Ball Pivoting (0 for every other
+    # method, which doesn't dedup). Coincident points add no surface and, past 50%
+    # of the cloud, collapse the auto ball radius to 0 — so they're dropped and
+    # REPORTED rather than silently absorbed. `points_used` is already net of them.
+    duplicates_dropped: Optional[int] = None
     # Per-triangle grid cell (row-major i + nx*(j + ny*k)) when the request pinned
     # the mesh to a `grid`; -1 (packed as the uint32 sentinel 0xffffffff) means the
     # centroid fell outside every cell. Aligned 1:1 with `triangles`. Empty when no
@@ -4388,21 +4393,58 @@ class TriangulationResponse(BaseModel):
     triangle_cell_ids: List[int] = []
 
 
+# Open3D's BPA rejects any radius <= 0, and its error message calls a ZERO radius
+# "negative" — so a duplicate-heavy cloud fails with a diagnosis pointing at the
+# wrong value. Duplicates are the real cause: `compute_nearest_neighbor_distance`
+# returns 0.0 for every point coincident with another, so once MORE THAN HALF the
+# points are duplicates the median collapses to 0.0 and the auto ladder becomes
+# [0, 0, 0]. Every rung is validated, so one zero poisons the whole ladder.
+# Duplicates arrive from merged overlapping scans, a re-imported export, or a
+# quantizing decimation. The non-zero spacing estimate here and the dedup in
+# `_do_open3d_triangulation` both exist to keep that out of Open3D's hands.
+def _nn_spacing(o3d, points_np):
+    """Reference nearest-neighbour spacing for a point array: the median over the
+    NON-ZERO distances. A zero is an exact duplicate, which carries no spacing
+    information — including them biases the estimate toward 0 and, past 50%
+    duplicates, pins it AT 0. Returns 0.0 only when every point is coincident
+    (no spacing exists at all), which callers must treat as un-meshable."""
+    import numpy as np
+    probe = o3d.geometry.PointCloud()
+    probe.points = o3d.utility.Vector3dVector(points_np)
+    nn = np.asarray(probe.compute_nearest_neighbor_distance())
+    nz = nn[nn > 0]
+    if nz.size == 0:
+        return 0.0
+    return float(np.median(nz))
+
+
+def _ball_pivot_radii(o3d, points_np):
+    """Auto radius ladder ([median, 2x, 4x] of non-zero NN spacing), or None when
+    the cloud is fully degenerate (every point coincident). Shared by the
+    single-pass and adaptive-tiled paths so both estimate radii identically."""
+    ref = _nn_spacing(o3d, points_np)
+    if ref <= 0:
+        return None
+    return [ref, ref * 2, ref * 4]
+
+
 def _ball_pivot_mesh(o3d, points_np, radii=None):
     """Run BPA on a point array with cheap centroid-facing normals + an auto radius
-    ladder ([median, 2x, 4x] of NN spacing). Returns an open3d TriangleMesh. Shared
-    by the single-pass and adaptive-tiled paths so both estimate radii identically.
+    ladder ([median, 2x, 4x] of NN spacing). Returns an open3d TriangleMesh, or
+    None when the cloud is too degenerate to derive a radius from. Shared by the
+    single-pass and adaptive-tiled paths so both estimate radii identically.
     `radii` overrides the auto ladder (an explicit user value)."""
     import numpy as np
+    if radii is None:
+        radii = _ball_pivot_radii(o3d, points_np)
+        if radii is None:
+            return None
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points_np)
     pcd.estimate_normals()
     centroid = points_np.mean(axis=0)
     pcd.orient_normals_towards_camera_location(centroid)
     pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
-    if radii is None:
-        ref = float(np.median(np.asarray(pcd.compute_nearest_neighbor_distance())))
-        radii = [ref, ref * 2, ref * 4]
     return o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
         pcd, o3d.utility.DoubleVector(radii))
 
@@ -4433,9 +4475,14 @@ def _adaptive_ball_pivot(o3d, points_np, ckpt=None):
         return None
 
     # Cheap global density-spread probe: tile only when spacing is non-uniform.
+    # Measured over NON-ZERO distances only — a zero is an exact duplicate, which
+    # is not a spacing, and leaving them in drags both the median and the p90 down
+    # (past 50% duplicates the median hits 0 and the ratio is undefined). Callers
+    # dedup upstream, so this is belt-and-braces for any other entry point.
     probe = o3d.geometry.PointCloud()
     probe.points = o3d.utility.Vector3dVector(points_np)
     nn = np.asarray(probe.compute_nearest_neighbor_distance())
+    nn = nn[nn > 0]
     med = float(np.median(nn)) if nn.size else 0.0
     if med <= 0:
         return None
@@ -4468,6 +4515,8 @@ def _adaptive_ball_pivot(o3d, points_np, ckpt=None):
             if ckpt is not None:
                 ckpt()
             mesh = _ball_pivot_mesh(o3d, P)
+            if mesh is None:
+                continue  # tile is fully coincident — no spacing to derive a ball from
             tv = np.asarray(mesh.vertices)
             tt = np.asarray(mesh.triangles)
             if tt.shape[0] == 0:
@@ -4525,6 +4574,19 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                     "num_triangles": 0, "num_vertices": 0, "points_used": 0,
                     "error": "crop_box must be [min_x, min_y, min_z, max_x, max_y, max_z]"}
         cropping = request.crop_box is not None
+
+        # Reject a non-positive explicit radius here rather than at the Open3D call,
+        # which reports ANY radius <= 0 as "negative" and names no offending value.
+        # The UI already guards r > 0, so this is for direct API callers.
+        if request.method == "ball_pivoting" and request.radii is not None:
+            bad = [r for r in request.radii
+                   if not math.isfinite(r) or r <= 0]
+            if bad or not request.radii:
+                return {"success": False, "method_used": request.method,
+                        "num_triangles": 0, "num_vertices": 0, "points_used": 0,
+                        "error": (f"Ball radii must be positive, finite numbers; got {bad}."
+                                  if bad else
+                                  "radii must contain at least one positive value.")}
 
         # Resolve order with crop-to-grid: the per-source `max_points` cap (the
         # "Triangulate max points" setting) stride-downsamples inside
@@ -4601,6 +4663,34 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             return {"success": False, "method_used": request.method,
                     "num_triangles": 0, "num_vertices": 0, "points_used": points_used,
                     "error": err}
+
+        # Drop exact duplicate coordinates before Ball Pivoting.
+        #
+        # BPA rolls a ball over the surface; coincident points add no surface, and
+        # past 50% duplicates they take over the nearest-neighbour distribution and
+        # collapse the auto radius to 0 — which Open3D rejects as an "invalid,
+        # negative radius" (see the comment above `_nn_spacing`). Deduping is the
+        # honest fix rather than only hardening the estimate: the duplicates would
+        # contribute nothing to the mesh even if a radius survived them.
+        #
+        # BPA only. Poisson solves over a weighted field and alpha/delaunay build a
+        # tetrahedralization, so duplicates are harmless there and dropping them
+        # would silently change long-standing output for no benefit.
+        duplicates_dropped = 0
+        if request.method == "ball_pivoting" and len(points) > 1:
+            _report(0.12, "Removing duplicate points")
+            before = len(points)
+            points = np.unique(points, axis=0)
+            duplicates_dropped = before - len(points)
+            points_used = int(len(points))
+            if duplicates_dropped and len(points) < 3:
+                return {"success": False, "method_used": request.method,
+                        "num_triangles": 0, "num_vertices": 0,
+                        "points_used": points_used,
+                        "duplicates_dropped": duplicates_dropped,
+                        "error": (f"Only {points_used} distinct point(s) remain after "
+                                  f"removing {duplicates_dropped:,} duplicate coordinate(s) "
+                                  "— not enough distinct geometry to triangulate.")}
 
         # Create Open3D point cloud
         _report(0.15, "Preparing point cloud")
@@ -4684,9 +4774,19 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
                     pcd.orient_normals_towards_camera_location(centroid)
                     pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
                 if request.radii is None:
-                    distances = pcd.compute_nearest_neighbor_distance()
-                    ref_dist = float(np.median(distances))
-                    radii = o3d.utility.DoubleVector([ref_dist, ref_dist * 2, ref_dist * 4])
+                    auto = _ball_pivot_radii(o3d, np.asarray(pcd.points))
+                    if auto is None:
+                        # Every remaining point is coincident, so there is no spacing
+                        # to size a ball from. Say that, rather than handing Open3D a
+                        # 0 and surfacing its "negative radius" message.
+                        return {"success": False, "method_used": request.method,
+                                "num_triangles": 0, "num_vertices": 0,
+                                "points_used": points_used,
+                                "duplicates_dropped": duplicates_dropped,
+                                "error": ("All points share the same coordinate, so no "
+                                          "ball radius can be derived. Ball Pivoting needs "
+                                          "points spread over a surface.")}
+                    radii = o3d.utility.DoubleVector(auto)
                 else:
                     radii = o3d.utility.DoubleVector(request.radii)
                 mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pcd, radii)
@@ -4858,6 +4958,7 @@ def _do_open3d_triangulation(request: TriangulationRequest, progress=None) -> di
             "method_used": method_used,
             "points_used": points_used,
             "downsampled": was_downsampled,
+            "duplicates_dropped": duplicates_dropped,
             "triangle_cell_ids": triangle_cell_ids,
         }
 
@@ -10102,14 +10203,70 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
     return xyz, dirs, labels, vals, flags
 
 
+# Base of the per-miss sentinel timestamps handed to Helios when a backfilled
+# miss buffer carries no pulse times (see _append_backfilled_misses). Distinct
+# per miss (base - k) and far below any real clock, so no miss ever shares a
+# beam with another miss or with a hit.
+_MISS_SENTINEL_TIMESTAMP_BASE = -1.0e12
+
+
+def _uniquify_miss_timestamps(miss_ts: "np.ndarray", hit_ts: "np.ndarray") -> "np.ndarray":
+    """Return `miss_ts` with every value distinct from every other miss and from
+    every hit timestamp, moving a colliding value by the smallest possible float
+    steps (np.nextafter). A beam is a shared timestamp, so a collision would
+    either merge two pulses or trip Helios's target_count check; a nudge of a
+    few ulps changes nothing a trajectory join can resolve. Values that still
+    collide after a bounded number of nudges fall back to distinct sentinels.
+    """
+    import numpy as np
+
+    out = np.array(miss_ts, dtype=np.float64, copy=True)
+    if out.size == 0:
+        return out
+    hit_u = np.unique(np.asarray(hit_ts, dtype=np.float64))
+    collide = np.zeros(out.shape[0], dtype=bool)
+    for _ in range(16):
+        # Vectorised: a backfilled buffer can hold tens of millions of misses.
+        collide = np.isin(out, hit_u)
+        _, first_idx = np.unique(out, return_index=True)
+        dup = np.ones(out.shape[0], dtype=bool)
+        dup[first_idx] = False  # every non-first occurrence of a repeated value
+        collide |= dup
+        if not collide.any():
+            return out
+        out[collide] = np.nextafter(out[collide], np.inf)
+    # Pathological input (a raster of identical times): give the leftovers
+    # sentinels so the inversion still sees one beam per miss.
+    leftovers = np.where(collide)[0]
+    out[leftovers] = _MISS_SENTINEL_TIMESTAMP_BASE - 1.0e6 - np.arange(leftovers.size, dtype=np.float64)
+    return out
+
+
 def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     """Append a session's backfilled-miss buffer to assembled LAD hit arrays.
 
     Hits carry `is_miss`=0; the appended misses carry `is_miss`=1 (creating the
-    column if the hits lacked it). Direction rows come from the buffer; timestamp/
-    origin columns are filled where both the hit arrays and the buffer carry them
-    (else 0 for the miss rows, which Helios ignores for sky points). Returns the
-    extended (xyz, dirs, labels, vals, flags) with `has_misses` True.
+    column if the hits lacked it). Direction rows come from the buffer; origin
+    columns are filled where both the hit arrays and the buffer carry them (else
+    0 for the miss rows).
+
+    `timestamp` is NOT ignored for sky points: Helios groups returns into beams
+    by shared timestamp (`groupHitsByTimestamp`), so misses that all carried the
+    same value would be ONE beam — one transmitted pulse standing in for the
+    whole sky population, which collapses the transmission denominator and
+    biases LAD high. Measured: 50 misses at timestamp 0 invert exactly like a
+    single miss. So when the hits carry a timestamp column, every appended miss
+    gets its own: the buffer's reconstructed pulse time when the gapfill wrote
+    one (which also lets a moving scan's trajectory join place the miss at its
+    real emission point), else a distinct sentinel far below any real clock
+    (negative, so it can never collide with GPS or relative time).
+
+    A reconstructed time can still coincide with a real pulse's — the gapfiller
+    dedupes by raster cell, not by time (4 of 41,612 on the multi-return
+    fixture) — and Helios REFUSES a beam whose member count exceeds the pulse's
+    declared target_count. `_uniquify_miss_timestamps` nudges such a miss by one
+    float step, which keeps the join unchanged and makes it its own beam.
+    Returns the extended (xyz, dirs, labels, vals, flags) with `has_misses` True.
     """
     import numpy as np
 
@@ -10133,8 +10290,13 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     for slug in labels:
         if slug == _MISS_SLUG:
             miss_cols.append(np.ones(n_miss, np.float64))
-        elif slug == 'timestamp' and backfilled.get("timestamp") is not None:
-            miss_cols.append(np.asarray(backfilled["timestamp"], dtype=np.float64))
+        elif slug == 'timestamp':
+            if backfilled.get("timestamp") is not None:
+                miss_ts = np.asarray(backfilled["timestamp"], dtype=np.float64)
+            else:
+                miss_ts = _MISS_SENTINEL_TIMESTAMP_BASE - np.arange(n_miss, dtype=np.float64)
+            hit_ts = hit_vals[:, labels.index('timestamp')] if n_hits > 0 else np.empty(0)
+            miss_cols.append(_uniquify_miss_timestamps(miss_ts, hit_ts))
         elif slug in ('origin_x', 'origin_y', 'origin_z') and backfilled.get("origins") is not None:
             axis = {'origin_x': 0, 'origin_y': 1, 'origin_z': 2}[slug]
             miss_cols.append(np.asarray(backfilled["origins"], dtype=np.float64)[:, axis])
@@ -10440,6 +10602,14 @@ def _run_gapfill_extract(cloud):
     none, and this returns None. Read through the columnar bulk getter for the
     same reason as everything else here — a per-hit loop is unaffordable at
     scale — with the absent sentinel telling the two paths apart.
+
+    `timestamp` is the per-miss pulse time when the C++ wrote one (the
+    timestamp path stamps every synthesised miss with its reconstructed pulse
+    time; the row/column path does when the scan carried times), else None.
+    It matters because the LAD inversion groups returns into BEAMS by shared
+    timestamp: every miss handed to Helios with the same time is one beam, so
+    a miss population without its own times would count as a single
+    transmitted pulse. Returns (synth_xyz, count, grid, timestamp).
     """
     import numpy as np
 
@@ -10477,7 +10647,18 @@ def _run_gapfill_extract(cloud):
             break
         grid[slug] = np.ascontiguousarray(vals)
 
-    return synth_xyz, int(mask.sum()), (grid or None)
+    synth_ts = None
+    try:
+        ts_col = np.asarray(cloud.getHitDataColumnArray("timestamp", _ABSENT),
+                            dtype=np.float64)
+        if ts_col.shape[0] == mask.shape[0]:
+            ts_vals = ts_col[mask]
+            if ts_vals.size > 0 and not (ts_vals == _ABSENT).any():
+                synth_ts = np.ascontiguousarray(ts_vals)
+    except Exception:  # noqa: BLE001 - an absent column is just "no timestamps"
+        synth_ts = None
+
+    return synth_xyz, int(mask.sum()), (grid or None), synth_ts
 
 
 def _dem_in_lad_frame(dem: "DemRaster", lad_shift) -> "DemRaster":
@@ -10621,6 +10802,63 @@ def _sample_dem_columns(grid_center, grid_size, grid_nx, grid_ny, grid_nz,
             kept_mask[col] = True
 
     return column_offsets, kept_mask, dropped
+
+
+def _count_deleted_inside_grid(sess: "CloudSession", grid: "HeliosGrid") -> int:
+    """Hits (never misses) a session has DELETED whose position lies inside the
+    LAD voxel box.
+
+    The inversion recovers returns removed from a pulse from `target_count`, but
+    it can only place them BEFORE or BEYOND the grid (see
+    `LiDARcloud::inferHiddenReturns`); a return deleted from inside the grid is
+    either unplaceable or misplaced, and either way the voxels around it read as
+    more transmitted than they are. Session deletions keep their coordinates in
+    the `deleted` mask until a bake compacts them, so this is a plain box test
+    in the session's own frame (the grid center is in that frame too; the moving
+    path's `lad_shift` recenters both sides equally). The box is the base voxel
+    box inverse-rotated about its center, stretched in z to cover any terrain-
+    following column offsets, the way `_cull_to_grid` covers them.
+    """
+    deleted = getattr(sess, "deleted", None)
+    if deleted is None or not bool(np.any(deleted)):
+        return 0
+    pos = np.asarray(sess.positions[deleted], dtype=np.float64)
+    miss = sess.extras.get(_MISS_SLUG) if getattr(sess, "extras", None) else None
+    if miss is not None and len(miss) == len(sess.positions):
+        pos = pos[np.asarray(miss)[deleted] == 0]
+    if pos.shape[0] == 0:
+        return 0
+    center = np.asarray(grid.center, dtype=np.float64)
+    half = np.asarray(grid.size, dtype=np.float64) / 2.0
+    rot = math.radians(float(getattr(grid, "rotation", 0.0) or 0.0))
+    d = pos - center
+    if abs(rot) > 1e-12:
+        c, s_ = math.cos(-rot), math.sin(-rot)
+        x = d[:, 0] * c - d[:, 1] * s_
+        y = d[:, 0] * s_ + d[:, 1] * c
+        d = np.column_stack([x, y, d[:, 2]])
+    lo = -half.copy()
+    hi = half.copy()
+    offs = getattr(grid, "column_offsets", None)
+    if offs:
+        lo[2] += float(min(offs))
+        hi[2] += float(max(offs))
+    inside = np.all((d >= lo) & (d <= hi), axis=1)
+    return int(inside.sum())
+
+
+def _lad_cropped_return_stats(cloud) -> "Optional[dict]":
+    """What the inversion inferred from `target_count`, or None when the native
+    library predates `getCroppedReturnStats` (the getter is a helios-core
+    addition; an older bundle must still invert, just without the tally)."""
+    getter = getattr(cloud, "getCroppedReturnStats", None)
+    if getter is None:
+        return None
+    try:
+        st = getter()
+    except Exception:  # noqa: BLE001 - older native lib: no tally, not a failure
+        return None
+    return {k: int(v) for k, v in dict(st).items()}
 
 
 def _do_lad_computation(request: "LADComputeRequest", progress=None,
@@ -10805,6 +11043,20 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             if sess is not None:
                 with _cloud_session_lock:
                     xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(sess, origin)
+                    n_deleted_in_grid = _count_deleted_inside_grid(sess, request.grid)
+                if n_deleted_in_grid > 0:
+                    _lbl = (getattr(scan_entry, 'label', None)
+                            or os.path.basename(scan_entry.file_path or '')
+                            or 'this scan')
+                    warnings.append(
+                        f"Scan '{_lbl}' has {n_deleted_in_grid:,} deleted points inside "
+                        "the voxel grid (a crop, erase, filter or class deletion). The "
+                        "inversion can place a pulse's removed returns before or beyond "
+                        "the grid from its target count, but not inside it, so voxels "
+                        "around those deletions will read as more transmitted than they "
+                        "are. Undo the edit, or delete only outside the grid, for an "
+                        "unbiased result."
+                    )
             elif scan_entry.points:
                 xyz, dirs, labels, vals, scan_flags = _inline_to_lad_arrays(
                     scan_entry.points, scan_entry.scalar_columns, origin)
@@ -11262,6 +11514,32 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             else:
                 cloud.calculateLeafArea(ctx, min_hits, element_width)
 
+        # What the inversion recovered from target_count (see
+        # LiDARcloud::inferHiddenReturns). Beyond-grid returns are the expected
+        # signature of a cloud cropped to the grid and are simply reported;
+        # ambiguous ones mean the cloud was cropped INSIDE the grid, which the
+        # inference cannot repair.
+        cropped_returns = _lad_cropped_return_stats(cloud)
+        if cropped_returns is not None:
+            if cropped_returns.get("hidden_ambiguous", 0) > 0:
+                warnings.append(
+                    f"{cropped_returns['beams_ambiguous']:,} pulses have returns removed "
+                    "from BETWEEN two surviving returns, so those returns were inside the "
+                    f"voxel grid and cannot be placed ({cropped_returns['hidden_ambiguous']:,} "
+                    "returns left out of the inversion). Voxels along those beams will "
+                    "read as more transmitted than they are. This happens when a cloud "
+                    "is filtered inside the grid, e.g. keeping only leaf-classified "
+                    "points; keep every return and size the grid to the tree instead."
+                )
+            elif cropped_returns.get("hidden_after", 0) > 0:
+                warnings.append(
+                    f"{cropped_returns['beams_with_hidden_returns']:,} pulses had returns "
+                    "removed from the cloud; their target count placed "
+                    f"{cropped_returns['hidden_after']:,} of those beyond the voxel grid "
+                    "and counted them as transmitted, so cropping to the grid did not "
+                    "bias the result."
+                )
+
         def _clean(x):
             """NaN -> None so the value survives JSON serialization."""
             return None if (x != x) else x
@@ -11519,6 +11797,9 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "gtheta_profile": gtheta_profile_out,
             "gapfilled_misses": 0,  # LAD no longer gapfills; misses come from Backfill Misses / source
             "had_miss_points": any_has_misses,
+            # Returns the inversion inferred from target_count (None when the
+            # native library predates the tally). See _lad_cropped_return_stats.
+            "cropped_returns": cropped_returns,
             # None unless every source scan agreed on a CRS; drives raster georeferencing.
             "crs_epsg": result_crs_epsg,
             "method_used": "helios",
@@ -14647,6 +14928,11 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
         extra_dims_meta=extra_dims_meta,
         timestamps=timestamps,
         world_shift=None,  # synthetic scans are authored near the origin
+        # A Helios-simulated scan is metres by construction — the scene it rays
+        # against is built in metres. Recorded as a KNOWN unit (scale 1.0)
+        # rather than left None, which would read as "never asked".
+        source_units="m",
+        source_unit_scale=1.0,
         deleted=np.zeros(n, dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -22281,6 +22567,69 @@ def _robust_extent(positions: "np.ndarray") -> "Optional[List[float]]":
     return [float(max(0.0, hi[i] - lo[i])) for i in range(3)]
 
 
+def _robust_attribute_ranges(
+    intensity: "Optional[np.ndarray]",
+    extras: "Optional[Dict[str, np.ndarray]]",
+) -> "Dict[str, List[float]]":
+    """Outlier-resistant [lo, hi] per numeric attribute, keyed by slug.
+
+    The colorbar's twin of `_robust_extent`, and it exists for the same reason:
+    the domain a colormap is stretched across is set by its most extreme value,
+    so a handful of noise returns — a hot specular spike in reflectance, a bird
+    above the canopy in z — push the end of the ramp out to where nothing lives.
+    Every real point then crowds into a narrow band of the colormap and the
+    structure the user is trying to read washes out to one flat colour.
+
+    Computed HERE because this is the one place the full arrays are in RAM: the
+    octree carries only PotreeConverter's absolute per-attribute extrema, and a
+    cloud's points are never re-read from the file after import. Same percentiles
+    as the extent box, so "robust" has exactly one definition in the codebase.
+
+    CATEGORICAL COLUMNS ARE INCLUDED ON PURPOSE. Trimming 1% off a class-ID
+    column would drop the rarest class from the palette, so these ranges must
+    never be used for one — but that decision cannot be made here. A field is
+    categorical or continuous by the user's import-wizard choice, which lives in
+    the renderer's process-wide registries (`classification.ts`) and can be
+    flipped AFTER import; a backend-side exclusion list would be a second source
+    of truth that silently goes stale the moment the user changes their mind.
+    So this reports the percentile for everything numeric and the renderer, which
+    alone knows the answer, decides what to consult it for. See
+    `robustScalarRange` in src/renderer/lib/robustColorRange.ts for the gate.
+
+    Returns {} rather than None when nothing qualifies, so callers can merge it
+    unconditionally; a slug is simply absent when its column is non-finite,
+    empty, or degenerate (lo == hi), in which case the consumer keeps the raw
+    extrema it already has.
+    """
+    out: Dict[str, List[float]] = {}
+    if np is None:
+        return out
+
+    def _add(slug: str, arr: "Optional[np.ndarray]") -> None:
+        if arr is None:
+            return
+        a = np.asarray(arr)
+        if a.ndim != 1 or a.size == 0:
+            return
+        finite = a[np.isfinite(a)]
+        if finite.size == 0:
+            return
+        lo = float(np.percentile(finite, _EXTENT_LOW_PERCENTILE))
+        hi = float(np.percentile(finite, _EXTENT_HIGH_PERCENTILE))
+        # A degenerate span (constant column, or a tail so thin the percentiles
+        # coincide) carries no information the raw extrema don't. Omit it and
+        # let the consumer fall back rather than emit an inverted or zero-width
+        # range the shader would have to guard against.
+        if not (hi > lo):
+            return
+        out[slug] = [lo, hi]
+
+    _add("intensity", intensity)
+    for slug, arr in (extras or {}).items():
+        _add(slug, arr)
+    return out
+
+
 def _autodetect_misses(
     positions: "np.ndarray",
     extras: Dict[str, "np.ndarray"],
@@ -22495,6 +22844,18 @@ class PointCloudPreviewResponse(BaseModel):
     # off, since elevation is rarely huge). Best-effort: null if the min couldn't
     # be probed cheaply.
     suggested_shift: Optional[List[float]] = None
+    # The length unit the SOURCE declares, when it declares one: a slug from
+    # _UNIT_TO_METRES ("m", "ftUS", …). The wizard seeds its unit control from
+    # this and, when `units_certain`, presents it as a statement rather than a
+    # guess.
+    #
+    # `units_certain` is True only when the answer comes from the FORMAT — a
+    # CRS in a LAS header, or a spec that fixes the unit (E57 and RIEGL are
+    # metres by definition). False means the format cannot say and the user is
+    # being asked; the wizard defaults to metres, which is what the app assumed
+    # implicitly before units existed.
+    detected_units: Optional[str] = None
+    units_certain: bool = False
 
 
 def _tokenize_ascii_format(fmt: str) -> List[str]:
@@ -28359,8 +28720,28 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
         elif ext in _RIEGL_PROJECT_EXTS:
             resp = _preview_riproject(str(source))
         if resp is not None:
+            # What unit does the source declare, if any? Read before the shift
+            # probe because the probe's threshold is metre-calibrated (see
+            # _SHIFT_SUGGEST_THRESHOLD) and the suggestion it returns has to be
+            # in the same frame the points will end up in.
+            _units, _factor, _certain = _detect_source_units(source)
+            resp.detected_units = _units
+            resp.units_certain = bool(_certain)
+
             # Probe coordinate magnitude and pre-fill a suggested global shift for
             # large (e.g. UTM) clouds, so the wizard can offer it on by default.
+            #
+            # Reported in RAW FILE UNITS, deliberately — the wizard scales it by
+            # whatever unit is finally chosen (see `setUnits` there). Scaling it
+            # here instead would be correct only for a CRS-detected file and
+            # wrong for every format that cannot declare a unit, since the user
+            # picks that AFTER this response is built. One scaler, in the one
+            # place that knows the final answer.
+            #
+            # The threshold inside `_suggest_global_shift` is metre-calibrated
+            # and is applied to raw values, so a millimetre-unit cloud can still
+            # trip it spuriously; the suggestion is only ever a default the user
+            # can turn off, so that is a nuisance rather than a correctness bug.
             resp.suggested_shift = _suggest_global_shift(str(source), resp)
             return resp
     except Exception as e:  # never block import on a preview failure
@@ -30079,6 +30460,20 @@ class CloudSession:
     # to georeference DEM raster exports (GeoTIFF). Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     crs_epsg: Optional[int] = None
+    # What unit the SOURCE FILE was in, and the factor applied to reach metres.
+    # PROVENANCE ONLY — `positions` is already metres by the time the session
+    # exists (see `_scale_positions_to_metres` at import), exactly as
+    # `world_shift` records a shift that has already been subtracted. Kept so
+    # the UI can explain why coordinates differ from the file, and so an export
+    # could one day offer to convert back.
+    #
+    # `source_unit_scale` is recorded even when it is 1.0, because "known to be
+    # metres" and "never asked" are different states: the first came from a CRS
+    # or a format guarantee, the second is the ASCII default. Both are None on a
+    # session created before units existed. Defaulted so existing direct
+    # CloudSession(...) constructions need no change.
+    source_units: Optional[str] = None
+    source_unit_scale: Optional[float] = None
     # Manual-labelling undo stack, keyed by label-column slug. Each entry records
     # the PRIOR values of the points one edit changed (see `_LabelDelta`), so a
     # rollback is a reverse-apply rather than a snapshot restore.
@@ -30177,26 +30572,259 @@ def _epsg_from_wkt_vlr(header) -> Optional[int]:
     return None
 
 
-def _read_las_crs_epsg(path: "_Path") -> Optional[int]:
-    """Best-effort EPSG code from a LAS/LAZ file's CRS VLRs. Tries pyproj's clean
-    database match first, then falls back to the EPSG code embedded in the file's
-    own WKT CRS VLR (real survey files often carry a CRS pyproj won't match to an
-    EPSG, but whose WKT names the code). Returns None for a non-LAS source or no
-    recoverable CRS. Reads only the header (no point data)."""
-    if path.suffix.lower() not in (".las", ".laz"):
+# ── Length units ───────────────────────────────────────────────────────────
+#
+# Every physically-dimensioned constant in this file assumes METRES — CSF's
+# cloth resolution and its airborne-vs-terrestrial regime switch, LAD's m²/m³,
+# QSM's 4.23 mm twig radius, ICP's voxel floors, the miss-distance threshold.
+# That assumption is now made true rather than merely hoped for: a cloud whose
+# source declares another unit is SCALED TO METRES at import, and the source
+# unit is kept only as provenance.
+#
+# Normalising (rather than carrying a unit and scaling at every use site) is
+# forced by the intermediate LAS this backend writes, which hardcodes
+# `header.scales = [0.001]*3` — 0.001 in SOURCE units. That is a 1 mm quantum
+# for a metre cloud but a 1 METRE quantum for a kilometre-unit one, so a cloud
+# that is not converted before the write is silently destroyed. Converting first
+# makes the existing 1 mm quantum true for every input.
+_UNIT_TO_METRES: Dict[str, float] = {
+    "m": 1.0,
+    "km": 1000.0,
+    "cm": 0.01,
+    "mm": 0.001,
+    # The two feet differ in the 7th significant figure, which is 2 mm over a
+    # 1 km survey — worth keeping distinct. "ftUS" is the US survey foot
+    # (1200/3937 m exactly), the unit of most US State Plane zones.
+    "ft": 0.3048,
+    "ftUS": 1200.0 / 3937.0,
+    "in": 0.0254,
+}
+
+# pyproj reports a unit NAME; map the ones that actually appear in CRS
+# definitions onto our slugs. Matched case-insensitively after stripping, so
+# "US survey foot" and "US Survey Foot" both land.
+_PYPROJ_UNIT_NAMES: Dict[str, str] = {
+    "metre": "m", "meter": "m", "m": "m",
+    "kilometre": "km", "kilometer": "km", "km": "km",
+    "centimetre": "cm", "centimeter": "cm", "cm": "cm",
+    "millimetre": "mm", "millimeter": "mm", "mm": "mm",
+    "foot": "ft", "feet": "ft", "ft": "ft", "international foot": "ft",
+    "us survey foot": "ftUS", "foot_us": "ftUS", "us foot": "ftUS",
+    "inch": "in", "in": "in",
+}
+
+# Formats whose unit is fixed by the SPECIFICATION, so there is nothing to
+# detect and nothing to ask:
+#
+#   * E57 — the spec mandates metres for Cartesian coordinates. Verified against
+#     the committed fixtures: cartesianX/Y/Z are plain Float nodes carrying no
+#     unit attribute and no coordinateMetadata, because there is no unit to
+#     declare.
+#   * RIEGL RXP / .riproject — scanner-local metres by format definition.
+_METRE_BY_SPEC_SUFFIXES = {".e57", ".rxp", ".riproject"}
+
+
+# Angular units, which are NOT lengths. Listed explicitly so a degree/radian
+# axis can never be mistaken for a length even if it reaches this function by
+# some path other than the `is_geographic` check in `_read_las_georef` — the
+# consequence of getting it wrong (scaling coordinates by 1/57) is silent and
+# destroys the data.
+_ANGULAR_UNIT_NAMES = frozenset({
+    "degree", "degrees", "deg", "arc-degree", "degree (supplier to define representation)",
+    "radian", "radians", "rad", "grad", "gradian",
+    "arc-second", "arcsecond", "arc-minute", "arcminute",
+})
+
+
+def _is_angular_unit(name: Optional[str]) -> bool:
+    """True for a unit of ANGLE rather than length (a geographic CRS's axes)."""
+    if not name:
+        return False
+    return str(name).strip().lower() in _ANGULAR_UNIT_NAMES
+
+
+def _unit_slug_from_name(name: Optional[str]) -> Optional[str]:
+    """Map a pyproj axis unit name onto one of our slugs, or None if unknown.
+
+    An ANGULAR unit is None, never a length: degrees cannot be converted to
+    metres by any constant (metres-per-degree of longitude depends on latitude).
+    """
+    if not name or _is_angular_unit(name):
         return None
+    return _PYPROJ_UNIT_NAMES.get(str(name).strip().lower())
+
+
+def _read_las_georef(path: "_Path") -> Tuple[Optional[int], Optional[str], Optional[float]]:
+    """Best-effort (EPSG, unit slug, metres-per-unit) from a LAS/LAZ header.
+
+    One function rather than two because both answers come from the SAME
+    `pyproj.CRS`: reading the header twice would be wasteful and — worse — lets
+    the EPSG and the unit disagree about which CRS they describe.
+
+    EPSG: tries pyproj's clean database match first, then falls back to the code
+    embedded in the file's own WKT CRS VLR (real survey files often carry a CRS
+    pyproj won't match to an EPSG, but whose WKT names the code).
+
+    Unit: read from the CRS's first axis. `unit_conversion_factor` is already
+    metres-per-unit, so it is authoritative even when the unit NAME is one we
+    don't recognise — the slug is for display, the factor is for arithmetic.
+
+    Returns (None, None, None) for a non-LAS source or an unreadable header.
+    Reads only the header (no point data)."""
+    if path.suffix.lower() not in (".las", ".laz"):
+        return (None, None, None)
     try:
         import laspy
         with laspy.open(str(path)) as reader:
             header = reader.header
         crs = header.parse_crs()
-        if crs is not None:
-            epsg = crs.to_epsg()
-            if epsg is not None:
-                return int(epsg)
-        return _epsg_from_wkt_vlr(header)
     except Exception:
-        return None
+        return (None, None, None)
+
+    epsg: Optional[int] = None
+    unit_slug: Optional[str] = None
+    factor: Optional[float] = None
+
+    if crs is not None:
+        try:
+            e = crs.to_epsg()
+            if e is not None:
+                epsg = int(e)
+        except Exception:
+            pass
+        try:
+            axis = crs.axis_info[0]
+            # ── Geographic CRS: NOT a length, and must never be scaled ──────
+            #
+            # A lat/long CRS (EPSG:4326, 4269, …) reports unit "degree" with a
+            # `unit_conversion_factor` of 0.0174533 — RADIANS per degree, not
+            # metres per unit. Treating that as a length factor multiplies every
+            # coordinate by 1/57, turning a 25 m tree into 0.44 m while the
+            # numbers still look plausible.
+            #
+            # Degrees also cannot be converted to metres by any constant: the
+            # metres-per-degree of longitude depends on latitude. A geographic
+            # cloud needs reprojection, which is a different feature. So it is
+            # reported as UNKNOWN (no factor, not certain) and left unscaled —
+            # the wizard then asks, defaulting to metres, which at least leaves
+            # the coordinates untouched.
+            #
+            # `is_geographic` rather than a name check: it catches every
+            # geographic CRS regardless of how pyproj spells its axis unit.
+            if crs.is_geographic:
+                unit_slug = None
+                factor = None
+            elif not _is_angular_unit(axis.unit_name):
+                # Second guard on the unit NAME, in case a CRS reports an
+                # angular axis without being flagged geographic.
+                #
+                # ── Every axis must agree ──────────────────────────────────
+                #
+                # A COMPOUND CRS can mix units: horizontal US survey feet with
+                # vertical metres (e.g. EPSG:2229+5703) is a standard US survey
+                # configuration, not a contrivance. Scaling all three axes by
+                # the FIRST axis's factor would divide every elevation by 3.28
+                # while leaving XY correct — so a 30 m tree becomes 9.14 m and
+                # XY/Z end up in different units, which silently breaks every
+                # distance, slope and volume the app computes.
+                #
+                # One scalar cannot describe such a file, so we report "unknown"
+                # and let the user say what they mean, rather than confidently
+                # applying a factor that is right for two axes out of three.
+                factors = []
+                for ax in crs.axis_info:
+                    if _is_angular_unit(ax.unit_name):
+                        factors = []
+                        break
+                    factors.append(float(ax.unit_conversion_factor))
+                agree = bool(factors) and all(
+                    math.isclose(x, factors[0], rel_tol=1e-12) for x in factors
+                )
+                if agree:
+                    f = factors[0]
+                    # A zero/negative/absurd factor means we misread the CRS; a
+                    # unit nobody uses is likelier a parse artefact than data.
+                    if math.isfinite(f) and 1e-6 < f < 1e6:
+                        factor = f
+                        unit_slug = _unit_slug_from_name(axis.unit_name)
+        except Exception:
+            pass
+
+    if epsg is None:
+        try:
+            epsg = _epsg_from_wkt_vlr(header)
+        except Exception:
+            epsg = None
+    return (epsg, unit_slug, factor)
+
+
+def _read_las_crs_epsg(path: "_Path") -> Optional[int]:
+    """Back-compat shim: just the EPSG half of `_read_las_georef`."""
+    return _read_las_georef(path)[0]
+
+
+def _scale_positions_to_metres(
+    positions: "np.ndarray",
+    metres_per_unit: Optional[float],
+) -> "np.ndarray":
+    """Scale an (N,3) position array from its source unit into metres.
+
+    Returns the input UNCHANGED when the factor is 1.0, absent, or nonsensical:
+
+      * 1.0 is returned by identity rather than multiplied, so the metre path —
+        which is almost all real data — is bit-identical to what it was before
+        units existed. A float multiply by 1.0 is exact in IEEE754, but not
+        multiplying at all is the property worth guaranteeing.
+      * a None/zero/negative factor means detection went wrong; applying it
+        would mangle the cloud, so it is refused rather than trusted.
+
+    POSITIONS ONLY. Intensity, classification, timestamps, return numbers and
+    colour are dimensionless or in their own units and must not be touched.
+    Scan origins and trajectories ARE positions and scale with the cloud — see
+    the world-frame contract for `scan_params.origin`.
+    """
+    if metres_per_unit is None:
+        return positions
+    f = float(metres_per_unit)
+    if not math.isfinite(f) or f <= 0.0:
+        return positions
+    if f == 1.0:
+        return positions
+    if isinstance(positions, np.memmap) and positions.flags.writeable:
+        # A store-backed session's column: scale it where it lives, a block at a
+        # time. Returning `positions * f` would copy the whole cloud into RAM and
+        # leave the store holding the unscaled column.
+        for a in range(0, len(positions), _LAS_READ_CHUNK):
+            positions[a:a + _LAS_READ_CHUNK] *= f
+        return positions
+    return np.asarray(positions, dtype=np.float64) * f
+
+
+def _detect_source_units(path: "_Path") -> Tuple[Optional[str], Optional[float], bool]:
+    """(unit slug, metres-per-unit, certain?) for a source file.
+
+    `certain` is True only when the answer comes from the format itself — a
+    declared CRS, or a spec that fixes the unit. A False/None result means the
+    format cannot say, and the user must be asked (the wizard defaults to
+    metres, which is what the app assumed implicitly before units existed).
+    """
+    suffix = path.suffix.lower()
+    if suffix in _METRE_BY_SPEC_SUFFIXES:
+        return ("m", 1.0, True)
+    if suffix in (".las", ".laz"):
+        _epsg, slug, factor = _read_las_georef(path)
+        if factor is not None:
+            # Trust the factor even when the name is unfamiliar: report the
+            # closest slug we have, or fall back to naming the raw factor.
+            if slug is None:
+                slug = next(
+                    (s for s, f in _UNIT_TO_METRES.items() if abs(f - factor) < 1e-9),
+                    None,
+                )
+            return (slug, factor, True)
+        return (None, None, False)
+    # PTX, PLY, PCD, ASCII (xyz/csv/txt/pts/asc): no unit in the format.
+    return (None, None, False)
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
@@ -31017,6 +31645,13 @@ class CloudSessionCreateRequest(BaseModel):
     # back at the read chokepoint, so downstream ops/exports recover true world
     # coords. None / omitted = keep the original (possibly large) coordinates.
     world_shift: Optional[List[float]] = None
+    # The unit the SOURCE FILE's coordinates are in, chosen (or confirmed) in the
+    # import wizard: one of _UNIT_TO_METRES' slugs. Positions are scaled to
+    # metres at create — BEFORE the world shift, before every derived metric,
+    # and before the intermediate LAS write whose 1 mm quantum is expressed in
+    # source units. None / omitted / "m" = no scaling, which is what every
+    # import did before units existed.
+    source_units: Optional[str] = None
     # Far-field distance (m) used by miss auto-detection's DISTANCE fallback only
     # — when a scan carries no `is_miss` column AND no `target_index` sentinel, a
     # point this far (>=0.98x) from the scanner origin is treated as a sky/miss.
@@ -31306,12 +31941,46 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                     ),
                 )
             beam_origins = source_origins
+        # ── Normalise to metres ────────────────────────────────────────────
+        #
+        # BEFORE the global shift, and before every derived metric below
+        # (ground_z, robust_extent, point_spacing) — all of which feed
+        # metre-calibrated thresholds — and before the intermediate LAS write,
+        # whose `header.scales = [0.001]*3` is expressed in SOURCE units. A
+        # kilometre-unit cloud written unscaled is quantised to 1 metre.
+        #
+        # Deliberately positions + beam origins only: intensity, classification,
+        # timestamps and colour are dimensionless or carry their own units.
+        # `source_unit_scale` is recorded even when 1.0, so a later reader can
+        # tell "known metres" from "never asked".
+        source_units: Optional[str] = getattr(request, "source_units", None) or None
+        source_unit_scale: Optional[float] = None
+        if source_units:
+            _f = _UNIT_TO_METRES.get(source_units)
+            if _f is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"Unknown source_units {source_units!r}; expected one of "
+                            f"{sorted(_UNIT_TO_METRES)}"),
+                )
+            source_unit_scale = float(_f)
+            if source_unit_scale != 1.0:
+                positions = _scale_positions_to_metres(positions, source_unit_scale)
+                if beam_origins is not None:
+                    beam_origins = _scale_positions_to_metres(beam_origins, source_unit_scale)
+                # The scanner origin is a position in the same frame and scales
+                # with the cloud — applied where it is resolved (`_miss_origin`
+                # below), since it may come from E57 scan_meta or the request.
+
         # CloudCompare-style global shift: subtract the requested offset so the
         # in-RAM array (the source of truth) — and the octree built from it below —
         # hold small, precision-friendly coordinates. The shift is stored on the
         # session and added back in `_read_points_from_source`, so triangulate /
         # skeleton / LAD / export all see true world coords. A near-zero or absent
         # shift means the cloud keeps its original coordinates.
+        #
+        # NOTE the ordering: the shift the wizard sent was computed by a preview
+        # probe that ALSO scaled to metres, so both are in the same frame here.
         world_shift_arr: Optional[np.ndarray] = None
         if request.world_shift is not None:
             ws = np.asarray(request.world_shift, dtype=np.float64)
@@ -31376,6 +32045,43 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # import — which writes no LAS — hands its pose/params in directly.
         scan_meta = (preloaded_meta if preloaded_meta is not None
                      else _import_scan_meta.pop(str(las_path.resolve()), None))
+
+        # ── Scale the scanner geometry with the points ─────────────────────
+        #
+        # A scanner ORIGIN is a position in the same frame as `positions`, so it
+        # rides the same unit conversion. Done HERE, in place, before any
+        # consumer reads it — scaling a local copy for miss detection while
+        # returning the raw dict to the renderer would leave two origins for one
+        # scanner, differing by the unit factor.
+        #
+        # This is not cosmetic: `scan_params.origin` becomes the beam apex for
+        # LAD path-length integration and for backfill-misses, which
+        # reconstructs every ray as (xyz - origin). A PTX tripod scan imported
+        # as feet would put the apex ~226 m from the cloud it sits inside.
+        #
+        # PTX (`_ptx_scan_params`) and PCD (VIEWPOINT) are the exposed formats —
+        # both report no detectable unit, so the wizard actively offers the user
+        # feet/mm for exactly these. E57 and RIEGL are metres by spec, and their
+        # other scan_params fields are angles and counts, not lengths.
+        if scan_meta and source_unit_scale not in (None, 1.0):
+            _usf = float(source_unit_scale)
+
+            def _scale_origin(v):
+                return [float(x) * _usf for x in v] if v is not None and len(v) == 3 else v
+
+            scan_meta = dict(scan_meta)
+            if scan_meta.get("origin") is not None:
+                scan_meta["origin"] = _scale_origin(scan_meta["origin"])
+            if scan_meta.get("scan_origins") is not None:
+                scan_meta["scan_origins"] = [
+                    _scale_origin(o) for o in scan_meta["scan_origins"]
+                ]
+            sp = scan_meta.get("scan_params")
+            if isinstance(sp, dict) and sp.get("origin") is not None:
+                sp = dict(sp)
+                sp["origin"] = _scale_origin(sp["origin"])
+                scan_meta["scan_params"] = sp
+
         if las_is_temp:
             try:
                 las_path.unlink()
@@ -31397,7 +32103,14 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # their misses onto the thin shell, exactly like a fresh synthetic scan.
         _miss_origin = scan_meta["origin"] if (scan_meta and scan_meta.get("origin") is not None) else None
         if _miss_origin is None and request.origin is not None and len(request.origin) == 3:
+            # UNITS: this branch only. `request.origin` arrives in the SOURCE
+            # file's frame (from a Helios scan XML), so it needs the same scaling
+            # the points got. A `scan_meta` origin was already scaled in place
+            # above, so scaling it again here would double-apply the factor —
+            # which is why this sits inside the branch rather than after both.
             _miss_origin = list(request.origin)
+            if source_unit_scale not in (None, 1.0):
+                _miss_origin = [float(v) * float(source_unit_scale) for v in _miss_origin]
         if _miss_origin is not None and world_shift_arr is not None:
             _miss_origin = (np.asarray(_miss_origin, dtype=np.float64) - world_shift_arr).tolist()
         _report(0.45, "Detecting sky/miss points…")
@@ -31426,6 +32139,25 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         # dominate a percentile span exactly as they do the raw bounding box.
         robust_extent = _robust_extent(_gz_src)
         robust_bounds = _robust_aabb(_gz_src)
+        # Per-attribute percentile ranges for the colorbar. Hits-only like the
+        # two above: a miss shell is a synthetic far-field value on every column
+        # it carries, and it skews a scalar percentile exactly as it skews the
+        # extent.
+        def _hits_only(arr):
+            # The mask is one bool per point; only apply it to a column that is
+            # actually per-point and 1-D. An extra that is neither (a stray
+            # scalar, an (n,3) block) is passed through untouched — the range
+            # helper skips anything it can't read as a column anyway, and a
+            # shape-mismatched index here would raise mid-import.
+            if arr is None or _gz_mask is None:
+                return arr
+            a = np.asarray(arr)
+            return a[_gz_mask] if (a.ndim == 1 and a.shape[0] == _gz_mask.shape[0]) else arr
+
+        robust_attribute_ranges = _robust_attribute_ranges(
+            _hits_only(intensity),
+            {k: _hits_only(v) for k, v in (extras or {}).items()},
+        )
         # Median nearest-neighbour spacing, for the ground tool's ALS/close-range
         # regime switch (see _ALS_SPACING_M). Measured HERE rather than when the
         # panel opens because the renderer holds no positions for an octree
@@ -31449,7 +32181,16 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             timestamps=timestamps,  # float64 GPS/relative time, not in float32 extras
             gps_time_encoding=gps_time_encoding,
             beam_origins=beam_origins,  # float64 ExtraBytes origins; bypass the join
-            crs_epsg=_read_las_crs_epsg(source_path),  # for DEM raster georeferencing
+            # For DEM raster georeferencing — but ONLY when the coordinates are
+            # still in the CRS's own units. An EPSG like 2229 is DEFINED in US
+            # survey feet; once we scale those coordinates to metres, stamping
+            # 2229 into a GeoTIFF tells a GIS to read metre tiepoints as feet,
+            # placing the raster 3.28x too close to the false origin and
+            # overlaying nothing. A missing CRS is honest; a wrong one is not.
+            crs_epsg=(_read_las_crs_epsg(source_path)
+                      if source_unit_scale in (None, 1.0) else None),
+            source_units=source_units,
+            source_unit_scale=source_unit_scale,
             deleted=(store.allocate_column("deleted", bool) if store is not None
                      else np.zeros(n, dtype=bool)),
             deleted_history=[],
@@ -31602,6 +32343,12 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
     # OctreeRef (provenance + world-coord readouts). null when no shift was applied.
     world_shift_out = world_shift_arr.tolist() if world_shift_arr is not None else None
     return {"session_id": session_id, "point_count": n, "world_shift": world_shift_out,
+            # What the source file's unit was, and the factor applied to reach
+            # metres. Provenance only — positions above are already metres —
+            # but the renderer persists it so the UI can explain why a scan's
+            # coordinates differ from the file it came from.
+            "source_units": source_units,
+            "source_unit_scale": source_unit_scale,
             # Outlier-resistant floor (see `_robust_ground_z`). The renderer uses
             # it for the default scene origin's height and the ground grid instead
             # of tight_bounds.min.z, which a single stray low point can sink.
@@ -31615,6 +32362,12 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             # needs its CENTRE: with far outliers the raw box centre sits out in
             # empty space, so a camera converging on it stalls short of the data.
             "robust_bounds": robust_bounds,
+            # Per-attribute percentile ranges for the colorbar (see
+            # `_robust_attribute_ranges`). The octree metadata carries only
+            # absolute extrema, so a single hot return stretches a scalar ramp
+            # out to where no points are. Includes categorical columns — the
+            # renderer decides what to apply them to.
+            "robust_attribute_ranges": robust_attribute_ranges,
             # Median nearest-neighbour spacing (see `_regime_point_spacing`). The
             # ground tool switches CSF recipe on it: close-range and airborne
             # clouds want opposite cloth resolutions, and the renderer cannot
@@ -31910,7 +32663,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
     # activity while it runs.
     _report(None, "Reconstructing misses")
     try:
-        synth_xyz, count, synth_grid = _run_gapfill_extract(cloud)
+        synth_xyz, count, synth_grid, synth_ts = _run_gapfill_extract(cloud)
     except Exception as exc:
         # Helios raises (HeliosRuntimeError) when it can't reconstruct the scan
         # grid — e.g. a sparse row/column raster ("too few populated scan rows"),
@@ -31936,6 +32689,11 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "positions": synth_xyz,
         "directions": synth_dirs,
     }
+    if synth_ts is not None and synth_ts.shape[0] == synth_xyz.shape[0]:
+        # Each synthesised miss's own pulse time. The LAD inversion groups
+        # returns into beams by shared timestamp, so these keep every miss its
+        # own transmitted pulse (see _append_backfilled_misses for the fallback).
+        buffer["timestamp"] = synth_ts
     if synth_grid:
         # The raster address of each synthesised miss, when the row/column path
         # produced one (the timestamp path forms no raster and supplies none).
@@ -32748,6 +33506,48 @@ def _session_observed_classes_locked(sess: "CloudSession") -> dict:
     return out
 
 
+def _session_robust_color_stats_locked(sess: "CloudSession") -> dict:
+    """{"robust_bounds": {...}, "robust_attribute_ranges": {...}} recomputed over
+    the points that SURVIVE and are real returns. Caller holds the lock.
+
+    These are the colorbar's outlier-resistant domains (see `_robust_aabb` and
+    `_robust_attribute_ranges`). They are measured at import over the arrays in
+    RAM, and they cannot be recovered from the octree afterwards: PotreeConverter
+    writes only absolute extrema, and the source file is never re-read.
+
+    So an edit that rewrites the octree has to re-measure them here, or the
+    renderer's rebuild finds them missing and silently falls back to raw extrema
+    — the colorbar snaps back to being set by one noise point, and the feature
+    looks like it randomly stopped working after a crop. Re-measuring is also the
+    only CORRECT answer: cropping away the outlier genuinely changes the
+    percentile, so carrying the import-time values forward would be stale.
+
+    Attached in `_session_rebuild` for the same reason `octree_pose` is cleared
+    and `observed_classes` is attached there — every edit funnels through that
+    one function, and a per-caller attach is a rule someone eventually forgets.
+
+    Hits-and-alive for the same reason as its siblings: a miss sits ~1 km out
+    along the beam and would dominate a percentile exactly as it dominates the
+    raw box, and a deleted point is not on screen.
+    """
+    editable = _session_editable_mask_locked(sess)
+    if not editable.any():
+        return {}
+    out: dict = {}
+    bounds = _robust_aabb(sess.positions[editable])
+    if bounds is not None:
+        out["robust_bounds"] = bounds
+    ranges = _robust_attribute_ranges(
+        sess.intensity[editable] if sess.intensity is not None else None,
+        {k: v[editable] for k, v in sess.extras.items()
+         if v is not None and np.asarray(v).ndim == 1
+         and np.asarray(v).shape[0] == editable.shape[0]},
+    )
+    if ranges:
+        out["robust_attribute_ranges"] = ranges
+    return out
+
+
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
     """Append (or replace) a per-point scalar extra-dim column on the session
     array. `values` is aligned to the SURVIVING points (positions[~deleted]);
@@ -32844,7 +33644,15 @@ def _session_rebuild(
         # function, so a per-caller attach is a rule someone eventually forgets —
         # and forgetting leaves the renderer listing classes the cloud no longer
         # contains. See `_session_observed_classes_locked`.
-        meta = {**meta, "observed_classes": _session_observed_classes_locked(sess)}
+        # Outlier-resistant colorbar domains, re-measured for the same reason and
+        # at the same chokepoint — see `_session_robust_color_stats_locked`.
+        # Without this every edit drops them and the colorbar silently reverts to
+        # raw extrema, i.e. back to being set by a single noise point.
+        meta = {
+            **meta,
+            "observed_classes": _session_observed_classes_locked(sess),
+            **_session_robust_color_stats_locked(sess),
+        }
     return cache_key, cache_dir, meta
 
 
@@ -32892,6 +33700,11 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         # in the same (shifted) space and still restore to world coords on read.
         world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),
         crs_epsg=sess.crs_epsg,  # subsets keep the parent's CRS for DEM georeferencing
+        # A subset is the SAME points, already converted — it inherits the
+        # parent's provenance rather than losing it. (Nothing is re-scaled here:
+        # the positions it copies are metres already.)
+        source_units=getattr(sess, "source_units", None),
+        source_unit_scale=getattr(sess, "source_unit_scale", None),
         deleted=np.zeros(len(take), dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -33446,6 +34259,18 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
     epsgs = {s.crs_epsg for s in sessions if s.crs_epsg is not None}
     crs_epsg = next(iter(epsgs)) if len(epsgs) == 1 and all(s.crs_epsg is not None for s in sessions) else None
 
+    # Source-unit provenance, by the same all-must-agree rule. Every input is
+    # ALREADY in metres (each was converted at its own import), so this is
+    # purely a question of what to report, never of rescaling — a merge of a
+    # feet scan and a metre scan is perfectly valid geometry whose provenance is
+    # simply "mixed", recorded as None.
+    unit_slugs = {getattr(s, "source_units", None) for s in sessions}
+    merged_units = (next(iter(unit_slugs))
+                    if len(unit_slugs) == 1 and None not in unit_slugs else None)
+    unit_scales = {getattr(s, "source_unit_scale", None) for s in sessions}
+    merged_unit_scale = (next(iter(unit_scales))
+                         if len(unit_scales) == 1 and None not in unit_scales else None)
+
     new_id = uuid.uuid4().hex[:8]
     new_sess = CloudSession(
         session_id=new_id,
@@ -33461,6 +34286,8 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
         beam_origins=beam_origins,
         world_shift=(shift_out_arr.copy() if shift_out is not None else None),
         crs_epsg=crs_epsg,
+        source_units=merged_units,
+        source_unit_scale=merged_unit_scale,
         deleted=np.zeros(total, dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -33512,6 +34339,11 @@ def session_merge(request: SessionMergeRequest):
             "session_id": merged.session_id,
             "point_count": int(len(merged.positions)),
             "world_shift": world_shift_out,
+            # Unit provenance, merged by the all-must-agree rule in
+            # `_merge_sessions_locked` (a mixed batch reports none). Every input
+            # is already metres, so this only says what to display.
+            "source_units": merged.source_units,
+            "source_unit_scale": merged.source_unit_scale,
             "cache_id": cache_key,
             "cache_dir": str(cache_dir),
             "has_misses": has_misses,

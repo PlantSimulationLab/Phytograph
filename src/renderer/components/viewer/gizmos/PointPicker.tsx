@@ -74,7 +74,12 @@ function worldPerPixelAt(camera: THREE.Camera, viewportHeight: number, distance:
 
 // CloudCompare-style point picker.
 //
-// Mounted only while the Pick Point tool is armed. Listens on the canvas
+// Mounted only while the Pick & Measure tool is armed. It reports a raw hit and
+// nothing more — whether that hit becomes an inspect label or a measurement
+// vertex is the caller's decision (see `pickerMode` in PointCloudViewer), which
+// is what lets one armed picker serve all four modes.
+//
+// Listens on the canvas
 // directly (rather than mounting an R3F click target like OriginPicker's giant
 // plane) so a pick works in every view direction — a finite catcher plane
 // misses when the camera looks along or away from it — with an explicit drag

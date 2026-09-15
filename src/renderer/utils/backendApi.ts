@@ -218,6 +218,11 @@ export interface TriangulationResult {
   // pointsUsed < cloud size, which a crop alone also makes true — gate the
   // "downsampled" warning on THIS, not on the count comparison.
   downsampled?: boolean;
+  // Exact duplicate coordinates dropped before Ball Pivoting (0 for the other
+  // methods, which don't dedup). Coincident points add no surface and, past 50%
+  // of the cloud, collapse the auto ball radius to 0 — which Open3D rejects as
+  // an "invalid, negative radius". `pointsUsed` is already net of them.
+  duplicatesDropped?: number;
   // Per-triangle grid cell (0xffffffff = outside) when the request pinned the
   // mesh to a `grid`. Aligned 1:1 with `triangles`. Undefined when not pinned.
   triangleCellIds?: Uint32Array;
@@ -759,6 +764,7 @@ export async function triangulatePointCloud(
     methodUsed: meta.method_used as string,
     pointsUsed: meta.points_used as number | undefined,
     downsampled: meta.downsampled as boolean | undefined,
+    duplicatesDropped: meta.duplicates_dropped as number | undefined,
     triangleCellIds: buffers.triangle_cell_ids as Uint32Array | undefined,
   };
 }
@@ -1736,6 +1742,19 @@ export interface LADResponse {
   dropped_columns?: number;
   // EPSG shared by every source scan, else null. Drives raster georeferencing.
   crs_epsg?: number | null;
+  // What the inversion inferred from target_count for pulses whose returns are
+  // no longer in the cloud (a crop to the grid). hidden_after were placed beyond
+  // the grid and counted as transmitted; hidden_ambiguous could not be placed
+  // (the cloud was cropped INSIDE the grid). null when the native library
+  // predates the tally.
+  cropped_returns?: {
+    beams_with_hidden_returns: number;
+    hidden_before: number;
+    hidden_after: number;
+    hidden_ambiguous: number;
+    beams_ambiguous: number;
+    standins_ignored: number;
+  } | null;
   warnings: string[];
   error?: string;
 }
@@ -2948,6 +2967,13 @@ export interface PointCloudPreviewResponse {
   // precision (any |axis min| > ~1e4). null otherwise. The wizard pre-fills its
   // shift fields from this (Z defaulted off). See _suggest_global_shift (backend).
   suggested_shift?: [number, number, number] | null;
+  // The length unit the SOURCE declares, when it declares one ("m", "ftUS", …).
+  // `units_certain` is true only when the FORMAT is authoritative — a CRS in a
+  // LAS header, or E57/RIEGL which are metres by specification. False means the
+  // format cannot say and the wizard is asking (defaulted to metres). See
+  // _detect_source_units (backend).
+  detected_units?: string | null;
+  units_certain?: boolean;
 }
 
 // Cheaply inspect a point-cloud file for the import wizard. The backend reads
@@ -4091,6 +4117,12 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // shift was applied. The renderer persists it on the cloud's OctreeRef for
   // world-coord readouts/provenance; the backend restores world coords on read.
   world_shift?: [number, number, number] | null;
+  // The unit the SOURCE file was in, and the factor applied to reach metres.
+  // Provenance only — every position in the session is already metres. A scale
+  // of exactly 1 means "known metres"; null/absent means the scan predates
+  // units or nothing was asked.
+  source_units?: string | null;
+  source_unit_scale?: number | null;
   // Sky/miss points (laser pulses that returned nothing) are kept in the
   // session for LAD but NOT in the octree (their ~20 km coords would poison the
   // bounding box). `has_misses` lets the renderer offer a "Show misses" toggle;
@@ -4129,6 +4161,12 @@ export interface CloudSessionMetadata extends OctreeMetadata {
   // content's centre — unlike `tight_bounds`', which far outliers drag into
   // empty space. null on a degenerate cloud.
   robust_bounds?: { min: [number, number, number]; max: [number, number, number] } | null;
+  // Outlier-resistant [lo, hi] per attribute slug (see `_robust_attribute_ranges`
+  // in main.py) — the colorbar's domain, as opposed to the absolute extrema the
+  // octree metadata carries. Keyed by slug, degenerate columns omitted, `{}` when
+  // nothing qualified. Includes categorical slugs: the backend cannot tell them
+  // apart, so the renderer gates on its own classification registries.
+  robust_attribute_ranges?: Record<string, [number, number]> | null;
   // Median 3D nearest-neighbour spacing (see `_regime_point_spacing` in
   // main.py). The ground tool switches CSF recipe on it — airborne and
   // close-range clouds want opposite cloth resolutions. Measured at import
@@ -4292,6 +4330,12 @@ export async function createCloudSession(
   // the user actually changed; an in-file format's auto-detection is otherwise
   // untouched. Empty/undefined → the previous behaviour exactly.
   roleOverrides?: Record<string, string> | null,
+  // The length unit the SOURCE file's coordinates are in, from the wizard.
+  // The backend SCALES positions to metres by this at import — before the world
+  // shift and before the intermediate LAS write — so it is a scale factor, not
+  // a label. undefined/null/'m' means no scaling, which is exactly what every
+  // import did before units existed.
+  sourceUnits?: string | null,
 ): Promise<CloudSessionMetadata> {
   try {
     // The endpoint streams PHP1 progress markers ahead of its JSON tail, so it
@@ -4311,6 +4355,7 @@ export async function createCloudSession(
         drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
         role_overrides: roleOverrides && Object.keys(roleOverrides).length
           ? roleOverrides : null,
+        source_units: sourceUnits ?? null,
       },
       signal,
       600000,
@@ -4374,6 +4419,10 @@ export async function createCloudSessions(
   onRunId?: (runId: string) => void,
   // See createCloudSession: in-file formats only; ASCII skips ride the plan.
   droppedSlugs?: string[] | null,
+  // See createCloudSession: the SOURCE unit the backend scales positions by at
+  // create. Every position in a multi-scan file shares it — they come from one
+  // file, so one declared unit.
+  sourceUnits?: string | null,
 ): Promise<CloudScanPosition[]> {
   try {
     const res = await fetchJsonWithProgress<CloudScanPositions & { error?: string }>(
@@ -4386,6 +4435,7 @@ export async function createCloudSessions(
         miss_distance_threshold: missDistanceThreshold ?? null,
         origin: origin ?? null,
         drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
+        source_units: sourceUnits ?? null,
       },
       signal,
       600000,
@@ -4961,7 +5011,7 @@ export async function duplicateCloudSession(
  * for octree-backed clouds. Returns the merged octree metadata. */
 export async function sessionMerge(
   sessionIds: string[],
-): Promise<{ merged: OctreeMetadata & { session_id: string; point_count: number; cache_id: string; world_shift?: [number, number, number] | null; has_misses?: boolean; miss_octree_cache_id?: string | null } }> {
+): Promise<{ merged: OctreeMetadata & { session_id: string; point_count: number; cache_id: string; world_shift?: [number, number, number] | null; source_units?: string | null; source_unit_scale?: number | null; has_misses?: boolean; miss_octree_cache_id?: string | null } }> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 300000, '/api/cloud/session/merge');

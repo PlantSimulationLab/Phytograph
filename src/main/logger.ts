@@ -8,9 +8,15 @@
 // feed into, so a bug report can carry something diagnosable.
 //
 // Layout of the unified file (default electron-log path):
-//   macOS:   ~/Library/Logs/Phytograph/main.log
-//   Windows: %APPDATA%\Phytograph\logs\main.log
-//   Linux:   ~/.config/Phytograph/logs/main.log
+//   macOS:   ~/Library/Logs/phytograph/main.log
+//   Windows: %APPDATA%\phytograph\logs\main.log
+//   Linux:   ~/.config/phytograph/logs/main.log
+// Lowercase because electron-log names the dir after app.getName(), which
+// returns "phytograph" despite main.ts's app.setName('Phytograph') — Electron
+// doesn't recompute cached paths after setName. Only Linux is case-sensitive
+// enough to care, but the paths above are wrong everywhere if you capitalise
+// them (cf. the octree cache, which really is "Phytograph" — hardcoded by the
+// backend, not derived from the app name).
 // Scopes tag each line by origin: [main], [backend], [renderer], [updater].
 //
 // The Python backend ALSO writes its own rotating file (see backend_wrapper.py)

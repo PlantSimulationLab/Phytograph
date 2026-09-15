@@ -190,3 +190,50 @@ def test_memory_pressure_evicts_ram_resident_sessions(client, tmp_path, monkeypa
     main._sweep_cloud_sessions()
     assert ids[2] in main._cloud_sessions
     assert ids[0] in main._spilled_sessions and ids[1] in main._spilled_sessions
+
+
+def test_a_store_backed_import_in_feet_is_scaled_on_disk(client, tmp_path, monkeypatch):
+    """Scaling a store-backed import to metres must happen in the store's own
+    column: a RAM copy would put the whole cloud back in memory and leave the
+    store holding unscaled coordinates."""
+    monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
+    monkeypatch.setenv("PHYTOGRAPH_SESSION_SPILL_ROOT", str(tmp_path / "sessions"))
+    monkeypatch.setenv("PHYTOGRAPH_SESSION_STORE_MIN_POINTS", "0")
+    monkeypatch.setattr(main, "_cloud_sessions", {})
+    monkeypatch.setattr(main, "_spilled_sessions", {})
+    monkeypatch.setattr(main, "_LAS_READ_CHUNK", 700)   # several blocks
+    las = _write_las(tmp_path / "ft.las", n=2000)
+    import laspy
+    raw = laspy.read(str(las))
+    source = np.column_stack([raw.x, raw.y, raw.z]).astype(np.float64)
+
+    res = client.post("/api/cloud/session/create",
+                      json={"source_path": str(las), "source_units": "ft"})
+    assert res.status_code == 200, res.text
+    sess = main._get_cloud_session(decode_streamed_json(res.content)["session_id"])
+    assert sess.store is not None
+    assert isinstance(sess.positions, np.memmap)
+    assert sess.source_unit_scale == 0.3048
+    shift = np.asarray(sess.world_shift if sess.world_shift is not None else [0, 0, 0])
+    np.testing.assert_allclose(np.asarray(sess.positions) + shift, source * 0.3048, atol=1e-9)
+    on_disk = np.load(Path(sess.store.root) / "columns" / "positions.npy", mmap_mode="r")
+    np.testing.assert_array_equal(on_disk, np.asarray(sess.positions))
+
+
+def test_scaling_a_memory_mapped_column_does_not_copy_it(tmp_path, monkeypatch):
+    """The regression test for the import-time RAM spike: a store-backed
+    positions column must be scaled where it lives and returned as itself.
+    Returning `positions * f` held a second full copy of the cloud in RAM during
+    import (the end state looked correct only because finalisation wrote the copy
+    back into the store)."""
+    monkeypatch.setattr(main, "_LAS_READ_CHUNK", 3)
+    path = tmp_path / "positions.npy"
+    col = np.lib.format.open_memmap(str(path), mode="w+", dtype=np.float64, shape=(10, 3))
+    col[:] = np.arange(30, dtype=np.float64).reshape(10, 3)
+    out = main._scale_positions_to_metres(col, 0.3048)
+    assert out is col, "a memory-mapped column was copied instead of scaled in place"
+    np.testing.assert_allclose(np.load(path, mmap_mode="r"), np.arange(30).reshape(10, 3) * 0.3048)
+    # A plain array is still returned as a new, scaled array.
+    plain = np.ones((4, 3))
+    scaled = main._scale_positions_to_metres(plain, 2.0)
+    assert scaled is not plain and np.all(plain == 1.0) and np.all(scaled == 2.0)

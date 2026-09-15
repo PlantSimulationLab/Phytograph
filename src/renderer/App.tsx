@@ -403,7 +403,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // callers that don't offer a cancel (none, currently) still work.
     opts?: ImportProgressOptions,
   ): Promise<Scan[]> => {
-    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, droppedSlugs, worldShift } = result;
+    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, droppedSlugs, worldShift, units } = result;
     // Far-field miss-detection threshold is a user setting; thread it into the
     // import so the backend's distance fallback honours it (the primary
     // target_index==99 signal ignores it).
@@ -411,6 +411,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const positions = await parsePointCloudsFromPath(
       input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
       missDistanceThreshold, null, opts, droppedSlugs,
+      // roleOverrides is not threaded on this path (unchanged); `units` is the
+      // wizard's source-unit choice, which the backend scales positions by at
+      // session create.
+      null, units,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
     for (const slug of continuousSlugs) registerContinuousSlug(slug);
@@ -1758,6 +1762,13 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             octree.asciiFormat ?? null,
             octree.columnPlan ?? null,
             octree.worldShift ?? null,
+            // The SOURCE UNIT is part of the rebuild descriptor: this re-reads
+            // the raw file, still in its original unit. Without it a feet scan
+            // whose session was swept (30-min idle TTL — routine) comes back
+            // 3.28x larger and is merged at that scale into a metre batch.
+            // Positions 5-11 are defaults; units is the 12th.
+            null, null, undefined, undefined, undefined, null, null,
+            octree.sourceUnits ?? null,
           );
           sessionIds.push(rebuilt.session_id);
         }
@@ -1780,6 +1791,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           categoricalAttributes: firstOctree.categoricalAttributes,
           sessionId: merged.session_id,
           worldShift: merged.world_shift ?? null,
+          // The backend merges provenance by an all-must-agree rule (a mixed
+          // batch reports none), so take the MERGED session's answer rather
+          // than the first input's — every input is already metres, so this is
+          // only about what to report.
+          sourceUnits: merged.source_units ?? null,
+          sourceUnitScale: merged.source_unit_scale ?? null,
           continuousAttributes: firstOctree.continuousAttributes,
           classPalettes: firstOctree.classPalettes,
         },

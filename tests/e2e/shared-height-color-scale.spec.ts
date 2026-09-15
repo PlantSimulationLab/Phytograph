@@ -14,8 +14,15 @@ const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
 const TALL = join(FIXTURES, 'tiny.xyz');           // z 0.000 .. 1.500
 const SHORT = join(FIXTURES, 'ground_plants.xyz'); // z 0.000 .. 0.798
 
+// The domains below are OUTLIER-RESISTANT (1st-99th percentile), not raw
+// bounding boxes — a colorbar stretched to a raw extent is stretched to its
+// single most extreme point, so one noise return above the canopy costs the
+// whole scene its colour resolution. tiny.xyz is an evenly-spaced cylinder
+// whose percentiles land exactly on its extent, so TALL_MAX is unchanged;
+// ground_plants.xyz has a thin top tail, so its robust max (0.7670) sits below
+// its raw 0.7981. See robustColorRange.ts.
 const TALL_MAX = 1.5;
-const SHORT_MAX = 0.7981;
+const SHORT_MAX = 0.767;
 
 // One consistent Z-height colour scale across every visible scan.
 //

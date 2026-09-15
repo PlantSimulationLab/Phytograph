@@ -44,6 +44,10 @@ You have four ways to import:
     current scene. See
     [Import & export](../workflows/import-export.md#import) for details.
 
+    On **Linux**, an AppImage only appears in the *Open With* list once it
+    is executable and has been launched at least once — see
+    [Install on Linux](install.md#install-on-linux).
+
 A progress indicator appears while the file is parsed, advancing through the
 stages of the import. ASCII files in the multi-million-point range typically
 import in a few seconds; LAS/LAZ binary formats are faster still. If an import
