@@ -646,21 +646,44 @@ def test_session_to_lad_arrays_appends_buffer_as_misses(stub_pyhelios):
     assert len(np.unique(ts_col)) == len(_TS_POSITIONS) + _FakeCloud.SYNTH
 
 
-def test_uniquify_miss_timestamps_separates_collisions_by_one_ulp():
-    # A synthesised miss that landed on a real pulse's time (the gapfiller dedupes
-    # by raster cell, not by time) must become its own beam without moving
-    # measurably: one float step, so a trajectory join still resolves the same
-    # pose. Duplicates among the misses themselves are separated the same way.
+def test_dedupe_miss_timestamps_drops_hit_collisions_and_nudges_miss_duplicates():
+    # A synthesised miss on a real pulse's time IS that pulse (the gapfiller
+    # reconstructs the pulse clock), so it is dropped: the hit already accounts
+    # for the pulse, and Helios would otherwise refuse the merged beam. Misses
+    # that merely duplicate each other are separated by one float step, so a
+    # trajectory join still resolves the same pose.
     hits = np.array([100.0, 101.0, 102.0])
     misses = np.array([100.0, 150.0, 150.0, 200.0])
-    out = main._uniquify_miss_timestamps(misses, hits)
-    assert len(np.unique(np.concatenate([hits, out]))) == 7
-    assert out[0] != 100.0 and abs(out[0] - 100.0) < 1e-9
-    assert abs(out[1] - 150.0) < 1e-9 and abs(out[2] - 150.0) < 1e-9 and out[1] != out[2]
-    assert out[3] == 200.0
+    out, keep = main._dedupe_miss_timestamps(misses, hits)
+    assert keep.tolist() == [False, True, True, True]
+    assert out.shape == (3,)
+    assert len(np.unique(np.concatenate([hits, out]))) == 6
+    assert abs(out[0] - 150.0) < 1e-9 and abs(out[1] - 150.0) < 1e-9 and out[0] != out[1]
+    assert out[2] == 200.0
     # No collisions: untouched.
-    np.testing.assert_array_equal(main._uniquify_miss_timestamps(np.array([5.0, 6.0]), hits),
-                                  np.array([5.0, 6.0]))
+    out2, keep2 = main._dedupe_miss_timestamps(np.array([5.0, 6.0]), hits)
+    np.testing.assert_array_equal(out2, np.array([5.0, 6.0]))
+    assert keep2.all()
+
+
+def test_append_backfilled_misses_drops_a_miss_on_a_hits_pulse(stub_pyhelios):
+    # The buffer carries a miss stamped with the same time as a surviving hit
+    # (the case a re-run of Backfill on a cropped cloud produces, once the LAD
+    # reader restores the deleted hit). The miss row must not reach Helios.
+    xyz = np.array([[0.0, 0.0, 1.0], [0.1, 0.0, 1.0]])
+    dirs = main._directions_from_origin(xyz, [0, 0, 5])
+    labels = ["timestamp"]
+    vals = np.array([[10.0], [11.0]])
+    buffer = {"positions": np.array([[9.0, 9.0, 9.0], [9.5, 9.0, 9.0]]),
+              "directions": np.zeros((2, 3), np.float32),
+              "timestamp": np.array([11.0, 12.0])}
+    oxyz, odirs, olabels, ovals, flags = main._append_backfilled_misses(
+        xyz, dirs, labels, vals, {"has_misses": False}, buffer)
+    assert oxyz.shape[0] == 3  # 2 hits + the one miss that is its own pulse
+    ts = ovals[:, olabels.index("timestamp")]
+    assert ts.tolist() == [10.0, 11.0, 12.0]
+    assert ovals[:, olabels.index("is_miss")].tolist() == [0.0, 0.0, 1.0]
+    assert flags["has_misses"] is True
 
 
 def test_session_to_lad_arrays_gives_timeless_misses_distinct_sentinels(stub_pyhelios):

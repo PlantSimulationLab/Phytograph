@@ -16,6 +16,7 @@ import os
 
 import numpy as np
 import pytest
+from typing import Optional
 
 import main
 
@@ -1300,19 +1301,22 @@ def _build_multi_session(tmp_path, session_id: str):
     return sess
 
 
-def _backfill_session(session_id: str) -> dict:
+_MULTI_RASTER = dict(origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
+                     theta_min=0, theta_max=180, phi_min=0, phi_max=360)
+
+
+def _backfill_session(session_id: str, raster: "Optional[dict]" = None) -> dict:
     """Run the explicit Backfill Misses step on a live session (the fixture
     carries a timestamp but no recorded misses, and LAD no longer gapfills
     silently). The endpoint streams PHP1 markers + a JSON tail; drain it to
-    the result dict."""
+    the result dict. `raster` overrides the scan's angular raster (defaults to
+    the multi-return fixture's)."""
     import asyncio
     import json as _json
 
     resp = main.backfill_cloud_misses(
         session_id,
-        main.BackfillMissesRequest(
-            origin=_FIXTURE_ORIGIN, n_theta=800, n_phi=1600,
-            theta_min=0, theta_max=180, phi_min=0, phi_max=360),
+        main.BackfillMissesRequest(**(raster or _MULTI_RASTER)),
         http_request=None)
 
     async def _collect():
@@ -1326,6 +1330,25 @@ def _backfill_session(session_id: str) -> dict:
     while i < len(raw) and raw[i:i + 1] in (b" ", b"\n", b"\t"):
         i += 1
     return _json.loads(raw[i:])
+
+
+def _drop_rows(sess, drop_mask):
+    """Physically remove rows from a session, as if the imported file never
+    held them — an EXTERNAL crop. Distinct from `sess.deleted`, which keeps the
+    coordinates and which the LAD reader restores for rows outside the grid."""
+    keep = ~np.asarray(drop_mask, dtype=bool)
+    sess.positions = sess.positions[keep]
+    if sess.colors is not None:
+        sess.colors = sess.colors[keep]
+    if sess.intensity is not None:
+        sess.intensity = sess.intensity[keep]
+    sess.extras = {k: v[keep] for k, v in sess.extras.items()}
+    if sess.timestamps is not None:
+        sess.timestamps = sess.timestamps[keep]
+    if getattr(sess, "beam_origins", None) is not None:
+        sess.beam_origins = sess.beam_origins[keep]
+    sess.deleted = np.zeros(int(keep.sum()), dtype=bool)
+    return int((~keep).sum())
 
 
 def _multi_session_request(session_id: str):
@@ -1466,14 +1489,16 @@ class TestMultiReturnImportColumnMapping:
         assert result["return_mode"] == "multi"
         assert result["cells"][0]["lad"] == pytest.approx(2.0, rel=0.15)
 
-    def test_cropping_to_the_grid_does_not_change_lad(self, tmp_path):
-        """The user's case: a cloud cropped to the voxel grid. Every return of a
-        mixed pulse (one inside the grid, others beyond it) that lies OUTSIDE the
-        grid is deleted in the session; target_index/target_count survive. The
-        inversion must recover the deleted beyond-grid returns from the count
-        and reproduce the uncropped LAD, and the result must say it did so.
-        Without the inference the surviving in-grid return would be the whole
-        beam and LAD would come out high (pinned by the helios self-test)."""
+    def test_externally_cropped_file_recovers_lad_from_target_count(self, tmp_path):
+        """The user's case: a file cropped to the voxel grid BEFORE import, so
+        the removed returns were never in the session (an in-app deletion is a
+        different case: the reader restores it). Every return of a mixed pulse
+        (one inside the grid, others beyond it) that lies OUTSIDE the grid is
+        removed; target_index/target_count survive. The inversion must recover
+        the removed beyond-grid returns from the count and reproduce the
+        uncropped LAD, and the result must say it did so. Without the inference
+        the surviving in-grid return would be the whole beam (pinned by the
+        helios self-test)."""
         pytest.importorskip("pyhelios")
         import collections
 
@@ -1493,7 +1518,7 @@ class TestMultiReturnImportColumnMapping:
             assert baseline["success"] is True, baseline.get("error")
             assert baseline["cropped_returns"]["hidden_after"] == 0
 
-            # Delete the outside-grid returns of every pulse that also has an
+            # Remove the outside-grid returns of every pulse that also has an
             # inside-grid return. Pulses with no inside return keep everything, so
             # the fired-beam population is unchanged and only the per-beam counts
             # are cropped — the inference's exact case.
@@ -1504,8 +1529,7 @@ class TestMultiReturnImportColumnMapping:
             for t, ins in zip(sess.timestamps, inside):
                 has_inside[t] |= bool(ins)
             mixed = np.array([has_inside[t] for t in sess.timestamps])
-            sess.deleted = (~inside) & mixed
-            n_deleted = int(sess.deleted.sum())
+            n_deleted = _drop_rows(sess, (~inside) & mixed)
             assert n_deleted > 100, n_deleted
 
             cropped = main._do_lad_computation(_req())
@@ -1548,6 +1572,215 @@ class TestMultiReturnImportColumnMapping:
         assert any("counted them as transmitted" in w for w in cropped["warnings"])
         assert not any("deleted points inside the voxel grid" in w for w in cropped["warnings"])
         assert not any("cannot be placed" in w for w in cropped["warnings"])
+
+
+    @staticmethod
+    def _pinned_request(session_id):
+        # Pin G(theta): this class is about the transmission counts.
+        req = _multi_session_request(session_id)
+        req.gtheta = 0.5
+        req.gtheta_override = True
+        return req
+
+    @staticmethod
+    def _outside_grid(sess):
+        pos = sess.positions
+        return ~((np.abs(pos[:, 0]) <= 0.5) & (np.abs(pos[:, 1]) <= 0.5)
+                 & (pos[:, 2] >= 0.0) & (pos[:, 2] <= 1.0))
+
+    def test_backfill_then_crop_to_grid_leaves_lad_unchanged(self, tmp_path):
+        """Scenario 1, in full: backfill the whole scan, then delete EVERYTHING
+        outside the voxel grid (the crop a per-tree LAD starts with), then run
+        LAD. A deletion keeps the point's coordinates, and the reader feeds the
+        deleted hits outside the grid back to the inversion, so the beam
+        population is identical: pulses that crossed the grid and returned
+        only beyond it (the transmission signal) are not lost. Before the
+        restore this read 16% high with 411 fewer beams."""
+        pytest.importorskip("pyhelios")
+        sess = _build_multi_session(tmp_path, "testmr03")
+        try:
+            _backfill_session("testmr03")
+            baseline = main._do_lad_computation(self._pinned_request("testmr03"))
+            sess.deleted = self._outside_grid(sess)
+            assert sess.deleted.sum() > 2000
+            cropped = main._do_lad_computation(self._pinned_request("testmr03"))
+        finally:
+            main._cloud_sessions.pop("testmr03", None)
+
+        assert baseline["success"] and cropped["success"], cropped.get("error")
+        b, c = baseline["cells"][0], cropped["cells"][0]
+        assert c["lad"] == pytest.approx(b["lad"], rel=1e-6)
+        assert c["beam_count"] == b["beam_count"]
+        # Nothing was inferred from target_count: the returns were never missing.
+        assert cropped["cropped_returns"]["hidden_after"] == 0
+        assert cropped["warnings"] == []
+
+    def test_crop_then_backfill_matches_the_uncropped_scan(self, tmp_path):
+        """Scenario 2: import an already-cropped cloud (every return outside the
+        grid gone before the session existed — the rows are removed, not marked
+        deleted), backfill it, run LAD. The gapfill synthesises a miss for
+        every pulse that lost all its returns, restoring the transmitted beams;
+        the target_count inference covers the pulses that kept an in-grid
+        return. Holds because this scene has nothing between scanner and grid
+        — see the occluder test for the case where it does not."""
+        pytest.importorskip("pyhelios")
+        _build_multi_session(tmp_path, "testmr04r")
+        try:
+            _backfill_session("testmr04r")
+            baseline = main._do_lad_computation(self._pinned_request("testmr04r"))
+        finally:
+            main._cloud_sessions.pop("testmr04r", None)
+
+        sess = _build_multi_session(tmp_path, "testmr04")
+        try:
+            _drop_rows(sess, self._outside_grid(sess))
+            bf = _backfill_session("testmr04")
+            cropped = main._do_lad_computation(self._pinned_request("testmr04"))
+        finally:
+            main._cloud_sessions.pop("testmr04", None)
+
+        assert cropped["success"], cropped.get("error")
+        assert bf["backfilled"] > 100_000  # the cropped raster is mostly gaps now
+        b, c = baseline["cells"][0], cropped["cells"][0]
+        assert c["lad"] == pytest.approx(b["lad"], rel=1e-2)
+        assert c["beam_count"] == b["beam_count"]
+        assert cropped["cropped_returns"]["hidden_after"] > 0
+
+    def test_rebackfill_after_crop_does_not_double_count(self, tmp_path):
+        """Backfill, crop to the grid, then follow the crop-time toast and run
+        Backfill AGAIN. The second gapfill synthesises a miss for every pulse
+        the crop deleted; the LAD reader restores those pulses' real returns
+        too. A miss on a restored hit's pulse time is that pulse and is
+        dropped, so nothing is counted twice."""
+        pytest.importorskip("pyhelios")
+        sess = _build_multi_session(tmp_path, "testmr05")
+        try:
+            _backfill_session("testmr05")
+            baseline = main._do_lad_computation(self._pinned_request("testmr05"))
+            sess.deleted = self._outside_grid(sess)
+            bf2 = _backfill_session("testmr05")
+            again = main._do_lad_computation(self._pinned_request("testmr05"))
+        finally:
+            main._cloud_sessions.pop("testmr05", None)
+
+        assert again["success"], again.get("error")
+        assert bf2["backfilled"] > 100_000
+        b, a = baseline["cells"][0], again["cells"][0]
+        assert a["lad"] == pytest.approx(b["lad"], rel=1e-2)
+        assert a["beam_count"] == b["beam_count"]
+
+
+class TestLADCropWithOccluder:
+    """A scene with something BETWEEN the scanner and the grid, built as a
+    regular timestamped raster so Backfill Misses can reconstruct it.
+
+    Beams are a 41 x 41 raster of zenith x azimuth about +x from (-5, 0, 0.5)
+    toward a 1 m voxel at (0, 0, 0.5). Inside the voxel's solid angle half the
+    beams hit a leaf at x = 0 (inside the voxel); of the rest, the upper half
+    hit an occluding plate at x = -2 (BEFORE the voxel) and the lower half hit
+    nothing. Downward beams hit the ground at z = -1 beyond and below the
+    voxel; upward ones hit nothing.
+
+    - Reference: every return present, backfilled, inverted.
+    - In-app crop: the occluder and ground returns deleted — LAD unchanged,
+      the reader restores them.
+    - Pre-cropped import: the occluder returns were never there, so the
+      gapfill synthesises a MISS for each occluded pulse and the inversion
+      counts a blocked beam as transmitted. LAD reads low. This is the
+      scenario-2 limitation and cannot be repaired from the cropped file.
+    """
+
+    ORIGIN = [-5.0, 0.0, 0.5]
+    N_THETA = 41
+    N_PHI = 41
+    THETA = (80.0, 100.0)  # zenith, degrees
+    PHI = (70.0, 110.0)    # azimuth, degrees; 90 is +x
+
+    @classmethod
+    def _rows(cls):
+        """(xyz, timestamp, kind) per return; kind in {leaf, occluder, ground}."""
+        o = np.array(cls.ORIGIN)
+        rows = []
+        thetas = np.linspace(*cls.THETA, cls.N_THETA)
+        phis = np.linspace(*cls.PHI, cls.N_PHI)
+        for col, phi in enumerate(phis):
+            for row, theta in enumerate(thetas):
+                t = float(col * cls.N_THETA + row)
+                th, ph = math.radians(theta), math.radians(phi)
+                d = np.array([math.sin(th) * math.sin(ph), math.sin(th) * math.cos(ph), math.cos(th)])
+                in_solid_angle = abs(phi - 90.0) <= 5.0 and abs(theta - 90.0) <= 5.0
+                if in_solid_angle:
+                    if (row + col) % 2 == 0:
+                        rows.append((o + d * (5.0 / d[0]), t, "leaf"))      # x = 0, inside
+                    elif theta < 90.0:
+                        rows.append((o + d * (3.0 / d[0]), t, "occluder"))  # x = -2, before
+                    # else: nothing returned — a sky miss
+                elif theta > 96.0:
+                    rows.append((o + d * (-1.5 / d[2]), t, "ground"))      # z = -1, beyond/below
+        return rows
+
+    @classmethod
+    def _session(cls, sid, kinds):
+        rows = [r for r in cls._rows() if r[2] in kinds]
+        pos = np.array([r[0] for r in rows], dtype=np.float64)
+        ts = np.array([r[1] for r in rows], dtype=np.float64)
+        sess = main.CloudSession(
+            session_id=sid, source_path="/synthetic.xyz", ascii_format="x y z timestamp",
+            column_plan=None, positions=pos, colors=None, intensity=None,
+            extras={}, extra_dims_meta=[], timestamps=ts,
+            deleted=np.zeros(len(pos), dtype=bool), deleted_history=[],
+            octree_cache_id=None, created_at=0.0)
+        with main._cloud_session_lock:
+            main._cloud_sessions[sid] = sess
+        return sess, np.array([r[2] for r in rows])
+
+    @classmethod
+    def _raster(cls):
+        return dict(origin=cls.ORIGIN, n_theta=cls.N_THETA, n_phi=cls.N_PHI,
+                    theta_min=cls.THETA[0], theta_max=cls.THETA[1],
+                    phi_min=cls.PHI[0], phi_max=cls.PHI[1])
+
+    @classmethod
+    def _request(cls, sid):
+        scan = main.HeliosScanEntry(
+            session_id=sid, origin=cls.ORIGIN, n_theta=cls.N_THETA, n_phi=cls.N_PHI,
+            theta_min=cls.THETA[0], theta_max=cls.THETA[1],
+            phi_min=cls.PHI[0], phi_max=cls.PHI[1], return_type="single")
+        req = main.LADComputeRequest(
+            scans=[scan],
+            grid=main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1),
+            lmax=0.1, max_aspect_ratio=4.0, min_voxel_hits=1)
+        req.gtheta = 0.5
+        req.gtheta_override = True
+        return req
+
+    def _run(self, sid, kinds, delete_kinds=()):
+        sess, kind = self._session(sid, kinds)
+        try:
+            bf = _backfill_session(sid, self._raster())
+            assert bf.get("error") is None, bf
+            sess.deleted = np.isin(kind, list(delete_kinds))
+            res = main._do_lad_computation(self._request(sid))
+        finally:
+            main._cloud_sessions.pop(sid, None)
+        assert res["success"], res.get("error")
+        return res["cells"][0], bf["backfilled"]
+
+    def test_in_app_crop_is_exact_and_pre_cropped_import_reads_low(self):
+        pytest.importorskip("pyhelios")
+        ref, bf_ref = self._run("occ-ref", {"leaf", "occluder", "ground"})
+        crop, _ = self._run("occ-crop", {"leaf", "occluder", "ground"},
+                            delete_kinds=("occluder", "ground"))
+        pre, bf_pre = self._run("occ-pre", {"leaf"})
+
+        assert ref["lad"] > 0
+        # In-app crop: the deleted returns are restored for the inversion.
+        assert crop["lad"] == pytest.approx(ref["lad"], rel=1e-6)
+        assert crop["beam_count"] == ref["beam_count"]
+        # Pre-cropped import: the occluded pulses came back as misses (more
+        # were synthesised) and now count as transmitted, so LAD is low.
+        assert bf_pre > bf_ref
+        assert pre["lad"] < 0.8 * ref["lad"], (pre["lad"], ref["lad"])
 
 
 class TestSingleReturnMissImportColumnMapping:

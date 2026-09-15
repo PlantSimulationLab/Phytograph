@@ -9840,13 +9840,23 @@ def _lad_labels_vals(column_getter, n: int):
     return labels, vals, _lad_flags(has_timestamp, is_multi, has_misses, has_grid)
 
 
-def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: bool = True):
+def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: bool = True,
+                           restore_mask: "Optional[np.ndarray]" = None):
     """Surviving session points as in-RAM arrays for the LAD path — no disk, no
     source-file read.
 
     Returns (xyz float64 (N,3), dirs float32 (N,3), labels list[str],
-    vals float64 (N,k)|None, flags). Honors ~sess.deleted. `flags` (see
-    `_lad_flags`) tells the caller whether to gapfill / warn.
+    vals float64 (N,k)|None, flags). Honors ~sess.deleted, except for rows the
+    caller names in `restore_mask` ((N,) bool), which are fed to the inversion
+    even though the user deleted them. LAD passes the deleted hits that lie
+    OUTSIDE the voxel grid (see `_deleted_hit_grid_masks`): a deletion keeps
+    the point's coordinates, and for the inversion a deleted return beyond the
+    grid is a transmitted beam exactly as it was before the crop, while one
+    before the grid contributes nothing either way. So a crop to the grid — the
+    common prelude to a per-tree LAD — leaves the beam population untouched
+    instead of deleting every pulse that crossed the grid and returned only
+    beyond it (measured: a 16% high LAD on the multi-return fixture). `flags`
+    (see `_lad_flags`) tells the caller whether to gapfill / warn.
 
     When `include_backfilled` is True (the default — the LAD read path) and the
     session has an explicit miss buffer (see CloudSession.backfilled_misses), its
@@ -9857,6 +9867,8 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
     import numpy as np
 
     keep = ~sess.deleted
+    if restore_mask is not None and restore_mask.shape == keep.shape:
+        keep = keep | restore_mask
     xyz = np.ascontiguousarray(sess.positions[keep], dtype=np.float64)
     dirs = _directions_from_origin(xyz, origin)
 
@@ -9908,36 +9920,41 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
 _MISS_SENTINEL_TIMESTAMP_BASE = -1.0e12
 
 
-def _uniquify_miss_timestamps(miss_ts: "np.ndarray", hit_ts: "np.ndarray") -> "np.ndarray":
-    """Return `miss_ts` with every value distinct from every other miss and from
-    every hit timestamp, moving a colliding value by the smallest possible float
-    steps (np.nextafter). A beam is a shared timestamp, so a collision would
-    either merge two pulses or trip Helios's target_count check; a nudge of a
-    few ulps changes nothing a trajectory join can resolve. Values that still
-    collide after a bounded number of nudges fall back to distinct sentinels.
+def _dedupe_miss_timestamps(miss_ts: "np.ndarray", hit_ts: "np.ndarray"):
+    """Return (timestamps, keep) for a miss buffer about to join a hit array.
+
+    A beam is a shared timestamp. A miss whose time equals a HIT's time is that
+    hit's pulse (the gapfiller reconstructs the pulse clock, so equality is
+    identity, not coincidence): it is dropped — `keep` is False — because the
+    hit already accounts for the pulse and Helios refuses a beam whose member
+    count exceeds the pulse's target_count. Misses that duplicate EACH OTHER
+    are nudged apart by the smallest possible float steps (np.nextafter), which
+    changes nothing a trajectory join can resolve; any still colliding after a
+    bounded number of nudges fall back to distinct sentinels.
     """
     import numpy as np
 
     out = np.array(miss_ts, dtype=np.float64, copy=True)
+    keep = np.ones(out.shape[0], dtype=bool)
     if out.size == 0:
-        return out
+        return out, keep
     hit_u = np.unique(np.asarray(hit_ts, dtype=np.float64))
+    keep = ~np.isin(out, hit_u)
+    out = out[keep]
     collide = np.zeros(out.shape[0], dtype=bool)
     for _ in range(16):
         # Vectorised: a backfilled buffer can hold tens of millions of misses.
-        collide = np.isin(out, hit_u)
         _, first_idx = np.unique(out, return_index=True)
-        dup = np.ones(out.shape[0], dtype=bool)
-        dup[first_idx] = False  # every non-first occurrence of a repeated value
-        collide |= dup
+        collide = np.ones(out.shape[0], dtype=bool)
+        collide[first_idx] = False  # every non-first occurrence of a repeated value
         if not collide.any():
-            return out
+            return out, keep
         out[collide] = np.nextafter(out[collide], np.inf)
     # Pathological input (a raster of identical times): give the leftovers
     # sentinels so the inversion still sees one beam per miss.
     leftovers = np.where(collide)[0]
     out[leftovers] = _MISS_SENTINEL_TIMESTAMP_BASE - 1.0e6 - np.arange(leftovers.size, dtype=np.float64)
-    return out
+    return out, keep
 
 
 def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
@@ -9959,12 +9976,17 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     real emission point), else a distinct sentinel far below any real clock
     (negative, so it can never collide with GPS or relative time).
 
-    A reconstructed time can still coincide with a real pulse's — the gapfiller
+    A reconstructed time can still coincide with a real pulse's: the gapfiller
     dedupes by raster cell, not by time (4 of 41,612 on the multi-return
-    fixture) — and Helios REFUSES a beam whose member count exceeds the pulse's
-    declared target_count. `_uniquify_miss_timestamps` nudges such a miss by one
-    float step, which keeps the join unchanged and makes it its own beam.
-    Returns the extended (xyz, dirs, labels, vals, flags) with `has_misses` True.
+    fixture), and a buffer computed BEFORE a crop is paired at LAD time with
+    hits the crop deleted but the grid test restored — or, after a re-run of
+    Backfill on the cropped cloud, with a synthesised miss for that very pulse.
+    Such a miss is the same pulse as the hit, and the hit is the truth, so
+    `_dedupe_miss_timestamps` DROPS it (Helios would otherwise refuse a beam
+    whose member count exceeds the pulse's target_count, or count the pulse
+    twice). Misses that merely duplicate each other are nudged apart by one
+    float step. Returns the extended (xyz, dirs, labels, vals, flags) with
+    `has_misses` True.
     """
     import numpy as np
 
@@ -9984,25 +10006,36 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
         labels.append(_MISS_SLUG)
         hit_vals = np.column_stack([hit_vals, np.zeros(n_hits, np.float64)])
 
+    # Per-miss beam ids, and which misses survive (a miss on a hit's pulse time
+    # is that pulse and is dropped — see _dedupe_miss_timestamps).
+    miss_ts_out = None
+    m_keep = np.ones(n_miss, dtype=bool)
+    if 'timestamp' in labels:
+        if backfilled.get("timestamp") is not None:
+            miss_ts = np.asarray(backfilled["timestamp"], dtype=np.float64)
+        else:
+            miss_ts = _MISS_SENTINEL_TIMESTAMP_BASE - np.arange(n_miss, dtype=np.float64)
+        hit_ts = hit_vals[:, labels.index('timestamp')] if n_hits > 0 else np.empty(0)
+        miss_ts_out, m_keep = _dedupe_miss_timestamps(miss_ts, hit_ts)
+    if not m_keep.all():
+        m_xyz = m_xyz[m_keep]
+        m_dirs = m_dirs[m_keep]
+        n_miss = m_xyz.shape[0]
+
     miss_cols = []
     for slug in labels:
         if slug == _MISS_SLUG:
             miss_cols.append(np.ones(n_miss, np.float64))
         elif slug == 'timestamp':
-            if backfilled.get("timestamp") is not None:
-                miss_ts = np.asarray(backfilled["timestamp"], dtype=np.float64)
-            else:
-                miss_ts = _MISS_SENTINEL_TIMESTAMP_BASE - np.arange(n_miss, dtype=np.float64)
-            hit_ts = hit_vals[:, labels.index('timestamp')] if n_hits > 0 else np.empty(0)
-            miss_cols.append(_uniquify_miss_timestamps(miss_ts, hit_ts))
+            miss_cols.append(miss_ts_out)
         elif slug in ('origin_x', 'origin_y', 'origin_z') and backfilled.get("origins") is not None:
             axis = {'origin_x': 0, 'origin_y': 1, 'origin_z': 2}[slug]
-            miss_cols.append(np.asarray(backfilled["origins"], dtype=np.float64)[:, axis])
+            miss_cols.append(np.asarray(backfilled["origins"], dtype=np.float64)[m_keep, axis])
         elif slug in _GRID_INDEX_SLUGS and backfilled.get(slug) is not None:
             # The row/column gapfill path knows each synthesised miss's cell, so
             # carry it rather than zeroing it — a zero here would put every
             # recovered miss in row 0 / column 0 of any structured export.
-            miss_cols.append(np.asarray(backfilled[slug], dtype=np.float64))
+            miss_cols.append(np.asarray(backfilled[slug], dtype=np.float64)[m_keep])
         else:
             miss_cols.append(np.zeros(n_miss, np.float64))
     miss_vals = np.column_stack(miss_cols) if miss_cols else np.empty((n_miss, 0), np.float64)
@@ -10517,15 +10550,30 @@ def _count_deleted_inside_grid(sess: "CloudSession", grid: "HeliosGrid") -> int:
     box inverse-rotated about its center, stretched in z to cover any terrain-
     following column offsets, the way `_cull_to_grid` covers them.
     """
+    inside, _outside = _deleted_hit_grid_masks(sess, grid)
+    return int(inside.sum())
+
+
+def _deleted_hit_grid_masks(sess: "CloudSession", grid: "HeliosGrid"):
+    """Split a session's DELETED hits (never misses) by whether they lie inside
+    the LAD voxel box. Returns two (N,) bool masks over every session row:
+    (deleted_inside, deleted_outside). The outside set is fed back to the
+    inversion by `_session_to_lad_arrays(restore_mask=...)`; the inside set is
+    the one deletion the inversion cannot repair and is warned about.
+    """
+    n = len(sess.positions)
+    empty = np.zeros(n, dtype=bool)
     deleted = getattr(sess, "deleted", None)
-    if deleted is None or not bool(np.any(deleted)):
-        return 0
-    pos = np.asarray(sess.positions[deleted], dtype=np.float64)
+    if deleted is None or deleted.shape[0] != n or not bool(np.any(deleted)):
+        return empty, empty.copy()
+    hit = deleted.copy()
     miss = sess.extras.get(_MISS_SLUG) if getattr(sess, "extras", None) else None
-    if miss is not None and len(miss) == len(sess.positions):
-        pos = pos[np.asarray(miss)[deleted] == 0]
-    if pos.shape[0] == 0:
-        return 0
+    if miss is not None and len(miss) == n:
+        hit &= np.asarray(miss) == 0
+    if not bool(np.any(hit)):
+        return empty, empty.copy()
+    idx = np.where(hit)[0]
+    pos = np.asarray(sess.positions[idx], dtype=np.float64)
     center = np.asarray(grid.center, dtype=np.float64)
     half = np.asarray(grid.size, dtype=np.float64) / 2.0
     rot = math.radians(float(getattr(grid, "rotation", 0.0) or 0.0))
@@ -10541,8 +10589,12 @@ def _count_deleted_inside_grid(sess: "CloudSession", grid: "HeliosGrid") -> int:
     if offs:
         lo[2] += float(min(offs))
         hi[2] += float(max(offs))
-    inside = np.all((d >= lo) & (d <= hi), axis=1)
-    return int(inside.sum())
+    inside_rows = np.all((d >= lo) & (d <= hi), axis=1)
+    deleted_inside = empty.copy()
+    deleted_outside = empty.copy()
+    deleted_inside[idx[inside_rows]] = True
+    deleted_outside[idx[~inside_rows]] = True
+    return deleted_inside, deleted_outside
 
 
 def _lad_cropped_return_stats(cloud) -> "Optional[dict]":
@@ -10740,8 +10792,17 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
 
             if sess is not None:
                 with _cloud_session_lock:
-                    xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(sess, origin)
-                    n_deleted_in_grid = _count_deleted_inside_grid(sess, request.grid)
+                    # Deleted hits outside the grid go back into the inversion
+                    # (a crop to the grid must not delete the transmitted beams
+                    # that crossed it); deleted hits inside it are warned about.
+                    _del_inside, _del_outside = _deleted_hit_grid_masks(sess, request.grid)
+                    xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(
+                        sess, origin, restore_mask=_del_outside)
+                    n_deleted_in_grid = int(_del_inside.sum())
+                if n_deleted_in_grid == 0:
+                    # Every deletion was restored, so a miss buffer computed
+                    # before the crop still matches the hits it sees.
+                    scan_flags["misses_stale"] = False
                 if n_deleted_in_grid > 0:
                     _lbl = (getattr(scan_entry, 'label', None)
                             or os.path.basename(scan_entry.file_path or '')
