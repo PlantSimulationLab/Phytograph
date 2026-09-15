@@ -32,12 +32,13 @@ surface.
   `.ptx`**, which collapses each pulse to one echo and can't carry those
   columns. See
   [Single- vs multi-return scans](../concepts/leaf-area-density.md#single-vs-multi-return-scans).
-- **Crop to the grid, not inside it.** Deleting a pulse's later returns makes
-  its surviving return the whole beam and biases LAD high. With `target_index`
-  and `target_count` present the inversion recovers returns deleted **beyond**
-  the grid (a crop to the tree) and reports how many; returns deleted **inside**
-  the grid (a ground filter, a leaf-only classification) cannot be placed and
-  trigger a warning. See
+- **Crop in Phytograph, and outside the grid.** Points you delete outside the
+  voxel grid are still fed to the inversion (a deletion keeps the coordinates),
+  so a crop to the tree changes nothing. Points deleted **inside** the grid (a
+  ground filter, a leaf-only classification) cannot be repaired and trigger a
+  warning. A file cropped *before* import relies on `target_index` /
+  `target_count` plus a Backfill Misses run on the cropped cloud, and reads low
+  wherever something stood between the scanner and the grid. See
   [Cropped and segmented clouds](../concepts/leaf-area-density.md#cropped-and-segmented-clouds).
 
 ## Steps

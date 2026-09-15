@@ -162,17 +162,33 @@ genuinely single-return instruments, where it retains misses well (see
 The equal-weighting inversion counts, for each pulse, the returns inside and
 beyond every voxel the beam pierces. Those counts come from the returns
 **present in the cloud**. So if a pulse hit a needle inside a voxel and then
-the ground behind it, and the ground return has been deleted (a crop to the
-tree, a ground filter, a leaf/wood classification that keeps only leaf points),
-the surviving needle return becomes the whole beam: a pulse that was half
-transmitted reads as fully intercepted, and LAD comes out **too high**. The
-deleted energy does **not** become a sky miss; it simply vanishes.
+the ground behind it, and the ground return is gone (a crop to the tree, a
+ground filter, a leaf/wood classification that keeps only leaf points), the
+surviving needle return becomes the whole beam: a pulse that was half
+transmitted reads as fully intercepted, and LAD comes out **too high**. Worse,
+a pulse that crossed the voxel and returned *only* beyond it, which is the
+transmission signal itself, disappears altogether. The removed energy does
+**not** become a sky miss; it simply vanishes.
 
-Phytograph closes that gap when the surviving returns still carry the per-pulse
-`target_index` and `target_count` the scanner wrote (LAS `return_number` /
-`number_of_returns`, or the same columns in a text file). A pulse's returns are
-ordered by range, and a beam crosses the grid in one contiguous segment, so a
-deleted return can be placed from the surviving indices alone:
+How well Phytograph recovers from that depends on where the crop happened.
+
+**Cropped in Phytograph (crop box, erase, filter).** A deletion keeps the
+point's coordinates, and LAD feeds every deleted point that lies **outside the
+voxel grid** back to the inversion, because for the inversion a deleted return
+beyond the grid is a transmitted beam exactly as before and one before the
+grid contributes nothing either way. So cropping to the grid, or deleting noise
+outside it, changes nothing: the result is identical to the uncropped scan,
+and a miss buffer computed before the crop stays valid. The one deletion the
+inversion cannot repair is a point deleted **inside** the grid, and LAD warns
+with the count when it finds one.
+
+**Cropped before import (a segmented tree file).** The removed returns were
+never in the session, so the inversion works from what the file kept. If the
+surviving returns still carry the per-pulse `target_index` and `target_count`
+the scanner wrote (LAS `return_number` / `number_of_returns`, or the same
+columns in a text file), a removed return can be placed from the surviving
+indices alone, since a pulse's returns are ordered by range and a beam crosses
+the grid in one contiguous segment:
 
 - an index **below** the smallest surviving index was before the grid and
   changes nothing;
@@ -181,22 +197,22 @@ deleted return can be placed from the surviving indices alone:
 - an index **between** two surviving returns cannot be placed. It is left out,
   and the result reports how many.
 
-The placement is exact when the cloud was cropped to the grid's extent, which
-is why the LAD result tells you how many returns it recovered this way. It is
-**not** exact for a cloud filtered *inside* the grid: a wood return deleted
-from the same voxel as the last surviving needle return is placed beyond it,
-and one deleted between two surviving returns is left out, so those voxels
-read as more transmitted than they are. Two warnings catch this: LAD warns
-when a session has deleted points inside the voxel box, and when the
-inversion found returns it could not place. For a per-tree leaf-area profile,
-keep every return and size the grid to the tree; separating wood from leaf
-area is a correction applied after the inversion, not a point filter before
-it.
+That covers pulses that kept a return inside the grid. Pulses that lost *all*
+their returns have nothing to carry a count, so run **Backfill Misses** on the
+cropped cloud: the gapfill synthesises a miss for every pulse with no return,
+which restores the beams that crossed the grid and returned only beyond it.
+The limit of that recovery is **occlusion**: a pulse whose only return was on
+something *between* the scanner and the grid (a neighbouring crown, a trunk
+outside the grid) comes back as a miss too, and a miss counts as transmitted,
+so those voxels read **low**. Nothing in the cropped file can tell a blocked
+beam from a transmitted one. For a per-tree profile in a closed stand, crop
+in Phytograph rather than before import, or keep the returns between the
+scanner and the tree in the file.
 
-A pulse that returned nothing has no row to carry a count, so true sky misses
-still have to be present as points: from a miss-retaining format, or from
-**Backfill Misses** run on the full scan before any cropping (backfilled
-misses live in their own buffer and survive later deletions).
+Two warnings catch the cases the inversion cannot repair: LAD warns when a
+session has deleted points inside the voxel box, and when the inversion found
+returns it could not place. Separating wood from leaf area is a correction
+applied after the inversion, not a point filter before it.
 
 ## Sky/miss points and gapfilling
 
