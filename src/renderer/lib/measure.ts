@@ -14,13 +14,20 @@
 //
 // ── Units ──────────────────────────────────────────────────────────────────
 //
-// Lengths print as BARE NUMBERS, with no unit suffix, because the app does not
-// actually know the unit. An ASCII .xyz carries no unit metadata, and nothing
-// in the import path records one — so a formatter that appended "m" would be
-// asserting something unverified. The coordinate rows in the same bubble are
-// equally bare (see formatCoord), so the readout is at least self-consistent.
-// When per-scan units land (detected from LAS/E57 CRS, asked in the wizard
-// otherwise), this is the one place that needs to learn about them.
+// Lengths print in METRES, and say so. That is now a guarantee rather than an
+// assumption: a cloud whose source declares another unit (a LAS CRS in US
+// survey feet, say) is scaled at import, and a format that cannot declare one
+// is asked in the import wizard, defaulting to metres. So every coordinate in
+// the app is metres by construction — see backend `_scale_positions_to_metres`
+// and `lib/units.ts`.
+//
+// This replaced a deliberate abstention: the readout used to print bare numbers
+// precisely because nothing recorded what unit a file was in, and appending "m"
+// would have asserted something unverified. The per-scan unit is what made the
+// suffix honest.
+//
+// The precision ladder below is metre-calibrated (100 m is a stand, 1 mm is a
+// twig) and is now correct by construction for the same reason.
 import { csvCell, formatCoord } from './pointPick';
 import type { Vec3 } from './pointPick';
 
@@ -189,6 +196,20 @@ export function formatLength(v: number): string {
 export function formatAngle(v: number | null): string {
   if (v === null || !isFinite(v)) return '—';
   return v.toFixed(1);
+}
+
+// The unit every length in this module is in. A constant rather than a literal
+// sprinkled through the components, so the day a display-unit preference lands
+// there is one place to change.
+export const LENGTH_UNIT_SUFFIX = 'm';
+
+// A length WITH its unit, for display. Kept separate from `formatLength` on
+// purpose: the CSV and clipboard paths must stay numeric — a "1.250 m" cell is
+// not a number any spreadsheet will sum — so the suffix is added at the display
+// sites and nowhere else.
+export function formatLengthWithUnit(v: number): string {
+  const s = formatLength(v);
+  return s === '—' ? s : `${s} ${LENGTH_UNIT_SUFFIX}`;
 }
 
 // A signed component delta. Same precision ladder as formatLength, but keeps

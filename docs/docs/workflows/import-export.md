@@ -251,6 +251,45 @@ reconstructed from the platform path.)
 If a file can't be previewed, the wizard says so and still lets you import
 with auto-detection.
 
+### Source units
+
+Phytograph works in **metres** throughout — leaf area density is reported in
+m²/m³, QSM radii and tree heights in metres, registration residuals in
+millimetres. So every scan is converted to metres **at import**, and the
+wizard's **Source units** control is where that conversion is decided.
+
+What you see depends on what the file can tell us:
+
+- **The file declares its unit.** A LAS/LAZ carrying a coordinate reference
+  system knows whether it is in metres, US survey feet, or something else, and
+  the control shows *detected from file*. An `.e57` or a RIEGL project is
+  metres by specification — those formats have no other option.
+- **The file cannot say.** An ASCII `.xyz`/`.csv`, a `.ply`, a `.pcd` and a
+  `.ptx` carry no unit information at all — they are just numbers. The control
+  defaults to **metres**, which is what Phytograph has always assumed, and you
+  can change it if your data is in something else.
+
+When the chosen unit is not metres, the wizard says it *will convert*, and the
+coordinates you see after import are metres rather than the raw numbers in the
+file. That is deliberate: it is what makes every measurement, density and radius
+in the app mean what it says.
+
+!!! tip "If your measurements come out wrong by a constant factor"
+
+    Check the unit. A cloud recorded in millimetres but imported as metres will
+    measure 1000× too large, and one in feet imported as metres about 3.28×.
+    Re-import with the right unit selected.
+
+Two cases are deliberately **not** auto-detected even from a CRS, because no
+single factor describes them: a **geographic (lat/long)** file, whose degrees
+are not a length at all, and a CRS whose **axes disagree** (horizontal feet with
+vertical metres). Both fall back to asking.
+
+Units are chosen **per file**, not shared across a batch — a set of scans can
+legitimately mix a metre LAS with a feet one. **Apply these settings to all**
+carries your unit choice only to scans that could not detect their own, so a
+file that declared its unit is never overwritten by a neighbour's.
+
 ### Importing several files at once
 
 Drop multiple files together, or select several at once from the

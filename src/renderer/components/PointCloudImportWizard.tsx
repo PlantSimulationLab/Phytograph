@@ -14,6 +14,17 @@ import { PoseStreamParseError, trajectoryDurationS } from '../lib/poseStream';
 import { showToast } from './Toast';
 import { DebouncedNumberInput } from './DebouncedNumberInput';
 import { hasRegisteredScheme } from '../lib/classification';
+import {
+  DEFAULT_UNIT,
+  UNIT_LABELS,
+  UNIT_ORDER,
+  isLengthUnit,
+  metresPerUnit,
+  unitLabel,
+  unitSummary,
+  wouldConvert,
+  type LengthUnit,
+} from '../lib/units';
 
 // One scan to walk the user through. `path` is REQUIRED — the wizard previews
 // by reading the file on disk; callers without a path (Blob fixtures) should
@@ -57,6 +68,11 @@ export interface WizardResult {
   // import, or null to keep the original coordinates. Auto-suggested from the
   // preview for large (e.g. UTM) clouds; the user can edit or disable it.
   worldShift: [number, number, number] | null;
+  // The unit the SOURCE file's coordinates are in. The backend scales positions
+  // to metres at import using this, so it is a scale factor, not a label.
+  // Always set — 'm' when the format declared metres, when the user left the
+  // default, or when nothing could be detected.
+  units: LengthUnit;
   // Mobile-platform trajectory to attach to this scan, or null for a static
   // (tripod) capture. When set, the imported Scan becomes a moving-platform
   // acquisition: its scan parameters carry this PoseStream so leaf-area
@@ -279,6 +295,19 @@ interface ScanConfig {
   // Set once the user edits the shift by hand, so a later preview arriving in
   // the same batch cannot overwrite their choice with the shared suggestion.
   shiftTouched?: boolean;
+  // The length unit this scan's SOURCE coordinates are in. Positions are scaled
+  // to metres at import, so this decides the scale factor — and defaults to
+  // metres, which is exactly what every import implicitly assumed before units
+  // existed.
+  //
+  // Seeded from the preview's `detected_units`; when `unitsCertain` the format
+  // itself declared it (a LAS CRS, or E57/RIEGL which are metres by spec) and
+  // the control states a fact rather than offering a guess.
+  units: LengthUnit;
+  unitsCertain: boolean;
+  // Set once the user picks a unit by hand, so a later preview in the same
+  // batch cannot overwrite their choice. Mirrors `shiftTouched`.
+  unitsTouched?: boolean;
   // Mobile-platform trajectory attached to this scan (null = static capture).
   trajectory: PoseStream | null;
   // True once the user explicitly imported a trajectory FOR THIS SCAN. A
@@ -357,6 +386,10 @@ function blankScanConfig(): ScanConfig {
     preview: null, loading: true, error: null, warning: null,
     columns: [], rgbIs255: true, autoOnly: false,
     shiftEnabled: false, shift: { x: 0, y: 0, z: 0 },
+    // Metres until a preview says otherwise: the same assumption every import
+    // made implicitly before units existed, so an untouched workflow is
+    // unchanged.
+    units: DEFAULT_UNIT, unitsCertain: false,
     trajectory: null, trajectoryExplicit: false, trajectoryError: null,
   };
 }
@@ -541,17 +574,65 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
             // stable regardless of preview completion order, and staying at or
             // below every scan's own floor(min) keeps coordinates positive,
             // which is what the shift is for.
-            const shared = prev.reduce<[number, number] | null>((acc, c, idx) => {
+            //
+            // A suggestion arrives in RAW FILE UNITS, but the shift is applied
+            // to points already scaled to metres — so every suggestion is
+            // converted by its OWN scan's unit before being compared or shared.
+            // Skipping this lands a feet-unit UTM cloud millions of metres from
+            // the origin (see `setUnits`).
+            const unitOf = (c: ScanConfig, idx: number): LengthUnit =>
+              idx === i
+                ? (isLengthUnit(preview.detected_units) ? preview.detected_units : DEFAULT_UNIT)
+                : c.units;
+            const shiftInMetres = (c: ScanConfig, idx: number): [number, number] | null => {
               const s = idx === i ? sug : (c.preview?.suggested_shift ?? null);
+              if (!s) return null;
+              const f = metresPerUnit(unitOf(c, idx)) ?? 1;
+              return [Math.floor(s[0] * f), Math.floor(s[1] * f)];
+            };
+
+            // Sharing one frame is only valid when the scans agree on a UNIT: a
+            // batch mixing a metre scan with a feet one describes two different
+            // sites far more often than one site recorded twice, and min()-ing
+            // across them would drag one cloud's frame to the other's.
+            //
+            // Compared over RESOLVED scans only. Using `prev[0]` as the
+            // reference was wrong: previews land in parallel, so an unresolved
+            // scan still sitting at the seeded default 'm' made a perfectly
+            // uniform feet batch look mixed — and a scan whose preview THREW
+            // stays at 'm' forever, permanently disabling shared shift for the
+            // batch. That is the vineyard regression the comment above warns
+            // about (scans drawn in different frames), so it must not be
+            // reintroduced by a unit check.
+            const resolved = prev
+              .map((c, idx) => ({ c, idx }))
+              .filter(({ c, idx }) => idx === i || c.preview !== null || c.unitsTouched);
+            const unitsAgree = resolved.length === 0
+              || resolved.every(({ c, idx }) => unitOf(c, idx) === unitOf(resolved[0].c, resolved[0].idx));
+
+            const shared = !unitsAgree ? null : prev.reduce<[number, number] | null>((acc, c, idx) => {
+              const s = shiftInMetres(c, idx);
               if (!s) return acc;
               return acc ? [Math.min(acc[0], s[0]), Math.min(acc[1], s[1])]
                          : [s[0], s[1]];
             }, null);
             return prev.map((c, idx) => {
-              const base = idx === i
+              let base = idx === i
                 ? { ...c, preview, loading: false, warning: preview.warning ?? null,
                     columns, autoOnly: columns.length === 0 }
                 : c;
+              // Seed this scan's unit from what its own format declared. Per
+              // scan, never shared: a batch can legitimately mix a metre LAS
+              // with a feet one, and guessing across them would rescale real
+              // data. Untouched scans only, like the shift.
+              if (idx === i && !base.unitsTouched) {
+                const det = preview.detected_units;
+                base = {
+                  ...base,
+                  units: isLengthUnit(det) ? det : DEFAULT_UNIT,
+                  unitsCertain: !!preview.units_certain && isLengthUnit(det),
+                };
+              }
               // Only re-seed scans the user has not edited by hand.
               if (!shared || base.shiftTouched) return base;
               return {
@@ -645,6 +726,44 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
       ? { ...c, shift: { ...c.shift, [axis]: v }, shiftTouched: true } : c));
   }, [stepIdx]);
 
+  // Choosing a unit by hand clears `unitsCertain`: whatever the file declared,
+  // the value shown is now the user's choice, and labelling it "detected from
+  // file" would be a lie. `unitsTouched` keeps a still-loading preview from
+  // overwriting it, exactly as with the shift.
+  const setUnits = useCallback((u: LengthUnit) => {
+    setConfigs((prev) => prev.map((c, i) => {
+      if (i !== stepIdx) return c;
+      const next = { ...c, units: u, unitsCertain: false, unitsTouched: true };
+
+      // ── Re-derive the suggested shift in the NEW unit ──────────────────
+      //
+      // The shift is SUBTRACTED from positions that have already been scaled to
+      // metres, so it must itself be in metres. The backend only pre-scales its
+      // suggestion when the FORMAT declared a unit — for an ASCII/PLY/PCD/PTX
+      // source it cannot, so `suggested_shift` arrives in RAW FILE UNITS and
+      // this is the only place that can put it right.
+      //
+      // Getting it wrong is silent and severe: a UTM .xyz in US survey feet
+      // (min ≈ 6,500,000 ft) scales to ≈ 1,981,204 m but keeps a 6,500,000
+      // shift, landing the cloud 4.5 MILLION metres from the origin — framed on
+      // empty space, with float32 precision destroyed.
+      //
+      // Only a shift the user has NOT hand-edited is re-derived; once they type
+      // a value it is theirs, in whatever frame they meant it.
+      const raw = c.preview?.suggested_shift;
+      if (!c.shiftTouched && raw) {
+        const f = metresPerUnit(u) ?? 1;
+        next.shift = {
+          x: Math.floor(raw[0] * f),
+          y: Math.floor(raw[1] * f),
+          // Z stays at keep/0, matching how the suggestion is seeded.
+          z: c.shift.z,
+        };
+      }
+      return next;
+    }));
+  }, [stepIdx]);
+
   // Import a mobile-platform trajectory file for the current scan. The picked
   // PoseStream is set on this scan (marked an explicit choice) and, since most
   // multi-file imports are one platform pass split across files, auto-populated
@@ -710,6 +829,14 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         shiftEnabled: src.shiftEnabled,
         shift: { ...src.shift },
         shiftTouched: true,
+        // Units are deliberately NOT carried when the target scan detected its
+        // own. A unit is a property of the individual FILE — a batch can mix a
+        // metre LAS with a feet one — and a detected unit is a fact read from
+        // that file, so overwriting it with a neighbour's choice would rescale
+        // real data on the strength of a UI convenience. Scans that could not
+        // detect one do inherit, which is the case apply-to-all is for: a
+        // directory of unit-less ASCII exports that are all in the same unit.
+        ...(c.unitsCertain ? {} : { units: src.units, unitsTouched: true }),
         columns: c.columns.map((col, idx) => ({
           ...col,
           role: src.columns[idx]?.role ?? col.role,
@@ -752,6 +879,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         keptSlugs: keptSlugs(c),
         roleOverrides: roleOverrides(c),
         worldShift: effectiveShift(c),
+        units: c.units,
         trajectory: c.trajectory,
       };
     });
@@ -1038,6 +1166,57 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
             </div>
           )}
 
+          {/* Source units. Placed ABOVE the global shift because a unit logically
+              precedes a shift magnitude — and literally so here: the backend
+              scales positions to metres BEFORE subtracting the shift, and the
+              suggested shift shown below is already expressed in metres.
+
+              Phytograph works in metres throughout (LAD's m²/m³, QSM's radii,
+              CSF's cloth resolution), so a non-metre cloud is converted at
+              import rather than carried. When the format declared the unit
+              this states a fact; otherwise it is a choice, defaulted to metres
+              — which is what every import assumed implicitly before this
+              existed, so leaving it alone changes nothing. */}
+          {/* Rendered even when the preview FAILED, unlike the shift and
+              trajectory blocks. A unit is a user choice that needs no preview —
+              and a failed preview is exactly what disabled detection, so this is
+              the one control that is MORE necessary then, not less. Without it
+              a feet LAS whose header laspy choked on would import silently
+              unscaled, on a screen that says import will still work. */}
+          {cfg && !cfg.loading && (
+            <div
+              data-testid="import-wizard-units"
+              data-units={cfg.units}
+              data-units-certain={cfg.unitsCertain ? 'true' : 'false'}
+              className="border border-neutral-700 rounded-lg px-3 py-2.5 space-y-2"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-medium text-neutral-200">Source units</span>
+                {cfg.unitsCertain && (
+                  <span className="text-[10px] text-lime-400/90">— detected from file</span>
+                )}
+                {wouldConvert(cfg.units) && (
+                  <span className="text-[10px] text-amber-300/90">— will convert</span>
+                )}
+              </div>
+              <select
+                data-testid="import-wizard-units-select"
+                value={cfg.units}
+                onChange={(e) => setUnits(e.target.value as LengthUnit)}
+                className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1
+                           text-[11px] text-neutral-200 focus:outline-none focus:border-neutral-500"
+              >
+                {UNIT_ORDER.map((u) => (
+                  <option key={u} value={u}>{UNIT_LABELS[u]}</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-neutral-500 leading-snug">
+                {unitSummary(cfg.units, cfg.unitsCertain)}
+                {' '}Phytograph works in metres, so every scan is converted at import.
+              </p>
+            </div>
+          )}
+
           {/* Global shift (CloudCompare-style). Subtracts a large offset from every
               point at import so coordinates are small and easy to work with — and so
               the viewport doesn't lose float32 precision (kinked grid / flickering
@@ -1070,6 +1249,15 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 Subtracts this offset from every point so coordinates stay small and the
                 viewport renders cleanly. The original (global) coordinates are restored
                 when you export.
+                {/* Only the SHIFT is undone on export — the unit conversion is
+                    not, so a converted cloud exports as metres. Saying
+                    "original coordinates are restored" unqualified would be a
+                    false promise for exactly the files this feature touches. */}
+                {wouldConvert(cfg.units) && (
+                  <> Values here are in <strong className="text-neutral-400">metres</strong>,
+                  like the converted cloud; exports are in metres, not the file’s
+                  original {unitLabel(cfg.units).toLowerCase()}.</>
+                )}
               </p>
               <div className="flex items-center gap-3">
                 {(['x', 'y', 'z'] as const).map((axis) => (

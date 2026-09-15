@@ -8,6 +8,7 @@ import {
   measurementAngle,
   labelAnchor,
   formatLength,
+  formatLengthWithUnit,
   formatAngle,
   formatDelta,
   primaryValue,
@@ -275,9 +276,29 @@ describe('formatLength', () => {
     expect(formatLength(Infinity)).toBe('—');
   });
 
-  it('carries no unit suffix', () => {
-    // Scene units are not known to be metres, so the readout must not claim one.
+  it('is bare, so CSV and clipboard cells stay numeric', () => {
+    // The unit suffix lives in formatLengthWithUnit, not here: a "1.500 m" cell
+    // is not a number any spreadsheet will sum.
     expect(formatLength(1.5)).not.toMatch(/[a-zA-Z]/);
+  });
+});
+
+describe('formatLengthWithUnit', () => {
+  it('appends the metre suffix for display', () => {
+    // Honest now that units are normalised at import — see the module header.
+    expect(formatLengthWithUnit(1.5)).toBe('1.500 m');
+    expect(formatLengthWithUnit(123.456)).toBe('123.46 m');
+  });
+
+  it('does not put a unit on a non-finite dash', () => {
+    expect(formatLengthWithUnit(NaN)).toBe('—');
+    expect(formatLengthWithUnit(Infinity)).toBe('—');
+  });
+
+  it('agrees with formatLength on the number itself', () => {
+    for (const v of [0, 0.001, 0.25, 1, 99.999, 1234.5]) {
+      expect(formatLengthWithUnit(v)).toBe(`${formatLength(v)} m`);
+    }
   });
 });
 

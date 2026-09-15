@@ -8,6 +8,7 @@ import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationM
 import type { ScanParameters } from './scanParameters';
 import type { ClassPalette } from './classPalettes';
 import type { SlabRegionPayload } from './crossSection';
+import type { LengthUnit } from './units';
 
 // potree-core's RequestManager interface isn't re-exported from the package
 // root in v2.0.15. The shape is small and stable, so mirror it locally
@@ -57,6 +58,17 @@ export interface OctreeRef {
   // cloud kept its original coordinates. Provenance + lets world-coord readouts
   // add it back; the backend session restores world coords for downstream ops.
   worldShift?: [number, number, number] | null;
+  // The length unit the SOURCE FILE was in, and the factor applied to reach
+  // metres. PROVENANCE ONLY: positions are already metres everywhere in the
+  // app, exactly as `worldShift` records a shift that has already been
+  // subtracted. Kept so the UI can explain why a scan's coordinates differ
+  // from the file it came from.
+  //
+  // `sourceUnitScale === 1` means "known to be metres"; `undefined`/`null`
+  // means the scan predates units or was never asked — different states, so
+  // they are not collapsed.
+  sourceUnits?: LengthUnit | null;
+  sourceUnitScale?: number | null;
   asciiFormat?: string | null; // Helios <ASCII_format> hint, when known
   // Optional per-attribute min/max from PotreeConverter's metadata.
   // Keyed by attribute name ("intensity", "rgb", "classification", …).

@@ -230,11 +230,11 @@ move-with-the-cloud and drop-on-rebuild rules as inspect labels.
 
 !!! note "Units"
 
-    Measurements are reported in **scene units, without a unit suffix**.
-    Phytograph does not currently record what unit a cloud was authored in —
-    an ASCII `.xyz` file carries no such metadata — so the readout gives you
-    the number and leaves the unit to you. For the great majority of data
-    (and everything Phytograph generates itself) that unit is metres.
+    Measurements are reported in **metres**. Every scan is converted to metres
+    at import — a file that declares another unit (a LAS in US survey feet, say)
+    is scaled on the way in, and a format that cannot declare one is asked in
+    the import wizard. See
+    [Source units](import-export.md#source-units).
 
 ## Adjust point size and colormap
 

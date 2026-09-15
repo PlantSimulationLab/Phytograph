@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
 import type { ClassPalette } from './classPalettes';
+import { isLengthUnit } from './units';
 import {
   importPointCloudByPath,
   importPointCloudLasLaz,
@@ -785,6 +786,11 @@ export async function parsePointCloudFromPath(
   // Role reassignments from the wizard for an in-file format, `{slug: role}`.
   // Only the columns the user changed; empty means pure auto-detection.
   roleOverrides?: Record<string, string> | null,
+  // The unit the SOURCE file's coordinates are in, chosen in the import wizard.
+  // The backend scales positions to metres by it at create, so it must ride the
+  // session-create call — there is no second chance to apply it once the
+  // session (and its octree) exist.
+  sourceUnits?: string | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -800,7 +806,7 @@ export async function parsePointCloudFromPath(
       path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
       missDistanceThreshold ?? null, origin ?? null,
       opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
-      roleOverrides ?? null,
+      roleOverrides ?? null, sourceUnits ?? null,
     );
     return buildPointCloudFromOctree(meta, path, name, {
       asciiFormat,
@@ -809,6 +815,8 @@ export async function parsePointCloudFromPath(
       sessionId: meta.session_id,
       worldShift: meta.world_shift ?? null,
       continuousAttributes,
+      sourceUnits: meta.source_units ?? null,
+      sourceUnitScale: meta.source_unit_scale ?? null,
     });
   }
 
@@ -861,6 +869,10 @@ export async function parsePointCloudsFromPath(
   opts?: ImportProgressOptions,
   droppedSlugs?: string[] | null,
   roleOverrides?: Record<string, string> | null,
+  // The unit the SOURCE file's coordinates are in, from the import wizard. The
+  // backend scales positions to metres by it at session create; there is no
+  // second chance once the session and its octree exist.
+  sourceUnits?: string | null,
 ): Promise<ImportedScanPosition[]> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -872,7 +884,7 @@ export async function parsePointCloudsFromPath(
     const data = await parsePointCloudFromPath(
       path, asciiFormat, columnPlan, categoricalAttributes, worldShift,
       continuousAttributes, missDistanceThreshold, origin, opts, droppedSlugs,
-      roleOverrides,
+      roleOverrides, sourceUnits,
     );
     return [{ data, name, scanIndex: 0 }];
   }
@@ -881,6 +893,7 @@ export async function parsePointCloudsFromPath(
     path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
     missDistanceThreshold ?? null, origin ?? null,
     opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
+    sourceUnits ?? null,
   );
 
   const ok = positions.filter(p => p.session && !p.error);
@@ -898,6 +911,8 @@ export async function parsePointCloudsFromPath(
       categoricalAttributes,
       sessionId: p.session!.session_id,
       worldShift: p.session!.world_shift ?? null,
+      sourceUnits: p.session!.source_units ?? null,
+      sourceUnitScale: p.session!.source_unit_scale ?? null,
       continuousAttributes,
     }),
     name: p.name,
@@ -922,6 +937,13 @@ export interface BuildOctreeCloudOptions {
   categoricalAttributes?: string[];
   sessionId?: string | null;
   worldShift?: [number, number, number] | null;
+  /**
+   * The unit the SOURCE file was in and the factor applied to reach metres.
+   * Provenance only — positions are already metres — so this is carried, never
+   * applied. See OctreeRef.sourceUnits.
+   */
+  sourceUnits?: string | null;
+  sourceUnitScale?: number | null;
   /** Slugs the user forced continuous ("Scalar") over a registered scheme. */
   continuousAttributes?: string[];
   /**
@@ -944,6 +966,8 @@ export function buildPointCloudFromOctree(
     categoricalAttributes,
     sessionId,
     worldShift,
+    sourceUnits,
+    sourceUnitScale,
     continuousAttributes,
     classPalettes,
   } = options;
@@ -1022,6 +1046,8 @@ export function buildPointCloudFromOctree(
       sourceXyzPath,
       sessionId: sessionId ?? null,
       worldShift: worldShift ?? null,
+      sourceUnits: isLengthUnit(sourceUnits) ? sourceUnits : null,
+      sourceUnitScale: typeof sourceUnitScale === 'number' ? sourceUnitScale : null,
       asciiFormat: asciiFormat ?? null,
       attributeRanges,
       attributeLabels,

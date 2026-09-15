@@ -1536,7 +1536,10 @@ export default function PointCloudViewer({
         results = onRequestImportWizard
           ? await onRequestImportWizard(inputs)
           : // No wizard host (defensive): import with auto-detect.
-            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], droppedSlugs: [], keptSlugs: [], worldShift: null, trajectory: null }));
+            // 'm' is the right default here, not a guess: with no wizard there
+            // is nobody to ask, and metres is what every import assumed before
+            // units existed — so this path behaves exactly as it always has.
+            inputs.map(input => ({ input, asciiFormat: input.asciiFormatHint ?? null, columnPlan: null, categoricalSlugs: [], continuousSlugs: [], droppedSlugs: [], keptSlugs: [], worldShift: null, units: 'm' as const, trajectory: null }));
         if (!results) return; // user cancelled the wizard
       }
 
@@ -1583,7 +1586,15 @@ export default function PointCloudViewer({
                   onProgress: (fraction, message) =>
                     setBulkImportProgress(b => (b ? { ...b, fraction, hint: message || undefined } : b)),
                   onRunId: (runId) => { bulkImportRunIdRef.current = runId; },
-                });
+                },
+                // droppedSlugs / roleOverrides are deliberately left at their
+                // defaults on this path, as they were before units existed —
+                // changing that is a separate question from this one.
+                undefined, undefined,
+                // The source unit the wizard resolved. The backend scales
+                // positions to metres by it at session create — there is no
+                // second chance once the session and its octree exist.
+                r.units);
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
               for (const slug of r.continuousSlugs) registerContinuousSlug(slug);
               scan.data = data;
@@ -3288,6 +3299,13 @@ export default function PointCloudViewer({
         categoricalAttributes: octreeInfo.categoricalAttributes,
         sessionId: sessionIdOverride !== undefined ? sessionIdOverride : octreeInfo.sessionId,
         worldShift: octreeInfo.worldShift ?? null,
+        // Source-unit provenance is part of WHAT THIS CLOUD IS, not of the
+        // operation that rebuilt it — a crop or a filter does not change what
+        // unit the file was authored in. Carried for the same reason worldShift
+        // and classPalettes are: every rebuild path funnels through here, and a
+        // field left out is silently erased by the user's first edit.
+        sourceUnits: octreeInfo.sourceUnits ?? null,
+        sourceUnitScale: octreeInfo.sourceUnitScale ?? null,
         continuousAttributes: octreeInfo.continuousAttributes,
         // Carry the user's palettes across the rebuild, or the cloud comes back
         // with invented "Class N" names derived from the observed value range.
@@ -3402,6 +3420,13 @@ export default function PointCloudViewer({
         octreeInfo.asciiFormat ?? null,
         octreeInfo.columnPlan ?? null,
         octreeInfo.worldShift ?? null,
+        // The SOURCE UNIT is part of the rebuild descriptor. This re-reads the
+        // raw file, which is still in its original unit — without this a
+        // feet-unit cloud comes back 3.28x larger, silently, and every
+        // metre-calibrated tool downstream then measures the wrong cloud.
+        // Positions 5-11 are defaults; units is the 12th.
+        null, null, undefined, undefined, undefined, null, null,
+        octreeInfo.sourceUnits ?? null,
       );
       // Refresh the sessionId — the old session is gone if the backend restarted.
       const newData = buildSessionOctreeData(rebuilt, octreeInfo, fileName, rebuilt.session_id);

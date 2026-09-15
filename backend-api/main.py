@@ -244,7 +244,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.84.0"
+BACKEND_VERSION = "0.85.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -14626,6 +14626,11 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
         extra_dims_meta=extra_dims_meta,
         timestamps=timestamps,
         world_shift=None,  # synthetic scans are authored near the origin
+        # A Helios-simulated scan is metres by construction — the scene it rays
+        # against is built in metres. Recorded as a KNOWN unit (scale 1.0)
+        # rather than left None, which would read as "never asked".
+        source_units="m",
+        source_unit_scale=1.0,
         deleted=np.zeros(n, dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -22285,6 +22290,18 @@ class PointCloudPreviewResponse(BaseModel):
     # off, since elevation is rarely huge). Best-effort: null if the min couldn't
     # be probed cheaply.
     suggested_shift: Optional[List[float]] = None
+    # The length unit the SOURCE declares, when it declares one: a slug from
+    # _UNIT_TO_METRES ("m", "ftUS", …). The wizard seeds its unit control from
+    # this and, when `units_certain`, presents it as a statement rather than a
+    # guess.
+    #
+    # `units_certain` is True only when the answer comes from the FORMAT — a
+    # CRS in a LAS header, or a spec that fixes the unit (E57 and RIEGL are
+    # metres by definition). False means the format cannot say and the user is
+    # being asked; the wizard defaults to metres, which is what the app assumed
+    # implicitly before units existed.
+    detected_units: Optional[str] = None
+    units_certain: bool = False
 
 
 def _tokenize_ascii_format(fmt: str) -> List[str]:
@@ -27928,8 +27945,28 @@ def preview_pointcloud(request: PointCloudPreviewRequest) -> PointCloudPreviewRe
         elif ext in _RIEGL_PROJECT_EXTS:
             resp = _preview_riproject(str(source))
         if resp is not None:
+            # What unit does the source declare, if any? Read before the shift
+            # probe because the probe's threshold is metre-calibrated (see
+            # _SHIFT_SUGGEST_THRESHOLD) and the suggestion it returns has to be
+            # in the same frame the points will end up in.
+            _units, _factor, _certain = _detect_source_units(source)
+            resp.detected_units = _units
+            resp.units_certain = bool(_certain)
+
             # Probe coordinate magnitude and pre-fill a suggested global shift for
             # large (e.g. UTM) clouds, so the wizard can offer it on by default.
+            #
+            # Reported in RAW FILE UNITS, deliberately — the wizard scales it by
+            # whatever unit is finally chosen (see `setUnits` there). Scaling it
+            # here instead would be correct only for a CRS-detected file and
+            # wrong for every format that cannot declare a unit, since the user
+            # picks that AFTER this response is built. One scaler, in the one
+            # place that knows the final answer.
+            #
+            # The threshold inside `_suggest_global_shift` is metre-calibrated
+            # and is applied to raw values, so a millimetre-unit cloud can still
+            # trip it spuriously; the suggestion is only ever a default the user
+            # can turn off, so that is a nuisance rather than a correctness bug.
             resp.suggested_shift = _suggest_global_shift(str(source), resp)
             return resp
     except Exception as e:  # never block import on a preview failure
@@ -29339,6 +29376,20 @@ class CloudSession:
     # to georeference DEM raster exports (GeoTIFF). Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     crs_epsg: Optional[int] = None
+    # What unit the SOURCE FILE was in, and the factor applied to reach metres.
+    # PROVENANCE ONLY — `positions` is already metres by the time the session
+    # exists (see `_scale_positions_to_metres` at import), exactly as
+    # `world_shift` records a shift that has already been subtracted. Kept so
+    # the UI can explain why coordinates differ from the file, and so an export
+    # could one day offer to convert back.
+    #
+    # `source_unit_scale` is recorded even when it is 1.0, because "known to be
+    # metres" and "never asked" are different states: the first came from a CRS
+    # or a format guarantee, the second is the ASCII default. Both are None on a
+    # session created before units existed. Defaulted so existing direct
+    # CloudSession(...) constructions need no change.
+    source_units: Optional[str] = None
+    source_unit_scale: Optional[float] = None
     # Manual-labelling undo stack, keyed by label-column slug. Each entry records
     # the PRIOR values of the points one edit changed (see `_LabelDelta`), so a
     # rollback is a reverse-apply rather than a snapshot restore.
@@ -29437,26 +29488,252 @@ def _epsg_from_wkt_vlr(header) -> Optional[int]:
     return None
 
 
-def _read_las_crs_epsg(path: "_Path") -> Optional[int]:
-    """Best-effort EPSG code from a LAS/LAZ file's CRS VLRs. Tries pyproj's clean
-    database match first, then falls back to the EPSG code embedded in the file's
-    own WKT CRS VLR (real survey files often carry a CRS pyproj won't match to an
-    EPSG, but whose WKT names the code). Returns None for a non-LAS source or no
-    recoverable CRS. Reads only the header (no point data)."""
-    if path.suffix.lower() not in (".las", ".laz"):
+# ── Length units ───────────────────────────────────────────────────────────
+#
+# Every physically-dimensioned constant in this file assumes METRES — CSF's
+# cloth resolution and its airborne-vs-terrestrial regime switch, LAD's m²/m³,
+# QSM's 4.23 mm twig radius, ICP's voxel floors, the miss-distance threshold.
+# That assumption is now made true rather than merely hoped for: a cloud whose
+# source declares another unit is SCALED TO METRES at import, and the source
+# unit is kept only as provenance.
+#
+# Normalising (rather than carrying a unit and scaling at every use site) is
+# forced by the intermediate LAS this backend writes, which hardcodes
+# `header.scales = [0.001]*3` — 0.001 in SOURCE units. That is a 1 mm quantum
+# for a metre cloud but a 1 METRE quantum for a kilometre-unit one, so a cloud
+# that is not converted before the write is silently destroyed. Converting first
+# makes the existing 1 mm quantum true for every input.
+_UNIT_TO_METRES: Dict[str, float] = {
+    "m": 1.0,
+    "km": 1000.0,
+    "cm": 0.01,
+    "mm": 0.001,
+    # The two feet differ in the 7th significant figure, which is 2 mm over a
+    # 1 km survey — worth keeping distinct. "ftUS" is the US survey foot
+    # (1200/3937 m exactly), the unit of most US State Plane zones.
+    "ft": 0.3048,
+    "ftUS": 1200.0 / 3937.0,
+    "in": 0.0254,
+}
+
+# pyproj reports a unit NAME; map the ones that actually appear in CRS
+# definitions onto our slugs. Matched case-insensitively after stripping, so
+# "US survey foot" and "US Survey Foot" both land.
+_PYPROJ_UNIT_NAMES: Dict[str, str] = {
+    "metre": "m", "meter": "m", "m": "m",
+    "kilometre": "km", "kilometer": "km", "km": "km",
+    "centimetre": "cm", "centimeter": "cm", "cm": "cm",
+    "millimetre": "mm", "millimeter": "mm", "mm": "mm",
+    "foot": "ft", "feet": "ft", "ft": "ft", "international foot": "ft",
+    "us survey foot": "ftUS", "foot_us": "ftUS", "us foot": "ftUS",
+    "inch": "in", "in": "in",
+}
+
+# Formats whose unit is fixed by the SPECIFICATION, so there is nothing to
+# detect and nothing to ask:
+#
+#   * E57 — the spec mandates metres for Cartesian coordinates. Verified against
+#     the committed fixtures: cartesianX/Y/Z are plain Float nodes carrying no
+#     unit attribute and no coordinateMetadata, because there is no unit to
+#     declare.
+#   * RIEGL RXP / .riproject — scanner-local metres by format definition.
+_METRE_BY_SPEC_SUFFIXES = {".e57", ".rxp", ".riproject"}
+
+
+# Angular units, which are NOT lengths. Listed explicitly so a degree/radian
+# axis can never be mistaken for a length even if it reaches this function by
+# some path other than the `is_geographic` check in `_read_las_georef` — the
+# consequence of getting it wrong (scaling coordinates by 1/57) is silent and
+# destroys the data.
+_ANGULAR_UNIT_NAMES = frozenset({
+    "degree", "degrees", "deg", "arc-degree", "degree (supplier to define representation)",
+    "radian", "radians", "rad", "grad", "gradian",
+    "arc-second", "arcsecond", "arc-minute", "arcminute",
+})
+
+
+def _is_angular_unit(name: Optional[str]) -> bool:
+    """True for a unit of ANGLE rather than length (a geographic CRS's axes)."""
+    if not name:
+        return False
+    return str(name).strip().lower() in _ANGULAR_UNIT_NAMES
+
+
+def _unit_slug_from_name(name: Optional[str]) -> Optional[str]:
+    """Map a pyproj axis unit name onto one of our slugs, or None if unknown.
+
+    An ANGULAR unit is None, never a length: degrees cannot be converted to
+    metres by any constant (metres-per-degree of longitude depends on latitude).
+    """
+    if not name or _is_angular_unit(name):
         return None
+    return _PYPROJ_UNIT_NAMES.get(str(name).strip().lower())
+
+
+def _read_las_georef(path: "_Path") -> Tuple[Optional[int], Optional[str], Optional[float]]:
+    """Best-effort (EPSG, unit slug, metres-per-unit) from a LAS/LAZ header.
+
+    One function rather than two because both answers come from the SAME
+    `pyproj.CRS`: reading the header twice would be wasteful and — worse — lets
+    the EPSG and the unit disagree about which CRS they describe.
+
+    EPSG: tries pyproj's clean database match first, then falls back to the code
+    embedded in the file's own WKT CRS VLR (real survey files often carry a CRS
+    pyproj won't match to an EPSG, but whose WKT names the code).
+
+    Unit: read from the CRS's first axis. `unit_conversion_factor` is already
+    metres-per-unit, so it is authoritative even when the unit NAME is one we
+    don't recognise — the slug is for display, the factor is for arithmetic.
+
+    Returns (None, None, None) for a non-LAS source or an unreadable header.
+    Reads only the header (no point data)."""
+    if path.suffix.lower() not in (".las", ".laz"):
+        return (None, None, None)
     try:
         import laspy
         with laspy.open(str(path)) as reader:
             header = reader.header
         crs = header.parse_crs()
-        if crs is not None:
-            epsg = crs.to_epsg()
-            if epsg is not None:
-                return int(epsg)
-        return _epsg_from_wkt_vlr(header)
     except Exception:
-        return None
+        return (None, None, None)
+
+    epsg: Optional[int] = None
+    unit_slug: Optional[str] = None
+    factor: Optional[float] = None
+
+    if crs is not None:
+        try:
+            e = crs.to_epsg()
+            if e is not None:
+                epsg = int(e)
+        except Exception:
+            pass
+        try:
+            axis = crs.axis_info[0]
+            # ── Geographic CRS: NOT a length, and must never be scaled ──────
+            #
+            # A lat/long CRS (EPSG:4326, 4269, …) reports unit "degree" with a
+            # `unit_conversion_factor` of 0.0174533 — RADIANS per degree, not
+            # metres per unit. Treating that as a length factor multiplies every
+            # coordinate by 1/57, turning a 25 m tree into 0.44 m while the
+            # numbers still look plausible.
+            #
+            # Degrees also cannot be converted to metres by any constant: the
+            # metres-per-degree of longitude depends on latitude. A geographic
+            # cloud needs reprojection, which is a different feature. So it is
+            # reported as UNKNOWN (no factor, not certain) and left unscaled —
+            # the wizard then asks, defaulting to metres, which at least leaves
+            # the coordinates untouched.
+            #
+            # `is_geographic` rather than a name check: it catches every
+            # geographic CRS regardless of how pyproj spells its axis unit.
+            if crs.is_geographic:
+                unit_slug = None
+                factor = None
+            elif not _is_angular_unit(axis.unit_name):
+                # Second guard on the unit NAME, in case a CRS reports an
+                # angular axis without being flagged geographic.
+                #
+                # ── Every axis must agree ──────────────────────────────────
+                #
+                # A COMPOUND CRS can mix units: horizontal US survey feet with
+                # vertical metres (e.g. EPSG:2229+5703) is a standard US survey
+                # configuration, not a contrivance. Scaling all three axes by
+                # the FIRST axis's factor would divide every elevation by 3.28
+                # while leaving XY correct — so a 30 m tree becomes 9.14 m and
+                # XY/Z end up in different units, which silently breaks every
+                # distance, slope and volume the app computes.
+                #
+                # One scalar cannot describe such a file, so we report "unknown"
+                # and let the user say what they mean, rather than confidently
+                # applying a factor that is right for two axes out of three.
+                factors = []
+                for ax in crs.axis_info:
+                    if _is_angular_unit(ax.unit_name):
+                        factors = []
+                        break
+                    factors.append(float(ax.unit_conversion_factor))
+                agree = bool(factors) and all(
+                    math.isclose(x, factors[0], rel_tol=1e-12) for x in factors
+                )
+                if agree:
+                    f = factors[0]
+                    # A zero/negative/absurd factor means we misread the CRS; a
+                    # unit nobody uses is likelier a parse artefact than data.
+                    if math.isfinite(f) and 1e-6 < f < 1e6:
+                        factor = f
+                        unit_slug = _unit_slug_from_name(axis.unit_name)
+        except Exception:
+            pass
+
+    if epsg is None:
+        try:
+            epsg = _epsg_from_wkt_vlr(header)
+        except Exception:
+            epsg = None
+    return (epsg, unit_slug, factor)
+
+
+def _read_las_crs_epsg(path: "_Path") -> Optional[int]:
+    """Back-compat shim: just the EPSG half of `_read_las_georef`."""
+    return _read_las_georef(path)[0]
+
+
+def _scale_positions_to_metres(
+    positions: "np.ndarray",
+    metres_per_unit: Optional[float],
+) -> "np.ndarray":
+    """Scale an (N,3) position array from its source unit into metres.
+
+    Returns the input UNCHANGED when the factor is 1.0, absent, or nonsensical:
+
+      * 1.0 is returned by identity rather than multiplied, so the metre path —
+        which is almost all real data — is bit-identical to what it was before
+        units existed. A float multiply by 1.0 is exact in IEEE754, but not
+        multiplying at all is the property worth guaranteeing.
+      * a None/zero/negative factor means detection went wrong; applying it
+        would mangle the cloud, so it is refused rather than trusted.
+
+    POSITIONS ONLY. Intensity, classification, timestamps, return numbers and
+    colour are dimensionless or in their own units and must not be touched.
+    Scan origins and trajectories ARE positions and scale with the cloud — see
+    the world-frame contract for `scan_params.origin`.
+    """
+    if metres_per_unit is None:
+        return positions
+    f = float(metres_per_unit)
+    if not math.isfinite(f) or f <= 0.0:
+        return positions
+    if f == 1.0:
+        return positions
+    return np.asarray(positions, dtype=np.float64) * f
+
+
+def _detect_source_units(path: "_Path") -> Tuple[Optional[str], Optional[float], bool]:
+    """(unit slug, metres-per-unit, certain?) for a source file.
+
+    `certain` is True only when the answer comes from the format itself — a
+    declared CRS, or a spec that fixes the unit. A False/None result means the
+    format cannot say, and the user must be asked (the wizard defaults to
+    metres, which is what the app assumed implicitly before units existed).
+    """
+    suffix = path.suffix.lower()
+    if suffix in _METRE_BY_SPEC_SUFFIXES:
+        return ("m", 1.0, True)
+    if suffix in (".las", ".laz"):
+        _epsg, slug, factor = _read_las_georef(path)
+        if factor is not None:
+            # Trust the factor even when the name is unfamiliar: report the
+            # closest slug we have, or fall back to naming the raw factor.
+            if slug is None:
+                slug = next(
+                    (s for s, f in _UNIT_TO_METRES.items() if abs(f - factor) < 1e-9),
+                    None,
+                )
+            return (slug, factor, True)
+        return (None, None, False)
+    # PTX, PLY, PCD, ASCII (xyz/csv/txt/pts/asc): no unit in the format.
+    return (None, None, False)
 
 
 def _get_cloud_session(session_id: str) -> "CloudSession":
@@ -30142,6 +30419,13 @@ class CloudSessionCreateRequest(BaseModel):
     # back at the read chokepoint, so downstream ops/exports recover true world
     # coords. None / omitted = keep the original (possibly large) coordinates.
     world_shift: Optional[List[float]] = None
+    # The unit the SOURCE FILE's coordinates are in, chosen (or confirmed) in the
+    # import wizard: one of _UNIT_TO_METRES' slugs. Positions are scaled to
+    # metres at create — BEFORE the world shift, before every derived metric,
+    # and before the intermediate LAS write whose 1 mm quantum is expressed in
+    # source units. None / omitted / "m" = no scaling, which is what every
+    # import did before units existed.
+    source_units: Optional[str] = None
     # Far-field distance (m) used by miss auto-detection's DISTANCE fallback only
     # — when a scan carries no `is_miss` column AND no `target_index` sentinel, a
     # point this far (>=0.98x) from the scanner origin is treated as a sky/miss.
@@ -30374,12 +30658,46 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
                     ),
                 )
             beam_origins = source_origins
+        # ── Normalise to metres ────────────────────────────────────────────
+        #
+        # BEFORE the global shift, and before every derived metric below
+        # (ground_z, robust_extent, point_spacing) — all of which feed
+        # metre-calibrated thresholds — and before the intermediate LAS write,
+        # whose `header.scales = [0.001]*3` is expressed in SOURCE units. A
+        # kilometre-unit cloud written unscaled is quantised to 1 metre.
+        #
+        # Deliberately positions + beam origins only: intensity, classification,
+        # timestamps and colour are dimensionless or carry their own units.
+        # `source_unit_scale` is recorded even when 1.0, so a later reader can
+        # tell "known metres" from "never asked".
+        source_units: Optional[str] = getattr(request, "source_units", None) or None
+        source_unit_scale: Optional[float] = None
+        if source_units:
+            _f = _UNIT_TO_METRES.get(source_units)
+            if _f is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"Unknown source_units {source_units!r}; expected one of "
+                            f"{sorted(_UNIT_TO_METRES)}"),
+                )
+            source_unit_scale = float(_f)
+            if source_unit_scale != 1.0:
+                positions = _scale_positions_to_metres(positions, source_unit_scale)
+                if beam_origins is not None:
+                    beam_origins = _scale_positions_to_metres(beam_origins, source_unit_scale)
+                # The scanner origin is a position in the same frame and scales
+                # with the cloud — applied where it is resolved (`_miss_origin`
+                # below), since it may come from E57 scan_meta or the request.
+
         # CloudCompare-style global shift: subtract the requested offset so the
         # in-RAM array (the source of truth) — and the octree built from it below —
         # hold small, precision-friendly coordinates. The shift is stored on the
         # session and added back in `_read_points_from_source`, so triangulate /
         # skeleton / LAD / export all see true world coords. A near-zero or absent
         # shift means the cloud keeps its original coordinates.
+        #
+        # NOTE the ordering: the shift the wizard sent was computed by a preview
+        # probe that ALSO scaled to metres, so both are in the same frame here.
         world_shift_arr: Optional[np.ndarray] = None
         if request.world_shift is not None:
             ws = np.asarray(request.world_shift, dtype=np.float64)
@@ -30444,6 +30762,43 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         # import — which writes no LAS — hands its pose/params in directly.
         scan_meta = (preloaded_meta if preloaded_meta is not None
                      else _import_scan_meta.pop(str(las_path.resolve()), None))
+
+        # ── Scale the scanner geometry with the points ─────────────────────
+        #
+        # A scanner ORIGIN is a position in the same frame as `positions`, so it
+        # rides the same unit conversion. Done HERE, in place, before any
+        # consumer reads it — scaling a local copy for miss detection while
+        # returning the raw dict to the renderer would leave two origins for one
+        # scanner, differing by the unit factor.
+        #
+        # This is not cosmetic: `scan_params.origin` becomes the beam apex for
+        # LAD path-length integration and for backfill-misses, which
+        # reconstructs every ray as (xyz - origin). A PTX tripod scan imported
+        # as feet would put the apex ~226 m from the cloud it sits inside.
+        #
+        # PTX (`_ptx_scan_params`) and PCD (VIEWPOINT) are the exposed formats —
+        # both report no detectable unit, so the wizard actively offers the user
+        # feet/mm for exactly these. E57 and RIEGL are metres by spec, and their
+        # other scan_params fields are angles and counts, not lengths.
+        if scan_meta and source_unit_scale not in (None, 1.0):
+            _usf = float(source_unit_scale)
+
+            def _scale_origin(v):
+                return [float(x) * _usf for x in v] if v is not None and len(v) == 3 else v
+
+            scan_meta = dict(scan_meta)
+            if scan_meta.get("origin") is not None:
+                scan_meta["origin"] = _scale_origin(scan_meta["origin"])
+            if scan_meta.get("scan_origins") is not None:
+                scan_meta["scan_origins"] = [
+                    _scale_origin(o) for o in scan_meta["scan_origins"]
+                ]
+            sp = scan_meta.get("scan_params")
+            if isinstance(sp, dict) and sp.get("origin") is not None:
+                sp = dict(sp)
+                sp["origin"] = _scale_origin(sp["origin"])
+                scan_meta["scan_params"] = sp
+
         if las_is_temp:
             try:
                 las_path.unlink()
@@ -30465,7 +30820,14 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
         # their misses onto the thin shell, exactly like a fresh synthetic scan.
         _miss_origin = scan_meta["origin"] if (scan_meta and scan_meta.get("origin") is not None) else None
         if _miss_origin is None and request.origin is not None and len(request.origin) == 3:
+            # UNITS: this branch only. `request.origin` arrives in the SOURCE
+            # file's frame (from a Helios scan XML), so it needs the same scaling
+            # the points got. A `scan_meta` origin was already scaled in place
+            # above, so scaling it again here would double-apply the factor —
+            # which is why this sits inside the branch rather than after both.
             _miss_origin = list(request.origin)
+            if source_unit_scale not in (None, 1.0):
+                _miss_origin = [float(v) * float(source_unit_scale) for v in _miss_origin]
         if _miss_origin is not None and world_shift_arr is not None:
             _miss_origin = (np.asarray(_miss_origin, dtype=np.float64) - world_shift_arr).tolist()
         _report(0.45, "Detecting sky/miss points…")
@@ -30536,7 +30898,16 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
             timestamps=timestamps,  # float64 GPS/relative time, not in float32 extras
             gps_time_encoding=gps_time_encoding,
             beam_origins=beam_origins,  # float64 ExtraBytes origins; bypass the join
-            crs_epsg=_read_las_crs_epsg(source_path),  # for DEM raster georeferencing
+            # For DEM raster georeferencing — but ONLY when the coordinates are
+            # still in the CRS's own units. An EPSG like 2229 is DEFINED in US
+            # survey feet; once we scale those coordinates to metres, stamping
+            # 2229 into a GeoTIFF tells a GIS to read metre tiepoints as feet,
+            # placing the raster 3.28x too close to the false origin and
+            # overlaying nothing. A missing CRS is honest; a wrong one is not.
+            crs_epsg=(_read_las_crs_epsg(source_path)
+                      if source_unit_scale in (None, 1.0) else None),
+            source_units=source_units,
+            source_unit_scale=source_unit_scale,
             deleted=np.zeros(n, dtype=bool),
             deleted_history=[],
             octree_cache_id=None,
@@ -30681,6 +31052,12 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
     # OctreeRef (provenance + world-coord readouts). null when no shift was applied.
     world_shift_out = world_shift_arr.tolist() if world_shift_arr is not None else None
     return {"session_id": session_id, "point_count": n, "world_shift": world_shift_out,
+            # What the source file's unit was, and the factor applied to reach
+            # metres. Provenance only — positions above are already metres —
+            # but the renderer persists it so the UI can explain why a scan's
+            # coordinates differ from the file it came from.
+            "source_units": source_units,
+            "source_unit_scale": source_unit_scale,
             # Outlier-resistant floor (see `_robust_ground_z`). The renderer uses
             # it for the default scene origin's height and the ground grid instead
             # of tight_bounds.min.z, which a single stray low point can sink.
@@ -31991,6 +32368,11 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         # in the same (shifted) space and still restore to world coords on read.
         world_shift=(sess.world_shift.copy() if sess.world_shift is not None else None),
         crs_epsg=sess.crs_epsg,  # subsets keep the parent's CRS for DEM georeferencing
+        # A subset is the SAME points, already converted — it inherits the
+        # parent's provenance rather than losing it. (Nothing is re-scaled here:
+        # the positions it copies are metres already.)
+        source_units=getattr(sess, "source_units", None),
+        source_unit_scale=getattr(sess, "source_unit_scale", None),
         deleted=np.zeros(len(take), dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -32544,6 +32926,18 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
     epsgs = {s.crs_epsg for s in sessions if s.crs_epsg is not None}
     crs_epsg = next(iter(epsgs)) if len(epsgs) == 1 and all(s.crs_epsg is not None for s in sessions) else None
 
+    # Source-unit provenance, by the same all-must-agree rule. Every input is
+    # ALREADY in metres (each was converted at its own import), so this is
+    # purely a question of what to report, never of rescaling — a merge of a
+    # feet scan and a metre scan is perfectly valid geometry whose provenance is
+    # simply "mixed", recorded as None.
+    unit_slugs = {getattr(s, "source_units", None) for s in sessions}
+    merged_units = (next(iter(unit_slugs))
+                    if len(unit_slugs) == 1 and None not in unit_slugs else None)
+    unit_scales = {getattr(s, "source_unit_scale", None) for s in sessions}
+    merged_unit_scale = (next(iter(unit_scales))
+                         if len(unit_scales) == 1 and None not in unit_scales else None)
+
     new_id = uuid.uuid4().hex[:8]
     new_sess = CloudSession(
         session_id=new_id,
@@ -32559,6 +32953,8 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
         beam_origins=beam_origins,
         world_shift=(shift_out_arr.copy() if shift_out is not None else None),
         crs_epsg=crs_epsg,
+        source_units=merged_units,
+        source_unit_scale=merged_unit_scale,
         deleted=np.zeros(total, dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
@@ -32610,6 +33006,11 @@ def session_merge(request: SessionMergeRequest):
             "session_id": merged.session_id,
             "point_count": int(len(merged.positions)),
             "world_shift": world_shift_out,
+            # Unit provenance, merged by the all-must-agree rule in
+            # `_merge_sessions_locked` (a mixed batch reports none). Every input
+            # is already metres, so this only says what to display.
+            "source_units": merged.source_units,
+            "source_unit_scale": merged.source_unit_scale,
             "cache_id": cache_key,
             "cache_dir": str(cache_dir),
             "has_misses": has_misses,

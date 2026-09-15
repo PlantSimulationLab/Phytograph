@@ -8,7 +8,7 @@ import {
   totalLength,
   measurementAngle,
   deltas,
-  formatLength,
+  formatLengthWithUnit,
   formatAngle,
   formatDelta,
   kindLabel,
@@ -216,7 +216,7 @@ function MeasureBody({ m }: { m: Measurement }) {
         </div>
         <div className="mt-1 space-y-0.5">
           {arms.map((a, i) => (
-            <ValueRow key={i} label={`arm ${i + 1}`} value={formatLength(a)} />
+            <ValueRow key={i} label={`arm ${i + 1}`} value={formatLengthWithUnit(a)} />
           ))}
         </div>
       </>
@@ -231,12 +231,12 @@ function MeasureBody({ m }: { m: Measurement }) {
           className="text-[15px] leading-tight text-lime-400 tabular-nums"
           data-testid="measure-value"
         >
-          {formatLength(totalLength(m.vertices))}
+          {formatLengthWithUnit(totalLength(m.vertices))}
         </div>
         <div className="mt-1 space-y-0.5">
           <ValueRow label="segments" value={String(segs.length)} testId="measure-segment-count" />
           {segs.map((s, i) => (
-            <ValueRow key={i} label={`seg ${i + 1}`} value={formatLength(s)} testId="measure-segment" />
+            <ValueRow key={i} label={`seg ${i + 1}`} value={formatLengthWithUnit(s)} testId="measure-segment" />
           ))}
         </div>
       </>
@@ -252,7 +252,7 @@ function MeasureBody({ m }: { m: Measurement }) {
         className="text-[15px] leading-tight text-lime-400 tabular-nums"
         data-testid="measure-value"
       >
-        {formatLength(totalLength(m.vertices))}
+        {formatLengthWithUnit(totalLength(m.vertices))}
       </div>
       {d && (
         <div className="mt-1 space-y-0.5">

@@ -143,7 +143,7 @@ test.describe('measurement tool', () => {
     await expect(panel()).toHaveAttribute('data-measurement-count', '1');
 
     const label = measureLabels().first();
-    expect(await valueOf(label)).toBe('0.250');
+    expect(await valueOf(label)).toBe('0.250 m');
 
     // Components, which are what distinguish a correct distance from a
     // coincidentally-right magnitude.
@@ -162,7 +162,7 @@ test.describe('measurement tool', () => {
     await clickWorld([0.4, 0.0, 0.3]);
 
     await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
-    expect(await valueOf(measureLabels().first())).toBe('0.500');
+    expect(await valueOf(measureLabels().first())).toBe('0.500 m');
   });
 
   test('measures a polyline total and lists every segment', async () => {
@@ -182,7 +182,7 @@ test.describe('measurement tool', () => {
 
     await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
     const label = measureLabels().first();
-    expect(await valueOf(label)).toBe('0.500');
+    expect(await valueOf(label)).toBe('0.500 m');
     await expect(label.getByTestId('measure-segment-count')).toContainText('2');
 
     const segs = await label.getByTestId('measure-segment').allTextContents();
@@ -253,7 +253,7 @@ test.describe('measurement tool', () => {
     await clickWorld([0.4, 0.0, 0.3]);
     await session.page.keyboard.press('Enter');
     await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
-    expect(await valueOf(measureLabels().first())).toBe('0.500');
+    expect(await valueOf(measureLabels().first())).toBe('0.500 m');
   });
 
   test('a measurement SURVIVES a rigid transform, unchanged, and moves with the cloud', async () => {
@@ -267,7 +267,7 @@ test.describe('measurement tool', () => {
     await clickWorld([0.2, 0.0, 0.15]);
     await clickWorld([0.4, 0.0, 0.3]);
     await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
-    expect(await valueOf(measureLabels().first())).toBe('0.250');
+    expect(await valueOf(measureLabels().first())).toBe('0.250 m');
 
     // Disarm so viewport clicks stop being picks, then translate the cloud.
     await session.page.keyboard.press('Escape');
@@ -291,7 +291,7 @@ test.describe('measurement tool', () => {
 
     // Still exactly one measurement, still exactly 0.250.
     await expect(measureLabels()).toHaveCount(1);
-    expect(await valueOf(measureLabels().first())).toBe('0.250');
+    expect(await valueOf(measureLabels().first())).toBe('0.250 m');
 
     // And it MOVED: its leader dot now sits over the translated location of the
     // same point, not where the point used to be. Checking the number alone
@@ -347,7 +347,7 @@ test.describe('measurement tool', () => {
     await clickWorld([0.2, 0.0, 0.15]);
     await clickWorld([0.4, 0.0, 0.3]);
     await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
-    expect(await valueOf(measureLabels().first())).toBe('0.250');
+    expect(await valueOf(measureLabels().first())).toBe('0.250 m');
 
     await session.page.keyboard.press('Escape');
     const row = session.page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
@@ -376,7 +376,7 @@ test.describe('measurement tool', () => {
     // A rotation is rigid, so the LENGTH is unchanged — that is the property
     // that makes carrying the measurement the right call in the first place.
     await expect(measureLabels()).toHaveCount(1);
-    expect(await valueOf(measureLabels().first())).toBe('0.250');
+    expect(await valueOf(measureLabels().first())).toBe('0.250 m');
 
     // And it MOVED with the rotation. Asserting the exact landing pixel would
     // mean re-deriving the pivot here — duplicating the implementation, and
@@ -543,6 +543,89 @@ test.describe('measurement tool', () => {
       .poll(async () => Number(await row.getAttribute('data-point-count')), { timeout: 60_000 })
       .toBeLessThan(60);
     await expect(measureLabels()).toHaveCount(0);
+  });
+
+  test('converts a FEET survey to metres, so a 10 ft mast measures 3.048 m', async () => {
+    // The whole units feature, end to end, through the real UI.
+    //
+    // feet-mast.las declares EPSG:2229 (CA State Plane V, US survey feet) in a
+    // real CRS VLR, so the backend detects the unit via laspy.parse_crs ->
+    // pyproj and scales positions at import. The fixture is a 10 ft vertical
+    // mast plus a 10 ft horizontal arm, both of which must read 3.048 m.
+    //
+    // 1 US survey foot = 1200/3937 m, so 10 ft = 3.048006096 m, which formats
+    // as "3.048 m". The international foot would give 3.048000 — identical at
+    // this precision, so this test does NOT distinguish them; the unit tests do.
+    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'feet-mast.las'));
+
+    // The wizard must SHOW the detected unit rather than converting silently.
+    const unitsBlock = session.page.getByTestId('import-wizard-units');
+    await expect(unitsBlock).toBeVisible({ timeout: 20_000 });
+    await expect(unitsBlock).toHaveAttribute('data-units', 'ftUS');
+    await expect(unitsBlock).toHaveAttribute('data-units-certain', 'true');
+
+    await completeImportWizard(session.page);
+    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="feet-mast"]');
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row).toHaveAttribute('data-point-count', '21');
+    await waitForCameraSettled();
+
+    // The cloud's z-extent is the DIRECT evidence of conversion, read before
+    // any clicking: 10 ft becomes 3.048 m. A cloud that was not converted spans
+    // 10. Asserted here as well as through the readout because it isolates the
+    // scaling from any projection/clicking concern.
+    const cam = await session.page.evaluate(() => (window as any).__getCameraState?.());
+    const zSpan = cam.bounds.max[2] - cam.bounds.min[2];
+    expect(
+      zSpan,
+      `mast spans ${zSpan} — expected 3.048 m (10 ft converted), or 10 if unconverted`,
+    ).toBeCloseTo(3.048, 2);
+
+    await armIn('distance');
+
+    // Click in the frame the scene actually renders, taken from the camera's
+    // own reported bounds rather than recomputed here: the cloud carries a
+    // global shift decision of its own, and re-deriving the position would only
+    // have to disagree with the app by a little to miss the points entirely.
+    const bx = cam.bounds.min[0];
+    const by = cam.bounds.min[1];
+    const base: [number, number, number] = [bx, by, cam.bounds.min[2]];
+    const top: [number, number, number] = [bx, by, cam.bounds.max[2]];
+
+    await clickWorld(base);
+    await expect(panel()).toHaveAttribute('data-pending-count', '1', { timeout: 10_000 });
+    await clickWorld(top);
+
+    await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
+    // 10 ft in metres. If the conversion had not happened this would read
+    // "10.000 m" — the exact failure the feature exists to prevent.
+    expect(await valueOf(measureLabels().first())).toBe('3.048 m');
+  });
+
+  test('an ASCII import defaults to metres and is unchanged by the units feature', async () => {
+    // The no-regression case, and the one that matters most: an .xyz carries no
+    // unit metadata, so the wizard defaults to metres — exactly what every
+    // import assumed implicitly before units existed. A user who ignores the
+    // new control must see no difference at all.
+    await importFiles(session.app, session.page, 'import-point-cloud', join(FIXTURES, 'scalars.xyz'));
+
+    const unitsBlock = session.page.getByTestId('import-wizard-units');
+    await expect(unitsBlock).toBeVisible({ timeout: 20_000 });
+    await expect(unitsBlock).toHaveAttribute('data-units', 'm');
+    // NOT certain — the format could not say, so this is a default the user owns.
+    await expect(unitsBlock).toHaveAttribute('data-units-certain', 'false');
+
+    await completeImportWizard(session.page);
+    const row = session.page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await waitForCameraSettled();
+
+    await armIn('distance');
+    await clickWorld([0.2, 0.0, 0.15]);
+    await clickWorld([0.4, 0.0, 0.3]);
+    await expect(measureLabels()).toHaveCount(1, { timeout: 10_000 });
+    // The same 0.250 every other test in this file asserts: unscaled.
+    expect(await valueOf(measureLabels().first())).toBe('0.250 m');
   });
 
   test('copies every measurement as CSV', async () => {
