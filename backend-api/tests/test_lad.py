@@ -1627,7 +1627,10 @@ class TestMultiReturnImportColumnMapping:
 
         assert baseline["success"] and cropped["success"], cropped.get("error")
         b, c = baseline["cells"][0], cropped["cells"][0]
-        assert c["lad"] == pytest.approx(b["lad"], rel=1e-6)
+        # 1e-5, not 1e-6: the inversion is float32 and not bit-reproducible
+        # (six runs on one unchanged session spread 4.8e-7, and a full-file run
+        # reached 1.2e-6). The bias this pins is 16%, and beam_count is exact.
+        assert c["lad"] == pytest.approx(b["lad"], rel=1e-5)
         assert c["beam_count"] == b["beam_count"]
         # Nothing was inferred from target_count: the returns were never missing.
         assert cropped["cropped_returns"]["hidden_after"] == 0
@@ -1686,6 +1689,158 @@ class TestMultiReturnImportColumnMapping:
         b, a = baseline["cells"][0], again["cells"][0]
         assert a["lad"] == pytest.approx(b["lad"], rel=1e-2)
         assert a["beam_count"] == b["beam_count"]
+
+    @staticmethod
+    def _crop_to_grid(client, session_id):
+        """The crop tool's commit: delete everything outside the grid box."""
+        res = client.post(f"/api/cloud/session/{session_id}/delete_region",
+                          json={"region": {"kind": "box", "min": [-0.5, -0.5, 0.0],
+                                           "max": [0.5, 0.5, 1.0], "invert": True}})
+        assert res.status_code == 200, res.text
+        return res.json()
+
+    def test_crop_survives_the_background_octree_refresh(self, client, tmp_path, monkeypatch):
+        """The running app, not just the mask: applying a crop queues a
+        background display refresh (`refreshCloudOctree` -> bake with
+        compact=false) a few seconds later. That refresh used to compact the
+        session, dropping every deleted row, so the restore had nothing left
+        to read and LAD jumped 16% high with 411 fewer beams."""
+        pytest.importorskip("pyhelios")
+        from tests.binframe import decode_streamed_json
+        monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
+        sess = _build_multi_session(tmp_path, "testmr06")
+        try:
+            _backfill_session("testmr06")
+            baseline = main._do_lad_computation(self._pinned_request("testmr06"))
+            crop = self._crop_to_grid(client, "testmr06")
+            assert crop["deleted_count"] > 2000
+            n_rows = len(sess.positions)
+
+            res = client.post("/api/cloud/session/testmr06/bake?compact=false")
+            assert res.status_code == 200, res.text
+            refreshed = decode_streamed_json(res.content)
+            refreshed_lad = main._do_lad_computation(self._pinned_request("testmr06"))
+        finally:
+            main._cloud_sessions.pop("testmr06", None)
+
+        assert baseline["success"] and refreshed_lad["success"], refreshed_lad.get("error")
+        b, r = baseline["cells"][0], refreshed_lad["cells"][0]
+        assert r["lad"] == pytest.approx(b["lad"], rel=1e-5)  # noise floor: see the test above
+        assert r["beam_count"] == b["beam_count"]
+        assert refreshed_lad["warnings"] == []
+
+        # The session kept every row under the mask...
+        assert len(sess.positions) == n_rows
+        assert int(sess.deleted.sum()) == crop["deleted_count"]
+        # ...while the display caught up: the octree holds the survivors, and
+        # the renderer is told to retire its whole delete stack and pending count.
+        assert refreshed["baked"] is True
+        assert refreshed["point_count"] == crop["remaining_count"]
+        assert refreshed["deleted_history_len"] == 0
+        assert refreshed["pending_deleted_count"] == 0
+
+    def test_apply_deletions_warns_that_lad_is_biased(self, client, tmp_path, monkeypatch):
+        """An explicit bake ("Apply deletions") still removes the rows, and then
+        nothing can restore them. The result must say so, rather than dropping
+        the stale-miss warning on the grounds that no deletion is left inside
+        the grid (which read as "this crop did not bias the result")."""
+        pytest.importorskip("pyhelios")
+        from tests.binframe import decode_streamed_json
+        monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
+        sess = _build_multi_session(tmp_path, "testmr07")
+        try:
+            _backfill_session("testmr07")
+            baseline = main._do_lad_computation(self._pinned_request("testmr07"))
+            crop = self._crop_to_grid(client, "testmr07")
+            res = client.post("/api/cloud/session/testmr07/bake")
+            assert res.status_code == 200, res.text
+            baked = decode_streamed_json(res.content)
+            baked_lad = main._do_lad_computation(self._pinned_request("testmr07"))
+        finally:
+            main._cloud_sessions.pop("testmr07", None)
+
+        assert baked["point_count"] == crop["remaining_count"]
+        assert len(sess.positions) == crop["remaining_count"]
+        assert baked_lad["success"], baked_lad.get("error")
+        # The bias is real (so the warning is not crying wolf)...
+        assert baked_lad["cells"][0]["beam_count"] < baseline["cells"][0]["beam_count"]
+        # ...and reported, with the stale-miss warning left standing.
+        warnings = baked_lad["warnings"]
+        assert any("points the inversion cannot restore" in w for w in warnings), warnings
+        assert any("computed before a later crop" in w for w in warnings), warnings
+        assert not any("did not bias" in w for w in warnings), warnings
+        assert sess.unrestorable_hit_count == crop["deleted_count"]
+
+    def test_backfilling_a_copy_of_a_cropped_cloud_recovers_the_lost_pulses(
+            self, client, tmp_path, monkeypatch):
+        """A split, extract or duplicate copies only the parent's SURVIVORS, so
+        the child starts with nothing deleted and the restore that makes a crop
+        harmless has nothing to read. The child counts those hits as lost (LAD
+        warns while they are). Backfill Misses on the child gap-fills against
+        its own hits, which re-creates the lost pulses as misses: LAD then
+        matches the uncropped cloud and the warning is gone. (The same holds
+        after Apply deletions: 2.8613 before the re-run, 2.4723 after, against
+        2.4676 uncropped.)"""
+        pytest.importorskip("pyhelios")
+        monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
+        _build_multi_session(tmp_path, "testmr08")
+        child_id = None
+        try:
+            _backfill_session("testmr08")
+            baseline = main._do_lad_computation(self._pinned_request("testmr08"))
+            crop = self._crop_to_grid(client, "testmr08")
+            res = client.post("/api/cloud/session/testmr08/duplicate")
+            assert res.status_code == 200, res.text
+            child_id = res.json()["duplicate"]["session_id"]
+            child = main._get_cloud_session(child_id)
+            assert len(child.positions) == crop["remaining_count"]
+            assert not child.deleted.any()
+            assert child.unrestorable_hit_count == crop["deleted_count"]
+            # The child gets its own misses, as a user would compute them for it.
+            _backfill_session(child_id)
+            child_lad = main._do_lad_computation(self._pinned_request(child_id))
+        finally:
+            main._cloud_sessions.pop("testmr08", None)
+            if child_id is not None:
+                main._cloud_sessions.pop(child_id, None)
+
+        assert child.unrestorable_hit_count == 0
+        assert child_lad["success"], child_lad.get("error")
+        b, c = baseline["cells"][0], child_lad["cells"][0]
+        # 1%, as for the other inferred crops: target_count places the partly
+        # removed pulses, whose returns are not collinear in this fixture.
+        assert c["lad"] == pytest.approx(b["lad"], rel=1e-2)
+        assert c["beam_count"] == b["beam_count"]
+        assert not any("cannot restore" in w for w in child_lad["warnings"]), child_lad["warnings"]
+
+    def test_a_transform_keeps_the_stale_miss_warning(self, tmp_path, monkeypatch):
+        """A transform moves a backfilled buffer's positions and origins but not
+        its beam directions, and flags it stale. Nothing is deleted, so the
+        crop logic (every deletion restored -> the buffer is current) used to
+        clear that flag and LAD reported nothing. Identity matrix: the geometry
+        is unchanged, so only the flag is under test."""
+        pytest.importorskip("pyhelios")
+        monkeypatch.setenv("PHYTOGRAPH_OCTREE_CACHE_ROOT", str(tmp_path / "octrees"))
+        sess = _build_multi_session(tmp_path, "testmr09")
+        try:
+            _backfill_session("testmr09")
+            before = main._do_lad_computation(self._pinned_request("testmr09"))
+            main.session_transform("testmr09", main.SessionTransformRequest(
+                matrix=[1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0],
+                octree_mode="pose"))
+            assert sess.backfilled_misses_moved is True
+            moved = main._do_lad_computation(self._pinned_request("testmr09"))
+            _backfill_session("testmr09")
+            refreshed = main._do_lad_computation(self._pinned_request("testmr09"))
+        finally:
+            main._cloud_sessions.pop("testmr09", None)
+
+        assert before["success"] and moved["success"], moved.get("error")
+        assert not any("moved or rotated" in w for w in before["warnings"]), before["warnings"]
+        assert any("moved or rotated" in w for w in moved["warnings"]), moved["warnings"]
+        # Backfill Misses recomputes the buffer, which clears it.
+        assert sess.backfilled_misses_moved is False
+        assert not any("moved or rotated" in w for w in refreshed["warnings"]), refreshed["warnings"]
 
 
 class TestLADCropWithOccluder:

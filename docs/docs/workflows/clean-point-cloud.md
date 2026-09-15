@@ -403,9 +403,13 @@ octree), they're cheap and reversible:
   the one slower step, and the point at which the deletions become permanent
   (no longer undoable). While it runs the button reads *Applying deletions…*
   and a progress pill appears at the top of the viewer; cancelling it leaves
-  your pending deletions exactly as they were. You only need this before exporting, or to free the
+  your pending deletions exactly as they were. You only need this to free the
   deleted points' memory; until then the masked result is already what every
-  other operation (triangulate, skeleton, segment, export) sees.
+  other operation (triangulate, skeleton, segment, export) sees. Skip it on a
+  scan you will estimate leaf area density from: LAD uses the deleted points
+  outside its voxel grid to keep a crop from biasing the result, and applying
+  deletions removes them (re-running Backfill Misses afterwards recovers
+  them).
 
 !!! info "How erase works"
     Erase is **instant** because it sets a per-point visibility mask on the

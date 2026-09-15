@@ -182,6 +182,19 @@ and a miss buffer computed before the crop stays valid. The one deletion the
 inversion cannot repair is a point deleted **inside** the grid, and LAD warns
 with the count when it finds one.
 
+This holds for as long as the deleted points are kept, which is until you
+choose **Permanently apply deletions** in the Erase panel. The display
+refresh that follows a crop, erase or filter keeps them. Applying deletions
+removes the points for good, so LAD can no longer restore the ones outside
+the grid, and it warns that the result may read high. The same happens to a
+cloud made by **split**, **extract**, **duplicate** or **merge**: it holds
+only the points it took, so the rest of the scan's returns are gone from it.
+Either crop without applying deletions, or re-run **Backfill Misses** on the
+new or applied cloud. Backfilling against the points that remain recovers the
+lost pulses as misses, which brings LAD back in line and clears the warning.
+Likewise, after you move or rotate a cloud, LAD warns until you re-run
+Backfill Misses, because the misses' beam directions predate the move.
+
 **Cropped before import (a segmented tree file).** The removed returns were
 never in the session, so the inversion works from what the file kept. If the
 surviving returns still carry the per-pulse `target_index` and `target_count`

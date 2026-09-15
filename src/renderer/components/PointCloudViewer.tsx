@@ -3612,7 +3612,12 @@ export default function PointCloudViewer({
     octreeRefreshRunIdRef.current = null;
     let baked;
     try {
+      // `compact: false`: a display refresh must not delete rows. LAD restores
+      // the deleted hits outside its grid from them, which is what keeps a crop
+      // to the grid from biasing it; compacting here undid that seconds after
+      // every crop. Only "Apply deletions" (handleBakeEdits) compacts.
       baked = await bakeCloudSession(sessionId, {
+        compact: false,
         signal: abort.signal,
         onRunId: (runId) => { octreeRefreshRunIdRef.current = runId; },
       });
@@ -3648,10 +3653,10 @@ export default function PointCloudViewer({
       next.set(cloudId, {
         ...cur,
         pendingDeletes: remaining,
-        // Only the fully-absorbed case has a count we can state; a raced-in
-        // delete's own count was measured against the pre-bake array, and the
-        // next delete_region overwrites this with a fresh cumulative figure.
-        pendingDeletedCount: remaining.length === 0 ? 0 : cur.pendingDeletedCount,
+        // The backend states it against the octree just installed (0 unless an
+        // edit raced the build). The fallback covers an older backend.
+        pendingDeletedCount: baked.pending_deleted_count
+          ?? (remaining.length === 0 ? 0 : cur.pendingDeletedCount),
         // The rebuilt octree no longer holds the filtered-out points, so the
         // committed filter's mask has nothing left to hide.
         committedFilters: undefined,
@@ -4171,7 +4176,7 @@ export default function PointCloudViewer({
               next.set(cloud.id, {
                 ...cur,
                 pendingDeletes: [...(cur.pendingDeletes ?? []), deleteRegion],
-                pendingDeletedCount: result.deleted_count,
+                pendingDeletedCount: result.pending_deleted_count ?? result.deleted_count,
               });
               return next;
             });
@@ -4469,7 +4474,7 @@ export default function PointCloudViewer({
           setEditMode('none');
           return;
         }
-        deletedCount = result.deleted_count;
+        deletedCount = result.pending_deleted_count ?? result.deleted_count;
       } catch (err) {
         showToast({
           title: `Erase failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -6264,7 +6269,8 @@ export default function PointCloudViewer({
             const remaining = result.remaining_count ?? 0;
             const before = editStatesRef.current.get(cloud.id);
             backgroundCommits.push({
-              id: cloud.id, sessionId, filters, deletedCount: result.deleted_count ?? 0,
+              id: cloud.id, sessionId, filters,
+              deletedCount: result.pending_deleted_count ?? result.deleted_count ?? 0,
               pendingDeletes: before?.pendingDeletes ?? [],
             });
             // Mark the cloud as diverged from its source file NOW (same reason
@@ -22262,7 +22268,7 @@ export default function PointCloudViewer({
                   if (cur) next.set(cloud.id, {
                     ...cur,
                     pendingDeletes: stack.slice(0, -1),
-                    pendingDeletedCount: r.deleted_count,
+                    pendingDeletedCount: r.pending_deleted_count ?? r.deleted_count,
                   });
                   return next;
                 });

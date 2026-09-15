@@ -4261,6 +4261,10 @@ export async function backfillMisses(
 export interface CloudSessionEditResult {
   session_id: string;
   deleted_count: number;
+  // Deleted rows the renderer's current point count still includes: the
+  // cumulative `deleted_count` minus the rows the last installed octree build
+  // already left out. This, not `deleted_count`, is `pendingDeletedCount`.
+  pending_deleted_count?: number;
   remaining_count: number;
   total_count: number;
   // True when this crop invalidated a SEPARATELY backfilled-miss buffer (it was
@@ -4291,6 +4295,9 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   // history for `reset_edits`, so it truncates to this length instead of
   // assuming the bake absorbed everything.
   deleted_history_len?: number;
+  // /bake only: what `pendingDeletedCount` becomes once this octree is
+  // installed. 0 unless an edit raced the build.
+  pending_deleted_count?: number;
 }
 
 /**
@@ -4675,10 +4682,16 @@ export async function commitCloudLabels(
  * Permanently apply deletions: rebuild the octree from the survivors (one
  * PotreeConverter run) and clear the mask. The deliberately-slow step. Returns
  * the new octree metadata; `baked === false` when there were no deletions.
+ *
+ * `compact: false` is the background display refresh: the octree is rebuilt
+ * the same way, but the deleted rows stay in the session under the mask. LAD
+ * restores the deleted hits outside its voxel grid from those rows, so only an
+ * explicit "Apply deletions" may remove them.
  */
 export async function bakeCloudSession(
   sessionId: string,
   options?: {
+    compact?: boolean;
     signal?: AbortSignal;
     // PotreeConverter progress for a status pill. Bake is the deliberately-slow
     // step (a full octree rebuild), so the caller needs one.
@@ -4688,7 +4701,7 @@ export async function bakeCloudSession(
 ): Promise<CloudSessionBakeResult> {
   try {
     return await fetchJsonWithProgress<CloudSessionBakeResult>(
-      `/api/cloud/session/${sessionId}/bake`,
+      `/api/cloud/session/${sessionId}/bake${options?.compact === false ? '?compact=false' : ''}`,
       {},
       options?.signal,
       600000,

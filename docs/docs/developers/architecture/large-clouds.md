@@ -111,8 +111,32 @@ answer for neighbourhood tools, and per-block reads for the point-local ones
 
 ### A bake re-homes the store
 
-`bake` removes deleted rows for good, and the renderer's background refresh
-queue calls it after every crop. On a store-backed session it used to
+`bake` removes deleted rows for good. Only an explicit **Permanently apply
+deletions** does that now: the renderer's background refresh queue calls
+`bake?compact=false`, which rebuilds the octree from the survivors but keeps
+every row under the mask, because LAD restores the deleted hits outside its
+voxel grid from them (`_deleted_hit_grid_masks`). A compacting refresh had
+undone a crop-to-grid LAD a few seconds after every crop. Keeping the mask
+across rebuilds needs two things compaction had hidden: `reset_edits` needs
+an undo floor (`_commit_delete_history_locked` sets `deleted_base` wherever
+history is cleared), and the renderer's `pendingDeletedCount` must be
+measured against the last installed build (`pending_deleted_count`, from
+`octree_point_count`), not the cumulative `deleted_count`. Pinned by
+`tests/test_background_refresh_keeps_deletions.py` and
+`test_lad.py::test_crop_survives_the_background_octree_refresh`. On a
+store-backed session the retained rows cost disk, not RAM.
+
+Rows that leave a session for good are counted in `unrestorable_hit_count`, so
+LAD can warn: the hits a compacting bake drops, and, for a child made by
+split, extract, duplicate or merge, every parent hit it did not take (plus
+what the parent had already lost). Backfill Misses resets the count, because
+gap-filling against the remaining hits re-creates those pulses as misses.
+Measured on the multi-return fixture: 2.4676 uncropped, 2.8613 after a crop
+plus bake, 2.4723 once re-backfilled. Separately, `backfilled_misses_moved`
+marks a buffer a transform moved. Its beam directions are not rotated, so LAD
+warns from that flag even when every deletion was restored.
+
+On a store-backed session a compacting bake used to
 boolean-index every column, which pulled a full in-RAM copy of the survivors
 back into the process and left the store recording the pre-bake point
 count. The next eviction's write-back then refused the mismatch, the spill

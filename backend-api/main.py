@@ -10211,6 +10211,8 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
         # miss ratio no longer matches the surviving hits) — surface that so the
         # LAD endpoint can warn. Only meaningful when the buffer is actually used.
         flags["misses_stale"] = bool(getattr(sess, "backfilled_misses_stale", False))
+        # A transform moved the buffer's positions but not its beam directions.
+        flags["misses_moved"] = bool(getattr(sess, "backfilled_misses_moved", False))
 
     return xyz, dirs, labels, vals, flags
 
@@ -10953,6 +10955,10 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         _cancel_checkpoint(progress)
 
     warnings: List[str] = []
+    # Hits an explicit bake removed across the requested scans. Nonzero means
+    # some removed returns are unrecoverable, so no message may call a crop
+    # unbiased (see the Apply deletions warning below).
+    unrestorable_hits_total = 0
     try:
         from pyhelios import LiDARCloud, Context
 
@@ -11101,10 +11107,32 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(
                         sess, origin, restore_mask=_del_outside)
                     n_deleted_in_grid = int(_del_inside.sum())
-                if n_deleted_in_grid == 0:
+                    n_unrestorable = int(getattr(sess, "unrestorable_hit_count", 0) or 0)
+                if n_deleted_in_grid == 0 and n_unrestorable == 0:
                     # Every deletion was restored, so a miss buffer computed
-                    # before the crop still matches the hits it sees.
+                    # before the crop still matches the hits it sees. (A moved
+                    # buffer warns from its own `misses_moved` flag instead.)
                     scan_flags["misses_stale"] = False
+                unrestorable_hits_total += n_unrestorable
+                if n_unrestorable > 0:
+                    # These rows are gone from the session outright (compacted by
+                    # a bake, or left in another cloud by a split/extract/merge),
+                    # so none of them could be restored: not the ones outside the
+                    # grid, and nothing says where they were. Never let the
+                    # result read as an unbiased crop.
+                    _lbl = (getattr(scan_entry, 'label', None)
+                            or os.path.basename(scan_entry.file_path or '')
+                            or 'this scan')
+                    warnings.append(
+                        f"Scan '{_lbl}' is missing {n_unrestorable:,} points the inversion "
+                        "cannot restore: they were removed by Apply deletions, or stayed "
+                        "in another cloud when this one was split, extracted, duplicated "
+                        "or merged. Pulses that crossed the voxel grid and returned only "
+                        "on those points are missing, so LAD may read high. Re-run "
+                        "Backfill Misses on this cloud to recover them as misses, or run "
+                        "LAD on the original cloud with anything outside the grid "
+                        "deleted but not applied."
+                    )
                 if n_deleted_in_grid > 0:
                     _lbl = (getattr(scan_entry, 'label', None)
                             or os.path.basename(scan_entry.file_path or '')
@@ -11232,7 +11260,15 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # hits, so their ratio against the surviving hits is off and the
             # inversion may be inaccurate. (Set by delete_region; carried through
             # _session_to_lad_arrays.) Warn so the user re-runs Backfill Misses.
-            if scan_flags.get("misses_stale"):
+            if scan_flags.get("misses_moved"):
+                warnings.append(
+                    f"Scan '{scan_label}' has sky/miss points that were computed "
+                    "before the cloud was moved or rotated, so their beam directions "
+                    "no longer match it and the leaf-area-density result may be "
+                    "inaccurate. Re-run Backfill Misses on the transformed cloud to "
+                    "recompute them."
+                )
+            elif scan_flags.get("misses_stale"):
                 warnings.append(
                     f"Scan '{scan_label}' has sky/miss points that were computed "
                     "before a later crop, so the leaf-area-density result may be "
@@ -11645,8 +11681,12 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     f"{cropped_returns['beams_with_hidden_returns']:,} pulses had returns "
                     "removed from the cloud; their target count placed "
                     f"{cropped_returns['hidden_after']:,} of those beyond the voxel grid "
-                    "and counted them as transmitted, so cropping to the grid did not "
-                    "bias the result."
+                    "and counted them as transmitted"
+                    + (", so cropping to the grid did not bias the result."
+                       if unrestorable_hits_total == 0 else
+                       ". Points removed by Apply deletions, or left in another cloud by "
+                       "a split, extract or merge, could not be recovered, so "
+                       "the result may still be biased.")
                 )
 
         def _clean(x):
@@ -27953,6 +27993,51 @@ def _mark_octree_stale_locked(sess: "CloudSession") -> None:
     sess.octree_cache_id = None
 
 
+def _commit_delete_history_locked(sess: "CloudSession",
+                                  floor: "Optional[np.ndarray]" = None) -> None:
+    """End undo at the current mask: clear `deleted_history` and make the mask
+    the floor `reset_edits` replays onto.
+
+    Clearing the history alone is not enough while the mask keeps deletions.
+    `reset_edits` rebuilds the mask as `deleted_base` (or all-False) plus the
+    surviving deltas, so a cleared history with no base turned "undo the erase
+    after this filter" into "restore every point ever deleted", including a crop
+    the user committed long before. That was harmless only while a background
+    bake compacted the rows away first; the display refresh no longer compacts
+    (see `_do_bake_cloud_session`), so the floor has to be explicit.
+
+    `floor` is a detached copy of the current mask the caller already holds,
+    adopted instead of copying the mask again (N bytes on a large cloud).
+
+    Caller holds `_cloud_session_lock`."""
+    sess.deleted_history = []
+    if not bool(np.any(sess.deleted)):
+        sess.deleted_base = None
+    else:
+        sess.deleted_base = (floor if floor is not None
+                             else np.array(sess.deleted, dtype=bool, copy=True))
+
+
+def _pending_deleted_count_locked(sess: "CloudSession") -> int:
+    """Deleted rows the renderer's current point count still includes.
+
+    The renderer shows `pointCount - pendingDeletedCount`, where `pointCount` is
+    the `point_count` of the last octree build it installed. That build already
+    excluded the rows deleted at the time, so reporting the CUMULATIVE deleted
+    count here subtracted them a second time on the next erase. This is the
+    difference from that build's survivor count instead (negative after an undo
+    restores rows the octree lacks, which is still the right correction).
+    `octree_point_count` is None until the first rebuild, when the drawn octree
+    is the import's and holds every row.
+
+    Caller holds `_cloud_session_lock`."""
+    remaining = int((~np.asarray(sess.deleted)).sum())
+    built = sess.octree_point_count
+    if built is None:
+        built = int(len(sess.positions))
+    return int(built) - remaining
+
+
 def _live_session_octree_ids() -> "set[str]":
     """The octree cache ids every live cloud session is currently rendering from.
 
@@ -30689,6 +30774,22 @@ class CloudSession:
     # time (toast) and at LAD time (warning). Only the backfilled buffer can go
     # stale — interleaved is_miss points live in `extras` and are subset by bake.
     backfilled_misses_stale: bool = False
+    # True when a transform moved the cloud after Backfill Misses ran. The buffer's
+    # positions and origins move with it but its LAD beam directions do not, so,
+    # unlike a crop's staleness, restoring deleted hits cannot make it current
+    # again: LAD must keep warning until Backfill Misses recomputes it.
+    backfilled_misses_moved: bool = False
+    # Survivor count of the last octree build handed to the renderer (the
+    # `point_count` it now displays from). None until the first rebuild. See
+    # `_pending_deleted_count_locked`.
+    octree_point_count: Optional[int] = None
+    # Hits of this scan that are no longer rows of this session, so LAD cannot
+    # restore them. A deleted row keeps its coordinates, and LAD restores the
+    # deleted hits outside its grid from them; a row an explicit bake compacted
+    # away, or one a split/extract/duplicate/merge left in the parent cloud, is
+    # gone, so LAD can no longer do that and must say so. Backfill Misses resets
+    # it: gap-filling against the current hits recovers those pulses as misses.
+    unrestorable_hit_count: int = 0
     # Per-point GPS/relative time, the moving-platform LAD join key. Kept as a
     # dedicated float64 column (NOT in the float32 `extras` dict) because GPS
     # Adjusted-Standard time is a huge double (~3.5e8 s) and a float32 cast has
@@ -32975,7 +33076,14 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         # Freshly computed against the current hits — no longer stale, and the
         # scan origin is now known for the display projection.
         sess.backfilled_misses_stale = False
+        sess.backfilled_misses_moved = False
         if count > 0:
+            # Gap-filling against the CURRENT hits re-creates, as misses, the
+            # pulses whose returns were compacted away or left in another cloud
+            # (target_count places the partly removed ones), so they are no
+            # longer lost: measured 2.4723 vs 2.4676 uncropped after a bake,
+            # against 2.8613 without the re-run.
+            sess.unrestorable_hit_count = 0
             sess.miss_octree_origin = list(origin)
         sess.last_accessed = time.time()
 
@@ -33140,11 +33248,13 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
             sess.backfilled_misses_stale = True
         deleted_count = int(sess.deleted.sum())
         total = int(len(sess.positions))
+        pending = _pending_deleted_count_locked(sess)
         backfilled_misses_stale = sess.backfilled_misses_stale
 
     return {
         "session_id": session_id,
         "deleted_count": deleted_count,
+        "pending_deleted_count": pending,
         "remaining_count": total - deleted_count,
         "total_count": total,
         "backfilled_misses_stale": backfilled_misses_stale,
@@ -33319,9 +33429,11 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
         sess.octree_pose = None   # see the invariant note in delete_cloud_region
         deleted_count = int(sess.deleted.sum())
         total = int(len(sess.positions))
+        pending = _pending_deleted_count_locked(sess)
     return {
         "session_id": session_id,
         "deleted_count": deleted_count,
+        "pending_deleted_count": pending,
         "remaining_count": total - deleted_count,
         "total_count": total,
     }
@@ -33469,14 +33581,26 @@ def _bake_display_stats_locked(sess: "CloudSession") -> dict:
     }
 
 
-def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
+def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True) -> dict:
     """Worker for POST .../bake — see the endpoint docstring.
 
     Runs off the event loop (via `_bin_frame_streaming_response`) so the
     PotreeConverter run can report progress and be cancelled. EVERY mutation of
     the session happens AFTER the build returns, so a cancel mid-build unwinds
     out of here leaving the session pristine — the same guarantee
-    `session_segment_ground` gives for its killable compute."""
+    `session_segment_ground` gives for its killable compute.
+
+    `compact=False` is the renderer's background display refresh after a crop,
+    erase, filter or split: the octree is rebuilt from the survivors exactly as
+    a bake would, but the deleted rows STAY in the session under the mask.
+    Compaction is irreversible data loss, and LAD depends on those rows: a
+    deletion keeps its coordinates, and `_deleted_hit_grid_masks` feeds the
+    deleted hits outside the voxel grid back to the inversion, which is what
+    makes a crop to the grid leave LAD unchanged. Compacting on every refresh
+    destroyed that seconds after the crop (+16% LAD, 411 fewer beams on the
+    multi-return fixture). Only an explicit bake ("Apply deletions") compacts.
+    The undo history is ended at the mask either way, since the renderer
+    retires its delete stack when the rebuilt octree lands."""
     cancel_event = getattr(progress, "cancel_event", None)
     sess = _get_cloud_session(session_id)
     with _cloud_session_lock:
@@ -33499,16 +33623,24 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
     # keep posing it and double-apply the transform. A silent wrong-frame answer,
     # which is the failure mode this whole area exists to prevent. Rebuild.
     is_posed = sess.octree_pose is not None
-    if not has_deletions and not is_posed:
+    # A current octree (`octree_cache_id` is cleared by every edit) already
+    # excludes the deleted rows, so a refresh has nothing to do. A compacting
+    # bake still has work while rows are deleted: removing them.
+    if not is_posed and (not has_deletions or not compact):
         cache_dir = _octree_cache_root() / (sess.octree_cache_id or "")
         if sess.octree_cache_id and (cache_dir / "metadata.json").is_file():
             meta = _read_octree_metadata(cache_dir)
             with _cloud_session_lock:
                 display_stats = _bake_display_stats_locked(sess)
+                history_len = len(sess.deleted_history)
+                pending = _pending_deleted_count_locked(sess)
             return {
-                "session_id": session_id, "point_count": int(len(sess.positions)),
+                "session_id": session_id, "point_count": survivors,
                 "baked": False, "cache_id": sess.octree_cache_id,
-                "cache_dir": str(cache_dir), **meta, **display_stats,
+                "cache_dir": str(cache_dir),
+                "deleted_history_len": history_len,
+                "pending_deleted_count": pending,
+                **meta, **display_stats,
             }
 
     import tempfile
@@ -33518,6 +33650,11 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
             # Octree is hits-only (misses stay in the session for LAD/overlay).
             _session_to_las(sess, las_path, exclude_misses=True)
             extra_dims_meta = list(sess.extra_dims_meta)
+            # The mask this octree was built from, taken in the same critical
+            # section as the write. A non-compacting refresh compares it after
+            # the build to tell whether an edit raced the converter.
+            built_mask = None if compact else np.array(sess.deleted, dtype=bool, copy=True)
+            built_point_count = int((~np.asarray(sess.deleted)).sum())
         cache_key, cache_dir, meta = _build_octree_from_las(
             las_path, extra_dims_meta, progress=progress, cancel_event=cancel_event,
         )
@@ -33530,11 +33667,41 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
     # deletions they just cancelled. Check here, before the first mutation.
     _cancel_checkpoint(progress)
 
+    if not compact:
+        with _cloud_session_lock:
+            if np.array_equal(np.asarray(sess.deleted), built_mask):
+                # Nothing raced the build: this octree IS the session's display.
+                # End undo at the mask (the renderer drops its delete stack when
+                # this lands) and keep every deleted row.
+                _commit_delete_history_locked(sess, floor=built_mask)
+                sess.octree_cache_id = cache_key
+                sess.rendered_octree_cache_id = None
+                sess.octree_pose = None
+            else:
+                # A delete or undo landed during the build, so the octree is
+                # already behind the mask. The renderer installs it anyway (and
+                # keeps masking the newer edit), so pin it as the drawn octree,
+                # leave the session stale for the next refresh, and leave the
+                # history alone: its entries still describe real edits.
+                sess.rendered_octree_cache_id = cache_key
+            sess.octree_point_count = built_point_count
+        remaining = built_point_count
+    else:
+        remaining = _compact_baked_session(sess, cache_key)
+
+    return _finish_bake(sess, session_id, remaining, cache_key, cache_dir, meta)
+
+
+def _compact_baked_session(sess: "CloudSession", cache_key: str) -> int:
+    """The compacting half of an explicit bake. Returns the new point count."""
     # Compact the in-RAM arrays to the survivors and clear the mask + history, so
     # the session's source of truth matches the baked octree and further edits
     # start from the reduced set.
     with _cloud_session_lock:
         keep = np.asarray(~sess.deleted)
+        miss_col = sess.extras.get(_MISS_SLUG)
+        dropped = ~keep if miss_col is None else (~keep) & (np.asarray(miss_col) == 0)
+        sess.unrestorable_hit_count += int(dropped.sum())
         if sess.store is not None:
             # Store-backed: compact ON DISK into a new store (see the helper).
             # Nothing deleted means nothing to move; the maps stay as they are.
@@ -33579,7 +33746,13 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         # the same critical section).
         sess.octree_pose = None
         remaining = int(len(sess.positions))
+        sess.octree_point_count = remaining
+    return remaining
 
+
+def _finish_bake(sess: "CloudSession", session_id: str, remaining: int,
+                 cache_key: str, cache_dir, meta: dict) -> dict:
+    """Miss octree, eviction and the response, shared by both bake modes."""
     # Rebuild the miss octree from the surviving misses so the displayed shell
     # tracks the baked cloud (a crop that removed hits also reprojects the misses
     # against the new far hit). Reprojected from the stored origin; None if no
@@ -33603,6 +33776,7 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         # rather than assuming zero, or a delete racing a background rebuild
         # would desynchronise the two and misaddress a later undo.
         history_len = len(sess.deleted_history)
+        pending = _pending_deleted_count_locked(sess)
         display_stats = _bake_display_stats_locked(sess)
 
     return {
@@ -33613,13 +33787,16 @@ def _do_bake_cloud_session(session_id: str, progress=None) -> dict:
         "cache_dir": str(cache_dir),
         "miss_octree_cache_id": miss_cache_id,
         "deleted_history_len": history_len,
+        # What the renderer's `pendingDeletedCount` becomes: 0 unless an edit
+        # raced the build. See `_pending_deleted_count_locked`.
+        "pending_deleted_count": pending,
         **meta,
         **display_stats,
     }
 
 
 @app.post("/api/cloud/session/{session_id}/bake")
-def bake_cloud_session(session_id: str, http_request: Request):
+def bake_cloud_session(session_id: str, http_request: Request, compact: bool = True):
     """Permanently apply deletions by rebuilding the octree FROM THE IN-RAM
     ARRAYS — the survivors (positions[~deleted] + colours + intensity + every
     scalar extra-dim) are written to a LAS via `_session_to_las` and fed to
@@ -33628,6 +33805,10 @@ def bake_cloud_session(session_id: str, http_request: Request):
     metadata. The deliberately-slow step (the PotreeConverter run).
 
     No deletions → returns the current octree without rebuilding.
+
+    `?compact=false` (the renderer's background display refresh) rebuilds the
+    octree but keeps the deleted rows under the mask, because LAD restores the
+    deleted hits outside its grid from them. See `_do_bake_cloud_session`.
 
     Streams PHP1 progress markers ahead of the JSON tail and is **cancellable**
     via `/api/cancel/{run_id}` (the cancel SIGKILLs the PotreeConverter child).
@@ -33642,7 +33823,7 @@ def bake_cloud_session(session_id: str, http_request: Request):
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
-            _do_bake_cloud_session(session_id, progress)
+            _do_bake_cloud_session(session_id, progress, compact=compact)
         ).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
@@ -33893,6 +34074,12 @@ def _session_rebuild(
     throttle and drops only the collateral damage to unrelated requests."""
     import contextlib
     import tempfile
+    # What the octree about to be written holds, for `octree_point_count`.
+    # Measured before the (block-locked) write, like every caller's own
+    # `remaining`; a delete landing mid-write is the race `_session_to_las`
+    # documents.
+    with (contextlib.nullcontext() if private else _cloud_session_lock):
+        built_point_count = int((~np.asarray(sess.deleted)).sum())
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "rebuilt.las"
         # Octree is hits-only (misses stay in the session for LAD/overlay). A
@@ -33912,6 +34099,7 @@ def _session_rebuild(
         )
     with _cloud_session_lock:
         sess.octree_cache_id = cache_key
+        sess.octree_point_count = built_point_count
         sess.rendered_octree_cache_id = None   # see _mark_octree_stale_locked
         # The octree was just built FROM the current arrays, so any posed
         # transform is now folded into it. Cleared here rather than at each of
@@ -33991,11 +34179,27 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         deleted=np.zeros(len(take), dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
+        # Every parent hit the child does not take (a sibling tree, the ground a
+        # split moved away, rows the parent had deleted) is a return LAD on the
+        # child can no longer restore, on top of what the parent had already lost.
+        unrestorable_hit_count=(int(getattr(sess, "unrestorable_hit_count", 0) or 0)
+                                + _hit_row_count_locked(sess)
+                                - _hit_row_count_locked(sess, take)),
         created_at=time.time(),
         last_accessed=time.time(),
     )
     _cloud_sessions[new_id] = new_sess
     return new_sess
+
+
+def _hit_row_count_locked(sess: "CloudSession", rows: Optional[np.ndarray] = None) -> int:
+    """How many of `sess`'s rows (all of them, or the index array `rows`) are hits
+    rather than interleaved sky/miss points. Caller holds `_cloud_session_lock`."""
+    miss_col = sess.extras.get(_MISS_SLUG)
+    if miss_col is None:
+        return int(len(sess.positions) if rows is None else len(rows))
+    col = np.asarray(miss_col)
+    return int((col == 0).sum() if rows is None else (col[rows] == 0).sum())
 
 
 def _session_subset_locked(sess: "CloudSession", keep: np.ndarray) -> "CloudSession":
@@ -34083,8 +34287,7 @@ def session_split(session_id: str, request: SessionSplitRequest):
         # so reset the undo history to keep both sides in lock-step.
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[leftover_mask]] = True
-        sess.deleted_history = []
-        sess.deleted_base = None
+        _commit_delete_history_locked(sess)
         sess.label_history = {}   # label undo must not reach across this commit either
         _mark_octree_stale_locked(sess)
         sess.octree_pose = None    # see the invariant note in delete_cloud_region
@@ -34574,6 +34777,12 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
         deleted=np.zeros(total, dtype=bool),
         deleted_history=[],
         octree_cache_id=None,
+        # Only survivors are concatenated, so each input's deleted hits are gone
+        # from the merged cloud, as is whatever that input had already lost.
+        unrestorable_hit_count=sum(
+            int(getattr(s, "unrestorable_hit_count", 0) or 0)
+            + _hit_row_count_locked(s) - _hit_row_count_locked(s, np.flatnonzero(m))
+            for s, m in zip(sessions, survs)),
         created_at=time.time(),
         last_accessed=time.time(),
         # A merged multi-scan cloud has no single beam apex → project misses at
@@ -35761,6 +35970,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             if bf.get("origins") is not None and np.asarray(bf["origins"]).shape[0] > 0:
                 bf["origins"] = _apply(np.asarray(bf["origins"], dtype=np.float64), shift)
             sess.backfilled_misses_stale = True
+            sess.backfilled_misses_moved = True
 
         # Miss-octree projection origin (session frame): move it with the cloud so
         # the reprojected shell keeps the same hit-distance/angle geometry.
@@ -35779,8 +35989,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         # history so a later erase-undo can't reach across the transform.
         # (Re-set below when the pose path keeps the existing octree.)
         _mark_octree_stale_locked(sess)
-        sess.deleted_history = []
-        sess.deleted_base = None
+        _commit_delete_history_locked(sess)
         remaining = int((~sess.deleted).sum())
         sess.label_history = {}   # label undo must not reach across this commit either
         total = int(len(sess.positions))
@@ -35991,15 +36200,16 @@ def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=
         # erase-undo must not reach back across this filter.
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[~keep]] = True
-        sess.deleted_history = []
-        sess.deleted_base = None
+        _commit_delete_history_locked(sess)
         sess.label_history = {}   # label undo must not reach across this commit either
         _mark_octree_stale_locked(sess)
         sess.octree_pose = None    # see the invariant note in delete_cloud_region
         remaining = int((~sess.deleted).sum())
+        pending = _pending_deleted_count_locked(sess)
 
     if not request.rebuild:
-        return {"session_id": session_id, "remaining_count": remaining, "deleted_count": total - remaining, "total_count": total, "rebuilt": False}
+        return {"session_id": session_id, "remaining_count": remaining, "deleted_count": total - remaining,
+                "pending_deleted_count": pending, "total_count": total, "rebuilt": False}
     # The deliberately-slow step. The mask commit above is milliseconds; this
     # octree reconversion is the whole wait the user sees, so it owns almost the
     # entire progress span and carries the cancel that kills the converter child.

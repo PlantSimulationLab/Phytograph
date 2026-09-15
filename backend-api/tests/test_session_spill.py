@@ -150,6 +150,9 @@ def test_every_cloudsession_field_survives_the_round_trip(spill_root):
     sess.miss_octree_cache_id = "miss-full"
     sess.miss_octree_origin = [0.5, 0.5, 1.7]
     sess.backfilled_misses_stale = True
+    sess.backfilled_misses_moved = True
+    sess.octree_point_count = n - 3
+    sess.unrestorable_hit_count = 17
     sess.timestamps = np.arange(n, dtype=np.float64) + 3.5e8
     sess.gps_time_encoding = "adjusted_standard"
     sess.beam_origins = np.zeros((n, 3), dtype=np.float64)
