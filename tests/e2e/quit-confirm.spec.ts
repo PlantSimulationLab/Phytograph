@@ -23,6 +23,37 @@ const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 // each needs its own app to close. (The documented exception to the shared-app
 // rule in CLAUDE.md, same as octree-cache-recovery.spec.ts.)
 
+/**
+ * Wait until MAIN has actually received the renderer's dirty-state push.
+ *
+ * The renderer sends it from a useEffect (App.tsx), which runs after React has
+ * committed the DOM and then travels asynchronous IPC. So waiting on a DOM row
+ * — the scan list — proves only that the RENDERER knows; main can still be a
+ * few ticks behind. Closing in that window finds a clean scene and skips the
+ * confirmation entirely, which is exactly how `prompts` came back 0 instead of
+ * 1 in CI under two-worker load.
+ */
+async function waitForMainDirty(
+  app: import('@playwright/test').ElectronApplication,
+  dirty: boolean,
+) {
+  await expect
+    .poll(
+      () =>
+        app.evaluate(
+          () =>
+            ((globalThis as Record<string, unknown>).__sceneDirty as
+              | { dirty: boolean }
+              | undefined)?.dirty ?? null,
+        ),
+      {
+        message: `main never heard the scene was ${dirty ? 'dirty' : 'clean'}`,
+        timeout: 20_000,
+      },
+    )
+    .toBe(dirty);
+}
+
 /** Close the window the way the X button does, and report what happened. */
 async function closeWindow(app: import('@playwright/test').ElectronApplication) {
   return app.evaluate(async ({ BrowserWindow }) => {
@@ -46,6 +77,7 @@ test('a close is CANCELLED when the user declines, and the session survives inta
   await completeImportWizard(app.page);
   const rows = app.page.locator('[data-testid="scan-row"]');
   await expect(rows).toHaveCount(1, { timeout: 20_000 });
+  await waitForMainDirty(app.app, true);
 
   const result = await closeWindow(app.app);
 
@@ -72,6 +104,7 @@ test('a close PROCEEDS when the user accepts', async () => {
   await importFiles(app.app, app.page, 'import-point-cloud', [TINY]);
   await completeImportWizard(app.page);
   await expect(app.page.locator('[data-testid="scan-row"]')).toHaveCount(1, { timeout: 20_000 });
+  await waitForMainDirty(app.app, true);
 
   const result = await closeWindow(app.app);
 

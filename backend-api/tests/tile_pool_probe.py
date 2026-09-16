@@ -14,6 +14,32 @@ import json
 import os
 import sys
 
+# Pin the OpenMP runtime to ONE thread before anything can import a native
+# extension that starts it. CSF's cloth simulation is raced upstream:
+# `Cloth::timeStep` runs `satisfyConstraintSelf` under `#pragma omp parallel
+# for` (CSF/src/Cloth.cpp), and that function writes its NEIGHBOUR particle
+# (`p2->offsetPos(...)`) — a particle another iteration owns. So the settled
+# cloth, and the `maxDiff < 0.005` early stop that reads it, both depend on
+# thread interleaving. A point whose height lands within float noise of
+# `class_threshold` then classifies either way from run to run.
+#
+# That is invisible on macOS (its wheel is built without OpenMP) and live on
+# Linux (its wheel links libgomp), which is why the exact-equality assertion
+# in test_tiled_parallel.py passed locally and failed intermittently in CI on
+# ONE point in 60,000.
+#
+# Pinned HERE rather than in the backend because the race is upstream and
+# costs real parallelism on production-sized clouds — the tiling engine this
+# probe exists to test is unaffected by it either way. With CSF made
+# deterministic the pool's answer must match the sequential one EXACTLY, which
+# is the property the test is actually for: that tiles scatter to the right
+# output rows. A tolerance would pass a pool that mixed up whole tiles.
+#
+# Set before `import numpy`, and inherited by the spawn-pool children, so the
+# parent and every worker agree.
+for _v in ("OMP_NUM_THREADS", "OMP_THREAD_LIMIT"):
+    os.environ[_v] = "1"
+
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))

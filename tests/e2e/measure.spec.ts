@@ -39,7 +39,20 @@ test.describe('measurement tool', () => {
 
   // Project a WORLD point to viewport pixels through the renderer's own camera,
   // so a click targets geometry wherever the current framing actually draws it.
-  async function worldToScreenPx(world: [number, number, number]) {
+  // `requireCanvas` defaults to true because the usual caller is about to CLICK
+  // the pixel, and a click swallowed by an overlay reads as "clicked and nothing
+  // happened". Pass false when the projection is only being COMPARED against
+  // something already rendered: the viewer's permanent navigation-help overlay
+  // sits at `bottom-4 left-4` (PointCloudViewer.tsx), so a world point that
+  // projects near the canvas floor legitimately lands on that <span> - and
+  // failing there says nothing about the projection, which is all the caller
+  // wanted. That is precisely how the rigid-transform test failed in CI: the
+  // translate had applied correctly (the viewer's own centre readout showed the
+  // moved cloud) and the test still died, on a pixel it never intended to click.
+  async function worldToScreenPx(
+    world: [number, number, number],
+    { requireCanvas = true }: { requireCanvas?: boolean } = {},
+  ) {
     const pt = await session.page.evaluate(
       (w) => (window as any).__worldToScreen?.(w) ?? null,
       world,
@@ -51,17 +64,17 @@ test.describe('measurement tool', () => {
         `(projected to ${pt.x.toFixed(1)},${pt.y.toFixed(1)})`,
       );
     }
-    // A click that lands on a panel is swallowed by the DOM and never reaches
-    // the picker, which reads as "clicked and nothing happened".
-    const tag = await session.page.evaluate(
-      (p) => (document.elementFromPoint(p.x, p.y) as HTMLElement | null)?.tagName?.toLowerCase() ?? null,
-      { x: pt.x, y: pt.y },
-    );
-    if (tag !== 'canvas') {
-      throw new Error(
-        `projected ${JSON.stringify(world)} to (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) but that ` +
-        `pixel belongs to <${tag}>, not the canvas`,
+    if (requireCanvas) {
+      const tag = await session.page.evaluate(
+        (p) => (document.elementFromPoint(p.x, p.y) as HTMLElement | null)?.tagName?.toLowerCase() ?? null,
+        { x: pt.x, y: pt.y },
       );
+      if (tag !== 'canvas') {
+        throw new Error(
+          `projected ${JSON.stringify(world)} to (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) but that ` +
+          `pixel belongs to <${tag}>, not the canvas`,
+        );
+      }
     }
     return pt as { x: number; y: number };
   }
@@ -320,7 +333,7 @@ test.describe('measurement tool', () => {
     });
 
     await expect.poll(async () => {
-      const expectedPx = await worldToScreenPx([0.3 + DX, 0.0, 0.225]);
+      const expectedPx = await worldToScreenPx([0.3 + DX, 0.0, 0.225], { requireCanvas: false });
       const cx = parseFloat(await dot.getAttribute('cx') ?? 'NaN');
       const cy = parseFloat(await dot.getAttribute('cy') ?? 'NaN');
       return Math.hypot(
@@ -390,7 +403,6 @@ test.describe('measurement tool', () => {
     //      from an origin the rotation would otherwise swing it around.
     const dotBefore = { x: cxBefore, y: cyBefore };
 
-    await waitForCameraSettled();
     const dot = session.page.locator('[data-testid="measure-leaders"] circle').first();
     await expect(dot).toBeVisible();
 
@@ -398,14 +410,36 @@ test.describe('measurement tool', () => {
       const r = el.getBoundingClientRect();
       return { width: r.width, height: r.height };
     });
+
+    // POLL for the move rather than reading once after waitForCameraSettled().
+    // cx/cy are written by a PER-FRAME projector (MeasureLabels' useFrame), so
+    // they only catch up on the next rendered frame - while the settle helper
+    // waits on the CAMERA, which rotating the CLOUD never moves. It therefore
+    // returns immediately, and a single read can still see the pre-rotation
+    // pixel. That is exactly how this failed in CI: the snapshot showed the
+    // measurement HAD rotated (its components went 0.200/0.000/0.150 ->
+    // 0.195/0.117/0.105, length preserved at 0.250 m) while the dot still
+    // measured as having moved 0 px.
+    await expect
+      .poll(
+        async () => {
+          const x = parseFloat((await dot.getAttribute('cx')) ?? 'NaN');
+          const y = parseFloat((await dot.getAttribute('cy')) ?? 'NaN');
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return -1;
+          return Math.hypot(x - dotBefore.x, y - dotBefore.y);
+        },
+        {
+          message:
+            `leader dot did not move from (${dotBefore.x.toFixed(1)}, ${dotBefore.y.toFixed(1)}) `
+            + `under a multi-axis rotation - movePoint is ignoring rotation`,
+          timeout: 15_000,
+          intervals: [100, 250, 500],
+        },
+      )
+      .toBeGreaterThan(5);
+
     const cx = parseFloat(await dot.getAttribute('cx') ?? 'NaN');
     const cy = parseFloat(await dot.getAttribute('cy') ?? 'NaN');
-
-    expect(
-      Math.hypot(cx - dotBefore.x, cy - dotBefore.y),
-      `leader dot did not move from (${dotBefore.x.toFixed(1)}, ${dotBefore.y.toFixed(1)}) ` +
-      `under a 90° rotation — movePoint is ignoring rotation`,
-    ).toBeGreaterThan(5);
 
     expect(
       cx >= 0 && cx <= canvasRect.width && cy >= 0 && cy <= canvasRect.height,

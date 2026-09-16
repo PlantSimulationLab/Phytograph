@@ -62,6 +62,42 @@ The same shape applies to any future dependency that cannot be committed: stand
 in for the ABI, keep the stub honest with a layout assertion, and say out loud
 what the stub cannot prove.
 
+## A native dependency can be nondeterministic — pin its threads, don't loosen the test
+
+The `cloth-simulation-filter` wheel (`import CSF`) is **OpenMP-parallel on
+Linux and single-threaded on macOS**, and upstream CSF has a data race inside
+that parallel region: `Cloth::timeStep` runs `satisfyConstraintSelf` under a
+`#pragma omp parallel for`, and that function writes its *neighbour* particle
+(`p2->offsetPos(...)`) — a particle another iteration owns. The settled cloth,
+and the `maxDiff < 0.005` early stop that reads it, therefore both depend on
+thread interleaving.
+
+The visible symptom is tiny and confusing: a point whose height lands within
+float noise of `class_threshold` classifies either way from run to run. It cost
+a CI run on **one label in 60,000**, in a test that had passed for a week, on a
+commit that touched nothing nearby — and it reproduced on neither a rerun nor
+any macOS machine, because the macOS wheel has no OpenMP at all.
+
+Two rules follow:
+
+- **Pin `OMP_NUM_THREADS=1` in the test harness, not in the backend.** The race
+  is upstream and threading is worth real time on production-sized clouds, so
+  the backend keeps it. `backend-api/tests/tile_pool_probe.py` sets the pin at
+  module import — before `numpy` or any native extension loads, and inherited
+  by its spawn-pool children — which makes CSF reproducible for the test
+  without changing what ships.
+- **Don't answer nondeterminism by weakening the assertion.** Once CSF is
+  pinned, `test_tiled_parallel.py` can keep demanding the pool's labels match
+  the sequential ones *exactly*, which is the property it exists for: that
+  tiles scatter to the right output rows. A tolerance would have hidden a pool
+  that mixed up whole tiles. (Where the comparison is genuinely approximate —
+  `test_tiled.py`'s tiled-vs-untiled seam check, which compares different
+  *algorithms*, not different schedulers — a tolerance is correct.)
+
+The general shape: when a test fails on a hair's-width difference, ask whether a
+native dependency is threaded on that platform before assuming the code under
+test moved.
+
 ## E2E rules (non-negotiable)
 
 These rules exist because the alternative — mocking the backend or

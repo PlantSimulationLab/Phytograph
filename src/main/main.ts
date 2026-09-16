@@ -7,7 +7,7 @@ import { authorizeOpenPaths, extractFilePathsFromArgv } from './openPaths.js';
 import { installApplicationMenu, applyMenuState } from './menu.js';
 import { setupAutoUpdater } from './updater.js';
 import { IPC, type FileDropPayload, type MenuStatePayload, type SceneDirtyPayload } from '../shared/ipc.js';
-import { setSceneDirty, resetSceneDirty, shouldAllowClose } from './quitConfirm.js';
+import { setSceneDirty, resetSceneDirty, shouldAllowClose, currentSceneDirty } from './quitConfirm.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
 import { registerOctreeSchemeAsPrivileged, registerOctreeProtocol } from './octreeProtocol.js';
 import { initLogging, getLogDir, getLogSessionTag, setFatalErrorHandler, log } from './logger.js';
@@ -421,6 +421,7 @@ function createWindow(): void {
     rendererReady = false;
     // The scene died with the window; a later quit has nothing to warn about.
     resetSceneDirty();
+    (globalThis as Record<string, unknown>).__sceneDirty = currentSceneDirty();
   });
 }
 
@@ -523,6 +524,13 @@ app.whenReady().then(async () => {
   // flag — see quitConfirm.ts.
   ipcMain.on(IPC.SceneDirty, (_e, payload: SceneDirtyPayload) => {
     setSceneDirty(payload);
+    // Readable from Playwright's app.evaluate (which runs in main), for the
+    // same reason as __quitConfirmShown above. The renderer pushes this from a
+    // useEffect, which runs AFTER React has committed the DOM and then travels
+    // async IPC — so a spec that waits on a DOM row has NOT waited for main to
+    // know the scene is dirty. It normally wins by microseconds and loses under
+    // CI load, which closed a "dirty" scene with no prompt at all.
+    (globalThis as Record<string, unknown>).__sceneDirty = currentSceneDirty();
   });
 
   // Windows/Linux: a second launch (e.g. double-clicking a file while the app is
