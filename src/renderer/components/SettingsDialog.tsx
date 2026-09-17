@@ -512,8 +512,16 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                                    + 'but with no sky shell — Leaf Area Density needs it'],
                           ] as const)
                         : ([
+                            // "Start Docker Desktop" is only right when a
+                            // daemon is actually stopped. When the CLI itself
+                            // cannot be found, Docker is often already running
+                            // and starting it again changes nothing — say what
+                            // is really missing instead.
                             ['docker', rieglStatus.dockerPresent, 'Docker running',
-                             'Start Docker Desktop'],
+                             rieglStatus.dockerState === 'no_cli'
+                               ? 'The docker command was not found — install Docker '
+                                 + "Desktop, or enable its CLI tools if it's already installed"
+                               : 'Start Docker Desktop'],
                             ['rivlib', rieglStatus.rivlibValid, 'RiVLib folder',
                              settings?.rivlibPath
                                ? 'No lib/libscanifc.so here — pick the extracted folder'

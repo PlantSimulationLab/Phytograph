@@ -650,7 +650,12 @@ def test_docker_invocation_is_unchanged(monkeypatch, tmp_path):
     mounts = [("/host/rivlib", "/rivlib", "ro"), ("/host/proj", "/project", "ro")]
     cmd, env, container = main._riegl_reader_invocation(["inspect", "/project"], mounts)
 
-    assert cmd[:5] == ["docker", "run", "--rm", "--name", container]
+    # argv[0] is the RESOLVED docker binary, not the bare name: a GUI-launched
+    # app inherits launchd's PATH and would not find "docker" on it. Everything
+    # after it is unchanged.
+    assert os.path.basename(cmd[0]) == "docker"
+    assert cmd[0] == (main._docker_exe() or "docker")
+    assert cmd[1:5] == ["run", "--rm", "--name", container]
     assert "--platform" in cmd and "linux/amd64" in cmd
     assert "-v" in cmd
     assert "/host/rivlib:/rivlib:ro" in cmd

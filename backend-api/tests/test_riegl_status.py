@@ -1640,3 +1640,175 @@ def test_context_still_resolves_from_the_repo_checkout(monkeypatch):
     ctx = main._riegl_docker_context()
     assert (ctx / "Dockerfile").is_file()
     assert (ctx / "rxp_reader.py").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Docker CLI resolution — a GUI-launched app does NOT inherit the shell's PATH
+# ---------------------------------------------------------------------------
+#
+# The regression these pin: a macOS app launched from Finder/Dock inherits
+# launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin), which contains neither
+# /usr/local/bin (Docker Desktop's symlink) nor /opt/homebrew/bin (Homebrew).
+# `shutil.which("docker")` therefore returned None on a machine with a running,
+# healthy Docker, `_spawn_run` raised FileNotFoundError, and the bare
+# `except Exception` in the probe reported "Docker is not running" — sending
+# the user to restart a daemon that was never stopped. Neither restarting
+# Docker nor restarting Phytograph could fix it.
+
+
+def _bare_launchd_path(monkeypatch):
+    """Make shutil.which behave as it does under launchd's PATH: docker unseen."""
+    monkeypatch.setattr(main.shutil, "which", lambda name: None)
+
+
+def test_docker_exe_falls_back_when_path_lacks_docker(monkeypatch, tmp_path):
+    """PATH missing docker must not mean "no docker" — check the real locations."""
+    _bare_launchd_path(monkeypatch)
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(main, "_DOCKER_FALLBACK_PATHS", (str(fake),))
+
+    assert main._docker_exe() == str(fake)
+
+
+def test_docker_exe_prefers_path_over_fallbacks(monkeypatch, tmp_path):
+    """A docker the user deliberately put on PATH still wins."""
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(main.shutil, "which", lambda name: "/from/path/docker")
+    monkeypatch.setattr(main, "_DOCKER_FALLBACK_PATHS", (str(fake),))
+
+    assert main._docker_exe() == "/from/path/docker"
+
+
+def test_docker_exe_ignores_nonexistent_and_nonexecutable(monkeypatch, tmp_path):
+    """A listed fallback that isn't there, or isn't runnable, is not a docker."""
+    _bare_launchd_path(monkeypatch)
+    missing = tmp_path / "nope"
+    not_exec = tmp_path / "docker"
+    not_exec.write_text("#!/bin/sh\nexit 0\n")
+    not_exec.chmod(0o644)
+    monkeypatch.setattr(
+        main, "_DOCKER_FALLBACK_PATHS", (str(missing), str(not_exec))
+    )
+
+    assert main._docker_exe() is None
+
+
+def test_docker_argv_rewrites_to_absolute_binary(monkeypatch):
+    """Every docker call site must run the RESOLVED binary, not the bare name.
+
+    The probes are not the only thing that breaks on a bare PATH: `docker build`
+    and `docker run` go through Popen, where the same FileNotFoundError turns a
+    resolvable PATH problem into an import that fails halfway through.
+    """
+    monkeypatch.setattr(main, "_docker_exe", lambda: "/usr/local/bin/docker")
+
+    assert main._docker_argv(["docker", "build", "-t", "x", "."]) == [
+        "/usr/local/bin/docker", "build", "-t", "x", ".",
+    ]
+    # Not a docker argv: left exactly alone.
+    assert main._docker_argv(["git", "status"]) == ["git", "status"]
+
+
+def test_docker_probe_reports_no_cli_not_no_daemon(monkeypatch):
+    """The heart of the bug: a missing CLI must not read as a stopped daemon."""
+    monkeypatch.setattr(main, "_docker_exe", lambda: None)
+
+    def _boom(*a, **k):  # pragma: no cover - must never be reached
+        raise AssertionError("must not probe the daemon when there is no CLI")
+
+    monkeypatch.setattr(main, "_docker_present", _boom)
+
+    # Short-circuits on the missing CLI without ever touching the daemon: there
+    # is nothing to ask, and a 10s subprocess timeout per probe is pure cost.
+    assert main._docker_probe() == main._DOCKER_NO_CLI
+
+
+def test_docker_probe_ok_when_daemon_answers(monkeypatch):
+    monkeypatch.setattr(main, "_docker_exe", lambda: "/usr/local/bin/docker")
+    monkeypatch.setattr(
+        main, "_spawn_run",
+        lambda argv, **k: main._SpawnResult(0, "28.3.3\n", ""),
+    )
+
+    assert main._docker_probe() == main._DOCKER_OK
+    assert main._docker_present() is True
+
+
+def test_docker_probe_no_daemon_when_cli_present_but_server_down(monkeypatch):
+    """A 500 from a wedged daemon is still "not responding", and says so."""
+    monkeypatch.setattr(main, "_docker_exe", lambda: "/usr/local/bin/docker")
+    monkeypatch.setattr(
+        main, "_spawn_run",
+        lambda argv, **k: main._SpawnResult(1, "", "500 Internal Server Error"),
+    )
+
+    assert main._docker_probe() == main._DOCKER_NO_DAEMON
+    assert main._docker_present() is False
+
+
+def test_status_no_cli_reason_does_not_say_not_running(monkeypatch, client):
+    """The user-facing remedy must be actionable.
+
+    "Start Docker Desktop and try again" is unfixable advice when Docker is
+    already running and the real fault is that the app cannot see the command.
+    """
+    monkeypatch.setattr(main, "_riegl_runtime", lambda: "docker")
+    monkeypatch.setattr(main, "_docker_exe", lambda: None)
+
+    b = client.get("/api/riegl/status").json()
+
+    assert b["available"] is False
+    assert b["docker_present"] is False
+    assert b["docker_state"] == main._DOCKER_NO_CLI
+    assert "could not be found" in b["reason"]
+    assert "is not running" not in b["reason"]
+
+
+def test_status_daemon_down_still_says_start_docker(monkeypatch, client):
+    """The original message survives for the case it was actually right about."""
+    monkeypatch.setattr(main, "_riegl_runtime", lambda: "docker")
+    monkeypatch.setattr(main, "_docker_exe", lambda: "/usr/local/bin/docker")
+    monkeypatch.setattr(
+        main, "_spawn_run",
+        lambda argv, **k: main._SpawnResult(1, "", "cannot connect"),
+    )
+
+    b = client.get("/api/riegl/status").json()
+
+    assert b["docker_state"] == main._DOCKER_NO_DAEMON
+    assert "Start Docker Desktop" in b["reason"]
+
+
+def test_status_recovers_docker_on_bare_launchd_path(monkeypatch, client, tmp_path):
+    """End to end: the exact failing configuration now reports Docker present.
+
+    Bare launchd PATH (which() blind) + a real docker at a fallback location +
+    a daemon that answers == available Docker. This is the case that shipped
+    broken: every ingredient was healthy and the app still said Docker was down.
+    """
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    _bare_launchd_path(monkeypatch)
+    monkeypatch.setattr(main, "_DOCKER_FALLBACK_PATHS", (str(fake),))
+    monkeypatch.setattr(main, "_riegl_runtime", lambda: "docker")
+
+    seen = {}
+
+    def _fake_spawn(argv, **k):
+        seen["argv"] = argv
+        return main._SpawnResult(0, "28.3.3\n", "")
+
+    monkeypatch.setattr(main, "_spawn_run", _fake_spawn)
+
+    b = client.get("/api/riegl/status").json()
+
+    assert b["docker_present"] is True
+    assert b["docker_state"] == main._DOCKER_OK
+    assert b["docker_exe"] == str(fake)
+    # And it ran the resolved absolute path, not the bare "docker".
+    assert seen["argv"][0] == str(fake)

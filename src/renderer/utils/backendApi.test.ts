@@ -1579,6 +1579,7 @@ describe('getRieglStatus', () => {
     host_os: 'darwin',
     runtime: 'docker',
     docker_present: true,
+    docker_state: 'ok',
     image_built: true,
     toolchain_present: true,
     misses_available: true,
@@ -1597,6 +1598,7 @@ describe('getRieglStatus', () => {
       hostOs: 'darwin',
       runtime: 'docker',
       dockerPresent: true,
+      dockerState: 'ok',
       imageBuilt: true,
       imageStale: false,
       toolchainPresent: true,
@@ -1606,6 +1608,21 @@ describe('getRieglStatus', () => {
       image: 'phytograph-riegl:latest',
       reason: 'RIEGL .rxp import is ready.',
     });
+  });
+
+  it('reads docker_state, and defaults to null when a backend omits it', async () => {
+    // Forward compatibility in both directions: an older backend (no such
+    // field) must not read as a known state, and an unrecognised value must
+    // not leak through as one.
+    mockFetchOk({ ...ready, docker_state: 'no_cli' });
+    expect((await getRieglStatus('/opt/rivlib')).dockerState).toBe('no_cli');
+
+    const { docker_state: _omitted, ...withoutState } = ready;
+    mockFetchOk(withoutState);
+    expect((await getRieglStatus('/opt/rivlib')).dockerState).toBeNull();
+
+    mockFetchOk({ ...ready, docker_state: 'something-new' });
+    expect((await getRieglStatus('/opt/rivlib')).dockerState).toBeNull();
   });
 
   it('maps a native runtime, where there is no Docker and no image', async () => {

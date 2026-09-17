@@ -389,6 +389,18 @@ export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
 export type RieglRuntime = 'docker' | 'native' | null;
 
 /**
+ * Why Docker is unreachable, when it is — the two causes need different words.
+ *
+ * 'no_cli'    — the `docker` command was not found. NOT fixable by starting
+ *               anything: a GUI-launched app inherits launchd's bare PATH, so
+ *               this reads as "down" on a machine where Docker is running fine.
+ * 'no_daemon' — the CLI is there but the daemon does not answer. "Start Docker
+ *               Desktop" is the right advice for this one, and only this one.
+ * 'ok'        — reachable.
+ */
+export type RieglDockerState = 'ok' | 'no_cli' | 'no_daemon' | null;
+
+/**
  * The OS the BACKEND probed, which is not necessarily the one Electron is
  * running on: PHYTOGRAPH_RIEGL_RUNTIME can force a runtime that
  * `process.platform` would contradict, and the whole fake-RiVLib suite depends
@@ -421,6 +433,8 @@ export interface RieglStatus {
    */
   runtime: RieglRuntime;
   dockerPresent: boolean;
+  /** Why Docker is unreachable when `dockerPresent` is false. Docker runtime only. */
+  dockerState: RieglDockerState;
   imageBuilt: boolean;
   /**
    * The image exists but was built by an earlier Phytograph. Docker only.
@@ -720,6 +734,12 @@ export async function getRieglStatus(
     runtime:
       j.runtime === 'docker' || j.runtime === 'native' ? j.runtime : null,
     dockerPresent: j.docker_present === true,
+    dockerState:
+      j.docker_state === 'ok' ||
+      j.docker_state === 'no_cli' ||
+      j.docker_state === 'no_daemon'
+        ? j.docker_state
+        : null,
     imageBuilt: j.image_built === true,
     imageStale: j.image_stale === true,
     toolchainPresent: j.toolchain_present === true,

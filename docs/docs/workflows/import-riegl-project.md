@@ -112,7 +112,7 @@ Phytograph reads it from wherever you put it. Nothing is copied into the app.
 
         | Checklist line | What to do |
         | --- | --- |
-        | ✗ Docker running | Start Docker Desktop and reopen Settings |
+        | ✗ Docker running | Start Docker Desktop and reopen Settings. If the line says the `docker` command was not found, install Docker Desktop's CLI tools instead — the daemon may already be running |
         | ✗ RiVLib folder | Choose the extracted folder (the one with `bin/`, `include/`, `lib/`) |
         | ✗ Reader image up to date | Click **Build reader image** — a one-time step; the image is ~300 MB on disk once built |
 
@@ -483,10 +483,12 @@ puts it back on the bounding box.
 : Phytograph found no way to run RiVLib here. Export from RiSCAN PRO or
   RiPROCESS instead.
 
-**"Docker is not running."** *(macOS)*
+**"Docker is installed but not responding."** *(macOS)*
 : Start Docker Desktop. The badge re-checks on its own within a few seconds.
-  You will never see this on Windows or Linux — RiVLib runs natively there and
-  Docker is not consulted at all.
+  If it is already running, the daemon itself has wedged — quit Docker Desktop
+  fully and reopen it, or use its **Troubleshoot → Restart** button. You will
+  never see this on Windows or Linux — RiVLib runs natively there and Docker is
+  not consulted at all.
 
 **"No `lib/libscanifc.so` under …"** *(macOS, Linux)* or
 **"No `lib\scanifc-mt-s.dll` under …"** *(Windows)*
@@ -552,11 +554,27 @@ loaded.**
   compiler with `PHYTOGRAPH_CXX=/usr/bin/g++-11` and re-import.
 
 **"Docker is not running" while Docker Desktop is clearly up.**
-: Fixed in v0.68.0. Older builds probed Docker with a call that forked the
-  backend process; with the LiDAR and PROJ libraries loaded, the forked child
-  crashed before it could run `docker`, which the probe read as "Docker
-  absent" (and macOS reported as *"Python quit unexpectedly"*). Update, or
-  restart the app if you are on the current version.
+: Two different bugs produced this, both fixed. In builds before v0.68.0 the
+  probe forked the backend process; with the LiDAR and PROJ libraries loaded
+  the forked child crashed before it could run `docker`, which read as "Docker
+  absent" (and macOS reported as *"Python quit unexpectedly"*). In builds
+  before v0.88.0, an app launched from Finder or the Dock inherited macOS's
+  bare startup `PATH`, which contains neither `/usr/local/bin` (Docker
+  Desktop's CLI) nor `/opt/homebrew/bin` (Homebrew's) — so Phytograph could not
+  find the `docker` command even with the daemon running perfectly. Neither
+  restarting Docker nor restarting Phytograph helped; launching the app from a
+  terminal did, which is the workaround on an older build. Phytograph now looks
+  in the standard install locations directly, and says *"The docker command
+  could not be found"* when the command really is absent, rather than blaming
+  the daemon.
+
+**"The docker command could not be found."** *(macOS)*
+: Docker Desktop either isn't installed, or is installed without its
+  command-line tools. Install it, or open Docker Desktop → Settings → Advanced
+  and enable the CLI tools / default Docker socket so `docker` is installed to
+  `/usr/local/bin`. This is a different message from *"Docker is installed but
+  not responding"*, which means the daemon itself is stopped or wedged — start
+  or restart Docker Desktop for that one.
 
 **macOS: the import is slower than RiSCAN PRO, or than the same scan on
 Windows or Linux.**

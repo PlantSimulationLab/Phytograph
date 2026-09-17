@@ -48,6 +48,7 @@ const BASE: RieglStatus = {
   hostOs: 'darwin',
   runtime: 'docker',
   dockerPresent: true,
+  dockerState: 'ok',
   imageBuilt: true,
   imageStale: false,
   toolchainPresent: true,
@@ -301,5 +302,48 @@ describe('SettingsDialog — RIEGL reader image', () => {
 
     await screen.findByTestId('settings-riegl-checklist');
     expect(screen.queryByTestId('settings-riegl-build-image')).toBeNull();
+  });
+});
+
+describe('SettingsDialog — Docker unreachable for two different reasons', () => {
+  // The regression: a macOS app launched from Finder inherits launchd's bare
+  // PATH, so the backend could not find the `docker` command even with Docker
+  // Desktop running and healthy. The checklist said "Docker running: ✗ — Start
+  // Docker Desktop", which is advice the user cannot act on; restarting Docker
+  // and restarting Phytograph both changed nothing.
+
+  it('does not say "start Docker" when the CLI is the thing missing', async () => {
+    nextStatus = {
+      ...BASE,
+      available: false,
+      dockerPresent: false,
+      dockerState: 'no_cli',
+      reason: 'The docker command could not be found.',
+    };
+    open();
+
+    const row = await screen.findByTestId('settings-riegl-check-docker');
+    expect(row.dataset.ok).toBe('false');
+    expect(row.textContent).toMatch(/docker command was not found/i);
+    // The actionable-advice invariant: never send someone to start a daemon
+    // that is very likely already running.
+    expect(row.textContent).not.toMatch(/Start Docker Desktop/i);
+  });
+
+  it('still says "start Docker" when the daemon really is down', async () => {
+    // The original message must survive for the case it was right about —
+    // fixing the wrong advice must not delete the correct advice.
+    nextStatus = {
+      ...BASE,
+      available: false,
+      dockerPresent: false,
+      dockerState: 'no_daemon',
+      reason: 'Docker is installed but not responding.',
+    };
+    open();
+
+    const row = await screen.findByTestId('settings-riegl-check-docker');
+    expect(row.dataset.ok).toBe('false');
+    expect(row.textContent).toMatch(/Start Docker Desktop/i);
   });
 });

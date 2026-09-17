@@ -1067,21 +1067,109 @@ def _riegl_rivlib_unloadable(path: "str | None") -> "str | None":
     return None
 
 
+# GUI-launched macOS apps inherit launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+# and NOT the user's shell PATH, so `shutil.which("docker")` finds nothing even
+# on a machine where Docker Desktop is running and healthy: the CLI installs to
+# /usr/local/bin (Docker Desktop) or /opt/homebrew/bin (Homebrew), neither of
+# which is on that list. `_spawn_run` then raises FileNotFoundError, every
+# caller's `except Exception` reads it as "absent", and the user is told
+# "Docker is not running" and sent to restart a daemon that was never stopped.
+#
+# Measured on a real install: PATH=/usr/bin:/bin:/usr/sbin:/sbin for the
+# packaged backend, `shutil.which("docker")` -> None, while the very same probe
+# with /usr/local/bin appended returns the server version. Restarting Docker
+# cannot fix it and neither can restarting Phytograph, which is what makes the
+# wrong message expensive rather than merely inaccurate.
+#
+# So resolve the binary explicitly. Order matters: PATH first, so a user who
+# has deliberately put a particular docker ahead of the rest still gets it, and
+# so a Linux/Windows host (where PATH is normally fine) behaves exactly as
+# before. The fallbacks are only consulted when PATH has already missed.
+_DOCKER_FALLBACK_PATHS = (
+    # Docker Desktop's own symlink, all platforms it ships a CLI on.
+    "/usr/local/bin/docker",
+    # Homebrew on Apple Silicon, then Intel.
+    "/opt/homebrew/bin/docker",
+    "/usr/local/opt/docker/bin/docker",
+    # Inside the app bundle: survives a user who never ran Docker Desktop's
+    # "install CLI tools" step, so no symlink exists anywhere on disk.
+    "/Applications/Docker.app/Contents/Resources/bin/docker",
+    # Rancher Desktop and colima put a CLI here; both speak the same API.
+    str(Path.home() / ".rd" / "bin" / "docker"),
+    str(Path.home() / ".docker" / "bin" / "docker"),
+)
+
+
+def _docker_exe() -> "str | None":
+    """Absolute path to a usable `docker` CLI, or None when there is none.
+
+    None means "the command does not exist on this machine", which is a
+    DIFFERENT state from "the daemon is not answering" — see _docker_probe.
+    """
+    found = shutil.which("docker")
+    if found:
+        return found
+    for cand in _DOCKER_FALLBACK_PATHS:
+        try:
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _docker_argv(args: "list[str]") -> "list[str]":
+    """Rewrite a ["docker", ...] argv to use the resolved absolute binary.
+
+    Every docker call site goes through this, not just the probes: a build or a
+    reader run launched by Popen would otherwise fail with the same
+    FileNotFoundError the probes were taught to survive, turning a resolvable
+    PATH problem into a failed import halfway through the work.
+    """
+    if not args or args[0] != "docker":
+        return list(args)
+    return [_docker_exe() or "docker"] + list(args[1:])
+
+
+# The three outcomes of asking Docker whether it is there, kept apart because
+# they need different words in front of the user. Folding "no CLI" into
+# "not running" is exactly the bug above.
+_DOCKER_OK = "ok"
+_DOCKER_NO_CLI = "no_cli"
+_DOCKER_NO_DAEMON = "no_daemon"
+
+
 def _docker_present() -> bool:
     """Best-effort probe for a reachable Docker daemon.
 
     `docker version --format {{.Server.Version}}` (not `--version`) because it
     round-trips to the daemon: the CLI alone can be installed while Docker
     Desktop is stopped, which would otherwise read as available.
+
+    Deliberately still the boolean seam every caller and test uses. The CLI
+    check lives in _docker_probe ON TOP of this, rather than inside it, so that
+    patching this one function keeps controlling reachability exactly as before.
     """
     try:
         r = _spawn_run(
-            ["docker", "version", "--format", "{{.Server.Version}}"],
+            _docker_argv(["docker", "version", "--format", "{{.Server.Version}}"]),
             timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
         return r.returncode == 0 and bool(r.stdout.strip())
     except Exception:
         return False
+
+
+def _docker_probe() -> str:
+    """Which of the three Docker states this host is in.
+
+    Split from the boolean because the remedies differ in kind: a missing CLI
+    is not fixed by starting anything, and telling the user to "start Docker
+    Desktop" when it is already running is advice they cannot act on.
+    """
+    if _docker_exe() is None:
+        return _DOCKER_NO_CLI
+    return _DOCKER_OK if _docker_present() else _DOCKER_NO_DAEMON
 
 
 def _riegl_image_built() -> bool:
@@ -1101,7 +1189,7 @@ def _riegl_image_built() -> bool:
     """
     try:
         r = _spawn_run(
-            ["docker", "images", "-q", RIEGL_IMAGE],
+            _docker_argv(["docker", "images", "-q", RIEGL_IMAGE]),
             timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
         if r.returncode == 0 and r.stdout.strip():
@@ -1110,7 +1198,7 @@ def _riegl_image_built() -> bool:
         pass
     try:
         r = _spawn_run(
-            ["docker", "image", "inspect", RIEGL_IMAGE],
+            _docker_argv(["docker", "image", "inspect", RIEGL_IMAGE]),
             timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
         return r.returncode == 0
@@ -1183,7 +1271,7 @@ def _riegl_image_stamp() -> "str | None":
     image_id = RIEGL_IMAGE
     try:
         r = _spawn_run(
-            ["docker", "images", "-q", RIEGL_IMAGE],
+            _docker_argv(["docker", "images", "-q", RIEGL_IMAGE]),
             timeout=_RIEGL_DOCKER_TIMEOUT_S,
         )
         if r.returncode == 0 and r.stdout.strip():
@@ -1267,9 +1355,10 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
     # rather than 500 — an optional capability failing to answer is a normal
     # state, not a server error.
     try:
-        docker_ok = _docker_present()
+        docker_state = _docker_probe()
     except Exception:
-        docker_ok = False
+        docker_state = _DOCKER_NO_DAEMON
+    docker_ok = docker_state == _DOCKER_OK
     try:
         image_ok = _riegl_image_built() if docker_ok else False
     except Exception:
@@ -1300,11 +1389,24 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
         image_ok and expected_stamp is not None and image_stamp != expected_stamp
     )
 
-    if not docker_ok:
+    if docker_state == _DOCKER_NO_CLI:
+        # NOT "Docker is not running" — that sends the user to restart a daemon
+        # that may well be running fine, which is unfixable advice and was the
+        # actual bug: a GUI-launched app inherits launchd's bare PATH, so a
+        # perfectly healthy Docker Desktop read as stopped. Name the real fault.
         reason = (
-            "Docker is not running. RIEGL's RiVLib has no macOS build, so "
-            "Phytograph reads .rxp inside a Linux container. Start Docker "
-            "Desktop and try again."
+            "The docker command could not be found. RIEGL's RiVLib has no "
+            "macOS build, so Phytograph reads .rxp inside a Linux container. "
+            "Install Docker Desktop, or if it is already installed, open it "
+            "and enable Settings -> Advanced -> \"Allow the default Docker "
+            "socket\" / CLI tools so the docker command is installed to "
+            "/usr/local/bin."
+        )
+    elif not docker_ok:
+        reason = (
+            "Docker is installed but not responding. RIEGL's RiVLib has no "
+            "macOS build, so Phytograph reads .rxp inside a Linux container. "
+            "Start Docker Desktop and try again."
         )
     elif not rivlib_path:
         reason = (
@@ -1347,6 +1449,11 @@ def _riegl_status(rivlib_override: "str | None" = None) -> dict:
         "host_os": _riegl_host_os(),
         "runtime": "docker",
         "docker_present": docker_ok,
+        # Distinguishes "no docker command on this machine" from "daemon not
+        # answering" for support questions; `docker_present` stays the boolean
+        # every existing caller reads, so nothing downstream has to change.
+        "docker_state": docker_state,
+        "docker_exe": _docker_exe(),
         "image_built": image_ok,
         "image_stale": image_stale,
         # The container carries g++ AND the shim links the same libscanifc.so
@@ -1696,7 +1803,7 @@ def _run_docker_build(context: Path, *, cancel_event=None, poll: float = 0.2,
     # _riegl_expected_stamp). The ARG is declared at the BOTTOM of the
     # Dockerfile, below every RUN, so passing it cannot invalidate the pip/apt
     # layers — a reader-only change stays a ~2 s COPY rebuild.
-    cmd = ["docker", "build", "--platform", "linux/amd64"]
+    cmd = _docker_argv(["docker", "build", "--platform", "linux/amd64"])
     stamp = _riegl_expected_stamp(context)
     if stamp:
         cmd += ["--build-arg", f"PHYTOGRAPH_READER_STAMP={stamp}"]
@@ -2524,8 +2631,8 @@ def _riegl_reader_invocation(args: List[str], mounts: List[tuple]) -> tuple:
     # Unique per run so a cancel can only ever target this container, even with
     # several imports in flight (the backend is genuinely concurrent).
     container_name = f"phytograph-riegl-{_uuid.uuid4().hex[:12]}"
-    cmd = ["docker", "run", "--rm", "--name", container_name,
-           "--platform", "linux/amd64"]
+    cmd = _docker_argv(["docker", "run", "--rm", "--name", container_name,
+                        "--platform", "linux/amd64"])
     for host, container, mode in mounts:
         cmd += ["-v", f"{host}:{container}:{mode}" if mode == "ro"
                 else f"{host}:{container}"]
@@ -2988,7 +3095,7 @@ def _kill_riegl_container(container_name: "str | None", proc=None) -> None:
     if container_name is not None:
         try:
             _spawn_run(
-                ["docker", "kill", container_name],
+                _docker_argv(["docker", "kill", container_name]),
                 timeout=_RIEGL_DOCKER_TIMEOUT_S,
             )
         except Exception:
