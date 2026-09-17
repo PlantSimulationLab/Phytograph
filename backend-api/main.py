@@ -28,6 +28,7 @@ from pathlib import Path
 import copy as _copy
 import denoise
 import memory_budget
+import normals as normals_mod
 import session_store
 import tiled
 from pytexit import py2tex
@@ -248,7 +249,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.86.0"
+BACKEND_VERSION = "0.87.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5349,6 +5350,11 @@ _RATE_CLOTH_NODE_ITERS_PER_S = 50e6   # measured 60-105 M node-iterations/s
 _RATE_WORKER_STAGE_PTS_PER_S = 30e6   # np.save + np.load of the (N,3) float64
 _WORKER_STARTUP_S = 4.5               # seg_worker re-imports main + libhelios
 _RATE_LAS_WRITE_PTS_PER_S = 10e6      # _session_to_las incl. extras
+# Normal estimation. Measured 0.48 M pts/s tiled across a spawn pool on 12
+# cores (10 M points in 20.8 s in-process); see normals.py for why that is not
+# the product of the cache-locality and parallelism figures. Halved per the
+# convention above, which also covers a 4-core machine running at half this.
+_RATE_NORMALS_PTS_PER_S = 0.25e6
 # PotreeConverter: 0.31 M pts/s poisson (10 M cloud); random measured 1.97 M
 # pts/s on 10 M and 6.1 M pts/s on 100 M (the 10 M run is mostly start-up).
 _RATE_CONVERT_PTS_PER_S = {"poisson": 0.3e6, "random": 3.0e6}
@@ -24388,9 +24394,10 @@ async def _run_killable(
     http_request: "Optional[Request]" = None,
     reflectance: "Optional[np.ndarray]" = None,
     seeds: "Optional[np.ndarray]" = None,
+    origins: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
 ):
-    """Run one segmentation compute (`tool` ∈ ground|wood|trees|denoise|skeleton)
+    """Run one segmentation compute (`tool` ∈ ground|wood|trees|denoise|skeleton|normals)
     in a KILLABLE child process and return its result.
 
     Returns, by tool:
@@ -24398,6 +24405,7 @@ async def _run_killable(
       - ground      → (np.ndarray labels, dict {"class_threshold": float, ...})
       - wood        → (np.ndarray labels, dict {"warnings": [...]})
       - denoise     → (np.ndarray labels, dict {"flagged": int, "params_used": {...}, ...})
+      - normals     → ((N, 5) float32 values, dict {"k": int, "tiled": bool, ...})
       - skeleton    → dict (the SkeletonResponse fields)
 
     The child is polled off the event loop; if `http_request` disconnects (the
@@ -24419,7 +24427,7 @@ async def _run_killable(
     try:
         return await _run_killable_admitted(
             tool, points, params, http_request=http_request, reflectance=reflectance,
-            seeds=seeds, poll=poll)
+            seeds=seeds, origins=origins, poll=poll)
     finally:
         admitted.__exit__(None, None, None)
 
@@ -24432,6 +24440,7 @@ async def _run_killable_admitted(
     http_request: "Optional[Request]" = None,
     reflectance: "Optional[np.ndarray]" = None,
     seeds: "Optional[np.ndarray]" = None,
+    origins: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
 ):
     """The body of `_run_killable`, once the memory budget has admitted it."""
@@ -24450,6 +24459,8 @@ async def _run_killable_admitted(
                 np.save(os.path.join(workdir, "reflectance.npy"), np.asarray(reflectance))
             if seeds is not None and len(seeds) > 0:
                 np.save(os.path.join(workdir, "seeds.npy"), np.asarray(seeds))
+            if origins is not None and len(origins) > 0:
+                np.save(os.path.join(workdir, "origins.npy"), np.asarray(origins))
             with open(os.path.join(workdir, "request.json"), "w") as f:
                 json.dump({"tool": tool, "params": params}, f)
 
@@ -24518,7 +24529,7 @@ async def _run_killable_admitted(
             return labels, feats
         if tool == "wood":
             return labels, (result_dict or {"warnings": []})
-        if tool in ("ground", "denoise"):
+        if tool in ("ground", "denoise", "normals"):
             return labels, (result_dict or {})
         return labels
 
@@ -25925,6 +25936,11 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
         if col in reserved or not np.issubdtype(vertex[col].dtype, np.number):
             continue
         slug = _sanitize_extra_dim_name(col)
+        # A normal component keeps the canonical `nx`/`ny`/`nz` slug whatever the
+        # file spelled it, so a cloud exported from here (or from CloudCompare)
+        # re-imports with its normals recognised instead of as three unrelated
+        # scalars that nothing ever reassembles into a vector.
+        slug = _PLY_NORMAL_ALIASES.get(col.lower(), slug)
         base, i = slug, 1
         while slug in used_slugs:
             slug = f"{base[:29]}_{i}"
@@ -28484,6 +28500,19 @@ def _ply_header_properties(file_path: str) -> tuple[List[str], bool, List[List[s
     return props, fmt == 'ascii', sample_rows, vertex_count
 
 
+# PLY spellings of a per-point normal, mapped to the slugs Compute Normals
+# writes. `nx/ny/nz` is the canonical PLY convention (and what this app exports);
+# `normal_x` and `scalar_nx` are what CloudCompare emits. Keeping the slug stable
+# across a round trip is what lets an imported cloud's normals be RECOGNISED as
+# normals rather than arriving as three unrelated scalar columns.
+_PLY_NORMAL_ALIASES = {
+    'nx': 'nx', 'ny': 'ny', 'nz': 'nz',
+    'normal_x': 'nx', 'normal_y': 'ny', 'normal_z': 'nz',
+    'normalx': 'nx', 'normaly': 'ny', 'normalz': 'nz',
+    'scalar_nx': 'nx', 'scalar_ny': 'ny', 'scalar_nz': 'nz',
+}
+
+
 def _ply_role_for(name: str) -> str:
     n = name.lower()
     if n in ('x', 'y', 'z'):
@@ -30898,6 +30927,19 @@ class CloudSession:
     # claiming the cache is servable as the session's current geometry.
     # Cleared whenever a rebuild installs a fresh `octree_cache_id`.
     rendered_octree_cache_id: Optional[str] = None
+    # True when the stored normal columns predate a geometry edit.
+    #
+    # A normal is a NEIGHBOURHOOD statistic, so deleting or cropping points
+    # changes the right answer for every surviving point near the cut — the
+    # stored column stays correctly INDEXED (`_session_add_extra_column`
+    # scatters by `~deleted`, which is absolute), it just answers a question
+    # about a cloud that no longer exists.
+    #
+    # Deliberately a warning and not an auto-clear: the values are still a good
+    # approximation away from the cut, and discarding a minute of compute
+    # because the user cropped a corner would cost more than it protects. The
+    # panel surfaces it as "recompute", and the choice stays with the user.
+    normals_stale: bool = False
 
 
 def _epsg_from_wkt_vlr(header) -> Optional[int]:
@@ -33219,6 +33261,9 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
         newly = np.flatnonzero(select & ~sess.deleted).astype(np.int64)
         sess.deleted |= select
         sess.deleted_history.append(newly)
+        # The cut changes the right normal for every surviving point beside it.
+        if newly.size:
+            _mark_normals_stale_locked(sess)
         # Bound the undo stack. Deltas are cheap, but a stack of thousands of
         # tiny erases is still a replay cost on every undo; keep the most recent
         # _MAX_DELETED_HISTORY steps (older undos are dropped). Dropping the
@@ -33425,6 +33470,8 @@ def reset_cloud_edits(session_id: str, request: ResetCloudEditsRequest):
                         else np.zeros(len(sess.positions), dtype=bool))
         for entry in sess.deleted_history:
             sess.deleted[entry] = True
+        # Restoring points changes neighbourhoods just as deleting them does.
+        _mark_normals_stale_locked(sess)
         _mark_octree_stale_locked(sess)
         sess.octree_pose = None   # see the invariant note in delete_cloud_region
         deleted_count = int(sess.deleted.sum())
@@ -33826,6 +33873,18 @@ def bake_cloud_session(session_id: str, http_request: Request, compact: bool = T
             _do_bake_cloud_session(session_id, progress, compact=compact)
         ).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+def _mark_normals_stale_locked(sess: "CloudSession") -> None:
+    """Flag the stored normals as predating a geometry edit. Caller holds the lock.
+
+    A no-op unless the session actually carries normals, so an ordinary crop on
+    a cloud that never had them stays flagged clean. Call from every path that
+    deletes or restores points — a normal is a neighbourhood statistic, so the
+    cut changes the right answer for every surviving point beside it.
+    """
+    if any(slug in sess.extras for slug, _ in normals_mod.COLUMNS):
+        sess.normals_stale = True
 
 
 def _session_survivor_hit_mask(sess: "CloudSession") -> np.ndarray:
@@ -34287,6 +34346,8 @@ def session_split(session_id: str, request: SessionSplitRequest):
         # so reset the undo history to keep both sides in lock-step.
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[leftover_mask]] = True
+        if leftover_mask.any():
+            _mark_normals_stale_locked(sess)
         _commit_delete_history_locked(sess)
         sess.label_history = {}   # label undo must not reach across this commit either
         _mark_octree_stale_locked(sess)
@@ -34741,6 +34802,25 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
                 parts.append(np.zeros(c, dtype=np.float32))
         extras[slug] = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
 
+    # Normals are the one column family the zero-fill above cannot honestly
+    # extend. For a scalar like `ground_class`, 0 is a usable "unknown". For a
+    # normal it is not a wrong DIRECTION, it is not a direction at all — a
+    # zero-length vector that Poisson and point-to-plane ICP would consume as if
+    # it were real, while `session_normals_status` reported the merged cloud
+    # fresh (it can only see that the slugs are PRESENT).
+    #
+    # So when the inputs disagree about having normals, drop the family outright
+    # rather than fabricate half of it: an absent column is a state the whole
+    # system already handles (the panel offers "Compute Normals"), whereas a
+    # half-fabricated one is a silent lie. When EVERY input has them the union is
+    # genuine and they are kept.
+    _normal_slugs = [s for s, _ in normals_mod.COLUMNS]
+    if any(s in extras for s in _normal_slugs) and not all(
+            all(sl in sess_i.extras for sl in _normal_slugs) for sess_i in sessions):
+        for sl in _normal_slugs:
+            extras.pop(sl, None)
+        merged_meta = [e for e in merged_meta if e["slug"] not in _normal_slugs]
+
     # CRS: keep it only if every input agrees (else the merged cloud has no single CRS).
     epsgs = {s.crs_epsg for s in sessions if s.crs_epsg is not None}
     crs_epsg = next(iter(epsgs)) if len(epsgs) == 1 and all(s.crs_epsg is not None for s in sessions) else None
@@ -34950,6 +35030,199 @@ async def session_segment_ground(session_id: str, request: SessionGroundSegmentR
               "tiled": gmeta.get("tiled")}
     # Deferred: the caller is about to rebuild this octree alongside the split's
     # children. Return NO octree fields — see `defer_octree`.
+    if request.defer_octree:
+        return {**common, "octree_deferred": True}
+    cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
+    return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
+
+
+def _normals_cost_estimate(n_points: int, rebuild_points: int) -> "tuple[float, int, str]":
+    """(seconds, bytes, breakdown) for one normal estimation on `n_points` hits
+    followed by octree rebuilds totalling `rebuild_points` points."""
+    n = max(0, int(n_points))
+    t_est = (_WORKER_STARTUP_S + n / _RATE_WORKER_STAGE_PTS_PER_S
+             + n / _RATE_NORMALS_PTS_PER_S)
+    t_rebuild = _convert_seconds(rebuild_points)
+    # Parent copy of the hits (24 B), the worker's copy (24 B), the (N,5)
+    # float32 result both sides hold (20 B each), and the five session columns
+    # it becomes (20 B). The per-tile working set is bounded by the tiling, so
+    # it does not scale with n.
+    tile_pts = min(n, normals_mod._tile_target_points()) if n else 0
+    working = int(n * (24 + 24 + 20 + 20 + 20) + tile_pts * 200)
+    breakdown = (f"{_fmt_duration(t_est)} estimating, "
+                 f"{_fmt_duration(t_rebuild)} rebuilding the octree")
+    return t_est + t_rebuild, working, breakdown
+
+
+class SessionComputeNormalsRequest(BaseModel):
+    """Estimate per-point normals on the session's in-RAM points and append the
+    `nx`/`ny`/`nz`/`curvature`/`verticality` columns."""
+    # Neighbours per local plane fit. Clamped into [MIN_K, MAX_K] by the core.
+    k: int = normals_mod.DEFAULT_K
+    # Optional hard cap on the search radius (metres). None = pure k-NN, which
+    # adapts to density on its own and is the right default for a scan whose
+    # return density falls as 1/r^2.
+    radius: Optional[float] = None
+    # How the sign ambiguity is resolved. 'origin' flips each normal toward the
+    # sensor, which is O(N), exact for a terrestrial scan, and - unlike an MST -
+    # a per-point decision, so it produces no seams when the compute is tiled.
+    orientation: str = normals_mod.DEFAULT_ORIENTATION
+    # Explicit viewpoint for orientation='viewpoint', or a fallback when the
+    # session carries no beam origins or scan origin.
+    viewpoint: Optional[List[float]] = None
+    acknowledge_cost: bool = False
+    # See SessionGroundSegmentRequest.defer_octree. Normals are usable by
+    # export / Poisson / ICP the moment the columns land; only the COLOURING
+    # needs the rebuild, so a big cloud defers it to the background queue.
+    defer_octree: bool = False
+
+
+def _session_normal_origins_locked(sess: "CloudSession", hit: np.ndarray,
+                                   viewpoint: "Optional[List[float]]"):
+    """(origin, source) for orienting this session's normals. Caller holds the lock.
+
+    Preference order, best first:
+      1. per-point `beam_origins` — the true emission point of each pulse, so a
+         multi-scan or moving-platform cloud orients every point against the
+         sensor that actually saw it.
+      2. the scan origin (`miss_octree_origin`), a single viewpoint.
+      3. the caller's explicit viewpoint.
+      4. None — the caller falls back to the cloud centroid.
+
+    `beam_origins` are stored in the session's SHIFTED frame alongside
+    `positions` (see CloudSession.beam_origins), so they need no world_shift
+    correction here; a viewpoint arriving from the renderer is world-frame and
+    does.
+    """
+    bo = getattr(sess, "beam_origins", None)
+    if bo is not None and len(bo) == len(sess.positions):
+        surv = ~sess.deleted
+        return np.ascontiguousarray(bo[surv][hit]), "beam_origins"
+    if sess.miss_octree_origin is not None:
+        return np.asarray(sess.miss_octree_origin, dtype=np.float64), "scan_origin"
+    if viewpoint is not None and len(viewpoint) == 3:
+        vp = np.asarray(viewpoint, dtype=np.float64)
+        ws = getattr(sess, "world_shift", None)
+        if ws is not None:
+            vp = vp - np.asarray(ws, dtype=np.float64)
+        return vp, "viewpoint"
+    return None, "centroid"
+
+
+@app.get("/api/cloud/session/{session_id}/normals_status")
+def session_normals_status(session_id: str):
+    """Whether this session carries normals, and whether they predate an edit.
+
+    The panel polls this to decide between "Compute" and "Recompute (normals may
+    be out of date)". Cheap: two dict lookups under the lock, no array work."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        present = [slug for slug, _ in normals_mod.COLUMNS if slug in sess.extras]
+        stale = bool(getattr(sess, "normals_stale", False))
+    return {"session_id": session_id,
+            "has_normals": len(present) == normals_mod.N_COLUMNS,
+            "columns": present,
+            "stale": stale}
+
+
+@app.post("/api/cloud/session/{session_id}/compute_normals")
+async def session_compute_normals(session_id: str,
+                                  request: SessionComputeNormalsRequest,
+                                  http_request: Request):
+    """Estimate normals on the in-RAM survivors → append five columns → rebuild
+    the octree from the arrays. No source file read.
+
+    The compute runs in a KILLABLE subprocess (see `_run_killable`), which is
+    also the only context where the tile pool may open (`tiled.worker_count`).
+    The column write + octree rebuild run in the parent AFTER the compute
+    returns, so a cancel during the long compute leaves the session pristine."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        # HIT survivors only. A miss is a ray that hit nothing, projected ~1 km
+        # out; including them would wreck the KD-tree balance and every spacing
+        # heuristic (the collar is measured from the k-th neighbour distance).
+        hit = _session_survivor_hit_mask(sess)
+        pts = _session_hit_positions_locked(sess, hit)
+        origin, origin_source = _session_normal_origins_locked(
+            sess, hit, request.viewpoint)
+    if len(pts) < normals_mod.MIN_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least {normals_mod.MIN_POINTS} points to estimate normals.")
+    if request.orientation not in normals_mod.ORIENTATIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown orientation {request.orientation!r}.")
+
+    if request.orientation == "origin" and origin is None:
+        # Nothing records where the sensor was, so treat the cloud's own centre
+        # as the viewpoint: normals face INWARD, toward that centre. That is the
+        # same convention as a real sensor origin (a scanner sees a surface from
+        # one side and the normal points back at it), so a cloud with no
+        # recorded origin is shaded consistently with one that has it.
+        #
+        # NOTE this is the opposite sign from `_do_open3d_triangulation`'s
+        # Ball-Pivoting fallback, which orients toward the centroid and then
+        # NEGATES to get an outward field, because BPA must roll on the outside
+        # of the surface. Do not "fix" one to match the other: they want
+        # different things.
+        origin = pts.mean(axis=0)
+        origin_source = "centroid"
+
+    if not request.acknowledge_cost:
+        survivors = int(len(hit))
+        rebuild_points = 0 if request.defer_octree else survivors
+        seconds, bytes_needed, breakdown = _normals_cost_estimate(
+            len(pts), rebuild_points)
+        warning = _cost_advisory(
+            f"Normal estimation on {len(pts):,} points", seconds, bytes_needed,
+            breakdown=breakdown)
+        if warning is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"cost_warning": warning, "message": warning["message"]},
+            )
+
+    params = dict(k=int(request.k), radius=request.radius,
+                  orientation=request.orientation)
+    per_point_origin = origin is not None and np.asarray(origin).ndim == 2
+    if origin is not None and not per_point_origin:
+        params["origin"] = np.asarray(origin, dtype=np.float64).tolist()
+    try:
+        values, nmeta = await _run_killable(
+            "normals", pts, params, http_request=http_request,
+            origins=origin if per_point_origin else None)
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Normal estimation was cancelled.")
+
+    values = np.asarray(values, dtype=np.float32)
+    if values.shape != (len(pts), normals_mod.N_COLUMNS):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Normal estimation returned {values.shape}, expected "
+                   f"{(len(pts), normals_mod.N_COLUMNS)}.")
+
+    # Scatter the hit-aligned result back over ALL survivors (misses → 0).
+    # `len(hit)` is the survivor count captured under the first lock, so this
+    # stays aligned with the snapshot the compute ran on.
+    full = np.zeros((len(hit), normals_mod.N_COLUMNS), dtype=np.float32)
+    full[hit] = values
+    with _cloud_session_lock:
+        for col, (slug, label) in enumerate(normals_mod.COLUMNS):
+            _session_add_extra_column(sess, slug, label, full[:, col])
+        # These normals describe the geometry as it stands right now.
+        sess.normals_stale = False
+        if request.defer_octree:
+            _mark_octree_stale_locked(sess)
+    # `analyzed_points`, not `point_count`: the octree metadata merged in below
+    # carries its OWN `point_count` (the octree's), which would shadow this one.
+    # Same naming as the denoise endpoint, for the same reason.
+    common = {"session_id": session_id, "analyzed_points": int(len(pts)),
+              "columns": [slug for slug, _ in normals_mod.COLUMNS],
+              "orientation": request.orientation,
+              "orientation_source": origin_source,
+              "k_used": nmeta.get("k"), "tiled": nmeta.get("tiled"),
+              "workers": nmeta.get("workers")}
     if request.defer_octree:
         return {**common, "octree_deferred": True}
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
@@ -35959,6 +36232,37 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         if sess.beam_origins is not None:
             sess.beam_origins = _apply(sess.beam_origins, shift)
 
+        # Stored normals are DIRECTIONS, so they rotate but must not translate:
+        # `R @ n`, not `_apply` (which adds t and the world shift and would turn a
+        # unit vector into a point). Rotating them here rather than flagging them
+        # stale is the difference between a small approximation error and a hard
+        # frame error — after a 90 deg rotation an unrotated normal is wrong BY 90
+        # deg, and `verticality` (measured against world +Z) flips a flat ground
+        # plane to a vertical wall while still reporting itself fresh. That fires
+        # on the ICP / alignment commit path, which is a first-class workflow.
+        #
+        # `curvature` is rotation-invariant (a ratio of eigenvalues) and is left
+        # alone; `verticality` is recomputed from the rotated Z component.
+        _nx = sess.extras.get(normals_mod.NORMAL_X_SLUG)
+        if _nx is not None and all(s in sess.extras for s, _ in normals_mod.COLUMNS):
+            _n = np.column_stack([
+                sess.extras[normals_mod.NORMAL_X_SLUG],
+                sess.extras[normals_mod.NORMAL_Y_SLUG],
+                sess.extras[normals_mod.NORMAL_Z_SLUG],
+            ]).astype(np.float64)
+            # Rows that never received a normal (deleted/miss, zero-filled) stay
+            # zero: rotating a zero vector is a no-op, so no guard is needed.
+            _n = _n @ R.T
+            sess.extras[normals_mod.NORMAL_X_SLUG] = _n[:, 0].astype(np.float32)
+            sess.extras[normals_mod.NORMAL_Y_SLUG] = _n[:, 1].astype(np.float32)
+            sess.extras[normals_mod.NORMAL_Z_SLUG] = _n[:, 2].astype(np.float32)
+            _norm = np.linalg.norm(_n, axis=1)
+            _live = _norm > 0.5
+            _vert = np.zeros(len(_n), dtype=np.float32)
+            _vert[_live] = np.degrees(np.arccos(
+                np.clip(np.abs(_n[_live, 2]) / _norm[_live], 0.0, 1.0)))
+            sess.extras[normals_mod.VERTICALITY_SLUG] = _vert
+
         # Separate backfilled-miss buffer (session frame). Its `positions` and
         # per-pulse `origins` are geometry and move; `directions` are LAD beam
         # data not consumed by the miss octree — leave them but flag the buffer
@@ -36200,6 +36504,8 @@ def _do_session_filter(session_id: str, request: SessionFilterRequest, progress=
         # erase-undo must not reach back across this filter.
         idx_surv = np.where(surv)[0]
         sess.deleted[idx_surv[~keep]] = True
+        if (~keep).any():
+            _mark_normals_stale_locked(sess)
         _commit_delete_history_locked(sess)
         sess.label_history = {}   # label undo must not reach across this commit either
         _mark_octree_stale_locked(sess)

@@ -148,6 +148,26 @@ def test_large_cloud_workflow(client, big_las, bench_root, monkeypatch):
                                 "rigidness": 3, "defer_octree": True})
         assert res.status_code == 200, res.text[:500]
 
+    with stage("estimate_normals"):
+        # The whole scalability story of Compute Normals in one number. Expect
+        # ~0.45 M pts/s in-process (10 M points in 20.8 s on 12 cores), or ~38 s
+        # through this endpoint once the worker start-up, the `input.npy`
+        # staging and the five-column scatter are counted. NOT the product of
+        # the cache-locality and parallelism figures — see normals.py, which
+        # explains why multiplying them overstates the result ~5x.
+        # `defer_octree` keeps the octree rebuild out of this measurement — it
+        # is measured on its own by `delete_region_and_rebuild` below.
+        res = client.post(f"/api/cloud/session/{sid}/compute_normals",
+                          json={"k": 30, "orientation": "origin",
+                                "defer_octree": True, "acknowledge_cost": True})
+        assert res.status_code == 200, res.text[:500]
+        nmeta = _decode(res)
+        assert nmeta["analyzed_points"] > 0
+        # Peak RSS must be bounded by one buffered tile per worker, not by the
+        # cloud: a regression that stops tiling shows up here as memory, not
+        # only as time.
+        assert nmeta.get("tiled") is True, "a bench-scale cloud must tile"
+
     with stage("dem_dtm"):
         # Ground column already present from the stage above, so this is the
         # pre-bin + TIN on the ground subset, no CSF and no rebuild.

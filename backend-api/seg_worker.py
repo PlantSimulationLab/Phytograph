@@ -10,12 +10,15 @@ before importing uvicorn so the frozen PyInstaller binary can re-enter as a
 worker. NOT imported by the FastAPI server — it only runs in the child.
 
 Protocol (all files live in `workdir`):
-  IN   request.json     {"tool": "ground|wood|trees|denoise|skeleton|poisson", "params": {...}}
+  IN   request.json     {"tool": "ground|wood|trees|denoise|skeleton|poisson|normals", "params": {...}}
        input.npy        (N, 3) float64 points
        reflectance.npy  optional (N,) float64           (wood only)
        seeds.npy        optional (S, 3) float64          (trees only)
        normals.npy      optional (N, 3) float64          (poisson only)
+       origins.npy      optional (N, 3) float64          (normals only; per-point
+                                                          beam origins)
   OUT  output.npy       (N,) int labels                  (ground/wood/trees/denoise)
+                        (N, 5) float32                   (normals)
        result.json      skeleton's structured result dict (skeleton only)
        vertices.npy     (V, 3) float64                   (poisson only)
        triangles.npy    (T, 3) int32                     (poisson only)
@@ -134,6 +137,31 @@ def run(workdir: str) -> int:
             np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
             with open(os.path.join(workdir, "result.json"), "w") as f:
                 json.dump(dmeta, f, default=_json_default)
+
+        elif tool == "normals":
+            # Normal estimation. Here for the multi-core path above all: the
+            # tile pool refuses to open unless PHYTOGRAPH_SEG_WORKER is set
+            # (tiled.worker_count), because multiprocessing forks before it
+            # execs and a forked copy of a process holding open3d or libhelios
+            # dies. Cancellability comes along for free -- an open3d
+            # estimate_normals call is a monolithic C++ loop that cannot poll a
+            # flag, so killing the process is the only way to stop it.
+            #
+            # Deliberately does NOT `import main`: like `poisson`, this needs
+            # only its own module, and skipping main saves dragging libhelios
+            # into the child.
+            import normals as _normals
+            origins_path = os.path.join(workdir, "origins.npy")
+            origin = (np.load(origins_path) if os.path.exists(origins_path)
+                      else params.pop("origin", None))
+            params.pop("origin", None)
+            nmeta: dict = {}
+            values = _normals.compute_normals(points, origin=origin, meta=nmeta,
+                                              **params)
+            np.save(os.path.join(workdir, "output.npy"),
+                    np.asarray(values, dtype=np.float32))
+            with open(os.path.join(workdir, "result.json"), "w") as f:
+                json.dump(nmeta, f, default=_json_default)
 
         elif tool == "trees":
             seeds_path = os.path.join(workdir, "seeds.npy")

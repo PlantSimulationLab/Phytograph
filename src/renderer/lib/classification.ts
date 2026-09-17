@@ -37,6 +37,29 @@ export const GROUND_CLASS_ATTRIBUTE = 'ground_class';
 // (register it via registerContinuousSlug, the opposite of ground_class).
 export const HEIGHT_ABOVE_GROUND_ATTRIBUTE = 'height_above_ground';
 
+// Per-point normals + the shape scalars from the same local fit, written by the
+// Compute Normals tool. All CONTINUOUS (register via registerContinuousSlug).
+//
+// The slugs are a cross-process contract: they are the LAS/PLY extra-dim names
+// the backend exports, the octree buffer keys the shader reads, and — for
+// nx/ny/nz — the canonical PLY spelling, so a cloud round-trips through other
+// software with its normals still recognisable as normals. They must stay in
+// step with `COLUMNS` in backend-api/normals.py.
+export const NORMAL_X_ATTRIBUTE = 'nx';
+export const NORMAL_Y_ATTRIBUTE = 'ny';
+export const NORMAL_Z_ATTRIBUTE = 'nz';
+// Surface variation, lambda0/(lambda0+lambda1+lambda2): ~0 on a plane, high on
+// an edge or in foliage. The most legible default view of a normals run.
+export const CURVATURE_ATTRIBUTE = 'curvature';
+// Angle of the normal from vertical, in degrees, folded to [0, 90]: 0 is flat
+// ground, 90 a vertical trunk or wall.
+export const VERTICALITY_ATTRIBUTE = 'verticality';
+
+export const NORMAL_ATTRIBUTES = [
+  NORMAL_X_ATTRIBUTE, NORMAL_Y_ATTRIBUTE, NORMAL_Z_ATTRIBUTE,
+  CURVATURE_ATTRIBUTE, VERTICALITY_ATTRIBUTE,
+] as const;
+
 // Exported so the labelling tool's ground preset is the same class list the
 // segmentation writes — one vocabulary for machine and hand classification.
 export const GROUND_SCHEME_CLASSES: ClassDef[] = [

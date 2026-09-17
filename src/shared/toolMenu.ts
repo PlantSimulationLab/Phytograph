@@ -44,6 +44,7 @@ export const TOOLS_MENU: ToolMenuSection[] = [
       { id: 'cloud-cross-section', label: 'Cross-section' },
       { id: 'cloud-filter', label: 'Filter Points' },
       { id: 'cloud-resample', label: 'Resample Point Cloud' },
+      { id: 'cloud-compute-normals', label: 'Compute Normals' },
       { id: 'cloud-move-origin', label: 'Move to Origin' },
       { id: 'cloud-backfill-misses', label: 'Backfill Misses' },
       null,

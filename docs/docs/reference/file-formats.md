@@ -7,7 +7,7 @@
 | `.las` | ✅ | ✅ | LAS 1.2/1.4. Export fidelity depends on the path: a **general cloud export** writes x/y/z + RGB only (LAS 1.2, point format 0/2 — no intensity, no classification), while the **batch export** (two or more objects checked, or any scan) writes LAS 1.4 with intensity, RGB, and a float32 ExtraBytes dimension for every scalar (including `is_miss`, `timestamp`, `target_index`, `target_count`). Use the batch path for full-fidelity round-trips — it takes plain clouds too, so checking a second object is enough to get it. |
 | `.laz` | ✅ | ✅ | Compressed LAS. Round-trips with `.las`. |
 | `.e57` | ✅ | ✅ | Structured scan format. Carries intensity and RGB colour, and recovers **sky/miss points** from the grid on import (see below). Export is per-object (one `.e57` each) via the batch export's **Data only** mode, carrying x/y/z, intensity, and colour. Export writes a **structured** file whenever the scan has a grid to write — either the instrument's own row/column indices or a declared Ntheta × Nphi sweep to bin against — and marks misses with the format's own `cartesianInvalidState` flag, so an exported scan re-imports as scan data rather than as a cloud of far-field points. Points are written in the scanner's local frame with its pose in the scan header, as scanners themselves do. |
-| `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** writes only x/y/z + optional RGB. Structured/organized PLYs recover sky/miss points (see below). |
+| `.ply` | ✅ | ✅ | **Import** preserves arbitrary scalar fields; **export** offers a field picker, so any scalar column — including [normals](#normals) — can be written alongside x/y/z and RGB. Structured/organized PLYs recover sky/miss points (see below). |
 | `.ptx` | ✅ | ✅ | Leica Cyclone's structured-scan ASCII format (also written by RiSCAN and FARO). A **multi-block** `.ptx` imports as one scan per block, each with its own pose. Carries intensity and RGB, and recovers **sky/miss points** from the grid (see below), so **single-return** LAD works. **Not for multi-return data:** one line per grid cell means each pulse is collapsed to a single echo, and the fixed schema has no room for `timestamp` / `target_index` / `target_count`, so the scan re-imports as genuinely single-return with no warning — which biases LAD high ([see below](#multi-return-data-and-ptx)). Export is per-object via the batch export's **Data only** mode; PTX always writes the full grid with no-return cells left empty, so misses round-trip whether or not the *write misses* box is ticked. |
 | `.pcd` | ✅ | ✅ | Point Cloud Data format (PCL), ASCII. Parsed via Open3D, which drops non-standard scalar fields — so **export carries position and colour only** and shows no field picker. Colour is packed into a single `rgb` field, as the format requires. Use `.ply` or `.las` to keep intensity and scalars. |
 | `.riproject` | ✅ | — | RIEGL **raw scanner project** — a *directory* of scan positions, not a file. Windows, Linux (x86_64) and macOS, and needs a user-supplied RiVLib (plus Docker on macOS only, where RiVLib has no native build): see **[Import a RIEGL project](../workflows/import-riegl-project.md)**. Carries reflectance, amplitude, deviation and per-pulse return numbering; scans arrive **unregistered**, though each position can be **levelled** using the instrument's own inclinometer (tilt only — not aligned to north or to each other); sky/miss points are recovered from the scanner's per-shot record, so LAD works (on Windows and Linux that recovery needs a C++ compiler; the scan imports without one, but with no sky shell). |
@@ -114,6 +114,20 @@ are preserved and carried into the octree as color-mappable scalar fields.
 `red`/`green`/`blue` become color, the first of `intensity`/`reflectance`
 becomes intensity, and every other numeric property is kept under its own
 name.
+
+### Normals
+
+[Compute Normals](../workflows/compute-normals.md) writes five per-point
+columns — `nx`, `ny`, `nz`, `curvature` and `verticality` — which behave like
+any other scalar column: they ride along in `.las`/`.laz` extra dimensions, and
+can be selected in the export field picker for `.ply` and the ASCII formats.
+
+`nx`/`ny`/`nz` are the standard PLY property names for normals, so a PLY
+exported from Phytograph carries its normals into CloudCompare, MeshLab and
+anything else that reads them. The same names are recognised on **import**, in
+Phytograph's own spelling and in the `normal_x` / `scalar_nx` spellings
+CloudCompare writes, so a round trip keeps the normals recognisable as normals
+instead of splitting them into three unrelated scalar columns.
 
 `.pcd` clouds are read via open3d, which carries position and color only —
 PCD scalar fields are **not** preserved. If you need scalar fields from a

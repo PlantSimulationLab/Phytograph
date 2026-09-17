@@ -7,9 +7,9 @@ import { OctreeRefreshQueue, type OctreeRefreshRunner } from '../lib/octreeRefre
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Axis3d, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -177,7 +177,7 @@ import {
   type ChannelDescriptor,
   type LegendEntry,
 } from '../lib/colorChannel';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE } from '../lib/classification';
+import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE, NORMAL_ATTRIBUTES, CURVATURE_ATTRIBUTE } from '../lib/classification';
 import { robustScalarRange } from '../lib/robustColorRange';
 import { buildNoiseParams, formatFlaggedSummary, formatMultiScanSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
@@ -259,6 +259,7 @@ import { OrthoProjectionOverride } from './viewer/gizmos/OrthoProjectionOverride
 import { EraseBrush } from './viewer/gizmos/EraseBrush';
 import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
 import { GroundSegmentPanel } from './viewer/panels/GroundSegmentPanel';
+import { ComputeNormalsPanel, type NormalOrientation } from './viewer/panels/ComputeNormalsPanel';
 import { DEMPanel } from './viewer/panels/DEMPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
@@ -1001,6 +1002,27 @@ export default function PointCloudViewer({
   // shape as the TreeIso pair below.
   const [groundSegmentCostWarning, setGroundSegmentCostWarning] = useState<string | null>(null);
   const groundCostAcknowledgedRef = useRef(false);
+  // --- Compute Normals -------------------------------------------------------
+  const [showComputeNormalsPanel, setShowComputeNormalsPanel] = useState(false);
+  const [normalsNeighbors, setNormalsNeighbors] = useState(30);
+  // A plain neighbour COUNT is the default, and the radius is opt-in, because a
+  // terrestrial scan's return density falls as 1/r^2: a fixed radius that is
+  // right at 5 m finds almost nothing at 40 m. Unlike CSF's cloth resolution
+  // this parameter therefore needs no extent-derived seeding — k is scale-free.
+  const [normalsUseRadius, setNormalsUseRadius] = useState(false);
+  const [normalsRadius, setNormalsRadius] = useState(0.1);
+  const [normalsOrientation, setNormalsOrientation] =
+    useState<NormalOrientation>('origin');
+  const [normalsInProgress, setNormalsInProgress] = useState(false);
+  const [normalsError, setNormalsError] = useState<string | null>(null);
+  const [normalsCostWarning, setNormalsCostWarning] = useState<string | null>(null);
+  // Mirrors the backend's `normals_stale`: the stored columns are still
+  // correctly indexed but predate a later edit. Fetched when the panel opens.
+  const [normalsStatus, setNormalsStatus] =
+    useState<{ hasNormals: boolean; stale: boolean }>({ hasNormals: false, stale: false });
+  const normalsAbortRef = useRef<AbortController | null>(null);
+  const normalsAckCostRef = useRef(false);
+
   const [groundClothResolution, setGroundClothResolution] = useState(0.05);
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
   // Measure the ground tolerance off the settled cloth rather than seeding it
@@ -1065,6 +1087,63 @@ export default function PointCloudViewer({
     }
     groundPanelWasOpen.current = showGroundSegmentPanel;
   }, [showGroundSegmentPanel, clouds, selectedIds, groundAutoMeasured]);
+
+  // Ask the backend whether this cloud already carries normals, and whether an
+  // edit has landed since they were computed. Fires on the panel's OPEN
+  // transition only (the wasOpen ref), so a later `clouds` change can't restate
+  // it while the user is reading it. A failure is silent: the status only
+  // decides between "Compute" and "Recompute", never whether the tool works.
+  // Keyed by the SESSION the status describes, not by a wasOpen boolean.
+  //
+  // The boolean version had a silent hole: the effect also depends on `clouds`,
+  // which churns (octree refresh, point-count update, a bake settling). A
+  // re-render mid-flight ran the cleanup — cancelling the pending response —
+  // while `wasOpen` was already true, so the guard skipped and NO replacement
+  // request went out. The panel then showed "Compute Normals" with no staleness
+  // warning on a cloud whose normals were stale: precisely the state this
+  // feature exists to surface, lost in the window right after a bake, which is
+  // when a user is most likely to open the panel.
+  //
+  // Keying off the session id makes a cancelled fetch self-healing: the ref
+  // still holds the previous key, so the very next render re-issues it.
+  const normalsStatusKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!showComputeNormalsPanel) {
+      normalsStatusKey.current = null;
+      return;
+    }
+    const sel = clouds.find((c) => selectedIds.has(c.id));
+    const sessionId = sel?.data.octree?.sessionId ?? null;
+    if (normalsStatusKey.current === sessionId) return;
+    normalsStatusKey.current = sessionId;
+
+    setNormalsStatus({ hasNormals: false, stale: false });
+    setNormalsError(null);
+    setNormalsCostWarning(null);
+    if (!sessionId) return;
+
+    let cancelled = false;
+    let settled = false;
+    void sessionNormalsStatus(sessionId)
+      .then((s) => {
+        settled = true;
+        if (!cancelled) setNormalsStatus({ hasNormals: s.has_normals, stale: s.stale });
+      })
+      .catch(() => {
+        // Advisory only — but clear the key so a transient failure retries on
+        // the next render rather than latching "no normals" for the session.
+        settled = true;
+        if (!cancelled) normalsStatusKey.current = null;
+      });
+    return () => {
+      cancelled = true;
+      // Cleanup runs on every dep change, not just on close. If the request had
+      // not answered yet, releasing the key is what makes the next render
+      // re-issue it — without this the cancelled response is simply lost and
+      // the panel silently keeps its "no normals" default.
+      if (!settled) normalsStatusKey.current = null;
+    };
+  }, [showComputeNormalsPanel, clouds, selectedIds]);
   // DEM (Digital Elevation Model) generation state. Like CSF, the cell size is an
   // absolute distance, so seed it from the selected cloud's horizontal extent
   // each time the DEM panel opens (guarded by a ref so it only fires on the open
@@ -2767,6 +2846,7 @@ export default function PointCloudViewer({
       setResamplePreview(null); // Clear resample preview when closing resample panel
     }
     if (except !== 'triangulation') setShowTriangulationPopup(false);
+    if (except !== 'compute-normals') setShowComputeNormalsPanel(false);
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
     if (except !== 'dem') setShowDEMPanel(false);
     if (except !== 'wood-segment') setShowWoodSegmentPanel(false);
@@ -7975,6 +8055,7 @@ export default function PointCloudViewer({
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
       { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
+      { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => { closeAllToolPanels('compute-normals'); setShowComputeNormalsPanel(!showComputeNormalsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Axis3d, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
       { id: 'cloud-backfill-misses', name: 'Backfill Misses', keywords: ['sky', 'miss', 'gapfill', 'lad', 'leaf area', 'transmission', 'recover', 'beam'], action: () => { closeAllToolPanels(); setShowBackfillPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'preprocess', icon: CloudFog, testId: 'tool-backfill-misses', multiInput: true },
       { id: 'cloud-align', name: 'Align Clouds (ICP)', keywords: ['register', 'icp', 'alignment', 'fit'], action: () => setShowAlignDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Globe, multiInput: true },
@@ -8070,7 +8151,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
   // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool
@@ -11635,6 +11716,110 @@ export default function PointCloudViewer({
       prev === `scalar:${NOISE_CLASS_ATTRIBUTE}` ? null : prev);
     for (const id of cloudIds) setCloudColorMode(id, { mode: 'height' });
   }, [setCloudColorMode]);
+
+  const handleComputeNormals = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    if (!cloud) return;
+
+    setNormalsInProgress(true);
+    setNormalsError(null);
+    const abort = new AbortController();
+    normalsAbortRef.current = abort;
+
+    // Consume any pending "Compute Anyway" confirmation, so a later run on a
+    // different cloud has to earn its own acknowledgement.
+    const acknowledgeCost = normalsAckCostRef.current;
+    normalsAckCostRef.current = false;
+    setNormalsCostWarning(null);
+
+    const params = {
+      k: normalsNeighbors,
+      radius: normalsUseRadius ? normalsRadius : null,
+      orientation: normalsOrientation,
+      acknowledge_cost: acknowledgeCost,
+    };
+
+    try {
+      const ps = await buildPointSource(cloud);
+
+      // Session-backed only. Unlike the segmentations there is no inline
+      // branch: normals are stored as session COLUMNS, and a flat cloud has no
+      // session to store them on. `buildPointSource` is still the right gate —
+      // it settles any pending bake first, so the compute never reads a cloud
+      // whose rebuild is mid-flight.
+      if (ps.kind !== 'source') {
+        throw new Error(
+          'Compute Normals needs an imported (session-backed) cloud. This cloud has no backend session to store the result on.');
+      }
+      const octreeInfo = cloud.data.octree;
+      if (!octreeInfo?.sessionId) {
+        throw new Error('Octree cloud is missing its editable session.');
+      }
+      const baseName = cloud.data.fileName ?? id;
+      const sessionId = octreeInfo.sessionId;
+
+      // Defer the octree rebuild on a big cloud: the columns land (so export,
+      // meshing and any later reuse can see them) while the COLOURING catches
+      // up on the background refresh queue. Same trade the ground split makes.
+      const willDefer = (cloud.data.pointCount ?? 0) > 5_000_000;
+      const meta = await sessionComputeNormals(
+        sessionId, { ...params, defer_octree: willDefer }, abort.signal);
+
+      if (!meta.octree_deferred) {
+        onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
+      }
+      // Every normals column is continuous — a gradient with a numeric
+      // colorbar, never a class list.
+      for (const slug of NORMAL_ATTRIBUTES) registerContinuousSlug(slug);
+      // Curvature is the most legible default: ~0 on smooth bark and ground,
+      // high on foliage and edges. The components are in the same dropdown.
+      setCloudColorMode(id, { mode: 'scalar', field: CURVATURE_ATTRIBUTE });
+      setNormalsStatus({ hasNormals: true, stale: false });
+      setShowComputeNormalsPanel(false);
+
+      if (willDefer) {
+        octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+      }
+      const orientNote = meta.orientation_source === 'beam_origins'
+        ? ' Oriented using per-point beam origins.'
+        : meta.orientation_source === 'scan_origin'
+          ? ' Oriented toward the scan origin.'
+          : meta.orientation_source === 'centroid'
+            ? ' No sensor position known — oriented toward the cloud centre.'
+            : '';
+      showToast({
+        type: 'success',
+        title: 'Normals Computed',
+        message: `${(meta.analyzed_points ?? 0).toLocaleString()} points.${orientNote}`,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof ScanCancelledError) return;
+      if (error instanceof CostWarningError) {
+        normalsAckCostRef.current = true;
+        setNormalsCostWarning(error.costWarning.message);
+        return;
+      }
+      console.error('Compute normals error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Normal estimation failed';
+      setNormalsError(errorMessage);
+      showToast({ type: 'error', title: 'Compute Normals Failed', message: errorMessage });
+    } finally {
+      setNormalsInProgress(false);
+      normalsAbortRef.current = null;
+    }
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, setCloudColorMode,
+      normalsNeighbors, normalsUseRadius, normalsRadius, normalsOrientation]);
+
+  const cancelComputeNormals = useCallback(() => {
+    // No run id to cancel: the compute is a plain JSON POST, so aborting the
+    // fetch closes the connection and the backend SIGKILLs its worker.
+    normalsAbortRef.current?.abort();
+    normalsAbortRef.current = null;
+    setNormalsInProgress(false);
+  }, []);
 
   const handleGroundSegment = useCallback(async () => {
     if (selectedIds.size !== 1) return;
@@ -22738,6 +22923,26 @@ export default function PointCloudViewer({
           sectionActive={!!slab && sectionTargetCloud?.id === labelTargetCloud.id}
           onClearSection={clearSlabSection}
           onClose={() => setShowLabelPanel(false)}
+        />
+      )}
+      {showComputeNormalsPanel && selectedIds.size === 1 && (
+        <ComputeNormalsPanel
+          neighbors={normalsNeighbors}
+          useRadius={normalsUseRadius}
+          radius={normalsRadius}
+          orientation={normalsOrientation}
+          inProgress={normalsInProgress}
+          error={normalsError}
+          costWarning={normalsCostWarning}
+          stale={normalsStatus.stale}
+          hasNormals={normalsStatus.hasNormals}
+          onClose={() => setShowComputeNormalsPanel(false)}
+          onNeighborsChange={setNormalsNeighbors}
+          onUseRadiusChange={setNormalsUseRadius}
+          onRadiusChange={setNormalsRadius}
+          onOrientationChange={setNormalsOrientation}
+          onCompute={handleComputeNormals}
+          onCancel={cancelComputeNormals}
         />
       )}
       {showGroundSegmentPanel && selectedIds.size === 1 && (

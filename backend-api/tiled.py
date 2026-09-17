@@ -187,7 +187,7 @@ class TilePlan:
 
 def run_tiled(plan: TilePlan, points: np.ndarray,
               fn: Callable[[np.ndarray, np.ndarray], np.ndarray], *,
-              out_dtype=np.int32, fill=0,
+              out_dtype=np.int32, fill=0, ncols: int = 1,
               progress: Optional[Callable[[float, str], None]] = None,
               should_cancel: Optional[Callable[[], bool]] = None,
               extra_columns: Optional[Sequence[np.ndarray]] = None) -> np.ndarray:
@@ -197,9 +197,16 @@ def run_tiled(plan: TilePlan, points: np.ndarray,
     `fn` gets the buffered chunk (a copy, contiguous) and must return one value
     per chunk row; only rows where `core_mask` is True are kept. Raises
     `TiledCancelled` when `should_cancel()` turns true between tiles.
+
+    `ncols > 1` makes the output (N, ncols) and `fn` must return one ROW per
+    chunk point — for tools whose per-point answer is a vector rather than a
+    scalar (normal estimation returns a direction plus its derived shape
+    scalars). `ncols == 1` keeps the original (N,) shape exactly, so every
+    existing caller is unaffected.
     """
     n = plan.n
-    out = np.full(n, fill, dtype=out_dtype)
+    out = (np.full(n, fill, dtype=out_dtype) if ncols == 1
+           else np.full((n, ncols), fill, dtype=out_dtype))
     tiles = plan.tiles()
     total = len(tiles)
     for k, tile in enumerate(tiles):
@@ -292,7 +299,11 @@ def _tile_task(args):
     the job, and return only the core rows' results with their output rows."""
     points_path, file_idx, out_idx, core, module, name, kwargs = args
     points = np.load(points_path, mmap_mode="r")
-    chunk = np.ascontiguousarray(points[file_idx])
+    # `np.array`, not `np.ascontiguousarray`: the latter can pass a memmap's
+    # read-only buffer straight through, and open3d's Vector3dVector refuses a
+    # non-writeable array ("array is not writeable"). A tile job that hands its
+    # chunk to open3d would fail only in the POOL, never in the in-process path.
+    chunk = np.array(points[file_idx], dtype=points.dtype, order="C")
     fn = _resolve_job(module, name)
     res = np.asarray(fn(chunk, core, **kwargs))
     if res.shape[0] != file_idx.shape[0]:
@@ -342,14 +353,17 @@ class staged_points:
 def run_tiled_parallel(plan: TilePlan, points_path: str, job: Tuple[str, str], *,
                        workers: int, job_kwargs: Optional[dict] = None,
                        file_rows: Optional[np.ndarray] = None,
-                       out_dtype=np.int32, fill=0,
+                       out_dtype=np.int32, fill=0, ncols: int = 1,
                        progress: Optional[Callable[[float, str], None]] = None,
                        should_cancel: Optional[Callable[[], bool]] = None) -> np.ndarray:
     """`run_tiled` over a spawn pool of `workers` processes. `job` is
     ("module", "function") resolving to `fn(chunk, core, **job_kwargs)`;
     `points_path` is an `.npy` holding the plan's points (or a superset of
-    them, with `file_rows` mapping plan row -> file row)."""
-    out = np.full(plan.n, fill, dtype=out_dtype)
+    them, with `file_rows` mapping plan row -> file row).
+
+    `ncols > 1` returns (N, ncols), matching `run_tiled`."""
+    out = (np.full(plan.n, fill, dtype=out_dtype) if ncols == 1
+           else np.full((plan.n, ncols), fill, dtype=out_dtype))
     tiles = plan.tiles()
     total = len(tiles)
     if total == 0:

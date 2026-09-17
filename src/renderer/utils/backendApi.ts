@@ -5072,6 +5072,37 @@ export async function sessionSegmentWood(
   return postSegment<CloudSessionBakeResult & { octree_deferred?: boolean }>(`/api/cloud/session/${sessionId}/segment_wood`, params, signal, 600000);
 }
 
+/** Estimate per-point normals on the session's in-RAM points, append the
+ * `nx`/`ny`/`nz`/`curvature`/`verticality` columns, and rebuild the octree from
+ * the arrays (no file read).
+ *
+ * 10-minute deadline: the compute runs ~0.45 M pts/s tiled across a spawn pool
+ * (measured on 12 cores), so a 100 M-point cloud is a few minutes of estimation
+ * plus a multi-minute octree rebuild — unless `defer_octree` hands that rebuild
+ * to the background queue, which the caller does above 5 M points. */
+export async function sessionComputeNormals(
+  sessionId: string,
+  // `acknowledge_cost` confirms a run the backend answered 409 with a cost
+  // advisory for (a `CostWarningError` on the first attempt).
+  params: { k?: number; radius?: number | null; orientation?: string; viewpoint?: number[] | null; defer_octree?: boolean; acknowledge_cost?: boolean },
+  signal?: AbortSignal,
+): Promise<CloudSessionBakeResult & { analyzed_points?: number; columns?: string[]; orientation?: string; orientation_source?: string; k_used?: number; tiled?: boolean; workers?: number; octree_deferred?: boolean }> {
+  return postSegment<CloudSessionBakeResult & { analyzed_points?: number; columns?: string[]; orientation?: string; orientation_source?: string; k_used?: number; tiled?: boolean; workers?: number; octree_deferred?: boolean }>(
+    `/api/cloud/session/${sessionId}/compute_normals`, params, signal, 600000);
+}
+
+/** Whether a session carries normals and whether they predate a later edit.
+ * Cheap (two dict lookups on the backend), so the panel can call it on open. */
+export async function sessionNormalsStatus(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<{ session_id: string; has_normals: boolean; columns: string[]; stale: boolean }> {
+  const response = await fetch(
+    `${getBackendUrl()}/api/cloud/session/${sessionId}/normals_status`, { signal });
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  return await response.json();
+}
+
 /** Run TreeIso on the session's in-RAM points, append a `tree_instance` column,
  * and rebuild the octree from the arrays (no file read). Pass TreeIso tuning. */
 export async function sessionSegmentTrees(
