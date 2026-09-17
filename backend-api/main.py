@@ -29,6 +29,7 @@ import copy as _copy
 import denoise
 import memory_budget
 import normals as normals_mod
+import scalar_fields
 import session_store
 import tiled
 from pytexit import py2tex
@@ -249,7 +250,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.87.0"
+BACKEND_VERSION = "0.88.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -5462,6 +5463,16 @@ _RATE_LAS_WRITE_PTS_PER_S = 10e6      # _session_to_las incl. extras
 # the product of the cache-locality and parallelism figures. Halved per the
 # convention above, which also covers a 4-core machine running at half this.
 _RATE_NORMALS_PTS_PER_S = 0.25e6
+# Scalar-field arithmetic, per COLUMN-ROW (rows x columns the expression reads),
+# because elementwise numpy is memory-bound: touching two columns costs about
+# twice touching one, and the operator count barely registers. Measured on an
+# M-series: 370-1190 M col-rows/s for plain elementwise work, and 250 M for a
+# two-pass aggregate like `(a - mean(a)) / std(a)`, which sweeps the column
+# twice. Taking the slowest case and halving per the convention above gives a
+# figure that is still ~1000x the octree rebuild's rate — which is the real
+# point: on any cloud big enough to warn about, the rebuild IS the cost, and
+# that is what `defer_octree` exists to let the caller batch.
+_RATE_SCALAR_ARITH_PTS_PER_S = 125e6
 # PotreeConverter: 0.31 M pts/s poisson (10 M cloud); random measured 1.97 M
 # pts/s on 10 M and 6.1 M pts/s on 100 M (the 10 M run is mostly start-up).
 _RATE_CONVERT_PTS_PER_S = {"poisson": 0.3e6, "random": 3.0e6}
@@ -31047,6 +31058,20 @@ class CloudSession:
     # because the user cropped a corner would cost more than it protects. The
     # panel surfaces it as "recompute", and the choice stays with the user.
     normals_stale: bool = False
+    # Provenance for scalar fields the user derived with the calculator:
+    # slug -> the expression that produced it.
+    #
+    # Kept because a derived field is otherwise indistinguishable from an
+    # imported one BY DESIGN (that is the whole point — it colours, filters and
+    # exports through the same machinery), and that leaves the user with no way
+    # to answer "what is `ndvi`, and how did I make it?" a week later. The
+    # Fields tab reads this to mark a field as derived and show its formula.
+    #
+    # Deliberately NOT load-bearing: nothing recomputes from it, and a field
+    # whose entry is missing behaves exactly like an imported one. So the
+    # subset/split/merge paths that build a child session may carry it forward
+    # or not without risking correctness.
+    derived_fields: Dict[str, str] = field(default_factory=dict)
 
 
 def _epsg_from_wkt_vlr(header) -> Optional[int]:
@@ -34186,12 +34211,61 @@ def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, value
 
     NOTE for label edits: use `_ensure_label_column_locked` + an in-place write
     instead. This function's zero-fill of deleted rows destroys labels on points
-    that `reset_edits` can later restore — see that helper's docstring."""
+    that `reset_edits` can later restore — see that helper's docstring.
+
+    NOTE for scalar-field arithmetic: use `_session_set_full_column_locked`, for
+    the same reason in a different shape — see that helper below."""
     full = np.zeros(len(sess.positions), dtype=np.float32)
     full[~sess.deleted] = values.astype(np.float32)
     sess.extras[slug] = full
     if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
         sess.extra_dims_meta.append({"slug": slug, "label": label})
+
+
+def _session_set_full_column_locked(sess: "CloudSession", slug: str, label: str,
+                                    values: np.ndarray) -> None:
+    """Set a per-point scalar column from ABSOLUTE-indexed values (one entry per
+    row of `sess.positions`, deleted rows included). Caller holds the lock.
+
+    The absolute-indexed sibling of `_session_add_extra_column`, and the one
+    scalar-field arithmetic must use. The difference is not stylistic:
+
+      * A NEIGHBOURHOOD statistic (a normal, a noise class, a CSF label) is
+        genuinely undefined for a point that is not in the cloud — it was not
+        part of any neighbourhood the compute saw. Zero-filling its deleted rows
+        states that honestly, which is what `_session_add_extra_column` does.
+      * An ELEMENTWISE expression has a perfectly good value on a deleted row:
+        `intensity * 2` does not care whether the point is currently hidden. And
+        a deleted row is not gone — `reset_edits` replays `deleted_history` and
+        brings it back. Zero-filling would mean an undo silently restores points
+        carrying 0 in a field where 0 is a real, plausible measurement, with
+        nothing to distinguish them from points that legitimately computed to 0.
+
+    So arithmetic computes over every row and writes every row. The cost is that
+    a deleted point contributes to nothing the user sees (stats and the colorbar
+    both mask it out — see `_session_editable_mask_locked`), which is correct:
+    the value exists, it is simply not displayed while the point is hidden.
+
+    Same lockstep contract as its sibling: `extras` and `extra_dims_meta` are
+    updated together, and an existing slug keeps its position in the meta order
+    so a re-computed field does not jump to the end of the export column list.
+    """
+    arr = np.asarray(values)
+    n = len(sess.positions)
+    if arr.shape != (n,):
+        raise HTTPException(
+            status_code=500,
+            detail=(f"scalar column {slug!r} has shape {arr.shape} but the "
+                    f"session has {n} points"),
+        )
+    sess.extras[slug] = arr.astype(np.float32, copy=False)
+    if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
+        sess.extra_dims_meta.append({"slug": slug, "label": label})
+    else:
+        for ed in sess.extra_dims_meta:
+            if ed["slug"] == slug:
+                ed["label"] = label
+                break
 
 
 def _session_rebuild(
@@ -36275,6 +36349,409 @@ def _translate_octree_in_place(cache_id: Optional[str],
                 return None
 
     return cache_key, cache_dir, _read_octree_metadata(cache_dir)
+
+
+# ── Scalar fields: arithmetic, statistics, management ────────────────────────
+#
+# The tool's endpoints. The maths and the naming vocabulary live in
+# `scalar_fields.py`; everything here is session mutation, masking and the
+# octree rebuild — i.e. the parts that need the lock.
+#
+# All four are `def`, not `async def`. They are pure numpy over in-RAM arrays,
+# so FastAPI runs them in anyio's worker threadpool and numpy releases the GIL;
+# an `async def` would own the event loop for the whole compute and starve
+# /health and /api/cancel behind it. See the module-level note in CLAUDE.md and
+# tests/test_event_loop_not_blocked.py, which fails the build on a no-await
+# `async def` route.
+
+# Slugs a derived field may never claim. Two groups, both load-bearing:
+#
+#   * Columns whose MEANING is wired into a specific tool — `is_miss` is LAD's
+#     Beer's-law transmission denominator and the miss filter every
+#     reconstruction tool depends on; the class columns are read by name by the
+#     segmentation tools, the export path's LAS `classification` promotion, and
+#     the renderer's categorical schemes.
+#   * The normal columns, which are a cross-process contract with the octree
+#     buffer keys and the canonical PLY spelling.
+#
+# Shadowing any of these with a user's arithmetic would not error — it would
+# quietly change what another tool computes.
+def _reserved_scalar_slugs() -> "set[str]":
+    reserved = {
+        _MISS_SLUG, TREE_INSTANCE_SLUG, MANUAL_CLASS_SLUG, WOOD_CLASS_SLUG,
+        GROUND_CLASS_SLUG, HEIGHT_ABOVE_GROUND_SLUG,
+        denoise.NOISE_CLASS_SLUG,
+        # Read by name by `_export_session_to_las`, which promotes the first
+        # class column it finds into the standard LAS `classification` byte.
+        "las_classification",
+        "x", "y", "z", "intensity", "timestamp",
+    }
+    reserved.update(slug for slug, _label in normals_mod.COLUMNS)
+    reserved.update(_ORIGIN_SLUGS)
+    return reserved
+
+
+def _session_scalar_columns_locked(sess: "CloudSession") -> "Dict[str, np.ndarray]":
+    """The (N,) numeric columns an expression may reference, by slug.
+
+    `x`/`y`/`z` are surfaced alongside the extras so a user can write
+    `z - height_above_ground` without a special case. They come from
+    `positions`, which is the session's own frame (world shift already
+    subtracted) — the same frame every other in-app readout uses, so a formula
+    written against what the Stats tab shows is the formula that gets evaluated.
+    """
+    cols: "Dict[str, np.ndarray]" = {}
+    pos = sess.positions
+    for i, axis in enumerate(("x", "y", "z")):
+        cols[axis] = np.asarray(pos[:, i])
+    if sess.intensity is not None:
+        cols["intensity"] = np.asarray(sess.intensity)
+    n = len(pos)
+    for slug, arr in sess.extras.items():
+        a = np.asarray(arr)
+        if a.ndim == 1 and a.shape[0] == n:
+            cols[slug] = a
+    return cols
+
+
+def _scalar_field_label_locked(sess: "CloudSession", slug: str) -> str:
+    """The display label for `slug`, falling back to the slug itself."""
+    for ed in sess.extra_dims_meta:
+        if ed.get("slug") == slug:
+            return ed.get("label") or slug
+    return {"x": "X", "y": "Y", "z": "Z", "intensity": "Intensity"}.get(slug, slug)
+
+
+def _scalar_fields_listing_locked(sess: "CloudSession") -> "List[dict]":
+    """Every referenceable field with its label, provenance and editability.
+
+    `editable` drives the Fields tab's rename/delete affordances. A field is
+    editable when it is a real `extras` column that is not reserved: `x`/`y`/`z`
+    and `intensity` are derived views or dedicated arrays, not extras rows, so
+    they can be READ by an expression but not renamed or deleted.
+    """
+    reserved = _reserved_scalar_slugs()
+    out: "List[dict]" = []
+    seen: "set[str]" = set()
+    # extra_dims_meta first, so the order matches the export column order.
+    for ed in sess.extra_dims_meta:
+        slug = ed.get("slug")
+        if not slug or slug in seen:
+            continue
+        arr = sess.extras.get(slug)
+        if arr is None or np.asarray(arr).ndim != 1:
+            continue
+        seen.add(slug)
+        out.append({
+            "slug": slug,
+            "label": ed.get("label") or slug,
+            "kind": "extra",
+            "editable": slug not in reserved,
+            "reserved": slug in reserved,
+            "expression": sess.derived_fields.get(slug),
+        })
+    for slug in ("x", "y", "z", "intensity"):
+        if slug == "intensity" and sess.intensity is None:
+            continue
+        if slug in seen:
+            continue
+        out.append({
+            "slug": slug,
+            "label": _scalar_field_label_locked(sess, slug),
+            "kind": "builtin",
+            "editable": False,
+            "reserved": True,
+            "expression": None,
+        })
+    return out
+
+
+class ScalarFieldComputeRequest(BaseModel):
+    """Derive a new scalar column from an expression over existing ones."""
+    expression: str
+    slug: str
+    label: Optional[str] = None
+    # Overwrite an existing DERIVED field of the same name. Never allows
+    # overwriting an imported or tool-written column — see the endpoint.
+    overwrite: bool = False
+    # See SessionGroundSegmentRequest.defer_octree. The column is usable by
+    # export and by a further expression the moment it lands; only the COLOURING
+    # needs the rebuild, so a big cloud can chain several derivations and repay
+    # one rebuild at the end via POST .../rebuild_octree.
+    defer_octree: bool = False
+    acknowledge_cost: bool = False
+    bins: Optional[int] = None
+
+
+@app.get("/api/cloud/session/{session_id}/scalar_fields")
+def session_scalar_fields(session_id: str):
+    """List the scalar fields an expression may reference or the panel may edit.
+
+    Cheap: metadata only, no column is touched."""
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        fields = _scalar_fields_listing_locked(sess)
+        point_count = int(len(sess.positions))
+        visible = int(np.count_nonzero(_session_editable_mask_locked(sess)))
+    return {"session_id": session_id, "fields": fields,
+            "point_count": point_count, "visible_count": visible,
+            "functions": sorted(scalar_fields.FUNCTIONS),
+            "aggregates": sorted(scalar_fields.AGGREGATES),
+            "constants": sorted(scalar_fields.CONSTANTS)}
+
+
+@app.get("/api/cloud/session/{session_id}/scalar_fields/{slug}/stats")
+def session_scalar_field_stats(session_id: str, slug: str,
+                               bins: Optional[int] = None):
+    """Summary statistics + histogram for one field.
+
+    Measured over the points that are ALIVE and are REAL RETURNS
+    (`_session_editable_mask_locked`) — the same mask
+    `_session_robust_color_stats_locked` feeds the colorbar. Two reasons, and
+    both bite:
+
+      * A sky/miss point is a ray that hit nothing, projected ~1 km out along
+        the beam. A histogram of `z` over raw rows is set entirely by those, and
+        a mean is meaningless. This is the read-only face of the miss-exclusion
+        rule that hangs the reconstruction tools.
+      * A deleted point is not on screen. If the stats disagreed with the legend
+        beside them, the panel would be reporting on a cloud the user cannot
+        see.
+    """
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        cols = _session_scalar_columns_locked(sess)
+        if slug not in cols:
+            raise HTTPException(status_code=404,
+                                detail=f"No scalar field named {slug!r} on this cloud.")
+        mask = _session_editable_mask_locked(sess)
+        # Copy under the lock: describe() sorts for percentiles, and the session
+        # array may be a memmap another request is about to rewrite.
+        values = np.asarray(cols[slug])[mask].astype(np.float64, copy=True)
+        label = _scalar_field_label_locked(sess, slug)
+    stats = scalar_fields.describe(values, bins=bins)
+    return {"session_id": session_id, "slug": slug, "label": label,
+            "stats": stats}
+
+
+@app.post("/api/cloud/session/{session_id}/scalar_fields/compute")
+def session_scalar_field_compute(session_id: str,
+                                 request: ScalarFieldComputeRequest):
+    """Evaluate an expression into a new per-point column, then rebuild.
+
+    The column is FULL-LENGTH — every row, deleted ones included. See
+    `_session_set_full_column_locked` for why arithmetic must not use the
+    survivor-aligned chokepoint.
+    """
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        cols = _session_scalar_columns_locked(sess)
+        existing = set(cols)
+        reserved = _reserved_scalar_slugs()
+        derived = dict(sess.derived_fields)
+
+    slug = (request.slug or "").strip()
+    # Re-deriving a field the user already made is the common case (tweak the
+    # formula, run again), so it is allowed with `overwrite`. Overwriting an
+    # IMPORTED or TOOL-WRITTEN column never is: those are measurements, and
+    # silently replacing one would invalidate every downstream result that read
+    # it without anything saying so.
+    replacing = request.overwrite and slug in derived
+    # Checked BEFORE validate_slug, which would otherwise answer the generic
+    # "already has a field named X" — true, but it tells the user to pick
+    # another name when what they actually need to know is that this particular
+    # field is not theirs to overwrite.
+    if request.overwrite and slug in existing and not replacing:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{slug!r} was not created by the calculator, so it cannot be "
+                    "overwritten. Pick another name."))
+    try:
+        scalar_fields.validate_slug(
+            slug,
+            existing=() if replacing else existing,
+            reserved=reserved,
+            aliases=_CANONICAL_ALIAS_TO_SLUG.keys(),
+        )
+    except scalar_fields.SlugError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    try:
+        parsed = scalar_fields.parse(request.expression, available=existing)
+    except scalar_fields.ExpressionError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": exc.message, "col": exc.col},
+        ) from None
+
+    if not request.acknowledge_cost:
+        # From the session, not from `cols`: a count inferred from the
+        # column snapshot degrades to 0 when the expression references
+        # none, which would silently suppress the advisory on a large cloud.
+        n = len(sess.positions)
+        rebuild_points = 0 if request.defer_octree else n
+        seconds, bytes_needed, breakdown = _scalar_compute_cost_estimate(
+            n, len(parsed.columns_needed), rebuild_points)
+        warning = _cost_advisory(
+            f"Computing {slug} on {n:,} points", seconds, bytes_needed,
+            breakdown=breakdown)
+        if warning is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"cost_warning": warning, "message": warning["message"]},
+            )
+
+    with _cloud_session_lock:
+        cols = _session_scalar_columns_locked(sess)
+        mask = _session_editable_mask_locked(sess)
+        needed = {s: cols[s] for s in parsed.columns_needed if s in cols}
+        if len(needed) != len(parsed.columns_needed):
+            missing = sorted(parsed.columns_needed - set(needed))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Field {missing[0]!r} is no longer on this cloud.")
+        try:
+            values, meta = scalar_fields.evaluate(
+                parsed, needed, n_points=len(sess.positions), mask=mask)
+        except scalar_fields.ExpressionError as exc:
+            raise HTTPException(status_code=400,
+                                detail={"message": exc.message,
+                                        "col": exc.col}) from None
+        label = (request.label or "").strip() or slug
+        _session_set_full_column_locked(sess, slug, label, values)
+        sess.derived_fields[slug] = parsed.source
+        stats_values = values[mask].astype(np.float64, copy=True)
+        if request.defer_octree:
+            _mark_octree_stale_locked(sess)
+
+    stats = scalar_fields.describe(stats_values, bins=request.bins)
+    common = {"session_id": session_id, "slug": slug, "label": label,
+              "expression": parsed.source, "stats": stats,
+              "nan_count": meta["nan_count"], "inf_count": meta["inf_count"]}
+    if request.defer_octree:
+        return {**common, "octree_deferred": True}
+    cache_key, cache_dir, oct_meta = _session_rebuild(sess)
+    return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **oct_meta}
+
+
+def _scalar_compute_cost_estimate(n_points: int, n_columns: int,
+                                  rebuild_points: int) -> "tuple[float, int, str]":
+    """(seconds, bytes, breakdown) for one arithmetic run + an optional rebuild.
+
+    Elementwise numpy over in-RAM columns is memory-bound, so the rate scales
+    with how many columns the expression touches rather than with its operator
+    count. The transient is bounded by the chunk size (see
+    `scalar_fields.DEFAULT_CHUNK_ROWS`) regardless of cloud size; the part that
+    really scales is the new full-length float32 column itself.
+
+    In practice the rebuild dominates by orders of magnitude — which is exactly
+    why `defer_octree` exists on this endpoint.
+    """
+    n = max(0, int(n_points))
+    cols = max(1, int(n_columns))
+    t_est = (n * cols) / _RATE_SCALAR_ARITH_PTS_PER_S
+    t_rebuild = _convert_seconds(rebuild_points)
+    # The new column (4 B/point) plus the chunked float64 working set, which is
+    # bounded by the chunk rather than by n.
+    working = int(n * 4 + scalar_fields.DEFAULT_CHUNK_ROWS * 8 * cols * 2)
+    breakdown = (f"{_fmt_duration(t_est)} computing, "
+                 f"{_fmt_duration(t_rebuild)} rebuilding the octree")
+    return t_est + t_rebuild, working, breakdown
+
+
+class ScalarFieldManageRequest(BaseModel):
+    """Rename, delete or duplicate one scalar field."""
+    action: Literal["rename", "delete", "duplicate"]
+    slug: str
+    # rename / duplicate
+    new_slug: Optional[str] = None
+    new_label: Optional[str] = None
+    defer_octree: bool = False
+
+
+@app.post("/api/cloud/session/{session_id}/scalar_fields/manage")
+def session_scalar_field_manage(session_id: str,
+                                request: ScalarFieldManageRequest):
+    """Rename / delete / duplicate a scalar field, then rebuild the octree.
+
+    Only a non-reserved `extras` column may be touched. The reserved set is not
+    bureaucratic: deleting `is_miss` would silently break LAD's transmission
+    term and the miss filter every reconstruction tool relies on, and renaming a
+    class column would orphan the categorical scheme the renderer paints it
+    with.
+
+    Store-backed (memmapped) sessions need nothing special here.
+    `_session_write_back_to_store` already resolves a renamed slug by array
+    identity and drops the column of a slug that has gone, so the on-disk store
+    follows from the in-RAM dicts on the next spill.
+    """
+    sess = _get_cloud_session(session_id)
+    slug = (request.slug or "").strip()
+    with _cloud_session_lock:
+        reserved = _reserved_scalar_slugs()
+        if slug not in sess.extras:
+            raise HTTPException(status_code=404,
+                                detail=f"No scalar field named {slug!r} on this cloud.")
+        if slug in reserved:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{slug!r} is a built-in field that other tools read by "
+                        "name, so it cannot be renamed or removed."))
+
+        if request.action == "delete":
+            sess.extras.pop(slug, None)
+            sess.extra_dims_meta[:] = [ed for ed in sess.extra_dims_meta
+                                       if ed.get("slug") != slug]
+            sess.derived_fields.pop(slug, None)
+            result = {"slug": slug, "deleted": True}
+        else:
+            new_slug = (request.new_slug or "").strip()
+            try:
+                scalar_fields.validate_slug(
+                    new_slug,
+                    existing=set(_session_scalar_columns_locked(sess)),
+                    reserved=reserved,
+                    aliases=_CANONICAL_ALIAS_TO_SLUG.keys(),
+                )
+            except scalar_fields.SlugError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            label = (request.new_label or "").strip() or new_slug
+
+            if request.action == "rename":
+                # Rebuild `extras` in place so the column keeps its POSITION in
+                # the dict, which `extras_order` in the store mirrors and the
+                # export column order follows. A pop+insert would move a renamed
+                # field to the end of every exported file.
+                sess.extras = {(new_slug if k == slug else k): v
+                               for k, v in sess.extras.items()}
+                for ed in sess.extra_dims_meta:
+                    if ed.get("slug") == slug:
+                        ed["slug"] = new_slug
+                        ed["label"] = label
+                        break
+                if slug in sess.derived_fields:
+                    sess.derived_fields[new_slug] = sess.derived_fields.pop(slug)
+                result = {"slug": new_slug, "previous_slug": slug, "label": label}
+            else:  # duplicate
+                # A real copy, not a view: the two fields must be independently
+                # editable, and a view would alias a memmap.
+                _session_set_full_column_locked(
+                    sess, new_slug, label,
+                    np.array(sess.extras[slug], dtype=np.float32, copy=True))
+                if slug in sess.derived_fields:
+                    sess.derived_fields[new_slug] = sess.derived_fields[slug]
+                result = {"slug": new_slug, "duplicated_from": slug, "label": label}
+
+        if request.defer_octree:
+            _mark_octree_stale_locked(sess)
+        fields = _scalar_fields_listing_locked(sess)
+
+    common = {"session_id": session_id, "action": request.action,
+              "fields": fields, **result}
+    if request.defer_octree:
+        return {**common, "octree_deferred": True}
+    cache_key, cache_dir, oct_meta = _session_rebuild(sess)
+    return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **oct_meta}
 
 
 class SessionTransformRequest(BaseModel):

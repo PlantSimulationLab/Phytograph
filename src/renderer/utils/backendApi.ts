@@ -5123,6 +5123,204 @@ export async function sessionNormalsStatus(
   return await response.json();
 }
 
+// ── Scalar fields: arithmetic, statistics, management ───────────────────────
+
+/** One entry of the cloud's scalar-field vocabulary. */
+export interface ScalarFieldInfo {
+  slug: string;
+  label: string;
+  /** `extra` — a real per-point column. `builtin` — x/y/z/intensity, readable
+   *  in an expression but not a row that can be renamed or deleted. */
+  kind: 'extra' | 'builtin';
+  /** False for built-ins and for columns other tools read by name (is_miss,
+   *  the class columns, the normals contract). Drives the ⋮ menu. */
+  editable: boolean;
+  reserved: boolean;
+  /** The formula this field was derived from, when the calculator made it. */
+  expression?: string | null;
+}
+
+/** Summary statistics + histogram for one field, measured over the points that
+ *  are alive AND real returns — the same mask the colorbar uses. */
+export interface ScalarFieldStats {
+  count: number;
+  finite_count: number;
+  nan_count: number;
+  inf_count: number;
+  min?: number;
+  max?: number;
+  mean?: number;
+  std?: number;
+  median?: number;
+  p1?: number;
+  p5?: number;
+  p25?: number;
+  p75?: number;
+  p95?: number;
+  p99?: number;
+  histogram?: {
+    bin_edges: number[];
+    counts: number[];
+    below_count: number;
+    above_count: number;
+    degenerate: boolean;
+  };
+}
+
+export interface ScalarFieldListResult {
+  session_id: string;
+  fields: ScalarFieldInfo[];
+  point_count: number;
+  /** Alive AND a real return — what the statistics are measured over. */
+  visible_count: number;
+  functions: string[];
+  aggregates: string[];
+  constants: string[];
+}
+
+/** The cloud's scalar-field vocabulary + the expression grammar it accepts.
+ *  Metadata only, so the panel can call it on open and after every mutation. */
+export async function listScalarFields(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<ScalarFieldListResult> {
+  const response = await fetch(
+    `${getBackendUrl()}/api/cloud/session/${sessionId}/scalar_fields`, { signal });
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  return await response.json();
+}
+
+/** Statistics + histogram for one field. */
+export async function scalarFieldStats(
+  sessionId: string,
+  slug: string,
+  signal?: AbortSignal,
+): Promise<{ session_id: string; slug: string; label: string; stats: ScalarFieldStats }> {
+  const response = await fetch(
+    `${getBackendUrl()}/api/cloud/session/${sessionId}/scalar_fields/`
+    + `${encodeURIComponent(slug)}/stats`, { signal });
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  return await response.json();
+}
+
+/** A 400 from the calculator, carrying the offset of the offending token so the
+ *  panel can point at it instead of just printing the message. */
+export class ExpressionError extends Error {
+  readonly col?: number;
+  constructor(message: string, col?: number) {
+    super(message);
+    this.name = 'ExpressionError';
+    this.col = col;
+  }
+}
+
+export interface ScalarFieldComputeResult extends Partial<CloudSessionBakeResult> {
+  session_id: string;
+  slug: string;
+  label: string;
+  expression: string;
+  stats: ScalarFieldStats;
+  nan_count: number;
+  inf_count: number;
+  octree_deferred?: boolean;
+}
+
+/**
+ * Evaluate an expression into a new per-point column, then rebuild the octree.
+ *
+ * The backend is the only thing that ever parses or runs an expression; a 400
+ * comes back as an `ExpressionError` with a column offset, and a 409 as the
+ * usual `CostWarningError` the caller retries with `acknowledge_cost`.
+ */
+export async function computeScalarField(
+  sessionId: string,
+  params: {
+    expression: string;
+    slug: string;
+    label?: string;
+    overwrite?: boolean;
+    defer_octree?: boolean;
+    acknowledge_cost?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<ScalarFieldComputeResult> {
+  // Deliberately NOT `postSegment`. That helper flattens an error body to its
+  // message string, which is right for every other tool but loses the `col`
+  // offset this endpoint returns — and the offset is the difference between
+  // "invalid syntax" and underlining the token the user mistyped. The 409
+  // cost-warning branch is reproduced so the CostWarningError contract is
+  // identical to every other compute tool's.
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 600000,
+    `/api/cloud/session/${sessionId}/scalar_fields/compute`);
+  const onExternalAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+  try {
+    const response = await fetch(
+      `${getBackendUrl()}/api/cloud/session/${sessionId}/scalar_fields/compute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+        signal: controller.signal,
+      });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const detail = errorData?.detail;
+      if (response.status === 409 && detail && typeof detail === 'object'
+          && (detail as { cost_warning?: TreeCostWarning }).cost_warning) {
+        throw new CostWarningError((detail as { cost_warning: TreeCostWarning }).cost_warning);
+      }
+      // The parser answers {message, col}; a naming rejection answers a bare
+      // string. Both are user-facing as written.
+      if (detail && typeof detail === 'object' && 'message' in detail) {
+        const d = detail as { message: string; col?: number };
+        throw new ExpressionError(d.message, d.col ?? undefined);
+      }
+      throw new ExpressionError(
+        typeof detail === 'string' ? detail
+          : `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+    if (signal) signal.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+export interface ScalarFieldManageResult {
+  session_id: string;
+  action: 'rename' | 'delete' | 'duplicate';
+  slug: string;
+  previous_slug?: string;
+  duplicated_from?: string;
+  label?: string;
+  deleted?: boolean;
+  fields: ScalarFieldInfo[];
+  octree_deferred?: boolean;
+  cache_id?: string;
+  cache_dir?: string;
+}
+
+/** Rename, delete or duplicate a scalar field, then rebuild the octree.
+ *  Refuses the reserved columns other tools read by name. */
+export async function manageScalarField(
+  sessionId: string,
+  params: {
+    action: 'rename' | 'delete' | 'duplicate';
+    slug: string;
+    new_slug?: string;
+    new_label?: string;
+    defer_octree?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<ScalarFieldManageResult> {
+  return postSegment<ScalarFieldManageResult>(
+    `/api/cloud/session/${sessionId}/scalar_fields/manage`, params, signal, 600000);
+}
+
 /** Run TreeIso on the session's in-RAM points, append a `tree_instance` column,
  * and rebuild the octree from the arrays (no file read). Pass TreeIso tuning. */
 export async function sessionSegmentTrees(

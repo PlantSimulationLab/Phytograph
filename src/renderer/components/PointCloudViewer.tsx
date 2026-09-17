@@ -7,9 +7,9 @@ import { OctreeRefreshQueue, type OctreeRefreshRunner } from '../lib/octreeRefre
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStats, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -261,6 +261,9 @@ import { EraseBrush } from './viewer/gizmos/EraseBrush';
 import { EraseBrushOctree, type EraseSquareFrame } from './viewer/gizmos/EraseBrushOctree';
 import { GroundSegmentPanel } from './viewer/panels/GroundSegmentPanel';
 import { ComputeNormalsPanel, type NormalOrientation } from './viewer/panels/ComputeNormalsPanel';
+import { ScalarFieldsPanel, type ScalarFieldsTab } from './viewer/panels/ScalarFieldsPanel';
+import type { ScalarStats } from '../lib/scalarFieldStats';
+import { suggestSlug } from '../lib/scalarFieldExpression';
 import { DEMPanel } from './viewer/panels/DEMPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
@@ -1023,6 +1026,26 @@ export default function PointCloudViewer({
     useState<{ hasNormals: boolean; stale: boolean }>({ hasNormals: false, stale: false });
   const normalsAbortRef = useRef<AbortController | null>(null);
   const normalsAckCostRef = useRef(false);
+
+  // --- Scalar Fields ---------------------------------------------------------
+  const [showScalarFieldsPanel, setShowScalarFieldsPanel] = useState(false);
+  const [scalarTab, setScalarTab] = useState<ScalarFieldsTab>('fields');
+  const [scalarFieldList, setScalarFieldList] = useState<ScalarFieldListResult | null>(null);
+  const [scalarSelectedSlug, setScalarSelectedSlug] = useState<string | null>(null);
+  const [scalarStats, setScalarStats] = useState<ScalarStats | null>(null);
+  const [scalarStatsLoading, setScalarStatsLoading] = useState(false);
+  const [scalarExpression, setScalarExpression] = useState('');
+  const [scalarNewSlug, setScalarNewSlug] = useState('');
+  // Once the user edits the name it stops auto-following the expression —
+  // otherwise typing a name and then fixing a typo in the formula silently
+  // replaces the name they just chose.
+  const [scalarSlugTouched, setScalarSlugTouched] = useState(false);
+  const [scalarInProgress, setScalarInProgress] = useState(false);
+  const [scalarError, setScalarError] = useState<string | null>(null);
+  const [scalarErrorCol, setScalarErrorCol] = useState<number | null>(null);
+  const [scalarCostWarning, setScalarCostWarning] = useState<string | null>(null);
+  const scalarAbortRef = useRef<AbortController | null>(null);
+  const scalarAckCostRef = useRef(false);
 
   const [groundClothResolution, setGroundClothResolution] = useState(0.05);
   const [groundClassThreshold, setGroundClassThreshold] = useState(0.02);
@@ -2848,6 +2871,7 @@ export default function PointCloudViewer({
     }
     if (except !== 'triangulation') setShowTriangulationPopup(false);
     if (except !== 'compute-normals') setShowComputeNormalsPanel(false);
+    if (except !== 'scalar-fields') setShowScalarFieldsPanel(false);
     if (except !== 'ground-segment') setShowGroundSegmentPanel(false);
     if (except !== 'dem') setShowDEMPanel(false);
     if (except !== 'wood-segment') setShowWoodSegmentPanel(false);
@@ -8057,6 +8081,7 @@ export default function PointCloudViewer({
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
       { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
       { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => { closeAllToolPanels('compute-normals'); setShowComputeNormalsPanel(!showComputeNormalsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: NormalsIcon, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
+      { id: 'cloud-scalar-fields', name: 'Scalar Fields', keywords: ['scalar', 'field', 'attribute', 'arithmetic', 'calculator', 'formula', 'expression', 'statistics', 'stats', 'histogram', 'mean', 'median', 'percentile', 'rename', 'sf'], action: () => { closeAllToolPanels('scalar-fields'); setShowScalarFieldsPanel(!showScalarFieldsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Calculator, testId: 'tool-scalar-fields', isActive: () => showScalarFieldsPanel },
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
       { id: 'cloud-backfill-misses', name: 'Backfill Misses', keywords: ['sky', 'miss', 'gapfill', 'lad', 'leaf area', 'transmission', 'recover', 'beam'], action: () => { closeAllToolPanels(); setShowBackfillPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'preprocess', icon: CloudFog, testId: 'tool-backfill-misses', multiInput: true },
       { id: 'cloud-align', name: 'Align Clouds (ICP)', keywords: ['register', 'icp', 'alignment', 'fit'], action: () => setShowAlignDialog(true), category: 'Point Cloud', toolGroup: 'preprocess', icon: Globe, multiInput: true },
@@ -8152,7 +8177,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
   // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool
@@ -11821,6 +11846,314 @@ export default function PointCloudViewer({
     normalsAbortRef.current = null;
     setNormalsInProgress(false);
   }, []);
+
+  // --- Scalar Fields ---------------------------------------------------------
+  //
+  // The session id of the single selected cloud, or null. Every scalar-field
+  // call needs one: the fields ARE the session's columns, so a flat or
+  // session-less cloud has nothing to list.
+  const scalarSessionId = useMemo(() => {
+    if (selectedIds.size !== 1) return null;
+    const id = Array.from(selectedIds)[0];
+    return clouds.find(c => c.id === id)?.data.octree?.sessionId ?? null;
+  }, [selectedIds, clouds]);
+
+  const refreshScalarFields = useCallback(async (sessionId: string) => {
+    try {
+      const listing = await listScalarFields(sessionId);
+      setScalarFieldList(listing);
+      // Keep the selection if it survived; otherwise fall back to the first
+      // field so the Stats tab is never staring at an empty picker.
+      setScalarSelectedSlug(prev =>
+        prev && listing.fields.some(f => f.slug === prev)
+          ? prev
+          : (listing.fields[0]?.slug ?? null));
+      return listing;
+    } catch (error) {
+      console.error('List scalar fields error:', error);
+      setScalarError(describeBackendError(error, 'List scalar fields').message);
+      return null;
+    }
+  }, []);
+
+  // Load the vocabulary when the panel opens or the selected cloud changes.
+  useEffect(() => {
+    if (!showScalarFieldsPanel || !scalarSessionId) {
+      setScalarFieldList(null);
+      return;
+    }
+    void refreshScalarFields(scalarSessionId);
+  }, [showScalarFieldsPanel, scalarSessionId, refreshScalarFields]);
+
+  // Fetch statistics for the selected field. Keyed on the field list too, so a
+  // recompute of the SAME slug re-measures rather than showing stale numbers.
+  useEffect(() => {
+    if (!showScalarFieldsPanel || scalarTab !== 'stats'
+        || !scalarSessionId || !scalarSelectedSlug) {
+      return;
+    }
+    let cancelled = false;
+    const abort = new AbortController();
+    setScalarStatsLoading(true);
+    setScalarStats(null);
+    scalarFieldStats(scalarSessionId, scalarSelectedSlug, abort.signal)
+      .then(res => { if (!cancelled) setScalarStats(res.stats ?? null); })
+      .catch(error => {
+        if (abort.signal.aborted) return;
+        console.error('Scalar field stats error:', error);
+        if (!cancelled) setScalarStats(null);
+      })
+      .finally(() => { if (!cancelled) setScalarStatsLoading(false); });
+    return () => { cancelled = true; abort.abort(); };
+  }, [showScalarFieldsPanel, scalarTab, scalarSessionId, scalarSelectedSlug,
+      scalarFieldList]);
+
+  // Whether the selected field holds whole numbers, so the readout prints `3`
+  // rather than `3.00`. Read off the measured statistics rather than guessed
+  // from the slug: a derived field has no name convention to go on.
+  const scalarSelectedIsInteger = useMemo(() => {
+    if (isIntegerFilterField(`scalar:${scalarSelectedSlug ?? ''}`)) return true;
+    const s = scalarStats;
+    if (!s || s.min === undefined || s.max === undefined) return false;
+    return Number.isInteger(s.min) && Number.isInteger(s.max)
+      && (s.median === undefined || Number.isInteger(s.median));
+  }, [scalarSelectedSlug, scalarStats]);
+
+  const scalarVocabulary = useMemo(() => ({
+    fields: scalarFieldList?.fields.map(f => f.slug) ?? [],
+    functions: scalarFieldList?.functions ?? [],
+    aggregates: scalarFieldList?.aggregates ?? [],
+    constants: scalarFieldList?.constants ?? [],
+  }), [scalarFieldList]);
+
+  const handleComputeScalarField = useCallback(async () => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    const octreeInfo = cloud?.data.octree;
+    const sessionId = octreeInfo?.sessionId;
+    if (!cloud || !octreeInfo || !sessionId) {
+      setScalarError('Scalar field arithmetic needs an imported (session-backed) cloud.');
+      return;
+    }
+
+    const taken = scalarFieldList?.fields.map(f => f.slug) ?? [];
+    const slug = scalarSlugTouched
+      ? scalarNewSlug
+      : (scalarNewSlug || suggestSlug(scalarExpression, taken));
+    if (!scalarExpression.trim() || !slug) return;
+
+    setScalarInProgress(true);
+    setScalarError(null);
+    setScalarErrorCol(null);
+    const abort = new AbortController();
+    scalarAbortRef.current = abort;
+
+    // Consume any pending "Compute Anyway", so a later run has to earn its own.
+    const acknowledgeCost = scalarAckCostRef.current;
+    scalarAckCostRef.current = false;
+    setScalarCostWarning(null);
+
+    // Defer the rebuild on a big cloud, exactly as Compute Normals does: the
+    // column lands immediately (export, a further formula and every other tool
+    // can read it) while the COLOURING catches up on the refresh queue.
+    const willDefer = (cloud.data.pointCount ?? 0) > 5_000_000;
+
+    try {
+      const result = await computeScalarField(sessionId, {
+        expression: scalarExpression,
+        slug,
+        // Re-running the same name is the normal edit-the-formula loop; the
+        // backend still refuses to overwrite an imported or tool-written column.
+        overwrite: true,
+        defer_octree: willDefer,
+        acknowledge_cost: acknowledgeCost,
+      }, abort.signal);
+
+      const baseName = cloud.data.fileName ?? id;
+      if (!result.octree_deferred && result.cache_id) {
+        onUpdateCloud(id, buildSessionOctreeData(
+          result as unknown as OctreeMetadata, octreeInfo, baseName));
+      }
+      // A derived field is a measurement, not a class list: register it
+      // continuous so it renders as a gradient with a numeric colorbar rather
+      // than having a categorical scheme invented for it from its value range.
+      registerContinuousSlug(result.slug);
+      setCloudColorMode(id, { mode: 'scalar', field: result.slug });
+
+      // The cloud's data changed, so this is a destructive boundary — the point
+      // arrays are never snapshotted into the undo stack (see sceneActions).
+      scene.boundary([id]);
+
+      if (willDefer) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+
+      const listing = await refreshScalarFields(sessionId);
+      setScalarSelectedSlug(result.slug);
+      setScalarStats(result.stats ?? null);
+      setScalarTab('stats');
+      setScalarExpression('');
+      setScalarNewSlug('');
+      setScalarSlugTouched(false);
+      void listing;
+
+      const oddities: string[] = [];
+      if (result.nan_count > 0) oddities.push(`${result.nan_count.toLocaleString()} NaN`);
+      if (result.inf_count > 0) oddities.push(`${result.inf_count.toLocaleString()} infinite`);
+      showToast({
+        type: oddities.length ? 'warning' : 'success',
+        title: 'Scalar Field Computed',
+        message: oddities.length
+          ? `${result.label} created, with ${oddities.join(' and ')} values.`
+          : `${result.label} created.`,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof CostWarningError) {
+        scalarAckCostRef.current = true;
+        setScalarCostWarning(error.costWarning.message);
+        return;
+      }
+      if (error instanceof ExpressionError) {
+        setScalarError(error.message);
+        setScalarErrorCol(error.col ?? null);
+        return;
+      }
+      console.error('Compute scalar field error:', error);
+      const message = describeBackendError(error, 'Compute the scalar field').message;
+      setScalarError(message);
+      showToast({ type: 'error', title: 'Compute Failed', message });
+    } finally {
+      setScalarInProgress(false);
+      scalarAbortRef.current = null;
+    }
+  }, [selectedIds, clouds, scalarExpression, scalarNewSlug, scalarSlugTouched,
+      scalarFieldList, onUpdateCloud, setCloudColorMode, scene, showToast,
+      refreshScalarFields]);
+
+  const cancelComputeScalarField = useCallback(() => {
+    scalarAbortRef.current?.abort();
+    scalarAbortRef.current = null;
+    setScalarInProgress(false);
+  }, []);
+
+  /**
+   * Migrate every piece of renderer state that names a scalar field by slug.
+   *
+   * A rename changes the field's identity, and three separate stores point at
+   * it by name. Deleting a field needs none of this — a GC effect already drops
+   * a colour mode whose field the cloud no longer carries — but a rename would
+   * otherwise silently fall back to the default colouring and drop the user's
+   * filter, which reads as the rename having broken something.
+   */
+  const migrateScalarSlug = useCallback((cloudId: string, from: string, to: string) => {
+    setCloudColorModes(prev => {
+      const current = prev.get(cloudId);
+      if (!current || current.mode !== 'scalar' || current.field !== from) return prev;
+      const next = new Map(prev);
+      next.set(cloudId, { ...current, field: to });
+      return next;
+    });
+    setColorRanges(prev => {
+      const key = `scalar:${from}`;
+      if (!(key in prev)) return prev;
+      const { [key]: moved, ...rest } = prev;
+      return { ...rest, [`scalar:${to}`]: moved };
+    });
+    setCloudFilters(prev => {
+      const filters = prev.get(cloudId);
+      if (!filters?.scalarFields || !(from in filters.scalarFields)) return prev;
+      const { [from]: movedFilter, ...restFilters } = filters.scalarFields;
+      const next = new Map(prev);
+      next.set(cloudId,
+        { ...filters, scalarFields: { ...restFilters, [to]: movedFilter } });
+      return next;
+    });
+  }, []);
+
+  /**
+   * Apply a management action whose name (for rename/duplicate) the PANEL has
+   * already collected and confirmed.
+   *
+   * The name is not gathered here. `window.prompt` / `window.confirm` block the
+   * main thread, are refused outright by some Electron configurations, and were
+   * the only native dialogs anywhere in this renderer — every other naming or
+   * destructive flow in the app is a rendered control. The panel now owns a
+   * small inline form, so this is a pure apply step.
+   */
+  const handleManageScalarField = useCallback(async (
+    action: 'rename' | 'delete' | 'duplicate', slug: string, requestedSlug?: string,
+  ) => {
+    if (selectedIds.size !== 1) return;
+    const id = Array.from(selectedIds)[0];
+    const cloud = clouds.find(c => c.id === id);
+    const octreeInfo = cloud?.data.octree;
+    const sessionId = octreeInfo?.sessionId;
+    if (!cloud || !octreeInfo || !sessionId) return;
+
+    const existing = scalarFieldList?.fields.find(f => f.slug === slug);
+    let newSlug: string | undefined;
+    let newLabel: string | undefined;
+
+    if (action === 'rename' || action === 'duplicate') {
+      newSlug = (requestedSlug ?? '').trim();
+      if (!newSlug || newSlug === slug) return;
+      // Carry the display label across a rename only when it was just the slug;
+      // a hand-set label ("Reflectance [dB]") is the user's and should survive.
+      newLabel = existing && existing.label !== slug ? existing.label : newSlug;
+    }
+
+    setScalarInProgress(true);
+    setScalarError(null);
+    const abort = new AbortController();
+    scalarAbortRef.current = abort;
+    const willDefer = (cloud.data.pointCount ?? 0) > 5_000_000;
+
+    try {
+      const result = await manageScalarField(sessionId, {
+        action, slug, new_slug: newSlug, new_label: newLabel,
+        defer_octree: willDefer,
+      }, abort.signal);
+
+      const baseName = cloud.data.fileName ?? id;
+      if (!result.octree_deferred && result.cache_id) {
+        onUpdateCloud(id, buildSessionOctreeData(
+          result as unknown as OctreeMetadata, octreeInfo, baseName));
+      }
+      if (action === 'rename' && result.previous_slug) {
+        registerContinuousSlug(result.slug);
+        migrateScalarSlug(id, result.previous_slug, result.slug);
+      }
+      if (action === 'duplicate') registerContinuousSlug(result.slug);
+
+      scene.boundary([id]);
+      if (willDefer) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+
+      setScalarFieldList(prev => prev ? { ...prev, fields: result.fields } : prev);
+      setScalarSelectedSlug(action === 'delete'
+        ? (result.fields[0]?.slug ?? null)
+        : result.slug);
+
+      showToast({
+        type: 'success',
+        title: action === 'delete' ? 'Field Deleted'
+          : action === 'rename' ? 'Field Renamed' : 'Field Duplicated',
+        message: action === 'delete'
+          ? `${existing?.label ?? slug} removed.`
+          : `${result.label ?? result.slug} ready.`,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      console.error('Manage scalar field error:', error);
+      const message = describeBackendError(error, `${action} the scalar field`).message;
+      setScalarError(message);
+      showToast({ type: 'error', title: 'Scalar Field Error', message });
+    } finally {
+      setScalarInProgress(false);
+      scalarAbortRef.current = null;
+    }
+  }, [selectedIds, clouds, scalarFieldList, onUpdateCloud, scene, showToast,
+      migrateScalarSlug]);
+
 
   const handleGroundSegment = useCallback(async () => {
     if (selectedIds.size !== 1) return;
@@ -22944,6 +23277,40 @@ export default function PointCloudViewer({
           onOrientationChange={setNormalsOrientation}
           onCompute={handleComputeNormals}
           onCancel={cancelComputeNormals}
+        />
+      )}
+      {showScalarFieldsPanel && selectedIds.size === 1 && (
+        <ScalarFieldsPanel
+          tab={scalarTab}
+          onTabChange={setScalarTab}
+          fields={scalarFieldList?.fields ?? []}
+          vocabulary={scalarVocabulary}
+          visibleCount={scalarFieldList?.visible_count ?? 0}
+          pointCount={scalarFieldList?.point_count ?? 0}
+          selectedSlug={scalarSelectedSlug}
+          onSelectSlug={setScalarSelectedSlug}
+          stats={scalarStats}
+          statsLoading={scalarStatsLoading}
+          selectedIsInteger={scalarSelectedIsInteger}
+          expression={scalarExpression}
+          onExpressionChange={setScalarExpression}
+          newSlug={scalarNewSlug}
+          onNewSlugChange={(v) => { setScalarNewSlug(v); setScalarSlugTouched(true); }}
+          slugTouched={scalarSlugTouched}
+          inProgress={scalarInProgress}
+          error={scalarError}
+          errorCol={scalarErrorCol}
+          costWarning={scalarCostWarning}
+          onCompute={handleComputeScalarField}
+          onCancel={cancelComputeScalarField}
+          onRename={(slug, newSlug) => { void handleManageScalarField('rename', slug, newSlug); }}
+          onDuplicate={(slug, newSlug) => { void handleManageScalarField('duplicate', slug, newSlug); }}
+          onDelete={(slug) => { void handleManageScalarField('delete', slug); }}
+          onColorBy={(slug) => {
+            const id = Array.from(selectedIds)[0];
+            if (id) setCloudColorMode(id, { mode: 'scalar', field: slug });
+          }}
+          onClose={() => setShowScalarFieldsPanel(false)}
         />
       )}
       {showGroundSegmentPanel && selectedIds.size === 1 && (

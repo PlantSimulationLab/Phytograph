@@ -23,7 +23,7 @@ scan showing its wood/leaf classes beside a raw scan colored by height.
 | **Intensity** | Color by LiDAR intensity scalar | Distinguishing reflective leaves from less reflective wood (species-dependent). |
 | **RGB** | Original per-point color from the file | Scans co-registered with photography. |
 | **Solid Color** | A single flat color | When you want the data out of the way to focus on a mesh or skeleton overlay. |
-| **Scalar Field** | Color by any custom per-point scalar carried in the source file | Imported clouds with extra columns — reflectance, deviation, timestamp, target index, custom metrics. |
+| **Scalar Field** | Color by any per-point scalar the cloud carries | Imported clouds with extra columns — reflectance, deviation, timestamp, target index — plus anything a tool wrote or you [derived with a formula](../workflows/scalar-fields.md). |
 
 When a scalar mode is active, a colormap selector becomes available in
 the right panel: viridis (default), plasma, inferno, magma, turbo, jet,
@@ -85,6 +85,15 @@ turbo — without one picker dragging the other along.
 A scalar field selection belongs to the cloud that carries it, so
 deleting a segmented scan removes its mode with it; other clouds are
 unaffected.
+
+### Fields you derive yourself
+
+The [Scalar Fields tool](../workflows/scalar-fields.md) computes a new field
+from a formula over the existing ones — `intensity * 2`,
+`(intensity - mean(intensity)) / std(intensity)`, `degrees(acos(nz))`. The
+result is an ordinary scalar field: it appears in this dropdown, in the Filter
+panel and in the export column picker, and can feed another formula. The same
+tool reports each field's statistics and histogram.
 
 ### Scalar fields on imported clouds
 

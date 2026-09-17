@@ -44,6 +44,10 @@ by the four stages of a typical processing pipeline.
 
 - :phytograph-cross-section: **[Cross-section](clean-point-cloud.md)** — clip the view to a slab and traverse it.
 
+- :material-vector-line: **[Compute normals](compute-normals.md)** — estimate surface direction, curvature and verticality.
+
+- :material-calculator-variant: **[Work with scalar fields](scalar-fields.md)** — statistics, histograms, and new fields from a formula.
+
 - :phytograph-backfill: **[Backfill misses](backfill-misses.md)** — recover the sky/miss rays that LAD needs from a scan that dropped them.
 
 - :phytograph-auto-register: **[Auto-register clouds](register-compare.md#auto-register-when-clouds-start-far-apart)** — align scans that start far apart, validated by loop closure.
