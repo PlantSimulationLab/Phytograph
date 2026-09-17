@@ -1,4 +1,5 @@
-import { AlertTriangle, Axis3d, Loader2, X } from 'lucide-react';
+import { AlertTriangle, Loader2, X } from 'lucide-react';
+import { NormalsIcon } from '../../icons/NormalsIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 
@@ -55,7 +56,7 @@ export function ComputeNormalsPanel({
     <div data-testid="compute-normals-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-          <Axis3d className="w-3 h-3" />
+          <NormalsIcon className="w-3 h-3" />
           Compute Normals
         </div>
         <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
@@ -210,7 +211,7 @@ export function ComputeNormalsPanel({
             costWarning ? 'bg-amber-600 hover:bg-amber-500' : 'bg-green-600 hover:bg-green-500'
           }`}
         >
-          {costWarning ? <AlertTriangle className="w-3 h-3" /> : <Axis3d className="w-3 h-3" />}
+          {costWarning ? <AlertTriangle className="w-3 h-3" /> : <NormalsIcon className="w-3 h-3" />}
           {costWarning ? 'Compute Anyway' : (hasNormals ? 'Recompute Normals' : 'Compute Normals')}
         </button>
       )}
