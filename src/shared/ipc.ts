@@ -61,6 +61,10 @@ export const IPC = {
   // hundred MB (PyInstaller sidecar + native libs), so the download is a
   // multi-minute silent stretch without this.
   UpdaterStatus: 'updater:status',
+  // Renderer -> main (invoke/handle): "I have painted the frame you asked for".
+  // Only used by the 'installing' notice, which must be visible BEFORE main
+  // starts the blocking quit sequence. See src/main/updater.ts.
+  UpdaterStatusPainted: 'updater:statusPainted',
 } as const;
 
 export type UpdaterStatusPayload =
@@ -68,6 +72,11 @@ export type UpdaterStatusPayload =
   | { status: 'downloading'; version: string; percent: number | null }
   // Bytes are in; the restart prompt is up (or deferred to next quit).
   | { status: 'downloaded'; version: string }
+  // The user chose "Restart now" and the install has been handed to
+  // electron-updater. The app then closes, unpacks and relaunches — ~10s on
+  // macOS during which the window is frozen and then gone. Without this the
+  // user sees a dead window and no reason to believe anything is happening.
+  | { status: 'installing'; version: string }
   // The download failed. The pill goes away; the error is logged.
   | { status: 'error' };
 

@@ -22,9 +22,18 @@ const showMessageBox =
     Promise.resolve({ response: 1 }),
   );
 
+// Captures the renderer->main handlers updater.ts registers, so a test can
+// play the renderer and fire the paint ack.
+const invokeHandlers = new Map<string, (...args: any[]) => any>();
+
 vi.mock('electron', () => ({
   app,
   dialog: { showMessageBox: (win: any, opts: any) => showMessageBox(win, opts) },
+  ipcMain: {
+    handle: vi.fn((channel: string, cb: (...args: any[]) => any) => {
+      invokeHandlers.set(channel, cb);
+    }),
+  },
   BrowserWindow: class {},
 }));
 vi.mock('electron-updater', () => ({ default: { autoUpdater } }));
@@ -45,6 +54,7 @@ const getWindow = () => fakeWindow as any;
 async function loadUpdater() {
   vi.resetModules();
   handlers.clear();
+  invokeHandlers.clear();
   sent = [];
   showMessageBox.mockClear();
   showMessageBox.mockResolvedValue({ response: 1 } as any);
@@ -166,6 +176,108 @@ describe('update-downloaded prompt', () => {
     answerRestartWith(0); // "Restart now"
     await handlers.get('update-downloaded')!({ version: '0.58.0' });
     expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('restart notice covers the install gap', () => {
+  beforeEach(loadUpdater);
+
+  /** Answer the restart prompt with "Restart now", leaving others as "Later". */
+  const clickRestartNow = () =>
+    showMessageBox.mockImplementation((_win: any, opts: any) =>
+      Promise.resolve({ response: opts?.title === 'Update ready' ? 0 : 1 }),
+    );
+
+  it('shows "installing" BEFORE quitAndInstall, not after', async () => {
+    const { setupAutoUpdater } = await loadUpdater();
+    autoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.58.0' } });
+    clickRestartNow();
+
+    // Play the renderer: ack as soon as the notice arrives. Without an ack the
+    // install would still proceed (on timeout), so acking here is what proves
+    // the ordering rather than the timeout masking it.
+    const fakeWindow2 = {
+      webContents: {
+        send: (channel: string, payload: UpdaterStatusPayload) => {
+          sent.push({ channel, payload });
+          if ((payload as any).status === 'installing') {
+            // Deliberately async, like a real IPC round-trip.
+            setTimeout(() => invokeHandlers.get(IPC.UpdaterStatusPainted)?.(), 0);
+          }
+        },
+      },
+    };
+    setupAutoUpdater(() => fakeWindow2 as any);
+
+    // Record the ordering: main blocks right after quitAndInstall, so an
+    // 'installing' emitted afterwards would never reach the screen.
+    let installingSentAt = -1;
+    autoUpdater.quitAndInstall.mockImplementation(() => {
+      installingSentAt = sent.findIndex((s) => (s.payload as any).status === 'installing');
+    });
+
+    await handlers.get('update-downloaded')!({ version: '0.58.0' });
+
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+    // The notice was already in `sent` at the moment quitAndInstall ran.
+    expect(installingSentAt).toBeGreaterThanOrEqual(0);
+  });
+
+  it('waits for the renderer paint ack before installing', async () => {
+    const { setupAutoUpdater } = await loadUpdater();
+    autoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.58.0' } });
+    clickRestartNow();
+
+    let acked = false;
+    let quitBeforeAck = false;
+    const fakeWindow2 = {
+      webContents: {
+        send: (channel: string, payload: UpdaterStatusPayload) => {
+          sent.push({ channel, payload });
+          if ((payload as any).status === 'installing') {
+            setTimeout(() => {
+              acked = true;
+              invokeHandlers.get(IPC.UpdaterStatusPainted)?.();
+            }, 20);
+          }
+        },
+      },
+    };
+    autoUpdater.quitAndInstall.mockImplementation(() => {
+      if (!acked) quitBeforeAck = true;
+    });
+    setupAutoUpdater(() => fakeWindow2 as any);
+
+    await handlers.get('update-downloaded')!({ version: '0.58.0' });
+
+    // The ack gates the install; racing past it is the bug being prevented.
+    expect(quitBeforeAck).toBe(false);
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('installs anyway when the renderer never acks (a wedged window must not block the update)', async () => {
+    const { setupAutoUpdater } = await loadUpdater();
+    autoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.58.0' } });
+    clickRestartNow();
+    // fakeWindow records the send but never acks.
+    setupAutoUpdater(getWindow);
+
+    await handlers.get('update-downloaded')!({ version: '0.58.0' });
+
+    expect(sent.some((s) => (s.payload as any).status === 'installing')).toBe(true);
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show the restart notice when the user picks "Later"', async () => {
+    const { setupAutoUpdater } = await loadUpdater();
+    autoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.58.0' } });
+    showMessageBox.mockResolvedValue({ response: 1 } as any); // "Later"
+    setupAutoUpdater(getWindow);
+
+    await handlers.get('update-downloaded')!({ version: '0.58.0' });
+
+    expect(sent.some((s) => (s.payload as any).status === 'installing')).toBe(false);
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
   });
 });
 

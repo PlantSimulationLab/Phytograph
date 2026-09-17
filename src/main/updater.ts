@@ -2,7 +2,7 @@
 // target in package.json (GitHub Releases by default). Falls back to a no-op
 // in dev — electron-updater requires a packaged build.
 
-import { app, dialog, BrowserWindow } from 'electron';
+import { app, dialog, ipcMain, BrowserWindow } from 'electron';
 import electronUpdater from 'electron-updater';
 import { updaterLog } from './logger.js';
 import { IPC, type UpdaterStatusPayload } from '../shared/ipc.js';
@@ -16,15 +16,31 @@ type GetWindow = () => BrowserWindow | null;
 // for ~30s and the user otherwise has no idea whether it's working.
 const RESTART_ESTIMATE = 'This usually takes under a minute.';
 
+// How long to wait for the renderer to confirm the "Restarting…" notice is on
+// screen before installing anyway. The ack normally lands in a frame or two;
+// this only bounds the pathological case (a wedged or already-gone renderer),
+// where proceeding without the notice is far better than stalling the update.
+const PAINT_ACK_TIMEOUT_MS = 400;
+
 // Register the shared event listeners exactly once, whether the first trigger
 // is the startup auto-check or a manual "Check for Updates…" click.
 let listenersRegistered = false;
 // Guard against overlapping manual checks stacking dialogs on double-click.
 let checking = false;
 
+// Resolved by the renderer's ack that it painted the 'installing' notice.
+// Set just before the notice is emitted and cleared once it settles.
+let paintAck: (() => void) | null = null;
+
 function registerListeners(getWindow: GetWindow): void {
   if (listenersRegistered) return;
   listenersRegistered = true;
+
+  // The renderer reports the notice is visible. Registered alongside the
+  // updater listeners so it exists for any path that can reach quitAndInstall.
+  ipcMain.handle(IPC.UpdaterStatusPainted, () => {
+    paintAck?.();
+  });
 
   // Push updater state to the renderer, which renders it as the same top-center
   // StatusPill used by triangulation/LAD. Best-effort: the window may not exist
@@ -76,7 +92,40 @@ function registerListeners(getWindow: GetWindow): void {
       // left guessing whether the update failed.
       detail: `Phytograph will close, install the update, and reopen. ${RESTART_ESTIMATE}`,
     });
-    if (choice.response === 0) autoUpdater.quitAndInstall();
+    if (choice.response !== 0) return;
+
+    // Show "Restarting…" and WAIT for the renderer to confirm it's painted.
+    //
+    // The wait is the whole fix, not a nicety: quitAndInstall() runs the
+    // 'before-quit' teardown (stopBackend() alone blocks the main thread
+    // synchronously for up to 1.5s) and then unpacks the installer, so main
+    // stops servicing IPC almost immediately. Emitting and calling straight
+    // through means the renderer never gets a frame in and the user stares at
+    // the same dead window they did before. Bounded so a wedged renderer
+    // delays the update by at most PAINT_ACK_TIMEOUT_MS rather than blocking it.
+    emit({ status: 'installing', version: info.version });
+    await waitForPaintAck();
+
+    autoUpdater.quitAndInstall();
+  });
+}
+
+/** Resolve on the renderer's paint ack, or on timeout — whichever is first. */
+function waitForPaintAck(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      paintAck = null;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      updaterLog.warn('renderer did not confirm the restart notice; installing anyway.');
+      finish();
+    }, PAINT_ACK_TIMEOUT_MS);
+    paintAck = finish;
   });
 }
 

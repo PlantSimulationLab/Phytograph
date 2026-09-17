@@ -251,10 +251,12 @@ viewer, the same indicator used for other long-running operations. The
 download continues in the background; you can keep working.
 
 Once it finishes, Phytograph asks whether to restart. Choosing **Restart
-now** closes the app, installs the update, and reopens it — the window
-disappears for up to a minute while that happens, which is normal.
-Choosing **Later** keeps the downloaded update and installs it the next
-time you quit.
+now** closes the app, installs the update, and reopens it. The pill
+switches to *Restarting to install the update…* first, and on macOS it
+stays up for several seconds while the new version is unpacked before
+the window closes — that pause is normal. The window is then gone for
+up to a minute. Choosing **Later** keeps the downloaded update and
+installs it the next time you quit.
 
 ## Command palette
 

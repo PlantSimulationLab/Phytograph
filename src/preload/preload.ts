@@ -114,6 +114,11 @@ const api = {
     ipcRenderer.on(IPC.UpdaterStatus, listener);
     return () => ipcRenderer.removeListener(IPC.UpdaterStatus, listener);
   },
+  // Tell main the 'installing' notice is on screen, so it can start the quit
+  // sequence knowing the user can see it. Main blocks hard once that begins,
+  // so this ack is the only thing keeping the message from losing the race.
+  notifyUpdaterStatusPainted: (): Promise<void> =>
+    ipcRenderer.invoke(IPC.UpdaterStatusPainted),
 };
 
 export type ElectronAPI = typeof api;

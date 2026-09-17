@@ -226,8 +226,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   const [newConfirmOpen, setNewConfirmOpen] = useState(false);
   // In-flight auto-update download, shown as a top-center StatusPill. null when
   // no download is running. `percent` is null until the first progress event.
+  // `installing` flips the same pill from download progress to the indefinite
+  // "Restarting…" notice shown across the close/install/relaunch gap.
   const [updateDownload, setUpdateDownload] = useState<
-    { version: string; percent: number | null } | null
+    { version: string; percent: number | null; installing: boolean } | null
   >(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const pendingImportTypeRef = useRef<ImportType>('auto');
@@ -2127,7 +2129,20 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   useEffect(() => {
     const unsubscribe = window.electronAPI.onUpdaterStatus?.((payload) => {
       if (payload.status === 'downloading') {
-        setUpdateDownload({ version: payload.version, percent: payload.percent });
+        setUpdateDownload({ version: payload.version, percent: payload.percent, installing: false });
+      } else if (payload.status === 'installing') {
+        // The app is about to close, install and relaunch — ~10s during which
+        // the window freezes and then vanishes. Swap the pill to an indefinite
+        // "Restarting…" so that stretch reads as work, not a hang, and tell
+        // main once it's actually on screen: it blocks hard right after, so an
+        // un-acked notice would never get a frame. Double rAF because a single
+        // one still fires before the compositor has presented the frame.
+        setUpdateDownload({ version: payload.version, percent: null, installing: true });
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            void window.electronAPI.notifyUpdaterStatusPainted?.();
+          });
+        });
       } else {
         // 'downloaded' hands off to the native restart prompt; 'error' is
         // reported in the log. Either way the pill's job is done.
@@ -2231,11 +2246,13 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             electron-updater has no cancel once downloadUpdate() is underway. */}
         {updateDownload && (
           <StatusPill
-            testId="update-downloading"
+            testId={updateDownload.installing ? 'update-installing' : 'update-downloading'}
             label={
-              updateDownload.version
-                ? `Downloading update v${updateDownload.version}…`
-                : 'Downloading update…'
+              updateDownload.installing
+                ? 'Restarting to install the update…'
+                : updateDownload.version
+                  ? `Downloading update v${updateDownload.version}…`
+                  : 'Downloading update…'
             }
             progress={updateDownload.percent != null ? updateDownload.percent / 100 : null}
           />
