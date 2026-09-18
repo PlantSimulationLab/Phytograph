@@ -66,7 +66,7 @@ The tables are grouped by feature area. To find a handler, grep `^@app\.` in
 | POST | `/api/qsm/phyllotaxis` | `main.py` | Auto-detect the phyllotactic angle from the QSM's branching geometry (child-shoot azimuths around each parent). Returns a canonical angle + pattern + leaves-per-node + confidence; pre-fills the Add Leaves modal |
 | POST | `/api/qsm/leaves` | `main.py` | Place leaves on the QSM's terminal shoots and return a textured mesh |
 | GET | `/api/qsm/leaf-textures` | `main.py` | List the curated built-in leaf textures available for QSM leaf placement |
-| POST | `/api/qsm/adjust-leaf-angles` | `main.py` | Rotate placed leaves so each voxel cell's leaf-angle distribution matches a target measured from a leaf-on triangulation, via per-cell optimal assignment. Takes either a `triangulation` or precomputed `cell_targets` |
+| POST | `/api/qsm/adjust-leaf-angles` | `main.py` | Rotate placed leaves so each voxel cell's leaf-angle distribution matches a target measured from a leaf-on triangulation, via per-cell optimal assignment. Takes either a `triangulation` or precomputed `cell_targets`. Accepts JSON **or a PHB1 binary frame** (`tin_vertices`/`tin_indices`/`tin_cell_ids`, plus optional `tin_scan_ids`/`tin_scan_origins`, with the grid under `grid_for_triangulation` in the header `meta`). The renderer always sends the frame — this tool only accepts full-resolution Helios triangulations, which do not fit in a JSON body |
 
 Takes inline `points` or a `source` descriptor (octree-backed clouds). The full
 pipeline lives in the `qsm/` package and is a thin call from the endpoint:
@@ -299,7 +299,7 @@ sessions from the array. All of it is file-read-free after import.
 | POST | `/api/c2m/distance` | `main.py` | Cloud-to-mesh distance. A session source is streamed block by block (`_iter_session_hit_positions`) so the query never holds the whole cloud; only the float32 distance per point is kept |
 | POST | `/api/c2m/icp-register` | `main.py` | Cloud-to-mesh ICP |
 | POST | `/api/c2c/icp-register` | `main.py` | Cloud-to-cloud ICP |
-| POST | `/api/m2m/icp-register` | `main.py` | Mesh-to-mesh ICP |
+| POST | `/api/m2m/icp-register` | `main.py` | Mesh-to-mesh ICP. Accepts JSON **or a PHB1 binary frame** (`target_vertices`/`target_indices`/`source_vertices`/`source_indices` as buffers, scalars in the header `meta`). The renderer always sends the frame: the mesh picker offers Helios triangulations, and four arrays of that size as JSON numbers exceed V8's max string length, so the request died in `JSON.stringify` before it was sent |
 
 !!! note "Reading points — the `source` descriptor"
     Octree-backed clouds keep no point positions in the renderer (the geometry

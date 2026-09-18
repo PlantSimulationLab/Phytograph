@@ -257,8 +257,13 @@ While the download runs, a progress pill appears at the top of the
 viewer, the same indicator used for other long-running operations. The
 download continues in the background; you can keep working.
 
-Once it finishes, Phytograph asks whether to restart. Choosing **Restart
-now** closes the app, installs the update, and reopens it. The pill
+Once it finishes, Phytograph asks whether to restart. If you have work
+open, it then asks a second time whether to discard the session, because
+installing the update closes the app and nothing in a Phytograph session
+is saved automatically. Declining that prompt cancels the install and
+leaves the app exactly as it was — the download is kept, and it installs
+the next time you quit normally. Choosing **Restart now** closes the app,
+installs the update, and reopens it. The pill
 switches to *Restarting to install the update…* first, and on macOS it
 stays up for several seconds while the new version is unpacked before
 the window closes — that pause is normal. The window is then gone for
