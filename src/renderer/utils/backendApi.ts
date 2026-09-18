@@ -4635,6 +4635,15 @@ export async function resetCloudLabelEdits(
   sessionId: string,
   editCount?: number,
   slug?: string,
+  // Preferred for a GLOBAL undo: the stroke ids still surviving in the renderer,
+  // NEWEST FIRST. The session keeps up to the first one it recognises.
+  //
+  // A count cannot express this: the renderer's list counts user gestures while
+  // the backend history counts recorded changes, and a gesture that painted
+  // nothing is never recorded, so the two legitimately diverge. The stroke id is
+  // the join key between them. An empty list means keep nothing. Takes
+  // precedence over `editCount` server-side.
+  undoAfterStrokeIds?: string[],
 ): Promise<Omit<LabelRegionResult, 'created_column' | 'applied'>> {
   const baseUrl = getBackendUrl();
   try {
@@ -4646,6 +4655,8 @@ export async function resetCloudLabelEdits(
         body: JSON.stringify({
           ...(editCount === undefined ? {} : { edit_count: editCount }),
           ...(slug ? { slug } : {}),
+          ...(undoAfterStrokeIds === undefined
+            ? {} : { undo_after_stroke_ids: undoAfterStrokeIds }),
         }),
       },
     );

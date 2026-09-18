@@ -250,7 +250,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.88.0"
+BACKEND_VERSION = "0.89.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -33678,6 +33678,19 @@ class ResetLabelEditsRequest(BaseModel):
     labelling on the slug (edit_count = 0)."""
     edit_count: Optional[int] = None
     slug: str = MANUAL_CLASS_SLUG
+    # Preferred over `edit_count` for a global undo: the ids the renderer still
+    # holds, NEWEST FIRST. The history is rolled back to the first of them it
+    # recognises, keeping that edit and dropping everything after it.
+    #
+    # A count is unsafe here because the renderer's stroke list counts USER
+    # GESTURES while this history counts RECORDED CHANGES — a stroke whose
+    # From-class gate matched nothing is never recorded, so the two legitimately
+    # diverge and `min(k, len(hist))` would silently roll back the wrong edit.
+    # `stroke_id` is the join key between them (see LabelStroke). The list (not a
+    # single id) is what makes it exact: the newest surviving gesture may be one
+    # of those unrecorded ones, so we walk back to the newest one that IS in the
+    # history. An empty list means "keep nothing", i.e. the same as edit_count=0.
+    undo_after_stroke_ids: Optional[List[str]] = None
 
 
 @app.get("/api/cloud/session/{session_id}/label_summary")
@@ -33733,8 +33746,21 @@ def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
     slug = _validate_label_slug(request.slug)
     with _cloud_session_lock:
         hist = sess.label_history.get(slug, [])
-        k = 0 if request.edit_count is None else max(0, int(request.edit_count))
-        k = min(k, len(hist))
+        if request.undo_after_stroke_ids is not None:
+            # Resolve the count from the join keys, newest first. Ids the history
+            # does not hold are gestures it never recorded (a no-op stroke), so we
+            # walk back to the newest one it DOES hold. Recognising none of them
+            # means every surviving gesture was a no-op and nothing recorded
+            # should remain, which is the same answer as an empty list.
+            index_of = {d.stroke_id: i for i, d in enumerate(hist)}
+            k = 0
+            for sid_ in request.undo_after_stroke_ids:
+                if sid_ in index_of:
+                    k = index_of[sid_] + 1
+                    break
+        else:
+            k = 0 if request.edit_count is None else max(0, int(request.edit_count))
+            k = min(k, len(hist))
         col = sess.extras.get(slug)
         if col is not None:
             for delta in reversed(hist[k:]):

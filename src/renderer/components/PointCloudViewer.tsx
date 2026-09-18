@@ -92,7 +92,7 @@ import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
-import type { TransformState } from '../state/sceneActions';
+import type { TransformState, HistoryTransaction } from '../state/sceneActions';
 import {
   pointInPolygon,
   projectWorldToCanvasPixel,
@@ -642,6 +642,12 @@ export default function PointCloudViewer({
   // in the relevant handlers, transforms/mask edits in commitHistoryEntry), NOT
   // by these setters. See the scene store / action model in src/renderer/state/.
   const scene = useScene();
+  // Live handle on the store. `scene` is a memoised context value, so a callback
+  // that closes over it can read a STALE `state.past`/`state.future`; this ref is
+  // re-pointed every render, which is what undo/redo need to inspect the exact
+  // transaction they are about to apply.
+  const sceneRef = useRef(scene);
+  sceneRef.current = scene;
   const makeFieldSetter = useCallback(
     <K extends keyof SceneState>(field: K) =>
       (update: SceneState[K] | ((prev: SceneState[K]) => SceneState[K])) => {
@@ -3179,16 +3185,32 @@ export default function PointCloudViewer({
   // Undo via the unified store. Stitch is now just another transaction in the
   // same history (Phase D folded the old separate stitch stack in), so there's
   // no longer a special-cased stitch-first branch.
+  // Backend sync for the two action types whose truth is NOT in the store.
+  //
+  // `maskEdit` and `labelEdit` round-trip only the light description of an edit
+  // (regions / strokes). The per-point deltas live in the backend session's
+  // `deleted_history` / label history, so the reducer alone cannot undo them:
+  // it rewrote `editStates`/`labelStates` while `sess.deleted` kept every point
+  // erased, leaving the viewport showing points that export still omitted — and
+  // desyncing the stack `reset_edits` indexes BY LENGTH, so the next panel undo
+  // rolled back the wrong number of steps. Re-point per render so the stable
+  // handleUndo/handleRedo below never capture a stale implementation.
+  const syncSessionEditsRef = useRef<(tx: HistoryTransaction | undefined) => void>(() => {});
+
   const handleUndo = useCallback(() => {
     isUndoingRef.current = true;
+    const tx = sceneRef.current?.state.past[sceneRef.current.state.past.length - 1];
     scene.undo();
+    syncSessionEditsRef.current(tx);
     setTimeout(() => { isUndoingRef.current = false; }, 0);
   }, [scene]);
 
   // Redo
   const handleRedo = useCallback(() => {
     isUndoingRef.current = true;
+    const tx = sceneRef.current?.state.future[0];
     scene.redo();
+    syncSessionEditsRef.current(tx);
     setTimeout(() => { isUndoingRef.current = false; }, 0);
   }, [scene]);
 
@@ -4866,6 +4888,80 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => selectedIds.has(c.id));
     return cloud?.data.octree?.sessionId ? cloud : null;
   }, [showLabelPanel, selectedIds, clouds]);
+
+  // Wire the undo/redo backend sync declared near handleUndo. Runs AFTER the
+  // reducer has applied the inverse, so the store's post-undo state is the
+  // target the session must be rolled to.
+  //
+  // Neither is a replay: each tells the session which edits survive. The two
+  // address that differently, and the difference matters. `pendingDeletes`
+  // mirrors `deleted_history` ONE-FOR-ONE, so a count is exact there. The label
+  // stroke list does NOT — it counts user gestures while the history counts
+  // recorded changes — so labels are addressed by stroke id instead.
+  useEffect(() => {
+    syncSessionEditsRef.current = (tx) => {
+      if (!tx) return;
+      for (const action of tx.actions) {
+        if (action.t !== 'maskEdit' && action.t !== 'labelEdit') continue;
+        const cloud = cloudsRef.current.find(c => c.id === action.id);
+        const sessionId = cloud?.data.octree?.sessionId;
+        if (!sessionId) continue;
+
+        if (action.t === 'maskEdit') {
+          // Only the DELETE stack needs the backend; a pure translation change
+          // (the other thing maskEdit carries) is render-only and already done.
+          const next = sceneRef.current.state.editStates.get(action.id);
+          const before = action.before.pendingDeletes?.length ?? 0;
+          const after = action.after.pendingDeletes?.length ?? 0;
+          if (before === after) continue;
+          const keep = next?.pendingDeletes?.length ?? 0;
+          void resetCloudEdits(sessionId, keep)
+            .then((r) => {
+              setEditStates(prev => {
+                const m = new Map(prev);
+                const cur = m.get(action.id);
+                if (cur) m.set(action.id, {
+                  ...cur,
+                  pendingDeletedCount: r.pending_deleted_count ?? r.deleted_count,
+                });
+                return m;
+              });
+              octreeRefreshQueueRef.current?.enqueue(action.id, sessionId);
+            })
+            .catch((err) => showToast({
+              title: describeBackendError(err, 'Undo').message, type: 'error',
+            }));
+        } else {
+          // Undo by the STROKE ID the backend joins on, never by a count: the
+          // renderer's list counts user gestures and the history counts recorded
+          // changes, so a no-op gesture makes the two diverge and a count would
+          // roll back the wrong number of edits.
+          const next = sceneRef.current.state.labelStates.get(action.id);
+          const surviving = next?.strokes ?? [];
+          const keep = surviving.length;
+          // Send the WHOLE surviving id list, newest first. A gesture that
+          // recorded nothing is absent from the history, so naming only the last
+          // one could match nothing; the backend keeps up to the first id it
+          // recognises, which is exactly "everything the user still has".
+          const ids = surviving.map(s => s.strokeId).reverse();
+          void resetCloudLabelEdits(sessionId, undefined, action.slug, ids)
+            .then((res) => {
+              // Trust the BACKEND's surviving count: its history is byte-bounded
+              // and may have evicted older entries (same rule as handleLabelUndo).
+              setLabelStrokes(prev => prev.slice(0, Math.min(keep, res.label_edit_count)));
+              labelCountsSeqRef.current++;
+              setLabelClassCounts(Object.fromEntries(
+                Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
+              ) as Record<number, number>);
+              setLabelDirty(true);
+            })
+            .catch((err) => showToast({
+              title: describeBackendError(err, 'Undo').message, type: 'error',
+            }));
+        }
+      }
+    };
+  });
 
   // Read through a ref so the polygon-close callback (created once) can tell
   // whether the lasso should paint rather than crop, without re-creating itself
@@ -8198,7 +8294,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
   // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool

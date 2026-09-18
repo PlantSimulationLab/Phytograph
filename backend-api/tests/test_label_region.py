@@ -534,3 +534,74 @@ def test_an_invalid_region_leaves_no_partial_batch(client, cache_root, grid_xyz)
     ]})
     assert res.status_code == 400
     assert SLUG not in main._cloud_sessions[sid].extras
+
+
+# ── Undo by stroke id (the global Cmd+Z path) ────────────────────────────────
+#
+# A count cannot express the renderer's undo. Its stroke list counts USER
+# GESTURES; this history counts RECORDED CHANGES, and a gesture whose
+# from-class gate matched nothing is never recorded. So after one no-op stroke
+# the two are off by one, and `edit_count` silently rolls back the wrong edit
+# (`min(k, len(hist))` clamps rather than complaining). `stroke_id` is the
+# documented join key between the two lists, so resolving it server-side is the
+# only exact answer.
+
+def test_undo_by_stroke_id_is_exact_when_a_no_op_gesture_diverged_the_counts(
+    client, cache_root, grid_xyz,
+):
+    sid = _create(client, grid_xyz)
+    # s_noop repaints class 5 -> 9, but nothing is class 5 yet, so it records
+    # NOTHING. The renderer still holds it as a gesture.
+    _paint(client, sid, [
+        _stroke(BOX_BIG, 1, "s1"),
+        _stroke(BOX_BIG, 9, "s_noop", from_classes=[5]),
+        _stroke(BOX_SMALL, 2, "s2"),
+    ])
+    hist = main._cloud_sessions[sid].label_history[SLUG]
+    assert [d.stroke_id for d in hist] == ["s1", "s2"], "precondition: s_noop unrecorded"
+
+    # The user undoes their last gesture, so the renderer still holds
+    # ["s1", "s_noop"] -> newest-first ["s_noop", "s1"]. By COUNT that is keep=2,
+    # which would keep s1 AND s2 and undo nothing at all.
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"undo_after_stroke_ids": ["s_noop", "s1"]})
+    assert res.status_code == 200, res.text
+    assert res.json()["label_edit_count"] == 1, "must keep s1 only"
+
+    ref = _create(client, grid_xyz)
+    _paint(client, ref, [_stroke(BOX_BIG, 1, "s1")])
+    assert np.array_equal(_labels(sid), _labels(ref))
+
+
+def test_undo_by_stroke_id_empty_list_clears_every_edit(client, cache_root, grid_xyz):
+    sid = _create(client, grid_xyz)
+    _paint(client, sid, [_stroke(BOX_BIG, 1, "s1"), _stroke(BOX_SMALL, 2, "s2")])
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"undo_after_stroke_ids": []})
+    assert res.status_code == 200, res.text
+    assert np.all(_labels(sid) == main.MANUAL_CLASS_UNLABELED)
+    assert main._cloud_sessions[sid].label_history[SLUG] == []
+
+
+def test_undo_walks_back_past_several_unrecorded_gestures(client, cache_root, grid_xyz):
+    """Several no-op gestures in a row must not stop the walk at the first miss."""
+    sid = _create(client, grid_xyz)
+    _paint(client, sid, [
+        _stroke(BOX_BIG, 1, "s1"),
+        _stroke(BOX_BIG, 9, "n1", from_classes=[7]),
+        _stroke(BOX_BIG, 9, "n2", from_classes=[7]),
+    ])
+    assert [d.stroke_id for d in main._cloud_sessions[sid].label_history[SLUG]] == ["s1"]
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"undo_after_stroke_ids": ["n2", "n1", "s1"]})
+    assert res.status_code == 200, res.text
+    assert res.json()["label_edit_count"] == 1
+
+
+def test_stroke_ids_take_precedence_over_edit_count(client, cache_root, grid_xyz):
+    sid = _create(client, grid_xyz)
+    _paint(client, sid, [_stroke(BOX_BIG, 1, "s1"), _stroke(BOX_SMALL, 2, "s2")])
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"edit_count": 2, "undo_after_stroke_ids": ["s1"]})
+    assert res.status_code == 200, res.text
+    assert res.json()["label_edit_count"] == 1
