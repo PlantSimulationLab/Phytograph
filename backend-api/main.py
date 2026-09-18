@@ -30462,6 +30462,11 @@ def _spill_cloud_session(sess: "CloudSession") -> Optional[dict]:
         "path": path,
         "bytes": int(size) + (int(sess.store.bytes_on_disk()) if sess.store is not None else 0),
         "at": time.time(),
+        # The session's OWN last-use time, carried across the spill so
+        # `_trim_session_spills` can rank by genuine idleness. `at` only says
+        # when this file was written, which for a restored-then-re-evicted
+        # session is unrelated to how recently the user touched the cloud.
+        "last_accessed": float(getattr(sess, "last_accessed", 0.0) or 0.0),
         "store_dir": store_dir,
         # Recorded so `_live_session_octree_ids` keeps pinning the octrees of a
         # cloud that is still in the user's scene but no longer in RAM. Without
@@ -30518,6 +30523,23 @@ def _restore_cloud_session(session_id: str) -> "Optional[CloudSession]":
         sess.last_accessed = time.time()
         with _cloud_session_lock:
             _cloud_sessions[session_id] = sess
+            # The session is RESIDENT again, so its spill index entry is stale.
+            # Leaving it (this used `.get` above, unlike `_drop_session_spill`'s
+            # `.pop`) let `_trim_session_spills` treat a live, actively-edited
+            # session as a trim candidate and delete the `store_dir` holding its
+            # memmapped columns out from under it.
+            stale_entry = _spilled_sessions.pop(session_id, None)
+    # The pickle on disk now describes the cloud BEFORE whatever the caller is
+    # about to do to it, and the live object is the truth. Delete it here rather
+    # than leaving it to be found later: a failed re-spill must degrade to an
+    # honest 404, never to a pre-edit snapshot that silently undoes the user's
+    # work. `store_dir` is deliberately NOT touched -- it is this session's live
+    # column storage, and `_spill_cloud_session` writes back into it.
+    if stale_entry is not None:
+        try:
+            _Path(stale_entry["path"]).unlink()
+        except OSError:
+            pass
     # Outside the restore lock: this can evict (and spill) a DIFFERENT session.
     _sweep_cloud_sessions()
     return sess
@@ -30545,17 +30567,43 @@ def _drop_session_spill(session_id: str) -> None:
 
 
 def _trim_session_spills() -> None:
-    """Hold the spill directory under its cap, oldest-spilled first.
+    """Hold the spill directory under its cap, least-recently-USED first.
 
     A trimmed session reverts to the pre-spill behaviour (404, cloud lost), so
     this is the last thing that happens and is logged loudly when it does.
+
+    Only sessions that are purely on-disk are eligible: a resident or mid-spill
+    session's `store_dir` is its LIVE memmapped column storage, so trimming one
+    would destroy a cloud the user is still editing. When the ineligible
+    remainder alone exceeds the cap we deliberately stay over it and log --
+    overshooting a disk cap is recoverable, deleting a user's edits is not.
     """
     cap = _session_spill_max_bytes()
+    pinned = _pinned_session_ids()
     with _cloud_session_lock:
         total = sum(int(e.get("bytes", 0)) for e in _spilled_sessions.values())
         if total <= cap:
             return
-        ranked = sorted(_spilled_sessions.items(), key=lambda kv: kv[1].get("at", 0.0))
+        # NEVER trim a session that is not purely on-disk. A resident or
+        # mid-spill session's `store_dir` holds the memmapped columns that ARE
+        # `sess.positions` / `.deleted` / `.extras`, so deleting it destroys the
+        # live cloud (silently on POSIX, where the unlinked files stay mapped
+        # until the next eviction cannot find them). `_sweep_cloud_sessions`
+        # already skips pinned ids; this is the same guard for the same reason.
+        def _trimmable(sid: str) -> bool:
+            return (
+                sid not in _cloud_sessions
+                and sid not in _spilling_sessions
+                and sid not in pinned
+            )
+
+        # Oldest LAST-USED first, not oldest-spilled: `at` is the spill WRITE
+        # time, so a cloud spilled early then restored and actively edited keeps
+        # an ancient `at` and would be chosen ahead of genuinely idle sessions.
+        ranked = sorted(
+            ((sid, e) for sid, e in _spilled_sessions.items() if _trimmable(sid)),
+            key=lambda kv: kv[1].get("last_accessed", kv[1].get("at", 0.0)),
+        )
         doomed = []
         for sid, entry in ranked:
             if total <= cap:
@@ -30564,6 +30612,12 @@ def _trim_session_spills() -> None:
             total -= int(entry.get("bytes", 0))
         for sid, _entry in doomed:
             _spilled_sessions.pop(sid, None)
+        if total > cap:
+            logger.warning(
+                "Session spill cache still over %.1f GB after trimming; the "
+                "remainder belongs to live sessions and is deliberately kept.",
+                cap / 1e9,
+            )
     for sid, entry in doomed:
         logger.warning(
             "Session spill cache over %.1f GB - dropping session %s; that cloud "

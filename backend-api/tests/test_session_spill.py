@@ -715,3 +715,100 @@ def test_the_spill_dir_is_invisible_to_octree_eviction(tmp_path, monkeypatch):
     main._evict_octree_cache(1, keep=None)   # 1-byte cap: evict everything it can
 
     assert (spill / "big.session").is_file()
+
+
+# ---------------------------------------------------------------------------
+# `_trim_session_spills` must never delete a LIVE cloud
+# ---------------------------------------------------------------------------
+#
+# The cap exists to bound disk, and the only thing it is allowed to cost is a
+# cloud that is already purely on-disk. Two bugs together made it cost a cloud
+# the user was actively editing: `_restore_cloud_session` re-admitted a session
+# with `.get`, leaving its spill entry in place, and the trim then deleted that
+# entry's `store_dir` -- the LIVE memmapped columns -- with no liveness check.
+# On POSIX the unlinked files stay mapped, so nothing fails until the next
+# eviction cannot find them and the cloud, with every edit, is gone.
+
+def test_restore_clears_the_spill_index_entry(spill_root, monkeypatch):
+    """A resident session must not still be indexed as spilled."""
+    monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 1)
+    _admit(_session("keep"), 0)
+    _admit(_session("victim"), 100)
+    main._sweep_cloud_sessions()
+    assert "victim" in main._spilled_sessions, "precondition: it spilled"
+
+    assert main._restore_cloud_session("victim") is not None
+    assert "victim" in main._cloud_sessions, "it is resident again"
+    assert "victim" not in main._spilled_sessions, (
+        "a resident session left in the spill index is a trim candidate"
+    )
+
+
+def test_trim_never_deletes_a_resident_sessions_store(spill_root, monkeypatch):
+    """The reproduced data loss: trim must skip a live, edited cloud."""
+    monkeypatch.setattr(main, "_session_spill_max_bytes", lambda: 1)  # always over
+
+    live = _session("live")
+    main._cloud_sessions["live"] = live
+    store_dir = spill_root / "live.store"
+    store_dir.mkdir(parents=True)
+    (store_dir / "positions.npy").write_bytes(b"\0" * 1024)
+    # The stale entry the old `.get` left behind.
+    main._spilled_sessions["live"] = {
+        "path": spill_root / "live.session",
+        "bytes": 10**9,
+        "at": 0.0,
+        "store_dir": str(store_dir),
+    }
+    (spill_root / "live.session").write_bytes(b"\0" * 16)
+
+    main._trim_session_spills()
+
+    assert store_dir.is_dir(), "trim deleted the live session's column store"
+    assert (store_dir / "positions.npy").is_file()
+    assert "live" in main._cloud_sessions
+
+
+def test_trim_skips_pinned_and_mid_spill_sessions(spill_root, monkeypatch):
+    """The other two not-purely-on-disk states."""
+    monkeypatch.setattr(main, "_session_spill_max_bytes", lambda: 1)
+
+    def _entry(sid):
+        d = spill_root / f"{sid}.store"
+        d.mkdir(parents=True, exist_ok=True)
+        (spill_root / f"{sid}.session").write_bytes(b"\0" * 16)
+        return {"path": spill_root / f"{sid}.session", "bytes": 10**9,
+                "at": 0.0, "store_dir": str(d)}
+
+    main._spilled_sessions["spilling"] = _entry("spilling")
+    main._spilled_sessions["pinned"] = _entry("pinned")
+    main._spilling_sessions["spilling"] = _session("spilling")
+    monkeypatch.setattr(main, "_pinned_session_ids", lambda: {"pinned"})
+
+    main._trim_session_spills()
+
+    assert (spill_root / "spilling.store").is_dir(), "mid-spill store deleted"
+    assert (spill_root / "pinned.store").is_dir(), "pinned store deleted"
+
+
+def test_trim_ranks_by_last_use_not_spill_time(spill_root, monkeypatch):
+    """`at` is the spill WRITE time. A cloud spilled early then restored and
+    worked on keeps an ancient `at`, so ranking on it picks the hottest session
+    first -- exactly inverting the intent."""
+    monkeypatch.setattr(main, "_session_spill_max_bytes", lambda: 1500)
+    spill_root.mkdir(parents=True, exist_ok=True)
+
+    for sid, at, used in (("old_spill_hot", 0.0, 9_000.0),
+                          ("new_spill_cold", 5_000.0, 10.0)):
+        (spill_root / f"{sid}.session").write_bytes(b"\0" * 16)
+        main._spilled_sessions[sid] = {
+            "path": spill_root / f"{sid}.session", "bytes": 1000,
+            "at": at, "last_accessed": used, "store_dir": None,
+        }
+
+    main._trim_session_spills()
+
+    assert "new_spill_cold" not in main._spilled_sessions, "the idle one goes"
+    assert "old_spill_hot" in main._spilled_sessions, (
+        "ranked by spill time, so the recently-used cloud was dropped"
+    )
