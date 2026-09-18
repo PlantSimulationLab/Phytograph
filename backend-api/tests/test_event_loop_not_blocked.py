@@ -72,6 +72,35 @@ def test_no_async_handler_without_an_await():
     )
 
 
+# Functions that are expensive enough that calling them INLINE from an
+# `async def` handler stalls every other request, including /health and
+# POST /api/cancel/{run_id}. The existing check above cannot catch these: the
+# handler does have an `await` (it awaits the killable worker), so the blocking
+# call hides in between. `_treeiso_cost_warning` is a full-N cKDTree plus up to
+# twelve full-N np.unique passes — measured 5.4 s + up to 69 s at 8 M points,
+# and it fires on the FIRST Segment Trees click.
+_MUST_BE_THREADPOOLED = ("_treeiso_cost_warning", "_looks_like_ground_present")
+
+
+def test_expensive_probes_are_never_called_inline_from_an_async_handler():
+    """An `await` somewhere in the body does not make the rest of it safe."""
+    offenders = []
+    for path, name, is_async, body in _route_handlers():
+        if not is_async:
+            continue
+        for fn in _MUST_BE_THREADPOOLED:
+            for m in re.finditer(rf"\b{fn}\(", body):
+                # `await run_in_threadpool(fn, ...)` passes the callable by NAME,
+                # so a bare `fn(` with a paren is the inline call.
+                if not re.search(rf"run_in_threadpool\(\s*{fn}\b",
+                                 body[max(0, m.start() - 120):m.end()]):
+                    offenders.append(f"{path} ({name}) calls {fn}() inline")
+    assert offenders == [], (
+        "these hold the event loop across an expensive probe; wrap them in "
+        "`await run_in_threadpool(fn, ...)`:\n  " + "\n  ".join(offenders)
+    )
+
+
 def test_the_heavy_handlers_are_threadpooled():
     """Spot-check the routes that actually carry the load."""
     by_path = {p: (n, a) for p, n, a, _ in _route_handlers()}

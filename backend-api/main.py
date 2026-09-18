@@ -7979,8 +7979,18 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
         # Advisory cost check on the post-decimation node count (what actually
         # drives TreeIso's runtime). Returns a confirmation prompt rather than an
         # error — the caller re-sends with `acknowledge_cost` to run it anyway.
+        #
+        # OFF THE EVENT LOOP. This is an `async def` handler, so anything it runs
+        # inline owns the single loop until it returns, and the probe is not cheap:
+        # a full-N cKDTree plus up to 12 full-N np.unique passes (measured 5.4 s +
+        # up to 69 s at 8 M points). Inline, that froze /health and — the sharp
+        # edge — POST /api/cancel/{run_id}, making every OTHER running job
+        # uncancellable for the duration. It fires on the FIRST Segment Trees
+        # click, since `acknowledge_cost` is only set on the retry.
         if not request.acknowledge_cost:
-            warning = _treeiso_cost_warning(pts, ti_params_for_cost)
+            warning = await run_in_threadpool(
+                _treeiso_cost_warning, pts, ti_params_for_cost,
+            )
             if warning:
                 return TreeSegmentationResponse(
                     success=False, num_points=n_full, cost_warning=warning,
@@ -7988,7 +7998,9 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
 
         # Skip the advisory ground heuristic when the caller already handed us
         # ground labels to exclude — the ground is gone from `pts`.
-        ground_warning = (not ground_excluded) and _looks_like_ground_present(pts)
+        ground_warning = (not ground_excluded) and await run_in_threadpool(
+            _looks_like_ground_present, pts,
+        )
         seeds = (
             np.asarray(request.seed_points, dtype=np.float64)
             if request.seed_points else None
@@ -36357,7 +36369,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     plant_pts = pts[plant_mask]
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
-    size_error = _treeiso_size_error(plant_pts, ti_param_dict)
+    size_error = await run_in_threadpool(_treeiso_size_error, plant_pts, ti_param_dict)
     if size_error:
         raise HTTPException(status_code=400, detail=size_error)
     # Advisory cost check on the post-decimation node count, not raw point count
@@ -36366,8 +36378,15 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # cap: 409 + a structured `cost_warning` body tells the panel to prompt, and
     # the retry carries `acknowledge_cost`. 409 (not 400) so the renderer can
     # tell "needs confirmation" from a genuine bad request.
+    #
+    # OFF THE EVENT LOOP, like its inline twin: this handler is `async def`, and
+    # the probe is a full-N cKDTree plus up to 12 full-N np.unique passes (up to
+    # ~75 s at 8 M points). Run inline it owned the only loop, so /health and
+    # /api/cancel/{run_id} could not be served while it ran.
     if not request.acknowledge_cost:
-        warning = _treeiso_cost_warning(plant_pts, ti_param_dict)
+        warning = await run_in_threadpool(
+            _treeiso_cost_warning, plant_pts, ti_param_dict,
+        )
         if warning:
             raise HTTPException(
                 status_code=409,
