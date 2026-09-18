@@ -3999,17 +3999,42 @@ export interface MeshToMeshICPRequest {
  * The target mesh stays fixed, the source mesh will be transformed.
  * Returns the transformation needed to align the source to the target.
  */
+/** The two meshes as typed arrays, for the binary transport. */
+export interface MeshToMeshBuffers {
+  targetVertices: Float32Array;
+  targetIndices: Uint32Array;
+  sourceVertices: Float32Array;
+  sourceIndices: Uint32Array;
+}
+
 export async function icpRegisterMeshToMesh(
-  request: MeshToMeshICPRequest,
+  request: Omit<MeshToMeshICPRequest, 'target_vertices' | 'target_indices'
+    | 'source_vertices' | 'source_indices'> & Partial<MeshToMeshICPRequest>,
   signal?: AbortSignal,
   onProgress?: BinaryFrameProgress,
   onRunId?: (runId: string) => void,
+  // Send the meshes as a PHB1 frame instead of inside `request`. The mesh picker
+  // offers Helios triangulations, which run to millions of triangles, and four
+  // such arrays as JSON numbers exceed V8's max string length — the request died
+  // in JSON.stringify before it was sent.
+  meshes?: MeshToMeshBuffers | null,
 ): Promise<ICPRegistrationResponse> {
-  console.log('Mesh-to-mesh ICP - target vertices:', request.target_vertices.length / 3, 'source vertices:', request.source_vertices.length / 3);
   // Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
   // 3-minute timeout (mesh sampling + ICP); fetchJsonWithProgress refreshes it
   // per streamed chunk so an actively-progressing run is never aborted.
   try {
+    if (meshes) {
+      console.log('Mesh-to-mesh ICP (binary) - target vertices:',
+        meshes.targetVertices.length / 3, 'source vertices:', meshes.sourceVertices.length / 3);
+      const frame = encodeBinaryFrame(request as unknown as Record<string, unknown>, [
+        { name: 'target_vertices', data: meshes.targetVertices },
+        { name: 'target_indices', data: meshes.targetIndices },
+        { name: 'source_vertices', data: meshes.sourceVertices },
+        { name: 'source_indices', data: meshes.sourceIndices },
+      ]);
+      return await fetchJsonWithProgress<ICPRegistrationResponse>(
+        '/api/m2m/icp-register', request, signal, 180000, onProgress, onRunId, frame);
+    }
     return await fetchJsonWithProgress<ICPRegistrationResponse>(
       '/api/m2m/icp-register', request, signal, 180000, onProgress, onRunId);
   } catch (error) {
@@ -5809,17 +5834,58 @@ export interface QSMAdjustLeafAnglesRequest extends QSMLeavesRequest {
   max_cell_leaves?: number;
 }
 
+/** The triangulation's big arrays, kept as typed arrays all the way to the wire. */
+export interface LeafAngleTriangulationBuffers {
+  vertices: Float32Array;       // flat x,y,z
+  indices: Uint32Array;         // flat triangle vertex indices
+  cellIds: Uint32Array;         // per-triangle cell, 0xffffffff = outside
+  scanIds?: Uint32Array | null; // per-triangle source scan
+  scanOrigins?: Float32Array | null;
+  grid: QSMGrid;
+}
+
 export async function adjustQSMLeafAngles(
   request: QSMAdjustLeafAnglesRequest,
+  // Send the mesh as a PHB1 binary frame instead of inside `request`.
+  //
+  // The mesh here is a full-resolution Helios triangulation — the tool only
+  // offers those — and the backend's own cap calls 12M triangles "a
+  // full-resolution tree". Flattening that to JSON numbers is a body around a
+  // gigabyte, at or past V8's max string length, so the renderer threw in
+  // JSON.stringify before the request was ever sent. Raw buffers make it
+  // ~200 MB. Same transport the LAD reuse-mesh path already uses.
+  triangulation?: LeafAngleTriangulationBuffers | null,
 ): Promise<QSMLeavesResponse> {
   const baseUrl = getBackendUrl();
   const controller = new AbortController();
   const timeoutId = abortOnTimeout(controller, 300000, '/api/qsm/adjust-leaf-angles'); // 5 minutes
   try {
+    let body: BodyInit;
+    let contentType: string;
+    if (triangulation) {
+      const buffers: Array<{ name: string; data: Float32Array | Uint32Array }> = [
+        { name: 'tin_vertices', data: triangulation.vertices },
+        { name: 'tin_indices', data: triangulation.indices },
+        { name: 'tin_cell_ids', data: triangulation.cellIds },
+      ];
+      if (triangulation.scanIds) buffers.push({ name: 'tin_scan_ids', data: triangulation.scanIds });
+      if (triangulation.scanOrigins) {
+        buffers.push({ name: 'tin_scan_origins', data: triangulation.scanOrigins });
+      }
+      // `grid` rides in the header under its own key; the backend reassembles
+      // the QSMTriangulationInput from the buffers plus this.
+      const meta = { ...request, grid_for_triangulation: triangulation.grid };
+      delete (meta as Record<string, unknown>).triangulation;
+      body = toRequestBody(encodeBinaryFrame(meta as unknown as Record<string, unknown>, buffers));
+      contentType = 'application/octet-stream';
+    } else {
+      body = JSON.stringify(request);
+      contentType = 'application/json';
+    }
     const response = await fetch(`${baseUrl}/api/qsm/adjust-leaf-angles`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
+      headers: { 'Content-Type': contentType },
+      body,
       signal: controller.signal,
     });
     clearTimeout(timeoutId);

@@ -603,3 +603,129 @@ def test_a_cancelled_run_stops_at_a_checkpoint(client, cloud_points, monkeypatch
     resp = client.post("/api/qsm/build", json={"points": cloud_points})
     assert resp.status_code == 200
     assert b"cancelled" in resp.content, "the cancel was not honoured"
+
+
+# ── The binary transport for the triangulation ───────────────────────────────
+#
+# `isLeafAngleSourceMesh` restricts this tool to Helios triangulations, i.e.
+# full-resolution meshes — the response cap calls 12M triangles "a
+# full-resolution tree". Boxing those into JSON numbers is a body around a
+# gigabyte, at or past V8's max string length, so the renderer threw inside
+# JSON.stringify before the request was ever sent. The mesh now rides a PHB1
+# frame, the same transport the LAD reuse-mesh path uses.
+
+def _encode_leaf_angle_frame(meta: dict, *, vertices, indices, cell_ids,
+                             scan_ids=None, scan_origins=None) -> bytes:
+    """Mirror the renderer's encodeBinaryFrame for this endpoint."""
+    bufs = [("tin_vertices", _np.asarray(vertices, dtype=_np.float32)),
+            ("tin_indices", _np.asarray(indices, dtype=_np.uint32)),
+            ("tin_cell_ids", _np.asarray(cell_ids, dtype=_np.uint32))]
+    if scan_ids is not None:
+        bufs.append(("tin_scan_ids", _np.asarray(scan_ids, dtype=_np.uint32)))
+    if scan_origins is not None:
+        bufs.append(("tin_scan_origins", _np.asarray(scan_origins, dtype=_np.float32)))
+    header = json.dumps({
+        "meta": meta,
+        "buffers": [{"name": n, "dtype": "f32" if a.dtype == _np.float32 else "u32",
+                     "length": int(a.size)} for n, a in bufs],
+    }).encode("utf-8")
+    header += b" " * ((4 - len(header) % 4) % 4)
+    out = b"PHB1" + struct.pack("<I", len(header)) + header
+    for _, a in bufs:
+        out += a.tobytes()
+    return out
+
+
+def _erectophile_triangulation(grid):
+    """The same synthetic mesh the JSON test builds, as flat arrays."""
+    from qsm import leaf_angles as _A
+    center = _np.array(grid["center"])
+    rng = _np.random.default_rng(0)
+    verts, tris, cids = [], [], []
+    for _ in range(400):
+        zen = float(_np.clip(rng.normal(82, 5), 0, 90))
+        az = rng.uniform(0, 360)
+        nrm = _A.sphere2cart(1.0, _math.pi / 2 - _math.radians(zen), _math.radians(az))
+        t1 = _A._orthonormal_axis(nrm)
+        t2 = _np.cross(nrm, t1)
+        i0 = len(verts)
+        verts += [center.tolist(), (center + 0.01 * t1).tolist(), (center + 0.01 * t2).tolist()]
+        tris += [i0, i0 + 1, i0 + 2]
+        cids.append(0)
+    return _np.array(verts).ravel(), tris, cids
+
+
+def test_adjust_leaf_angles_accepts_a_binary_frame(client, built_qsm):
+    leaf_req = _leaf_request(built_qsm)
+    placed = client.post("/api/qsm/leaves", json=leaf_req).json()
+    grid = _covering_grid(built_qsm["cylinders"])
+    verts, tris, cids = _erectophile_triangulation(grid)
+
+    frame = _encode_leaf_angle_frame(
+        {**leaf_req, "seed": 2, "grid_for_triangulation": grid},
+        vertices=verts, indices=tris, cell_ids=cids)
+    resp = client.post("/api/qsm/adjust-leaf-angles", content=frame,
+                       headers={"Content-Type": "application/octet-stream"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"], body.get("error")
+    assert _mean_leaf_inclination(body) > _mean_leaf_inclination(placed) + 5.0
+
+
+def test_binary_and_json_transports_agree(client, built_qsm):
+    """The transport must not change the answer -- that is the whole claim."""
+    leaf_req = _leaf_request(built_qsm)
+    grid = _covering_grid(built_qsm["cylinders"])
+    verts, tris, cids = _erectophile_triangulation(grid)
+
+    via_json = client.post("/api/qsm/adjust-leaf-angles", json={
+        **leaf_req, "seed": 7,
+        "triangulation": {"vertices": list(verts), "indices": tris,
+                          "triangle_cell_ids": cids, "grid": grid},
+    }).json()
+    frame = _encode_leaf_angle_frame(
+        {**leaf_req, "seed": 7, "grid_for_triangulation": grid},
+        vertices=verts, indices=tris, cell_ids=cids)
+    via_bin = client.post("/api/qsm/adjust-leaf-angles", content=frame,
+                          headers={"Content-Type": "application/octet-stream"}).json()
+
+    assert via_json["success"] and via_bin["success"]
+    assert via_bin["leaf_count"] == via_json["leaf_count"]
+    assert via_bin["triangle_count"] == via_json["triangle_count"]
+    # float32 on the wire vs float64 in JSON, on a mesh whose vertices are
+    # ~0.01 m apart: the derived angles must still agree closely.
+    assert _mean_leaf_inclination(via_bin) == pytest.approx(
+        _mean_leaf_inclination(via_json), abs=1.0)
+
+
+def test_binary_frame_maps_the_outside_grid_sentinel(client, built_qsm):
+    """A u32 0xffffffff and a signed -1 must select the same triangles.
+
+    Half the mesh is in cell 0 and half is outside, so a sentinel that leaked
+    into the measurement would change what cell 0 fits. Note this holds for two
+    independent reasons -- the decoder normalises 0xffffffff to -1, AND
+    `compute_cell_targets` filters both spellings -- so it pins the OUTCOME
+    rather than either mechanism; removing just one of them keeps it green.
+    """
+    leaf_req = _leaf_request(built_qsm)
+    grid = _covering_grid(built_qsm["cylinders"])
+    verts, tris, cids = _erectophile_triangulation(grid)
+    half = len(cids) // 2
+    u32_cids = [0] * half + [0xFFFFFFFF] * (len(cids) - half)
+    signed_cids = [0] * half + [-1] * (len(cids) - half)
+
+    frame = _encode_leaf_angle_frame(
+        {**leaf_req, "seed": 3, "grid_for_triangulation": grid},
+        vertices=verts, indices=tris, cell_ids=u32_cids)
+    via_bin = client.post("/api/qsm/adjust-leaf-angles", content=frame,
+                          headers={"Content-Type": "application/octet-stream"}).json()
+    via_json = client.post("/api/qsm/adjust-leaf-angles", json={
+        **leaf_req, "seed": 3,
+        "triangulation": {"vertices": list(verts), "indices": tris,
+                          "triangle_cell_ids": signed_cids, "grid": grid},
+    }).json()
+
+    assert via_bin["success"], via_bin.get("error")
+    assert via_json["success"], via_json.get("error")
+    assert _mean_leaf_inclination(via_bin) == pytest.approx(
+        _mean_leaf_inclination(via_json), abs=1.0)

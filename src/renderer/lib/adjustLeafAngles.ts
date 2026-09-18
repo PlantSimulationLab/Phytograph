@@ -3,7 +3,7 @@
 // payload from a MeshData. Kept React/three-free so they can be unit-tested.
 
 import type { MeshData, MeshEntry, QSMEntry } from './pointCloudTypes';
-import type { QSMTriangulationInput, QSMGrid } from '../utils/backendApi';
+import type { LeafAngleTriangulationBuffers, QSMGrid } from '../utils/backendApi';
 
 // A mesh is eligible as a leaf-angle target when it is a Helios triangulation
 // carrying per-triangle cell ids AND the grid they index into. Those are exactly
@@ -72,9 +72,23 @@ export function meanLeafInclination(data: MeshData): number {
   return count > 0 ? sum / count : NaN;
 }
 
-// Build the backend triangulation payload from a mesh's MeshData. Converts the
-// typed arrays to plain number[] (JSON-serializable) and maps the grid.
-export function meshToTriangulationInput(data: MeshData): QSMTriangulationInput | null {
+// Build the backend triangulation payload from a mesh's MeshData, keeping every
+// large array as a TYPED array so it can ride the PHB1 binary transport.
+//
+// This used to `Array.from` all four and let JSON.stringify serialize them. The
+// meshes this tool accepts are full-resolution Helios triangulations — it offers
+// no others — and the backend's cap calls 12M triangles "a full-resolution
+// tree": ~36M indices plus 12M cell ids plus vertices, as boxed JS numbers, is a
+// JSON string around a gigabyte. That is at or past V8's max string length, so
+// the realistic failure was a RangeError or an OOM in the renderer BEFORE the
+// fetch started. Decimating is not an alternative here: leaf angle is a per-cell
+// statistic, so thinning changes the answer.
+//
+// The 0xffffffff "outside the grid" sentinel is preserved as-is; the backend
+// maps it back to -1 after decoding.
+export function meshToTriangulationInput(
+  data: MeshData,
+): LeafAngleTriangulationBuffers | null {
   if (!data.triangleCellIds || !data.grid) return null;
   const grid: QSMGrid = {
     center: data.grid.center,
@@ -83,15 +97,15 @@ export function meshToTriangulationInput(data: MeshData): QSMTriangulationInput 
     ny: data.grid.ny,
     nz: data.grid.nz,
   };
-  // triangleCellIds are stored as uint32 with 0xffffffff for "outside"; send them
-  // as signed -1 so the backend's int parsing treats them as outside-grid.
-  const cellIds = Array.from(data.triangleCellIds, v => (v === 0xffffffff ? -1 : v));
   return {
-    vertices: Array.from(data.vertices),
-    indices: Array.from(data.indices),
-    triangle_cell_ids: cellIds,
-    triangle_scan_ids: data.triangleScanIds ? Array.from(data.triangleScanIds) : undefined,
-    scan_origins: data.scanOrigins ? Array.from(data.scanOrigins) : undefined,
+    vertices: data.vertices instanceof Float32Array
+      ? data.vertices : new Float32Array(data.vertices),
+    indices: data.indices instanceof Uint32Array
+      ? data.indices : new Uint32Array(data.indices),
+    cellIds: data.triangleCellIds instanceof Uint32Array
+      ? data.triangleCellIds : new Uint32Array(data.triangleCellIds),
+    scanIds: data.triangleScanIds ? new Uint32Array(data.triangleScanIds) : null,
+    scanOrigins: data.scanOrigins ? new Float32Array(data.scanOrigins) : null,
     grid,
   };
 }

@@ -375,3 +375,77 @@ def test_correspondence_distance_falls_back_when_spacing_is_unmeasurable():
 # and the GrapeX benchmark, which run against real scans. The unit tests above
 # pin the RULE (window follows spacing, capped by extent); the real-data tests
 # pin the OUTCOME.
+
+
+# ── The binary transport for the two meshes ─────────────────────────────────
+#
+# MeshAlignDialog does not filter the mesh list, so a Helios triangulation is
+# selectable — millions of triangles. The renderer used to build four number[]
+# and JSON.stringify them, which at that size exceeds V8's max string length:
+# the request died in the renderer before it was ever sent. The meshes now ride
+# a PHB1 frame, decoded by `_m2m_request_from_frame`.
+
+def _m2m_frame(meta: dict, tv, ti, sv, si) -> bytes:
+    """Mirror the renderer's encodeBinaryFrame for this endpoint."""
+    import struct as _struct
+    bufs = [("target_vertices", np.asarray(tv, dtype=np.float32)),
+            ("target_indices", np.asarray(ti, dtype=np.uint32)),
+            ("source_vertices", np.asarray(sv, dtype=np.float32)),
+            ("source_indices", np.asarray(si, dtype=np.uint32))]
+    header = json.dumps({
+        "meta": meta,
+        "buffers": [{"name": n, "dtype": "f32" if a.dtype == np.float32 else "u32",
+                     "length": int(a.size)} for n, a in bufs],
+    }).encode("utf-8")
+    header += b" " * ((4 - len(header) % 4) % 4)
+    out = b"PHB1" + _struct.pack("<I", len(header)) + header
+    for _, a in bufs:
+        out += a.tobytes()
+    return out
+
+
+def _m2m_result(client, *, body=None, frame=None) -> dict:
+    from tests.binframe import decode_streamed_json
+    if frame is not None:
+        resp = client.post("/api/m2m/icp-register", content=frame,
+                           headers={"Content-Type": "application/octet-stream"})
+    else:
+        resp = client.post("/api/m2m/icp-register", json=body)
+    assert resp.status_code == 200, resp.text
+    return decode_streamed_json(resp.content)
+
+
+def test_m2m_endpoint_accepts_a_binary_frame(client):
+    _seed_open3d(0)
+    verts, tris = _cube_mesh()
+    offset = np.array([0.3, 0.2, -0.2])
+    src = (np.array(verts).reshape(-1, 3) + offset).ravel().tolist()
+
+    result = _m2m_result(client, frame=_m2m_frame({}, verts, tris, src, tris))
+    assert result["success"] is True, result.get("error")
+    m = np.array(result["transformation_matrix"], dtype=np.float64).reshape(4, 4)
+    centroid = np.array(verts).reshape(-1, 3).mean(axis=0)
+    moved = m @ np.array([*(centroid + offset), 1.0])
+    assert np.linalg.norm(moved[:3] - centroid) < 0.15
+
+
+def test_m2m_binary_and_json_transports_agree(client):
+    """The transport must not change the registration."""
+    verts, tris = _cube_mesh()
+    offset = np.array([0.3, 0.2, -0.2])
+    src = (np.array(verts).reshape(-1, 3) + offset).ravel().tolist()
+
+    _seed_open3d(0)
+    via_json = _m2m_result(client, body={
+        "target_vertices": verts, "target_indices": tris,
+        "source_vertices": src, "source_indices": tris,
+    })
+    _seed_open3d(0)
+    via_bin = _m2m_result(client, frame=_m2m_frame({}, verts, tris, src, tris))
+
+    assert via_json["success"] and via_bin["success"]
+    # float32 on the wire vs float64 in JSON, on a unit-scale cube: the recovered
+    # transforms must agree to well under the sampling floor.
+    a = np.array(via_json["transformation_matrix"], dtype=np.float64)
+    b = np.array(via_bin["transformation_matrix"], dtype=np.float64)
+    assert np.allclose(a, b, atol=1e-3), f"{a}\n!=\n{b}"

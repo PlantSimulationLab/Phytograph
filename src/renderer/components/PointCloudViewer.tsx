@@ -9,7 +9,7 @@ import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ,
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStats, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStats, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -14759,37 +14759,40 @@ export default function PointCloudViewer({
       const targetPos = meshPositions.get(targetMesh.id) || { x: 0, y: 0, z: 0 };
       const sourcePos = meshPositions.get(sourceMesh.id) || { x: 0, y: 0, z: 0 };
 
-      // Apply positions to vertices for ICP
-      const targetVertices: number[] = [];
-      const sourceVertices: number[] = [];
-
-      for (let i = 0; i < targetMesh.data.vertices.length; i += 3) {
-        targetVertices.push(
-          targetMesh.data.vertices[i] + targetPos.x,
-          targetMesh.data.vertices[i + 1] + targetPos.y,
-          targetMesh.data.vertices[i + 2] + targetPos.z
-        );
+      // Apply positions to vertices for ICP, into TYPED arrays.
+      //
+      // These were number[] built by push, then Array.from(indices), then
+      // JSON.stringify. The mesh picker offers Helios triangulations (millions
+      // of triangles), and four boxed arrays of that size exceed V8's max
+      // string length, so the request died before it was sent. Pre-sized
+      // Float32Array/Uint32Array ride the PHB1 binary frame instead.
+      const tv = targetMesh.data.vertices;
+      const sv = sourceMesh.data.vertices;
+      const targetVertices = new Float32Array(tv.length);
+      const sourceVertices = new Float32Array(sv.length);
+      for (let i = 0; i < tv.length; i += 3) {
+        targetVertices[i] = tv[i] + targetPos.x;
+        targetVertices[i + 1] = tv[i + 1] + targetPos.y;
+        targetVertices[i + 2] = tv[i + 2] + targetPos.z;
+      }
+      for (let i = 0; i < sv.length; i += 3) {
+        sourceVertices[i] = sv[i] + sourcePos.x;
+        sourceVertices[i + 1] = sv[i + 1] + sourcePos.y;
+        sourceVertices[i + 2] = sv[i + 2] + sourcePos.z;
       }
 
-      for (let i = 0; i < sourceMesh.data.vertices.length; i += 3) {
-        sourceVertices.push(
-          sourceMesh.data.vertices[i] + sourcePos.x,
-          sourceMesh.data.vertices[i + 1] + sourcePos.y,
-          sourceMesh.data.vertices[i + 2] + sourcePos.z
-        );
-      }
-
-      console.log('Mesh-to-mesh ICP - target vertices:', targetVertices.length / 3, 'source vertices:', sourceVertices.length / 3);
-
-      const response = await icpRegisterMeshToMesh({
-        target_vertices: targetVertices,
-        target_indices: Array.from(targetMesh.data.indices),
-        source_vertices: sourceVertices,
-        source_indices: Array.from(sourceMesh.data.indices),
-      },
+      const response = await icpRegisterMeshToMesh({},
         ctrl.signal,
         (p, msg) => setIcpProgress({ label: msg, value: p }),
         (runId) => { icpRunIdRef.current = runId; },
+        {
+          targetVertices,
+          targetIndices: targetMesh.data.indices instanceof Uint32Array
+            ? targetMesh.data.indices : new Uint32Array(targetMesh.data.indices),
+          sourceVertices,
+          sourceIndices: sourceMesh.data.indices instanceof Uint32Array
+            ? sourceMesh.data.indices : new Uint32Array(sourceMesh.data.indices),
+        },
       );
 
       if (!response.success) {
@@ -15316,9 +15319,16 @@ export default function PointCloudViewer({
   // Phase 2: adjust a QSM's leaves to match a measured per-cell leaf-angle
   // distribution (from a leaf-on Helios triangulation). Replaces the leaf mesh
   // in place, keeping its visibility.
-  const handleAdjustLeafAngles = useCallback(async (qsmId: string, request: QSMAdjustLeafAnglesRequest) => {
+  const handleAdjustLeafAngles = useCallback(async (
+    qsmId: string,
+    request: QSMAdjustLeafAnglesRequest,
+    // Kept OUT of `request` so the mesh never reaches JSON.stringify: a
+    // full-resolution triangulation serializes to ~1 GB of text, past V8's
+    // string ceiling. Goes over the PHB1 binary transport instead.
+    triangulation?: LeafAngleTriangulationBuffers | null,
+  ) => {
     try {
-      const resp = await adjustQSMLeafAngles(request);
+      const resp = await adjustQSMLeafAngles(request, triangulation);
       if (!resp.success || resp.triangle_count === 0) {
         showToast({ title: resp.error || 'Leaf-angle adjustment produced no geometry', type: 'error' });
         return;

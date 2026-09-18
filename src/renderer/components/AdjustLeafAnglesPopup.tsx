@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { X, Compass } from 'lucide-react';
-import { QSMAdjustLeafAnglesRequest } from '../utils/backendApi';
+import { QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers } from '../utils/backendApi';
 import type { QSMEntry, MeshEntry } from '../lib/pointCloudTypes';
 import { meshCellIds } from '../lib/leafAngleDistribution';
 import { eligibleLeafAngleMeshes, meshToTriangulationInput } from '../lib/adjustLeafAngles';
@@ -10,7 +10,7 @@ interface AdjustLeafAnglesPopupProps {
   onClose: () => void;
   qsm: QSMEntry | null;
   meshes: MeshEntry[];
-  onAdjust: (qsmId: string, request: QSMAdjustLeafAnglesRequest) => void;
+  onAdjust: (qsmId: string, request: QSMAdjustLeafAnglesRequest, triangulation?: LeafAngleTriangulationBuffers | null) => void;
   // Resolve a mesh's display name (mirrors the mesh-list naming).
   meshLabel: (mesh: MeshEntry) => string;
 }
@@ -57,12 +57,14 @@ export function AdjustLeafAnglesPopup({
       setError('The selected mesh has no grid / cell ids');
       return;
     }
+    // `triangulation` is passed BESIDE the request, not inside it: its arrays
+    // are a full-resolution mesh and go over the binary transport, never
+    // through JSON.stringify.
     const request: QSMAdjustLeafAnglesRequest = {
       ...qsm.leaves.request,
-      triangulation,
       seed: parseInt(seedStr, 10) || 0,
     };
-    onAdjust(qsm.id, request);
+    onAdjust(qsm.id, request, triangulation);
     onClose();
   }, [qsm, selectedMesh, seedStr, onAdjust, onClose]);
 

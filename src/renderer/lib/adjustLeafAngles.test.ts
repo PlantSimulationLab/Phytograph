@@ -79,17 +79,29 @@ describe('eligibleLeafAngleMeshes', () => {
 });
 
 describe('meshToTriangulationInput', () => {
-  it('flattens typed arrays to number[] and maps the grid', () => {
+  it('keeps the big arrays TYPED and maps the grid', () => {
     const tin = meshToTriangulationInput(meshData())!;
-    expect(tin.vertices).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0]);
-    expect(tin.indices).toEqual([0, 1, 2]);
-    expect(tin.triangle_cell_ids).toEqual([0]);
+    expect(Array.from(tin.vertices)).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    expect(Array.from(tin.indices)).toEqual([0, 1, 2]);
+    expect(Array.from(tin.cellIds)).toEqual([0]);
     expect(tin.grid).toEqual({ center: [0, 0, 0], size: [2, 2, 2], nx: 1, ny: 1, nz: 1 });
   });
-  it('maps the 0xffffffff outside-sentinel to -1', () => {
+
+  // The whole point of this shape: a full-resolution Helios triangulation is
+  // what the tool accepts (12M triangles by the backend's own cap), and boxing
+  // those into number[] for JSON.stringify is a ~1 GB string — past V8's limit,
+  // so it threw before the request was sent. Typed arrays ride the binary frame.
+  it('never returns plain arrays, which JSON.stringify would box', () => {
+    const tin = meshToTriangulationInput(meshData())!;
+    expect(ArrayBuffer.isView(tin.vertices)).toBe(true);
+    expect(ArrayBuffer.isView(tin.indices)).toBe(true);
+    expect(ArrayBuffer.isView(tin.cellIds)).toBe(true);
+  });
+
+  it('preserves the 0xffffffff outside-sentinel for the backend to map', () => {
     const data = meshData();
     data.triangleCellIds = new Uint32Array([0xffffffff]);
-    expect(meshToTriangulationInput(data)!.triangle_cell_ids).toEqual([-1]);
+    expect(Array.from(meshToTriangulationInput(data)!.cellIds)).toEqual([0xffffffff]);
   });
   it('returns null without a grid or cell ids', () => {
     expect(meshToTriangulationInput(meshData({ withGrid: false }))).toBeNull();

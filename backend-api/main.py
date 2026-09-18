@@ -250,7 +250,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.89.0"
+BACKEND_VERSION = "0.90.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -12234,6 +12234,33 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
     return counts
 
 
+def _parse_bin_request_frame(body: bytes) -> "Tuple[dict, dict]":
+    """Split a PHB1 request body into (meta, buffers).
+
+    The inverse of the renderer's `encodeBinaryFrame`, and the same wire format
+    `_bin_frame_bytes` produces for responses: 'PHB1', a uint32 header length, a
+    JSON header of {meta, buffers:[{name,dtype,length}]}, then the buffers back
+    to back. Buffers come back as numpy arrays (f32 or u32), copied so they do
+    not pin the whole request body.
+
+    Shared by every endpoint that accepts a large mesh, so a second binary path
+    does not need a second copy of the parsing.
+    """
+    import struct
+    if body[:4] != _BIN_FRAME_MAGIC:
+        raise ValueError("binary request must start with the PHB1 frame magic")
+    (header_len,) = struct.unpack_from("<I", body, 4)
+    header = json.loads(body[8:8 + header_len].decode("utf-8"))
+    buffers: "dict[str, np.ndarray]" = {}
+    off = 8 + header_len
+    for d in header.get("buffers", []):
+        n = int(d["length"])
+        np_dtype = np.float32 if d["dtype"] == "f32" else np.uint32
+        buffers[d["name"]] = np.frombuffer(body, dtype=np_dtype, count=n, offset=off).copy()
+        off += n * 4
+    return header.get("meta", {}), buffers
+
+
 def _decode_lad_request_frame(body: bytes) -> "Tuple[LADComputeRequest, Tuple[np.ndarray, np.ndarray, np.ndarray]]":
     """Decode a PHB1 LAD-reuse request frame into (request, (vertices, indices, scan_ids)).
 
@@ -19280,7 +19307,65 @@ class QSMAdjustLeafAnglesRequest(QSMLeavesRequest):
     max_cell_leaves: Optional[int] = 4000
 
 
+def _adjust_leaf_angles_request_from_frame(body: bytes) -> "QSMAdjustLeafAnglesRequest":
+    """Decode a PHB1 adjust-leaf-angles request: scalars in `meta`, the
+    triangulation's four big arrays as raw buffers.
+
+    Exists because the mesh this endpoint takes is a FULL-RESOLUTION Helios
+    triangulation — `isLeafAngleSourceMesh` restricts the tool to exactly those —
+    and the response cap names the size: _HELIOS_MAX_RETURN_TRIANGLES = 12 M,
+    "12M ~ a full-resolution tree". As JSON numbers that is a body around a
+    gigabyte, past V8's max string length, so the renderer died in
+    JSON.stringify BEFORE the request was ever sent. Raw buffers make the same
+    payload ~200 MB and cost no precision that matters here (vertices are f32 on
+    the GPU already; indices and ids are non-negative ints).
+    """
+    meta, buffers = _parse_bin_request_frame(body)
+    for key in ("tin_vertices", "tin_indices", "tin_cell_ids"):
+        if key not in buffers:
+            raise ValueError(f"adjust-leaf-angles frame missing required buffer '{key}'")
+    grid = meta.pop("grid_for_triangulation", None)
+    if grid is None:
+        raise ValueError("adjust-leaf-angles frame missing 'grid_for_triangulation'")
+    # `triangle_cell_ids` is signed (-1 = outside the grid) but rides as u32,
+    # carrying the 0xffffffff sentinel the renderer already uses on the response
+    # side. Normalising it to -1 here is BELT AND BRACES, not load-bearing:
+    # `compute_cell_targets` filters `(cell_ids >= 0) & (cell_ids != _OUTSIDE)`,
+    # so it already rejects either spelling. Kept so the request model carries
+    # the same values the JSON path would, rather than leaving a 4-billion id in
+    # a field documented as signed.
+    cell_ids = buffers["tin_cell_ids"].astype(np.int64)
+    cell_ids[cell_ids == 0xFFFFFFFF] = -1
+    scan_ids = buffers.get("tin_scan_ids")
+    origins = buffers.get("tin_scan_origins")
+    meta["triangulation"] = {
+        "vertices": buffers["tin_vertices"].astype(np.float64).tolist(),
+        "indices": buffers["tin_indices"].astype(np.int64).tolist(),
+        "triangle_cell_ids": cell_ids.tolist(),
+        "triangle_scan_ids": None if scan_ids is None else scan_ids.astype(np.int64).tolist(),
+        "scan_origins": None if origins is None else origins.astype(np.float64).tolist(),
+        "grid": grid,
+    }
+    return QSMAdjustLeafAnglesRequest(**meta)
+
+
 @app.post("/api/qsm/adjust-leaf-angles", response_model=QSMLeavesResponse)
+async def adjust_qsm_leaf_angles_route(http_request: Request):
+    """Adjust a QSM's leaf angles, accepting JSON or a PHB1 binary frame.
+
+    `async def` only to read the body; every blocking step runs in the
+    threadpool, so this does not hold the event loop (see the module note on
+    `def` handlers).
+    """
+    ctype = (http_request.headers.get("content-type") or "").lower()
+    body = await http_request.body()
+    if "application/octet-stream" in ctype or body[:4] == _BIN_FRAME_MAGIC:
+        request = await run_in_threadpool(_adjust_leaf_angles_request_from_frame, body)
+    else:
+        request = QSMAdjustLeafAnglesRequest(**json.loads(body.decode("utf-8")))
+    return await run_in_threadpool(adjust_qsm_leaf_angles, request)
+
+
 def adjust_qsm_leaf_angles(request: QSMAdjustLeafAnglesRequest):
     """Adjust a QSM's leaf angles to match a measured per-cell distribution."""
     import numpy as np
@@ -39746,15 +39831,44 @@ def _do_m2m_icp(request: "MeshToMeshICPRequest", progress=None) -> dict:
         return dict(success=False, error=f"Mesh-to-mesh ICP registration failed: {str(e)}")
 
 
+def _m2m_request_from_frame(body: bytes) -> "MeshToMeshICPRequest":
+    """Decode a PHB1 mesh-to-mesh ICP request: scalars in `meta`, the two meshes
+    as raw buffers.
+
+    Same reason as adjust-leaf-angles: the mesh picker offers Helios
+    triangulations, which run to millions of triangles, and flattening four such
+    arrays into JSON numbers builds a body past V8's max string length — the
+    renderer threw in JSON.stringify before the request was sent.
+    """
+    meta, buffers = _parse_bin_request_frame(body)
+    for key in ("target_vertices", "target_indices", "source_vertices", "source_indices"):
+        if key not in buffers:
+            raise ValueError(f"m2m ICP frame missing required buffer '{key}'")
+    meta["target_vertices"] = buffers["target_vertices"].astype(np.float64).tolist()
+    meta["target_indices"] = buffers["target_indices"].astype(np.int64).tolist()
+    meta["source_vertices"] = buffers["source_vertices"].astype(np.float64).tolist()
+    meta["source_indices"] = buffers["source_indices"].astype(np.int64).tolist()
+    return MeshToMeshICPRequest(**meta)
+
+
 @app.post("/api/m2m/icp-register")
-def icp_register_mesh_to_mesh(request: MeshToMeshICPRequest, http_request: Request):
+async def icp_register_mesh_to_mesh(http_request: Request):
     """
     Perform ICP (Iterative Closest Point) registration to align one mesh to another.
 
     The target mesh stays fixed, the source mesh will be transformed.
     Pre-aligns by moving source center to target center, then runs ICP until convergence.
     Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
+
+    Accepts JSON or a PHB1 binary frame; `async def` only to read the body, with
+    the decode pushed to the threadpool so the loop is never held.
     """
+    ctype = (http_request.headers.get("content-type") or "").lower()
+    body = await http_request.body()
+    if "application/octet-stream" in ctype or body[:4] == _BIN_FRAME_MAGIC:
+        request = await run_in_threadpool(_m2m_request_from_frame, body)
+    else:
+        request = MeshToMeshICPRequest(**json.loads(body.decode("utf-8")))
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(_do_m2m_icp(request, progress=progress)).encode("utf-8"),
