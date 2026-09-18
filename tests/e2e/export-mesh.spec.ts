@@ -54,8 +54,18 @@ async function buildAndSelectMesh(): Promise<number> {
   await page.getByTestId('tool-triangulate').click();
   const triModal = page.getByTestId('triangulation-popup');
   await expect(triModal).toBeVisible();
-  await triModal.getByTestId('triangulation-method').selectOption('poisson');
-  await triModal.getByTestId('triangulation-poisson-depth').fill('7');
+  // Ball pivoting, NOT Poisson. Open3D 0.19.0's Poisson reconstruction fails
+  // nondeterministically on ~6% of calls (an upstream segfault inside its own
+  // OpenMP microtask, which is why the backend runs it subprocess-isolated), so
+  // any spec that triangulates with it inherits that flake rate. This spec is
+  // about EXPORT — the mesh is a fixture, not the subject — so it has no reason
+  // to pay for it. Ball pivoting is exactly deterministic on tiny.xyz and
+  // faster (no per-call subprocess + `import open3d`).
+  //
+  // Observed: this failed one full-suite run in three at `mesh-row` never
+  // appearing, and passed 4/4 on re-run. per-instance-colormap.spec.ts was
+  // moved off Poisson earlier for the same reason.
+  await triModal.getByTestId('triangulation-method').selectOption('ball_pivoting');
   await triModal.getByTestId('triangulation-run-button').click();
 
   const meshRow = page.getByTestId('mesh-row').first();
