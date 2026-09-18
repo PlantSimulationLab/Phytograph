@@ -133,3 +133,97 @@ def test_worker_error_surfaces_as_runtimeerror():
         _run(main._run_killable("not_a_tool", _ground_cloud(n_ground=10, n_stem=0),
                                 {}, http_request=None))
     assert len(main._SEG_WORKERS) == 0
+
+
+# ── The orphan case: the backend dies, the worker must not survive ──────────
+#
+# `_SegProc` spawns each worker with `posix_spawn(..., setpgroup=0)` so a Cancel
+# can killpg it without taking down the backend. That split is load-bearing --
+# and it also means the supervisor's `process.kill(-pid)` (the BACKEND's group)
+# never reaches a worker. The only other cleanup was
+# `atexit.register(reap_seg_workers)`, which needs a graceful Python exit, so an
+# abrupt backend death (SIGKILL after stopBackend's 1.5s grace, an OOM kill, a
+# native crash) left a multi-GB compute running with no parent. They stack
+# across launches.
+
+def test_a_worker_is_spawned_into_its_own_process_group():
+    """Pins the premise: the supervisor signals the BACKEND's group
+    (`process.kill(-pid)` in src/main/backend.ts), and `setpgroup=0` puts each
+    worker outside it — which is WHY the watchdog below has to exist. Asserted
+    against the source, since observing it needs a live spawn whose inherited
+    stdout would outlive the test. If this ever stops being true the orphan
+    problem changes shape and the watchdog should be re-justified."""
+    import inspect
+    import re
+
+    src = inspect.getsource(main._SegProc.spawn if hasattr(main._SegProc, "spawn")
+                            else main._SegProc)
+    assert re.search(r"posix_spawn\(.*setpgroup=0", src, re.S), (
+        "the worker is no longer spawned into its own process group"
+    )
+
+
+def test_the_worker_exits_when_its_parent_dies():
+    """The fix, driven as a real orphan: spawn a watchdog-running grandchild
+    into its own group (exactly as _SegProc does), SIGKILL its parent so no
+    atexit runs, and require the grandchild to reap itself."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import tempfile
+    import textwrap
+    import time as _time
+
+    worker_dir = str(main._Path(main.__file__).resolve().parent)
+    with tempfile.TemporaryDirectory() as td:
+        pidfile = os.path.join(td, "worker.pid")
+        worker = os.path.join(td, "w.py")
+        with open(worker, "w") as f:
+            f.write(textwrap.dedent(f"""
+                import os, sys, time
+                sys.path.insert(0, {worker_dir!r})
+                from seg_worker import _watch_parent
+                _watch_parent(poll_s=0.2)
+                open({pidfile!r}, "w").write(str(os.getpid()))
+                time.sleep(60)
+            """))
+        parent_src = os.path.join(td, "p.py")
+        with open(parent_src, "w") as f:
+            f.write(textwrap.dedent(f"""
+                import os, sys, time
+                argv = [sys.executable, {worker!r}]
+                os.posix_spawn(argv[0], argv, os.environ, setpgroup=0)
+                time.sleep(60)
+            """))
+
+        parent = subprocess.Popen([sys.executable, parent_src])
+        try:
+            deadline = _time.time() + 20
+            while _time.time() < deadline and not os.path.exists(pidfile):
+                _time.sleep(0.05)
+            assert os.path.exists(pidfile), "worker never started"
+            wpid = int(open(pidfile).read())
+            assert os.getpgid(wpid) != os.getpgid(parent.pid), "not orphan-shaped"
+
+            os.kill(parent.pid, signal.SIGKILL)   # no atexit, no group reach
+            parent.wait(timeout=10)
+
+            deadline = _time.time() + 20
+            alive = True
+            while _time.time() < deadline:
+                _time.sleep(0.1)
+                try:
+                    os.kill(wpid, 0)
+                except OSError:
+                    alive = False
+                    break
+            if alive:
+                os.kill(wpid, signal.SIGKILL)     # don't leak from the test itself
+            assert not alive, (
+                "the worker outlived its backend: a multi-GB compute with no "
+                "parent, which is exactly the orphan this watchdog prevents"
+            )
+        finally:
+            if parent.poll() is None:
+                parent.kill()

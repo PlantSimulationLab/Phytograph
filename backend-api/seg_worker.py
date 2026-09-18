@@ -44,6 +44,8 @@ import os
 import sys
 import json
 import traceback
+import threading
+import time
 
 
 def _json_default(o):
@@ -211,6 +213,53 @@ def run(workdir: str) -> int:
         return 1
 
 
+def _watch_parent(poll_s: float = 2.0) -> None:
+    """Exit if the backend that spawned us dies.
+
+    `_SegProc` spawns each worker with `posix_spawn(..., setpgroup=0)`, i.e. into
+    its OWN process group, so a Cancel can killpg the worker without taking down
+    the backend. That is load-bearing and must not be undone — but it also means
+    the supervisor's `process.kill(-pid)` (the BACKEND's group) never reaches us,
+    and the only other cleanup, `atexit.register(reap_seg_workers)`, needs a
+    graceful Python exit.
+
+    So on every path where the backend dies abruptly we were orphaned:
+      * the supervisor SIGKILLs after its 1.5 s grace, which any in-flight
+        segmentation blows through (uvicorn's SIGTERM waits for the request);
+      * the backend is OOM-killed or segfaults;
+      * the machine kills it for any other reason.
+    Each orphan holds the staged cloud plus its own compute copies — multi-GB on
+    a real scan — with no parent, no terminal, and a name the user will not
+    recognise, and they stack across launches.
+
+    A `getppid()` poll rather than `prctl(PR_SET_PDEATHSIG)` because the latter
+    is Linux-only and, being per-process, would not survive the tiled tools'
+    spawn pool either. Cheap: one syscall every couple of seconds, on a daemon
+    thread that can never hold up a normal exit.
+    """
+    original = os.getppid()
+
+    def _poll() -> None:
+        while True:
+            time.sleep(poll_s)
+            try:
+                now = os.getppid()
+            except OSError:  # pragma: no cover - platform without getppid
+                return
+            # Reparented (POSIX gives us to init/launchd) or the pid changed:
+            # either way the backend that owns this work is gone, so the result
+            # has nobody to return to. os._exit, not sys.exit: we may be deep in
+            # a C extension holding the GIL, and this thread must not run
+            # interpreter shutdown under it.
+            if now != original or now == 1:
+                sys.stderr.write(
+                    f"seg_worker: parent {original} is gone (ppid now {now}); exiting\n")
+                sys.stderr.flush()
+                os._exit(3)
+
+    threading.Thread(target=_poll, name="parent-watchdog", daemon=True).start()
+
+
 if __name__ == "__main__":
     _workdir = os.environ.get("PHYTOGRAPH_SEG_WORKER") or (
         sys.argv[1] if len(sys.argv) > 1 else None
@@ -218,4 +267,5 @@ if __name__ == "__main__":
     if not _workdir:
         sys.stderr.write("seg_worker: no workdir (set PHYTOGRAPH_SEG_WORKER)\n")
         sys.exit(2)
+    _watch_parent()
     sys.exit(run(_workdir))
