@@ -535,14 +535,16 @@ test.describe('translate cloud', () => {
     // mechanism rather than the result.
     }, { timeout: 60_000, intervals: [250, 500, 1000] }).toMatchObject({ worldDx: 5 });
 
-    // Triangulate through the real UI (Poisson at non-default depth 7, matching
-    // the other triangulation specs on this fixture).
+    // Triangulate through the real UI. Ball pivoting, not Poisson: Open3D
+    // 0.19.0's Poisson fails nondeterministically on ~6% of calls, and the
+    // subject here is the TRANSLATION — the mesh is just a carrier for it, so
+    // there is no reason to inherit that flake rate. Ball pivoting is exactly
+    // deterministic on this fixture and needs no depth parameter.
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-triangulate').click();
     const triModal = page.getByTestId('triangulation-popup');
     await expect(triModal).toBeVisible();
-    await triModal.getByTestId('triangulation-method').selectOption('poisson');
-    await triModal.getByTestId('triangulation-poisson-depth').fill('7');
+    await triModal.getByTestId('triangulation-method').selectOption('ball_pivoting');
     await triModal.getByTestId('triangulation-run-button').click();
 
     const meshRow = page.getByTestId('mesh-row').first();
@@ -722,13 +724,14 @@ test.describe('translate cloud', () => {
     // ORIGINAL coordinates.
     await expect(page.getByTestId('translate-panel')).toBeHidden({ timeout: 60_000 });
 
-    // Triangulate (Poisson depth 7, matching the other specs on this fixture).
+    // Ball pivoting, for the reason given at the other triangulation in this
+    // file: the subject is the rotation, not the mesher, so it must not inherit
+    // Poisson's ~6% nondeterministic failure.
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
     await page.getByTestId('tool-triangulate').click();
     const triModal = page.getByTestId('triangulation-popup');
     await expect(triModal).toBeVisible();
-    await triModal.getByTestId('triangulation-method').selectOption('poisson');
-    await triModal.getByTestId('triangulation-poisson-depth').fill('7');
+    await triModal.getByTestId('triangulation-method').selectOption('ball_pivoting');
     await triModal.getByTestId('triangulation-run-button').click();
 
     const meshRow = page.getByTestId('mesh-row').first();
