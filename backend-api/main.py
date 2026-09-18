@@ -2971,6 +2971,29 @@ _RIEGL_LABELS = {
     "pps_locked": "PPS Locked",
     "facet": "Mirror Facet",
 }
+
+# Scalars the wizard OFFERS but leaves unticked. These are instrument
+# diagnostics — how the scanner arrived at a return, not a property of the
+# surface it hit — so carrying them by default costs a float32 per point and
+# adds seven entries to the colour-by picker that nothing downstream reads.
+#
+# They are offered rather than dropped because they are genuinely useful when
+# you want them (echo_type and pseudo_echo separate real returns from MTA
+# artefacts; pps_locked audits GNSS timing on a moving platform), and the user
+# can tick any of them in the wizard.
+#
+# Note this is a SECOND filter, layered on the reader's own pruning: rxp_reader
+# already drops these when they are all-NaN or constant for the instrument, so a
+# column reaching here carries real variation. Unticked-by-default is about
+# relevance, not emptiness.
+#
+# Layout-independent by construction: `.riproject` and `.PROJ` are decoded by
+# the same reader into the same `_RIEGL_STREAM_ATTRS` schema, so this applies
+# identically to both.
+_RIEGL_DIAGNOSTIC_ATTRS = frozenset({
+    "background_radiation", "echo_type", "waveform_available",
+    "pseudo_echo", "sw_calculated", "pps_locked", "facet",
+})
 _RIEGL_ARRAY_SPEC = (
     ("positions.f64", "<f8", 3),
     ("reflectance.f32", "<f4", 1),
@@ -23359,6 +23382,16 @@ class PreviewColumn(BaseModel):
     # False for geometry and the fixed standard dims: those genuinely ARE a
     # defined layout, and reassigning them would break the reader.
     role_assignable: bool = False
+    # Whether the wizard should pre-tick this column's Import checkbox. Defaults
+    # True, so every existing preview keeps its "offered means ticked" behaviour
+    # and a no-edit import stays byte-identical.
+    #
+    # False means "offered but off by default": the column is real and the user
+    # can tick it, but it is instrument diagnostics rather than something to
+    # carry into a session by default. Distinct from omitting the column (the
+    # user could never get it) and from detected_role='skip' (which is "there is
+    # nothing here to import" and already unticks via the role).
+    import_by_default: bool = True
 
 
 class PointCloudPreviewResponse(BaseModel):
@@ -29029,6 +29062,9 @@ def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
 
     Columns are NOT remappable — the layout is defined by the reader, exactly as
     E57/PLY/PCD layouts are defined by their formats.
+
+    The instrument-diagnostic scalars (`_RIEGL_DIAGNOSTIC_ATTRS`) are offered
+    unticked: real columns the user can opt into, just not carried by default.
     """
     columns = [
         PreviewColumn(index=0, header_name='x', detected_role='x',
@@ -29069,7 +29105,8 @@ def _preview_riproject(project_path: str) -> PointCloudPreviewResponse:
             suggested_label=_RIEGL_LABELS.get(
                 slug, slug.replace('_', ' ').title()),
             suggested_slug=slug, type_hint='float', remappable=False,
-            role_assignable=True))
+            role_assignable=True,
+            import_by_default=slug not in _RIEGL_DIAGNOSTIC_ATTRS))
         idx += 1
     # Time is carried in double precision as the LAD join key, so it is offered
     # like any other scalar even though it never rides in the float32 extras.

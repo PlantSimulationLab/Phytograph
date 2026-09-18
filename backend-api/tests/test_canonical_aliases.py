@@ -188,6 +188,57 @@ def test_riproject_preview_keeps_its_drop_names(tmp_path):
         assert slugs[name] == name
 
 
+def test_riproject_preview_unticks_only_the_diagnostic_scalars(tmp_path):
+    """The instrument-diagnostic scalars are OFFERED but start unticked.
+
+    They describe how the scanner arrived at a return rather than the surface it
+    hit, so carrying all seven by default costs a float32 per point and fills the
+    colour-by picker with fields nothing downstream reads. They must still be
+    listed — a user auditing MTA artefacts or GNSS timing needs to tick them.
+
+    Everything else must stay ticked: unticking a functional column by accident
+    would silently remove a capability (multi-return grouping, the LAD join) on a
+    no-edit import, which is exactly the failure this flag must not cause.
+    """
+    (tmp_path / "ScanPos001").mkdir()
+    preview = main._preview_riproject(str(tmp_path))
+    offered = {c.header_name for c in preview.columns}
+    off = {c.header_name for c in preview.columns if not c.import_by_default}
+
+    assert off == set(main._RIEGL_DIAGNOSTIC_ATTRS)
+    assert off == {
+        "background_radiation", "echo_type", "waveform_available",
+        "pseudo_echo", "sw_calculated", "pps_locked", "facet",
+    }
+    # Offered, not omitted — the user can still opt in.
+    assert off <= offered
+    # The columns tools key off by name stay ticked.
+    for name in ("x", "y", "z", "intensity", "reflectance", "amplitude",
+                 "deviation", "target_index", "target_count", "timestamp"):
+        assert name in offered
+        assert name not in off
+
+
+def test_diagnostic_attrs_are_real_stream_columns():
+    """Guards a typo: a slug misspelled in `_RIEGL_DIAGNOSTIC_ATTRS` would not
+    match any column, so the flag would silently do nothing and the column would
+    keep arriving ticked — a no-op that no other assertion here would catch."""
+    assert set(main._RIEGL_DIAGNOSTIC_ATTRS) <= set(main._RIEGL_STREAM_ATTRS)
+    # `is_miss` is system-managed and force-kept by extract, so unticking it in
+    # the wizard could never take effect — it must never land in this set.
+    assert "is_miss" not in main._RIEGL_DIAGNOSTIC_ATTRS
+
+
+def test_other_previews_leave_every_column_ticked(tmp_path):
+    """`import_by_default` must default True everywhere else, or adding the flag
+    would quietly change what an ASCII/LAS import carries."""
+    src = tmp_path / "cloud.xyz"
+    src.write_text("x y z intensity\n1 2 3 10\n4 5 6 20\n")
+    preview = main._preview_ascii(str(src), None, 10)
+    assert preview.columns
+    assert all(c.import_by_default for c in preview.columns)
+
+
 # ── Phase 2: LAS extra-dim slugs land canonical ────────────────────────────
 
 def test_las_extra_dim_slug_is_canonicalised(tmp_path):

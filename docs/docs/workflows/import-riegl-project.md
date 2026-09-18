@@ -444,6 +444,17 @@ To see them, turn on **Show sky/miss points** for the scan.
 | Scanner heading and tilt | `.PROJ` only, when imported registered: recovered from the pose |
 | Instrument | Named by the file, and used for the scan's marker. The V-Line models have their own entries (VZ-400i, VZ-1000, VZ-2000i); another VZ is marked as **RIEGL VZ-series** rather than being labelled as a model it isn't |
 
+The scanner also records a set of **instrument-diagnostic** scalars —
+Background Radiation, Echo Type, Waveform Available, Pseudo Echo, SW Calculated
+Target, PPS Locked and Mirror Facet. These describe how the scanner arrived at a
+return rather than the surface it hit, so the import wizard lists them with
+**Import unticked**: they are left out by default, keeping the scan lighter and
+the colour-by picker readable. Tick any of them in the wizard to carry them
+through — useful when you are separating real returns from multiple-time-around
+artefacts, or auditing GNSS timing on a moving platform. Columns your particular
+instrument never populates (a VZ-1000 records no background radiation) are not
+listed at all.
+
 Multi-return numbering is derived by grouping returns that share a pulse
 timestamp. If that grouping ever disagrees with the scanner's own echo
 classification, the toast shown when the import finishes says how many positions

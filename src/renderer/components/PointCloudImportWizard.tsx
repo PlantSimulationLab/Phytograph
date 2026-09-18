@@ -344,8 +344,10 @@ function configFromColumn(c: PreviewColumn): ColumnConfig {
     // A column the backend reported as 'skip' and that was NOT promoted to a
     // carried scalar above has nothing to import, so it starts unticked. Every
     // other column starts ticked, keeping a no-edit import byte-identical to
-    // the old auto-detect behaviour.
-    imported: role !== 'skip',
+    // the old auto-detect behaviour — unless the preview explicitly asked for it
+    // to start off (`import_by_default: false`, the RIEGL diagnostic scalars).
+    // That flag only ever UNTICKS: a 'skip' column stays unticked regardless.
+    imported: role !== 'skip' && c.import_by_default !== false,
     prevRole: null,
     // Default a carried scalar to 'extra' (continuous), never 'label', so a
     // no-edit import matches the old auto-detect colouring — a field that used

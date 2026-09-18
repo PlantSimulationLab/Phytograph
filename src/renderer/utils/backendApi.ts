@@ -2973,6 +2973,11 @@ export interface PreviewColumn {
   // (LAS/LAZ extra dims, .riproject scalars). Orthogonal to `remappable`, which
   // is about column POSITION and is ASCII-only.
   role_assignable?: boolean;
+  // Whether the wizard pre-ticks this column's Import checkbox. Absent/true for
+  // every format that has no opinion; false means "offered but off by default"
+  // (a RIEGL instrument-diagnostic scalar). Distinct from detected_role 'skip',
+  // which means there is nothing in the column to import at all.
+  import_by_default?: boolean;
 }
 
 export interface PointCloudPreviewResponse {

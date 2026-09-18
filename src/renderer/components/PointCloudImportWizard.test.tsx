@@ -142,6 +142,64 @@ describe('PointCloudImportWizard — per-column Import checkbox', () => {
     expect(result.keptSlugs).not.toContain('deviation');
   });
 
+  // A RIEGL project (.riproject / .PROJ) offers seven instrument-diagnostic
+  // scalars the preview marks `import_by_default: false`. They must arrive
+  // UNTICKED and, on a no-edit import, land in droppedSlugs so the extract
+  // endpoint's keep list actually excludes them — while every functional column
+  // stays ticked, because dropping one of those silently removes a capability.
+  const RIPROJECT_COLUMNS = [
+    col({ index: 0, header_name: 'x', detected_role: 'x', remappable: false }),
+    col({ index: 1, header_name: 'y', detected_role: 'y', remappable: false }),
+    col({ index: 2, header_name: 'z', detected_role: 'z', remappable: false }),
+    col({ index: 3, header_name: 'amplitude', detected_role: 'extra', remappable: false,
+          suggested_slug: 'amplitude', suggested_label: 'amplitude' }),
+    col({ index: 4, header_name: 'target_index', detected_role: 'target_index',
+          remappable: false, suggested_slug: 'target_index' }),
+    col({ index: 5, header_name: 'facet', detected_role: 'extra', remappable: false,
+          suggested_slug: 'facet', suggested_label: 'Mirror Facet',
+          import_by_default: false }),
+    col({ index: 6, header_name: 'pps_locked', detected_role: 'extra', remappable: false,
+          suggested_slug: 'pps_locked', suggested_label: 'PPS Locked',
+          import_by_default: false }),
+  ];
+
+  it('a column marked import_by_default:false starts unticked but is still offered', async () => {
+    await open(RIPROJECT_COLUMNS, 'riproject');
+    // Offered — the user can opt in.
+    expect(includeBox(5)).not.toBeNull();
+    expect(includeBox(6)).not.toBeNull();
+    expect(includeBox(5)!.checked).toBe(false);
+    expect(includeBox(6)!.checked).toBe(false);
+    // Everything else keeps the old "offered means ticked" default.
+    expect(includeBox(3)!.checked).toBe(true);
+    expect(includeBox(4)!.checked).toBe(true);
+  });
+
+  it('default-off columns are dropped on a no-edit import, functional ones kept', async () => {
+    const onComplete = await open(RIPROJECT_COLUMNS, 'riproject');
+    submit();                       // no interaction at all
+
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.droppedSlugs.sort()).toEqual(['facet', 'pps_locked']);
+    // App.tsx only sends a keep list when something was dropped, so a non-empty
+    // droppedSlugs is what makes the default take effect at all.
+    expect(result.keptSlugs).toContain('amplitude');
+    expect(result.keptSlugs).toContain('target_index');
+    expect(result.keptSlugs).not.toContain('facet');
+    expect(result.keptSlugs).not.toContain('pps_locked');
+  });
+
+  it('a default-off column can be ticked back on and is then kept', async () => {
+    const onComplete = await open(RIPROJECT_COLUMNS, 'riproject');
+    fireEvent.click(includeBox(5)!);
+    expect(includeBox(5)!.checked).toBe(true);
+    submit();
+
+    const result: WizardResult = onComplete.mock.calls[0][0][0];
+    expect(result.keptSlugs).toContain('facet');
+    expect(result.droppedSlugs).toEqual(['pps_locked']);
+  });
+
   it('re-ticking an ASCII column restores its original role', async () => {
     const onComplete = await open(ASCII_COLUMNS);
     fireEvent.click(includeBox(3)!);   // untick reflectance → 'skip'
