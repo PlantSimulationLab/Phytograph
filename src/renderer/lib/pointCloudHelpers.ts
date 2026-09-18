@@ -1647,6 +1647,22 @@ export function resampleCloud(
   fraction: number,
   originalCount: number,
 ): PointCloudData {
+  // FLAT CLOUDS ONLY. An octree-backed cloud carries `positions: Float32Array(0)`
+  // (the renderer reads from the octree), while `pointCount` is the real total —
+  // so sizing the work from `pointCount` and reading from `positions` silently
+  // produced all-NaN geometry and NaN bounds. Worse, the returned object keeps
+  // the `octree` ref, which makes handleUpdateScanData force `divergedFromSource`
+  // and drop `sourcePath`, so the corrupted cloud can never be rebuilt from its
+  // file. Fail loudly instead; callers gate on `!data.octree` and route octree
+  // clouds through backend decimation.
+  const available = Math.floor(data.positions.length / 3);
+  if (available < data.pointCount) {
+    throw new Error(
+      `resampleCloud requires a flat cloud: pointCount is ${data.pointCount} but ` +
+      `positions holds ${available} points. An octree-backed cloud must be ` +
+      `downsampled by the backend, not in the renderer.`,
+    );
+  }
   const sourceCount = data.pointCount;
   const targetCount = Math.max(1, Math.round(originalCount * fraction));
 

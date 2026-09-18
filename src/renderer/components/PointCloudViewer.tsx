@@ -8036,6 +8036,27 @@ export default function PointCloudViewer({
   const hasAnySelection = hasCloudSelected || hasMeshSelected || hasSkeletonSelected
     || hasQSMSelected || hasParamsScanSelected;
 
+  // Resample is a RENDERER-SIDE decimation over `data.positions`, so it only
+  // works on a flat cloud. An octree-backed cloud (every normal import) carries
+  // an empty `positions` with a real `pointCount`, which used to produce all-NaN
+  // geometry, NaN bounds, and — because the returned object keeps the `octree`
+  // ref — a forced `divergedFromSource` that makes the cloud unrebuildable from
+  // its file. Refuse up front rather than corrupting it. `clouds` is read via a
+  // ref because the registry closure is built before later state is memoised.
+  const canResampleSelectedCloud = useCallback((): boolean => {
+    const cloud = cloudsRef.current.find(c => selectedIds.has(c.id));
+    if (cloud?.data.octree) {
+      showToast({
+        type: 'info',
+        title: 'Resample unavailable',
+        message: 'This cloud is octree-backed. Use Filter Points or a backend '
+          + 'downsample — renderer-side resampling only applies to flat clouds.',
+      });
+      return false;
+    }
+    return true;
+  }, [showToast]);
+
   // Command registry — the single source of truth for the static Toolbar, the
   // Cmd+K palette, and the native Tools menu (see lib/toolCommands.ts for the
   // ToolCommand type and the availability helpers shared across all three).
@@ -8079,7 +8100,7 @@ export default function PointCloudViewer({
       { id: 'cloud-crop', name: 'Crop Point Cloud', keywords: ['cut', 'trim', 'box'], action: () => toggleCropMode(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Crop, testId: 'tool-crop', isActive: () => editMode === 'crop' },
       { id: 'cloud-erase', name: 'Erase Brush', keywords: ['delete', 'remove', 'paint'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'erase' ? 'none' : 'erase'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Eraser, testId: 'tool-erase', isActive: () => editMode === 'erase' },
       { id: 'cloud-filter', name: 'Filter Points', keywords: ['range', 'intensity', 'noise', 'denoise', 'outlier', 'flyer', 'stray', 'clean', 'sor', 'despeckle'], action: () => { closeAllToolPanels('filter'); setShowFilterPanel(!showFilterPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Filter, testId: 'tool-filter', isActive: () => showFilterPanel },
-      { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
+      { id: 'cloud-resample', name: 'Resample Point Cloud', keywords: ['downsample', 'reduce', 'decimate'], action: () => { if (!canResampleSelectedCloud()) return; closeAllToolPanels('resample'); setShowResamplePanel(!showResamplePanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: ChartScatter, isActive: () => showResamplePanel },
       { id: 'cloud-compute-normals', name: 'Compute Normals', keywords: ['normal', 'normals', 'nx', 'ny', 'nz', 'curvature', 'verticality', 'surface', 'orientation', 'pca', 'plane'], action: () => { closeAllToolPanels('compute-normals'); setShowComputeNormalsPanel(!showComputeNormalsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: NormalsIcon, testId: 'tool-compute-normals', isActive: () => showComputeNormalsPanel },
       { id: 'cloud-scalar-fields', name: 'Scalar Fields', keywords: ['scalar', 'field', 'attribute', 'arithmetic', 'calculator', 'formula', 'expression', 'statistics', 'stats', 'histogram', 'mean', 'median', 'percentile', 'rename', 'sf'], action: () => { closeAllToolPanels('scalar-fields'); setShowScalarFieldsPanel(!showScalarFieldsPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Calculator, testId: 'tool-scalar-fields', isActive: () => showScalarFieldsPanel },
       { id: 'cloud-move-origin', name: 'Move to Origin', keywords: ['center', 'zero', 'reset position'], action: () => handleMoveToOrigin(), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: CircleDot },
@@ -23091,7 +23112,9 @@ export default function PointCloudViewer({
       })()}
 
       {/* Resample Panel */}
-      {showResamplePanel && firstSelectedCloud && (() => {
+      {/* `!octree` mirrors canResampleSelectedCloud: renderer-side resampling
+          reads data.positions, which an octree-backed cloud does not populate. */}
+      {showResamplePanel && firstSelectedCloud && !firstSelectedCloud.data.octree && (() => {
         const cloud = firstSelectedCloud;
         // When a preview is active, resample against the pristine point total it
         // captured; otherwise against the cloud's current count.

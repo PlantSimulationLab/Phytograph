@@ -618,6 +618,16 @@ Use **Resample Point Cloud** (scatter icon) when a cloud is too large
 to work with interactively or
 when you want a uniformly sparser version for export.
 
+!!! note "Flat clouds only"
+
+    Resample works in the renderer, over the point array held in the
+    browser process, so it is available only for **flat** clouds — small
+    clouds parsed directly rather than streamed from an octree. A normal
+    import of a LAS/LAZ/E57 (or any file large enough to be octree-backed)
+    draws its points from the octree on disk, and the tool reports
+    *"Resample unavailable"* rather than running. Use **Filter Points**
+    to thin an octree-backed cloud, or crop it to the region you need.
+
 1. Click **Resample Point Cloud**.
 2. Type a **Keep fraction** between `0.001` and `1.0` (it's a number field, not
    a slider).

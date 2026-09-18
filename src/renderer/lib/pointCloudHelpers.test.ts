@@ -743,6 +743,24 @@ describe('resampleCloud', () => {
     expect(resampleCloud(makeCloud(10), 0.001, 10).pointCount).toBe(1);
   });
 
+  // An octree-backed cloud is the shape of EVERY normal import: positions is
+  // empty (the renderer draws from the octree) while pointCount is the real
+  // total. Sizing the work from pointCount and reading from positions used to
+  // emit all-NaN geometry and NaN bounds, and the surviving `octree` ref then
+  // made handleUpdateScanData force `divergedFromSource`, so the corrupted
+  // cloud could never be rebuilt from its file. Must throw, not corrupt.
+  it('refuses an octree-backed cloud instead of emitting NaNs', () => {
+    const octreeCloud: PointCloudData = {
+      ...makeCloud(10),
+      positions: new Float32Array(0),
+      colors: undefined,
+      intensities: undefined,
+      scalarFields: undefined,
+      pointCount: 5_000_000,
+    };
+    expect(() => resampleCloud(octreeCloud, 0.1, 5_000_000)).toThrow(/flat cloud/i);
+  });
+
   it('keeps the parallel buffers index-aligned for each survivor', () => {
     const out = resampleCloud(makeCloud(10), 0.5, 10);
     // Recover each survivor's original index from its x position, then assert the
