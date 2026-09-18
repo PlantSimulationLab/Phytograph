@@ -524,40 +524,69 @@ function handleUnexpectedExit(
       return;
     }
     spawnChild(binPath, port);
+    // Arm the stability timer on the SPAWN, not on the health probe.
+    //
+    // DON'T reset the restart budget yet: answering /version once only proves
+    // the port is bound, not that the backend is stable — a churn where each
+    // respawn dies seconds later would reset the budget every cycle and loop
+    // forever. Only zero it after the respawn survives HEALTHY_RESET_MS; the
+    // exit handler clears this timer if the child dies first, so an unstable
+    // backend keeps counting toward the give-up guard.
+    //
+    // What changed: this used to be armed INSIDE the `if (v)` below, so a
+    // respawn that came up slower than the poll budget never reset the budget
+    // even though it was alive and serving. Three such recoveries exhausted
+    // MAX_RESTART_ATTEMPTS and the fourth crash took the give-up branch — a
+    // permanent-failure dialog after three successes. Surviving the window is
+    // the real signal, and it does not depend on catching /version in time.
+    if (healthyResetTimer) clearTimeout(healthyResetTimer);
+    healthyResetTimer = setTimeout(() => {
+      healthyResetTimer = null;
+      if (child !== null && !intentionalStop) {
+        restartAttempts = 0;
+        console.log(`[Backend] stable for ${HEALTHY_RESET_MS / 1000}s on port ${port}; restart budget reset.`);
+      }
+    }, HEALTHY_RESET_MS);
     // Confirm the respawn actually bound the port before declaring success, so
-    // the renderer's `ready` toast is reliable. The bundled backend takes a
-    // moment to import + bind, so poll /version a few times. If it never
-    // answers, the child's own 'exit' drives the next attempt.
+    // the renderer's `ready` toast is reliable. If it never answers within the
+    // budget, the child's own 'exit' drives the next attempt.
     void confirmHealthy(port).then((v) => {
       if (v && !intentionalStop) {
         console.log(`[Backend] respawned and healthy (v${v}) on port ${port}.`);
         emitBackendStatus({ status: 'ready', port });
-        // DON'T reset the restart budget yet. Answering /version once only proves
-        // the port is bound, not that the backend is stable — a churn where each
-        // respawn dies seconds later would reset the budget every cycle and loop
-        // forever. Only zero it after the respawn survives HEALTHY_RESET_MS; the
-        // exit handler clears this timer if the child dies first, so an unstable
-        // backend keeps counting toward the give-up guard.
-        if (healthyResetTimer) clearTimeout(healthyResetTimer);
-        healthyResetTimer = setTimeout(() => {
-          healthyResetTimer = null;
-          if (child !== null && !intentionalStop) {
-            restartAttempts = 0;
-            console.log(`[Backend] stable for ${HEALTHY_RESET_MS / 1000}s on port ${port}; restart budget reset.`);
-          }
-        }, HEALTHY_RESET_MS);
+      } else if (!intentionalStop && child !== null) {
+        // Alive but not yet answering. Say so rather than leaving the renderer's
+        // "restarting…" toast (duration: 0) on screen forever against a backend
+        // that recovered.
+        console.warn(`[Backend] respawn on port ${port} did not answer /version within `
+          + `${HEALTH_POLL_BUDGET_MS / 1000}s but is still running; reporting ready.`);
+        emitBackendStatus({ status: 'ready', port });
       }
     });
   }, delay);
 }
 
-/** Poll /version up to ~10s; resolve with the version string or null. */
+/**
+ * Poll /version until the respawned backend answers, or the budget runs out.
+ *
+ * The budget must cover a COLD start, not a warm one. `useBackendReady` states
+ * the envelope this has to live inside — "Cold-start of the bundled PyInstaller
+ * backend is 10-40s (open3d + pyhelios + uvicorn init)" — and the splash waits
+ * 120s on the strength of it. This used to poll 5 times at 500ms, i.e. it gave
+ * up after ~12.5s: inside the documented range, so a perfectly healthy respawn
+ * routinely "failed", and the machine most likely to be slow here is one under
+ * the memory pressure that killed the backend in the first place.
+ */
+const HEALTH_POLL_BUDGET_MS = 60_000;
+const HEALTH_POLL_INTERVAL_MS = 500;
+
 async function confirmHealthy(port: number): Promise<string | null> {
-  for (let i = 0; i < 5; i++) {
+  const deadline = Date.now() + HEALTH_POLL_BUDGET_MS;
+  while (Date.now() < deadline) {
     if (intentionalStop || child === null) return null;
     const v = await fetchVersion(port);
     if (v) return v;
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
   }
   return null;
 }

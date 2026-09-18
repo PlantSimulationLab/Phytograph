@@ -279,3 +279,85 @@ describe('synchronous spawn throw (wrong-arch backend: EBADARCH on Intel Macs)',
     expect(onFailed).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A SLOW respawn is still a successful one
+// ---------------------------------------------------------------------------
+//
+// `useBackendReady` documents the envelope: "Cold-start of the bundled
+// PyInstaller backend is 10-40s (open3d + pyhelios + uvicorn init)", and the
+// splash waits 120s on it. confirmHealthy used to poll 5 times at 500ms and give
+// up after ~12.5s — inside that range. Both the 'ready' status AND the restart
+// budget reset lived behind `if (v)`, so a respawn that merely took longer than
+// the poll got neither: the renderer kept a duration:0 "restarting…" error toast
+// against a backend that was serving fine, and three such recoveries exhausted
+// MAX_RESTART_ATTEMPTS so the fourth crash showed a permanent-failure dialog.
+// The machine most likely to be slow here is the one under the memory pressure
+// that killed the backend to begin with.
+
+describe('a respawn slower than the health poll', () => {
+  let startBackend: typeof import('./backend.js').startBackend;
+  let setBackendFailedHandler: typeof import('./backend.js').setBackendFailedHandler;
+  const onFailed = vi.fn();
+  let children: ReturnType<typeof makeFakeChild>[] = [];
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    spawnMock.mockReset();
+    onFailed.mockReset();
+    children = [];
+    spawnMock.mockImplementation(() => {
+      const c = makeFakeChild(2000 + children.length);
+      children.push(c);
+      return c;
+    });
+    // /version NEVER answers: the worst case of a cold start that outruns the
+    // poll budget. The child stays alive throughout.
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('not up yet'); }));
+    process.env.PHYTOGRAPH_BACKEND_PORT = '52998';
+    process.env.PHYTOGRAPH_E2E = '';
+    ({ startBackend, setBackendFailedHandler } = await import('./backend.js'));
+    setBackendFailedHandler(onFailed);
+  });
+
+  afterEach(() => {
+    delete process.env.PHYTOGRAPH_BACKEND_PORT;
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('still resets the restart budget by surviving the stable window', async () => {
+    await startBackend();
+    expect(children.length).toBe(1);
+
+    // Three crashes, each respawn alive but never answering /version. Under the
+    // old code none of these reset the budget, so the next crash gave up.
+    for (let i = 0; i < 3; i++) {
+      children[children.length - 1].emit('exit', 1, null);
+      await vi.advanceTimersByTimeAsync(8000);    // backoff → respawn
+      await vi.advanceTimersByTimeAsync(46_000);  // survive the 45s window → reset
+    }
+
+    expect(onFailed).not.toHaveBeenCalled();
+
+    // And the budget really is full: one more crash still respawns.
+    const before = children.length;
+    children[children.length - 1].emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(children.length).toBe(before + 1);
+    expect(onFailed).not.toHaveBeenCalled();
+  });
+
+  it('does not reset the budget for a respawn that dies inside the window', async () => {
+    // The anti-churn guarantee the reset must not weaken: arming the timer on
+    // the spawn is only safe because the exit handler clears it.
+    await startBackend();
+    for (let i = 0; i < 5 && onFailed.mock.calls.length === 0; i++) {
+      children[children.length - 1].emit('exit', 1, null);
+      await vi.advanceTimersByTimeAsync(8000);    // never reach 45s
+    }
+    expect(onFailed).toHaveBeenCalled();
+    expect(children.length).toBeLessThanOrEqual(1 + 3);
+  });
+});
