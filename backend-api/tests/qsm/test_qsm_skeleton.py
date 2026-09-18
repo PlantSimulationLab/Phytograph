@@ -192,3 +192,68 @@ def test_skeleton_on_tricky_fork():
     cov_gt = float(np.mean(d_gt < 5.0 * R_MIN))
     print(f"tricky_fork cov_gt={cov_gt:.3f}  nodes={len(graph)}")
     assert cov_gt >= 0.85
+
+
+# ── is_acyclic_single_root: the rejections, and the cost ─────────────────────
+#
+# This guard runs under a bare `assert` at the end of every extract_skeleton, and
+# nothing in the build passes -O, so it ships. The original walked every node to
+# the root with a Python set per node -- O(K x depth), and a QSM skeleton is
+# chain-like by construction, so depth scales with K (measured 56.8s on a real
+# 57,863-node skeleton). It is now vectorised pointer doubling. These pin the
+# REJECTIONS, which the happy-path tests above cannot: a guard that returns True
+# for everything would pass all of them.
+
+def _graph(parent):
+    """A SkeletonGraph carrying only what the acyclicity check reads.
+
+    `nodes` is real because `__len__` is defined over it, not over `parent`.
+    """
+    from qsm.skeleton import SkeletonGraph
+    parent = np.asarray(parent, dtype=np.int64)
+    k = len(parent)
+    return SkeletonGraph(
+        nodes=np.zeros((k, 3), dtype=np.float64),
+        parent=parent,
+        level=np.zeros(k, dtype=np.int64),
+        point_count=np.ones(k, dtype=np.int64),
+    )
+
+
+def test_acyclic_check_accepts_a_valid_tree_and_a_chain():
+    assert _graph([-1, 0, 0, 1, 1, 2]).is_acyclic_single_root()
+    assert _graph([-1, 0, 1, 2, 3]).is_acyclic_single_root()
+
+
+def test_acyclic_check_rejects_multi_root_and_rootless():
+    assert not _graph([-1, 0, -1, 2]).is_acyclic_single_root(), "two roots"
+    assert not _graph([1, 0]).is_acyclic_single_root(), "no root at all"
+
+
+def test_acyclic_check_rejects_a_cycle_that_never_reaches_the_root():
+    # 0 is the root; 2<->3 is a detached 2-cycle. Walking from 2 never
+    # terminates, which is precisely what the guard exists to catch.
+    assert not _graph([-1, 0, 3, 2]).is_acyclic_single_root()
+
+
+def test_acyclic_check_rejects_a_self_parent():
+    # A 1-cycle: node 2 is its own parent, so it never reaches root 0.
+    assert not _graph([-1, 0, 2]).is_acyclic_single_root()
+
+
+def test_acyclic_check_rejects_an_out_of_range_parent():
+    assert not _graph([-1, 0, 99]).is_acyclic_single_root()
+
+
+def test_acyclic_check_is_fast_on_a_deep_spine():
+    """The regression that mattered: cost must not scale with depth x K."""
+    import time
+    K, spine = 40_000, 12_000
+    parent = np.full(K, -1, dtype=np.int64)
+    parent[1:spine] = np.arange(spine - 1)
+    rng = np.random.default_rng(0)
+    parent[spine:] = rng.integers(0, spine, size=K - spine)
+    g = _graph(parent)
+    t = time.perf_counter()
+    assert g.is_acyclic_single_root()
+    assert time.perf_counter() - t < 2.0, "the O(K x depth) walk is back"

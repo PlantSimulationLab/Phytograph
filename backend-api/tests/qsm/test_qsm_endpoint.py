@@ -546,3 +546,60 @@ def test_import_qsm_malformed_csv_400(client, tmp_path):
     resp = client.post("/api/qsm/import", json={"path": str(path)})
     assert resp.status_code == 400
     assert "radius" in resp.json()["detail"]
+
+
+# ── Guards: the point cap and real cancellability ────────────────────────────
+#
+# /api/qsm/build ran the same extract_skeleton as /api/skeleton/extract but had
+# none of its protections: no cap (measured 38 s / 2.6 GB at 2 M points) and no
+# cancel token, so the reporter's should_cancel() was hard-wired False, every
+# _cancel_checkpoint was a no-op, and no run_id ever reached the client -- the
+# panel's Cancel could not address the run at all.
+
+def test_build_refuses_a_cloud_past_the_skeleton_point_cap(client, monkeypatch):
+    """Refuse up front rather than commit the user to minutes of compute."""
+    import main
+    monkeypatch.setattr(main, "_SKELETON_MAX_POINTS", 500)
+    rng = np.random.default_rng(0)
+    body = build_qsm(client, {"points": rng.random((600, 3)).tolist()})
+    assert body["success"] is False
+    assert "exceeds" in body["error"] and "600" in body["error"]
+
+
+def test_build_emits_a_run_id_the_cancel_endpoint_can_address(client, cloud_points):
+    """The run_id rides the first PHP1 marker; without the token trio there was
+    none, so /api/cancel/{run_id} had no way to name this run."""
+    resp = client.post("/api/qsm/build", json={"points": cloud_points})
+    assert resp.status_code == 200
+    run_ids = []
+    off, content = 0, resp.content
+    while off < len(content):
+        if content[off:off + 4] == b"PHP1":
+            (length,) = struct.unpack_from("<I", content, off + 4)
+            marker = json.loads(content[off + 8:off + 8 + length].decode("utf-8"))
+            if marker.get("run_id"):
+                run_ids.append(marker["run_id"])
+            off += 8 + length
+        elif content[off:off + 4] == b"    ":
+            off += 4
+        else:
+            break
+    assert run_ids, "no run_id in any progress marker; the run is uncancellable"
+
+
+def test_a_cancelled_run_stops_at_a_checkpoint(client, cloud_points, monkeypatch):
+    """Cancel must actually unwind, not run to completion and discard the result.
+    Fire the event as soon as the build asks for it, then assert the stream ends
+    in a `cancelled` marker rather than a QSM."""
+    import main
+    real = main._new_cancel_token
+
+    def _prefired():
+        run_id, ev = real()
+        ev.set()
+        return run_id, ev
+
+    monkeypatch.setattr(main, "_new_cancel_token", _prefired)
+    resp = client.post("/api/qsm/build", json={"points": cloud_points})
+    assert resp.status_code == 200
+    assert b"cancelled" in resp.content, "the cancel was not honoured"

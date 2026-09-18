@@ -103,19 +103,46 @@ class SkeletonGraph:
         return out
 
     def is_acyclic_single_root(self) -> bool:
-        roots = int(np.sum(self.parent < 0))
-        if roots != 1:
+        """True when `parent` is one rooted tree: exactly one root, no cycles,
+        and every node reachable from that root.
+
+        Vectorised pointer doubling, O(K log depth), not the obvious
+        walk-every-node-to-root. That walk is O(K x depth) with a Python `set`
+        and an `int()` box per step, and a QSM skeleton is chain-like by
+        construction (a trunk spine), so depth scales with K: measured 56.8s on
+        a real 57,863-node skeleton with a 30%-of-K spine. It ran unconditionally
+        under `assert` on every /api/qsm/build -- and nothing in the build passes
+        `-O`, so it shipped.
+
+        Method: repeatedly replace each node's pointer with its grandparent
+        (root = self-pointer). After ceil(log2(K)) rounds every node in a tree
+        reaches the root; any node still not at a root is on a cycle, because
+        only a cycle can survive unbounded doubling.
+        """
+        n = len(self)
+        if n == 0:
             return False
-        # Walk every node to root; detect cycles.
-        for start in range(len(self)):
-            seen = set()
-            cur = start
-            while cur >= 0:
-                if cur in seen:
-                    return False
-                seen.add(cur)
-                cur = int(self.parent[cur])
-        return True
+        parent = np.asarray(self.parent, dtype=np.int64)
+        if int(np.count_nonzero(parent < 0)) != 1:
+            return False
+        # Out-of-range pointers are corruption, not merely a cycle.
+        finite = parent >= 0
+        if finite.any() and int(parent[finite].max()) >= n:
+            return False
+        # A self-parent is a 1-cycle. The final all-reached-the-root test already
+        # rejects it (such a node never moves), so this is a redundant fast path
+        # kept for explicitness, not a correctness requirement.
+        idx = np.arange(n, dtype=np.int64)
+        if np.any(finite & (parent == idx)):
+            return False
+        ptr = np.where(finite, parent, idx)          # roots point at themselves
+        for _ in range(max(1, int(n).bit_length())):
+            nxt = ptr[ptr]
+            if np.array_equal(nxt, ptr):
+                break
+            ptr = nxt
+        # Every node must have landed on THE root (the sole negative-parent node).
+        return bool(np.all(ptr == int(idx[~finite][0])))
 
 
 def _density(points: np.ndarray, sample: int = 2000) -> float:

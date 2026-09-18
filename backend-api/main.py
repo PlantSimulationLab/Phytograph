@@ -18800,6 +18800,9 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
     def _report(frac, msg):
         if progress is not None:
             progress(frac, msg)
+        # Every stage boundary is a cancel point. Raising here unwinds promptly
+        # and frees the multi-GB intermediates rather than running to completion.
+        _cancel_checkpoint(progress)
 
     try:
         _report(0.05, "Reading points")
@@ -18822,6 +18825,21 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
             return QSMBuildResponse(
                 success=False, points_used=len(points),
                 error="Need at least 50 points to build a QSM",
+            ).dict()
+
+        # Same cap, and for the same reason, as /api/skeleton/extract: this runs
+        # the SAME `extract_skeleton`, whose cost and peak RSS both climb steeply
+        # (measured 38 s / 2.6 GB at 2 M points, from a 48 MB input). Without it a
+        # QSM aimed at a whole plot was minutes of compute the user could not stop
+        # and could not have wanted.
+        if len(points) > _SKELETON_MAX_POINTS:
+            return QSMBuildResponse(
+                success=False, points_used=len(points),
+                error=(
+                    f"{len(points):,} points exceeds the {_SKELETON_MAX_POINTS:,}-point "
+                    "limit for QSM reconstruction. Crop to a single tree, or "
+                    "downsample, first."
+                ),
             ).dict()
 
         # B: skeleton.
@@ -18870,6 +18888,11 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
 
         _report(1.0, "Done")
         return _qsm_to_response(qsm, m, points_used=len(points)).dict()
+    except ScanCancelled:
+        # Must escape the catch-all below: the streaming layer turns this into a
+        # terminal `cancelled` marker, and reporting it as "QSM build failed" would
+        # show the user an error for their own Cancel click.
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -18877,14 +18900,22 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
 
 
 @app.post("/api/qsm/build")
-def build_qsm(request: QSMBuildRequest):
+def build_qsm(request: QSMBuildRequest, http_request: Request):
     """Build a true QSM, streaming per-stage progress as PHP1 markers ahead of the
     JSON result (mirrors triangulation / backfill). The renderer's
     fetchJsonWithProgress drains the markers and parses the trailing JSON, which is
-    the same QSMBuildResponse shape _do_qsm_build returns."""
+    the same QSMBuildResponse shape _do_qsm_build returns.
+
+    Cancellable. Without the token trio the reporter's `should_cancel()` is
+    hard-wired False, so every `_cancel_checkpoint` below is a no-op, no run_id
+    ever reaches the client and /api/cancel/{run_id} cannot address this run --
+    i.e. the panel's Cancel button did nothing while the heaviest endpoint in the
+    product ran for minutes. `/api/skeleton/extract`, which runs the same
+    extraction, has had all of this; this one was simply never wired."""
+    run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
-        lambda progress: json.dumps(_do_qsm_build(request, progress)).encode("utf-8")
-    )
+        lambda progress: json.dumps(_do_qsm_build(request, progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 class QSMImportRequest(BaseModel):

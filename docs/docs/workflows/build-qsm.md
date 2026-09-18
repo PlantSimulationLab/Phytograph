@@ -382,6 +382,7 @@ relevant:
 |---|---|---|
 | Min points to build | 50 | Below this the build refuses |
 | Point cap | 60,000 | Clouds are downsampled to this before building |
+| Backend hard cap | 3,000,000 | A backstop for callers that bypass the downsample (scripted / direct API use); the build refuses rather than running for minutes |
 | Twig radius (UI) | 4.23 mm | Tip diameter the taper is anchored to |
 | Continuation weights | (1, 0, 0) | Largest-GrowthLength axis rule |
 | Axis continuation (UI) | 0.75 | Sibling-thickness ratio at/above which a fork is codominant and the shoot ENDS there |
