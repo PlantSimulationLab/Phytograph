@@ -26,6 +26,75 @@ import type { PendingDeleteRegion } from './pointCloudTypes';
 // membership test (a stamp extrudes through the whole cloud).
 const EXTRUDE_DEPTH = 1e6;
 
+/**
+ * potree's vertex shader hard-codes `#define max_clip_boxes 30` and sizes its
+ * uniform `mat4[30]` from it — it is NOT derived from the count we pass, and
+ * `setClipBoxes` does no clamping. Handing it more is `INVALID_VALUE` on the
+ * `uniformMatrix4fv`, and WebGL drops the WHOLE upload: every clip box is lost,
+ * not just the extras, so deleted points draw again.
+ *
+ * That is worse than a cosmetic glitch. The backend has ALREADY deleted those
+ * points, so the user sees points that no longer exist, concludes the erase
+ * failed, and erases again over a region that is not there.
+ *
+ * It is reached trivially: `deleteRegionToClipBoxes` emits one box per brush
+ * STAMP, and the erase brush stamps at half-brush pitch while dragging, so a
+ * single drag of the default 24px brush across a 1200px canvas is ~50 boxes.
+ */
+export const MAX_CLIP_BOXES = 30;
+
+/**
+ * How many clip boxes a region will contribute, without building them.
+ *
+ * Kept next to `deleteRegionToClipBoxes` because it must agree with it exactly:
+ * the GPU/CPU split below decides which regions each path owns, and if the two
+ * disagree a region is either drawn twice or not at all.
+ */
+function clipBoxCount(region: PendingDeleteRegion): number {
+  if (region.invert) return 0;
+  if (region.kind === 'box') return 1;
+  if (region.kind === 'squares_union') return region.centers.length;
+  if (region.kind === 'spheres_union') return region.centers.length;
+  return 0; // polygon: handled per point, never as boxes
+}
+
+/**
+ * Split a delete stack into the regions the GPU clip union can take and the
+ * regions that must fall back to the per-point CPU mask, so their combined box
+ * count never exceeds `MAX_CLIP_BOXES`.
+ *
+ * Greedy from the END of the stack: the most recent deletes are the ones the
+ * user is looking at, and the live erase preview is appended after these, so the
+ * newest work keeps the frame-rate path. Overflow goes to `cpu`, where
+ * `pendingDeletesToCropMaskRules` renders it exactly (slower, but correct).
+ *
+ * `budget` lets the caller reserve room for boxes it will append itself — the
+ * live erase-brush stamps, which are not part of the committed stack.
+ */
+export function splitDeletesByClipBudget(
+  regions: PendingDeleteRegion[],
+  budget: number = MAX_CLIP_BOXES,
+): { gpu: PendingDeleteRegion[]; cpu: PendingDeleteRegion[] } {
+  const gpu: PendingDeleteRegion[] = [];
+  const cpu: PendingDeleteRegion[] = [];
+  let used = 0;
+  for (let i = regions.length - 1; i >= 0; i--) {
+    const region = regions[i];
+    const n = clipBoxCount(region);
+    // A region that contributes no boxes (inverted / polygon) is already the
+    // CPU path's business; leave it to the existing rules and don't spend
+    // budget on it.
+    if (n === 0) continue;
+    if (used + n <= budget) {
+      used += n;
+      gpu.unshift(region);
+    } else {
+      cpu.unshift(region);
+    }
+  }
+  return { gpu, cpu };
+}
+
 /** Axis-aligned box → world→box matrix (translate to center, scale to size). */
 function boxMatrix(
   min: [number, number, number],
@@ -172,13 +241,23 @@ function regionKey(region: PendingDeleteRegion, index: number): string {
  * `squares_union` / `spheres_union` (the erase and label brushes) never arrive
  * inverted, so they never reach the predicate branches below.
  */
-export function pendingDeletesToCropMaskRules(regions: PendingDeleteRegion[]): CropMaskRule[] {
+export function pendingDeletesToCropMaskRules(
+  regions: PendingDeleteRegion[],
+  // Regions the GPU could not take because the stack exceeded MAX_CLIP_BOXES
+  // (see splitDeletesByClipBudget). These are non-inverted and box-expressible —
+  // normally the GPU's business — so they must be rendered here instead, or they
+  // would not be hidden at all. Identity comparison, against the very objects
+  // the splitter returned.
+  overflow: readonly PendingDeleteRegion[] = [],
+): CropMaskRule[] {
   const rules: CropMaskRule[] = [];
+  const overflowed = new Set(overflow);
   regions.forEach((region, index) => {
     // A non-inverted BOX is exactly what the GPU clip volume tests, at frame
     // rate, so leave it there. Everything else that reaches this function is
-    // either inverted or a polygon — see deleteRegionToClipBoxes.
-    if (!region.invert && region.kind !== 'polygon') return;
+    // either inverted or a polygon — see deleteRegionToClipBoxes — or it
+    // overflowed the shader's box budget and the GPU never got it.
+    if (!region.invert && region.kind !== 'polygon' && !overflowed.has(region)) return;
     const key = regionKey(region, index);
     // A delete region names the points it REMOVES. As a mask clause the sense
     // flips: `invert: false` keeps what the predicate accepts. So a delete's own
@@ -193,6 +272,52 @@ export function pendingDeletesToCropMaskRules(regions: PendingDeleteRegion[]): C
         invert: maskInvert,
         predicate: (wx, wy, wz) =>
           wx >= minX && wx <= maxX && wy >= minY && wy <= maxY && wz >= minZ && wz <= maxZ,
+      });
+      return;
+    }
+    // The two brush kinds reach here ONLY as clip-budget overflow (they are
+    // never inverted). Each mirrors the box list `deleteRegionToClipBoxes`
+    // would have built, so a stamp hidden on the GPU and the same stamp hidden
+    // here cover the same points.
+    if (region.kind === 'spheres_union') {
+      const { centers, radii } = region;
+      rules.push({
+        key,
+        invert: maskInvert,
+        // Bounding CUBE per sphere, not the sphere: the GPU path approximates
+        // it that way too, and the two previews must not disagree.
+        predicate: (wx, wy, wz) => {
+          for (let i = 0; i < centers.length; i++) {
+            const [cx, cy, cz] = centers[i];
+            const r = radii[i] ?? radii[0] ?? 1;
+            if (Math.abs(wx - cx) <= r && Math.abs(wy - cy) <= r && Math.abs(wz - cz) <= r) {
+              return true;
+            }
+          }
+          return false;
+        },
+      });
+      return;
+    }
+    if (region.kind === 'squares_union') {
+      const { projection, view, canvas, centers, half_sizes } = region;
+      const canvasSize = { width: canvas.width, height: canvas.height };
+      rules.push({
+        key,
+        invert: maskInvert,
+        // Screen-space, against the region's FROZEN camera — the same matrices
+        // the clip boxes were unprojected from, so this does not track the live
+        // camera any more than the GPU path does.
+        predicate: (wx, wy, wz) => {
+          const pixel = projectWorldToCanvasPixel({ x: wx, y: wy, z: wz }, projection, view, canvasSize);
+          if (!pixel) return false;
+          for (let i = 0; i < centers.length; i++) {
+            const h = half_sizes[i] ?? half_sizes[0] ?? 1;
+            const [cx, cy] = centers[i];
+            if (Math.abs(pixel.x - cx) <= h && Math.abs(pixel.y - cy) <= h) return true;
+          }
+          return false;
+        },
       });
       return;
     }

@@ -123,7 +123,7 @@ import { LabelPanel } from './viewer/panels/LabelPanel';
 import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
-import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules } from '../lib/deletePreview';
+import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules, splitDeletesByClipBudget, MAX_CLIP_BOXES } from '../lib/deletePreview';
 import { stepCounter, stepReporter } from '../lib/stepProgress';
 import {
   computeBoundsFromPositions,
@@ -3336,8 +3336,28 @@ export default function PointCloudViewer({
   // (`clipBoxes`) already hides them and `pendingDeletesToCropMaskRules` skips
   // them. Only the inverted (keep-inside) regions a clip union cannot express
   // fall through to the CPU.
-  const cropMaskRulesFor = useCallback((cloudId: string, live: CropMaskRule | null): CropMaskRule[] => {
-    const committed = pendingDeletesToCropMaskRules(getEditState(cloudId).pendingDeletes ?? []);
+  // The GPU/CPU split for one cloud's committed deletes, computed ONCE so the
+  // clip-box list and the crop-mask rules below cannot disagree about which
+  // regions each path owns. `reserve` is the number of boxes the caller will
+  // append itself (the live erase-brush stamps), held back from the budget.
+  //
+  // Without a budget the clip list simply grew: potree's shader is a fixed
+  // mat4[30], an oversized uniform upload is INVALID_VALUE, and WebGL drops the
+  // WHOLE array — so past 30 boxes NOTHING was clipped and every deleted point
+  // drew again, over a backend that had already deleted them.
+  const deleteSplitFor = useCallback((cloudId: string, reserve = 0) => {
+    const regions = getEditState(cloudId).pendingDeletes ?? [];
+    return splitDeletesByClipBudget(regions, Math.max(0, MAX_CLIP_BOXES - reserve));
+  }, [getEditState]);
+
+  const cropMaskRulesFor = useCallback((
+    cloudId: string,
+    live: CropMaskRule | null,
+    overflow: readonly PendingDeleteRegion[] = [],
+  ): CropMaskRule[] => {
+    const committed = pendingDeletesToCropMaskRules(
+      getEditState(cloudId).pendingDeletes ?? [], overflow,
+    );
     if (live) committed.push(live);
     return committed;
   }, [getEditState]);
@@ -19523,7 +19543,17 @@ export default function PointCloudViewer({
                   // survive, so nothing is hidden). Same predicate the apply
                   // sends to the backend, so the preview matches the result
                   // by construction rather than by a parallel implementation.
-                  cropMask={cropMaskRulesFor(cloud.id, showCropPreview ? octreeCropMask : null)}
+                  cropMask={cropMaskRulesFor(
+                    cloud.id,
+                    showCropPreview ? octreeCropMask : null,
+                    // Whatever the clip budget could not take is hidden here
+                    // instead. Same reserve as the clipBoxes block below, so the
+                    // two agree on the split.
+                    deleteSplitFor(
+                      cloud.id,
+                      isSelected && editMode === 'erase' ? erasePreviewBoxes.length : 0,
+                    ).cpu,
+                  )}
                   // Live filter preview. Passed for EVERY cloud that has
                   // filters, not just the panel's primary: the commit buttons
                   // act on the whole selection (see resolveFilterTargets), so
@@ -19557,8 +19587,15 @@ export default function PointCloudViewer({
                     // T(−offset) into the display frame. The live erase preview
                     // boxes already come from the display-positioned octree pick,
                     // so they need no shift.
+                    const live = isSelected && editMode === 'erase' && erasePreviewBoxes.length > 0
+                      ? erasePreviewBoxes
+                      : [];
+                    // Reserve the live stamps' boxes before splitting the
+                    // committed stack, so the in-progress stroke (what the user
+                    // is watching) always fits and only older committed regions
+                    // spill to the CPU mask.
                     const committedWorld = pendingDeletesToClipBoxes(
-                      getEditState(cloud.id).pendingDeletes ?? [],
+                      deleteSplitFor(cloud.id, live.length).gpu,
                     );
                     const off = displayOffset;
                     const committed =
@@ -19569,10 +19606,7 @@ export default function PointCloudViewer({
                               .makeTranslation(-off.x, -off.y, -off.z)
                               .multiply(m),
                           );
-                    const live = isSelected && editMode === 'erase' && erasePreviewBoxes.length > 0
-                      ? erasePreviewBoxes
-                      : [];
-                    const all = [...committed, ...live];
+                    const all = [...committed, ...live].slice(0, MAX_CLIP_BOXES);
                     return all.length > 0 ? all.map(matrix => ({ matrix })) : null;
                   })()}
                   // Hand the live octree up so the gizmos that pick against it

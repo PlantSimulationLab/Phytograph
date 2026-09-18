@@ -4,6 +4,8 @@ import {
   deleteRegionToClipBoxes,
   pendingDeletesToClipBoxes,
   pendingDeletesToCropMaskRules,
+  splitDeletesByClipBudget,
+  MAX_CLIP_BOXES,
 } from './deletePreview';
 import { cropRulesKeep } from './cropGeometry';
 import type { PendingDeleteRegion } from './pointCloudTypes';
@@ -225,5 +227,128 @@ describe('pendingDeletesToCropMaskRules', () => {
       },
     ];
     expect(pendingDeletesToCropMaskRules(stack)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The shader's clip-box budget
+// ---------------------------------------------------------------------------
+//
+// potree's vertex shader is a fixed `mat4[30]` (`#define max_clip_boxes 30`),
+// not sized from the count we pass, and `setClipBoxes` does not clamp. Handing
+// it more makes the uniform upload INVALID_VALUE and WebGL drops the WHOLE
+// array — so past 30 boxes NOTHING is clipped and every deleted point draws
+// again, over a backend that has already deleted them. The erase brush reaches
+// this in one drag: one box per stamp, stamped at half-brush pitch.
+
+describe('splitDeletesByClipBudget', () => {
+  const cam = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 100);
+  cam.position.set(0, 0, 20);
+  cam.lookAt(0, 0, 0);
+  cam.updateMatrixWorld(true);
+  cam.updateProjectionMatrix();
+  const projection = cam.projectionMatrix.toArray();
+  const view = cam.matrixWorldInverse.toArray();
+  const canvas = { width: 200, height: 200 };
+
+  const stamps = (n: number, x0 = 0): PendingDeleteRegion => ({
+    kind: 'squares_union',
+    centers: Array.from({ length: n }, (_, i) => [x0 + i, 100] as [number, number]),
+    half_sizes: [4],
+    projection, view, canvas,
+    invert: false,
+  });
+
+  it('keeps a small stack entirely on the GPU', () => {
+    const stack = [stamps(3), stamps(4)];
+    const { gpu, cpu } = splitDeletesByClipBudget(stack);
+    expect(gpu).toHaveLength(2);
+    expect(cpu).toHaveLength(0);
+  });
+
+  it('never lets the GPU list exceed the shader limit', () => {
+    // One drag of the default brush across a wide canvas: ~50 stamps.
+    const stack = [stamps(50)];
+    const { gpu } = splitDeletesByClipBudget(stack);
+    expect(pendingDeletesToClipBoxes(gpu).length).toBeLessThanOrEqual(MAX_CLIP_BOXES);
+  });
+
+  it('spills whole regions to the CPU rather than truncating one', () => {
+    const stack = [stamps(20, 0), stamps(20, 500)];
+    const { gpu, cpu } = splitDeletesByClipBudget(stack);
+    expect(gpu).toHaveLength(1);
+    expect(cpu).toHaveLength(1);
+    expect(pendingDeletesToClipBoxes(gpu).length).toBeLessThanOrEqual(MAX_CLIP_BOXES);
+    // The NEWEST region keeps the frame-rate path: it is what the user is
+    // looking at, and the live stroke is appended after it.
+    expect(gpu[0]).toBe(stack[1]);
+    expect(cpu[0]).toBe(stack[0]);
+  });
+
+  it('honours a reserve for the live erase stamps', () => {
+    const stack = [stamps(25)];
+    // 10 live boxes are about to be appended, so only 20 remain for committed.
+    const { gpu, cpu } = splitDeletesByClipBudget(stack, MAX_CLIP_BOXES - 10);
+    expect(gpu).toHaveLength(0);
+    expect(cpu).toHaveLength(1);
+  });
+
+  it('does not spend budget on regions that produce no boxes', () => {
+    const inverted: PendingDeleteRegion = {
+      kind: 'box', min: [0, 0, 0], max: [1, 1, 1], invert: true,
+    };
+    const { gpu, cpu } = splitDeletesByClipBudget([inverted, stamps(30)]);
+    // The inverted region is the CPU path's business already, and must not
+    // push the 30 real stamps off the GPU.
+    expect(pendingDeletesToClipBoxes(gpu).length).toBe(30);
+    expect(cpu).toHaveLength(0);
+  });
+});
+
+describe('overflow is still hidden, just on the CPU', () => {
+  it('a point inside a spilled brush stamp is masked out', () => {
+    const cam = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 100);
+    cam.position.set(0, 0, 20);
+    cam.lookAt(0, 0, 0);
+    cam.updateMatrixWorld(true);
+    cam.updateProjectionMatrix();
+    const projection = cam.projectionMatrix.toArray();
+    const view = cam.matrixWorldInverse.toArray();
+    const canvas = { width: 200, height: 200 };
+
+    // A stamp over canvas centre, which covers the world origin.
+    const region: PendingDeleteRegion = {
+      kind: 'squares_union',
+      centers: [[100, 100]],
+      half_sizes: [20],
+      projection, view, canvas,
+      invert: false,
+    };
+    // Treated as overflow: the GPU never got it, so the mask must hide it.
+    const rules = pendingDeletesToCropMaskRules([region], [region]);
+    expect(rules).toHaveLength(1);
+    expect(cropRulesKeep(rules, 0, 0, 0)).toBe(false);          // deleted
+    expect(cropRulesKeep(rules, 9.5, 9.5, 0)).toBe(true);       // far corner survives
+  });
+
+  it('a spilled sphere brush masks its bounding cube, matching the GPU box', () => {
+    const region: PendingDeleteRegion = {
+      kind: 'spheres_union',
+      centers: [[5, 5, 5]],
+      radii: [1],
+      invert: false,
+    };
+    const rules = pendingDeletesToCropMaskRules([region], [region]);
+    expect(cropRulesKeep(rules, 5, 5, 5)).toBe(false);          // centre deleted
+    expect(cropRulesKeep(rules, 5.9, 5.9, 5.9)).toBe(false);    // cube corner too
+    expect(cropRulesKeep(rules, 8, 8, 8)).toBe(true);           // outside survives
+  });
+
+  it('a region the GPU DID take is not masked twice', () => {
+    const region: PendingDeleteRegion = {
+      kind: 'spheres_union', centers: [[0, 0, 0]], radii: [1], invert: false,
+    };
+    // Not in the overflow list => the clip volume owns it => no CPU rule.
+    expect(pendingDeletesToCropMaskRules([region], [])).toHaveLength(0);
   });
 });
