@@ -331,3 +331,66 @@ describe('startup check asks consent before downloading', () => {
     expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// The install must be vetoable BEFORE it happens
+// ---------------------------------------------------------------------------
+//
+// electron-updater's `quitAndInstall()` installs FIRST and quits second:
+// `install()` runs to completion, then `app.quit()` goes out on a setImmediate.
+// So the app's own 'before-quit' scene-dirty prompt cannot veto it — by the time
+// preventDefault() runs, the Linux AppImage has been unlinked and replaced, or
+// the Windows NSIS installer is rewriting the directory under a live process.
+// And `quitAndInstallCalled` is latched, so the update can never be retried.
+//
+// With a cloud open, that prompt's Cancel is both defaultId and cancelId, so
+// Return or Escape lands on exactly that path.
+
+describe('install confirmation gate', () => {
+  beforeEach(loadUpdater);
+
+  /** Drive update-downloaded with "Restart now" chosen. */
+  async function restartNow(mod: any, confirm: (() => boolean) | null) {
+    mod.setInstallConfirm(confirm);
+    mod.setupAutoUpdater(getWindow);
+    showMessageBox.mockResolvedValue({ response: 0 } as any);  // "Restart now"
+    await handlers.get('update-downloaded')!({ version: '0.58.0' });
+    await flush();
+  }
+
+  it('does not install when the confirm says no', async () => {
+    const mod = await loadUpdater();
+    await restartNow(mod, () => false);
+    expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('installs when the confirm says yes', async () => {
+    const mod = await loadUpdater();
+    await restartNow(mod, () => true);
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('installs when no confirm is registered', async () => {
+    const mod = await loadUpdater();
+    await restartNow(mod, null);
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks BEFORE installing, never after', async () => {
+    const mod = await loadUpdater();
+    const order: string[] = [];
+    autoUpdater.quitAndInstall.mockImplementation(() => { order.push('install'); });
+    await restartNow(mod, () => { order.push('confirm'); return true; });
+    expect(order).toEqual(['confirm', 'install']);
+    autoUpdater.quitAndInstall.mockReset();
+  });
+
+  it('leaves the update downloaded so an ordinary quit still installs it', async () => {
+    const mod = await loadUpdater();
+    await restartNow(mod, () => false);
+    // autoInstallOnAppQuit is what picks it up later; declining must not clear
+    // it or the user would have to download the update again.
+    expect(autoUpdater.autoInstallOnAppQuit).toBe(true);
+    expect(sent.at(-1)!.payload).toEqual({ status: 'downloaded', version: '0.58.0' });
+  });
+});

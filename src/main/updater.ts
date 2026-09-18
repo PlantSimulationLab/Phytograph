@@ -11,6 +11,33 @@ const { autoUpdater } = electronUpdater;
 
 type GetWindow = () => BrowserWindow | null;
 
+/**
+ * Asked before `quitAndInstall()`, and the answer is FINAL.
+ *
+ * electron-updater's `quitAndInstall()` installs FIRST and quits second:
+ * `install()` runs to completion, then `app.quit()` goes out on a setImmediate.
+ * On Linux that means the running AppImage is already unlinked and replaced; on
+ * Windows the NSIS installer is already rewriting the install directory under a
+ * live process.
+ *
+ * So the app's own 'before-quit' scene-dirty prompt is too late to be a veto: by
+ * the time it can call preventDefault() the install has happened, and because
+ * `quitAndInstallCalled` is now latched the update can never be retried in that
+ * session either. With a cloud open the prompt's Cancel is both defaultId and
+ * cancelId, so Return or Escape lands on exactly that path.
+ *
+ * Asking HERE, before anything is installed, is the only point where "no" can
+ * still mean no. Returning false must leave the app fully working.
+ */
+export type ConfirmInstall = () => boolean;
+
+let confirmInstall: ConfirmInstall | null = null;
+
+/** Injected by main.ts so the updater can settle the discard question itself. */
+export function setInstallConfirm(fn: ConfirmInstall | null): void {
+  confirmInstall = fn;
+}
+
 // How long the install+relaunch typically takes, quoted in the restart prompt.
 // The bundle is large (PyInstaller sidecar + native libs), so the app is gone
 // for ~30s and the user otherwise has no idea whether it's working.
@@ -93,6 +120,17 @@ function registerListeners(getWindow: GetWindow): void {
       detail: `Phytograph will close, install the update, and reopen. ${RESTART_ESTIMATE}`,
     });
     if (choice.response !== 0) return;
+
+    // Settle the scene-dirty question BEFORE installing anything.
+    // `quitAndInstall` installs then quits, so a veto raised by the quit is a
+    // veto that arrives after the damage — see ConfirmInstall. A false here is a
+    // clean no-op: the update stays downloaded and installs on the next ordinary
+    // quit (autoInstallOnAppQuit).
+    if (confirmInstall && !confirmInstall()) {
+      updaterLog.info('install declined at the session-discard prompt; deferring to next quit.');
+      emit({ status: 'downloaded', version: info.version });
+      return;
+    }
 
     // Show "Restarting…" and WAIT for the renderer to confirm it's painted.
     //

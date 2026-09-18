@@ -5,7 +5,7 @@ import { startBackend, stopBackend, setBackendWindowGetter, setBackendFailedHand
 import { registerIpc } from './ipc.js';
 import { authorizeOpenPaths, extractFilePathsFromArgv } from './openPaths.js';
 import { installApplicationMenu, applyMenuState } from './menu.js';
-import { setupAutoUpdater } from './updater.js';
+import { setupAutoUpdater, setInstallConfirm } from './updater.js';
 import { IPC, type FileDropPayload, type MenuStatePayload, type SceneDirtyPayload } from '../shared/ipc.js';
 import { setSceneDirty, resetSceneDirty, shouldAllowClose, currentSceneDirty } from './quitConfirm.js';
 import { RENDERER_DEV_PORT } from '../shared/constants.js';
@@ -569,6 +569,20 @@ app.whenReady().then(async () => {
   }
   createWindow();
   setupAutoUpdater(() => mainWindow);
+  // The updater asks about unsaved work BEFORE it installs, because
+  // `quitAndInstall()` installs first and quits second — a veto raised by the
+  // quit would arrive after the AppImage had already been replaced (and would
+  // latch `quitAndInstallCalled`, so the update could never be retried).
+  //
+  // Answering here also means the user is asked exactly ONCE: approving the
+  // discard latches `quitConfirmed`, so 'before-quit' does not ask again about
+  // the quit the updater is about to perform.
+  setInstallConfirm(() => {
+    if (!quitConfirmArmed || quitConfirmed) return true;
+    if (!shouldAllowClose(showQuitConfirm)) return false;
+    quitConfirmed = true;
+    return true;
+  });
 
   // macOS: closing the window doesn't quit the app (window-all-closed only
   // quits off-darwin), and window-all-closed calls stopBackend() — so the
