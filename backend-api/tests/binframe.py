@@ -58,14 +58,34 @@ def decode_streamed_json(content: bytes):
     icp-register endpoints, which stream a cancellable progress pill ahead of
     their JSON result. Plain `response.json()` chokes on the markers."""
     i = 0
+    last_marker = None
     while True:
         while i < len(content) and content[i] in (0x20, 0x09, 0x0A, 0x0D):
             i += 1
         if content[i:i + 4] != b"PHP1":
             break
         marker_len = struct.unpack_from("<I", content, i + 4)[0]
+        try:
+            last_marker = json.loads(
+                content[i + 8:i + 8 + marker_len].decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            last_marker = None
         i += 8 + marker_len
-    return json.loads(content[i:].decode("utf-8"))
+    tail = content[i:]
+    if not tail.strip():
+        # The stream carried no JSON. `_bin_frame_streaming_response` reports a
+        # worker failure (or a cancel) IN BAND as a terminal marker, because the
+        # 200 status line is already sent by then — so the real cause is in the
+        # last marker, and skipping past it turned every such failure into a bare
+        # "Expecting value: line 1 column 1", which says nothing about what broke.
+        if isinstance(last_marker, dict) and last_marker.get("error"):
+            raise AssertionError(
+                f"streaming endpoint failed: {last_marker['error']}")
+        if isinstance(last_marker, dict) and last_marker.get("cancelled"):
+            raise AssertionError("streaming endpoint reported cancelled")
+        raise AssertionError(
+            f"streaming endpoint returned no JSON body (last marker: {last_marker!r})")
+    return json.loads(tail.decode("utf-8"))
 
 
 def decode_progress_markers(content: bytes):
@@ -121,3 +141,18 @@ def decode_lidar_scan(content: bytes) -> dict:
                         "points": pts, "colors": cols, "scalars": scalars,
                         "session": s.get("session")})
     return {"success": True, "results": results}
+
+
+def decode_streamed_json_with_markers(content: bytes):
+    """`decode_streamed_json` plus the progress markers that preceded the JSON,
+    as [(progress, message), ...] — for tests that assert on the progress bar as
+    well as the result.
+
+    Exists so no test hand-rolls the marker walk again: a local copy that skips
+    markers only while they are CONTIGUOUS breaks the moment a whitespace
+    keepalive lands BETWEEN two of them (which the stream emits once the work
+    runs long enough), and fails as a bare "Expecting value: line 1 column 1".
+    """
+    markers = [(m.get("progress"), m.get("message"))
+               for m in decode_progress_markers(content)]
+    return decode_streamed_json(content), markers

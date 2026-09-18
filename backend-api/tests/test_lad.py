@@ -1330,7 +1330,8 @@ def _backfill_session(session_id: str, raster: "Optional[dict]" = None) -> dict:
     the result dict. `raster` overrides the scan's angular raster (defaults to
     the multi-return fixture's)."""
     import asyncio
-    import json as _json
+
+    from tests.binframe import decode_streamed_json
 
     resp = main.backfill_cloud_misses(
         session_id,
@@ -1340,14 +1341,13 @@ def _backfill_session(session_id: str, raster: "Optional[dict]" = None) -> dict:
     async def _collect():
         return b"".join([c if isinstance(c, (bytes, bytearray)) else c.encode()
                          async for c in resp.body_iterator])
-    raw = asyncio.run(_collect())
-    i = 0
-    while i + 8 <= len(raw) and raw[i:i + 4] == b"PHP1":
-        mlen = int.from_bytes(raw[i + 4:i + 8], "little")
-        i += 8 + mlen
-    while i < len(raw) and raw[i:i + 1] in (b" ", b"\n", b"\t"):
-        i += 1
-    return _json.loads(raw[i:])
+    # Use the canonical decoder, not a local re-implementation. The one that
+    # lived here skipped markers only while they were CONTIGUOUS from the start,
+    # so a whitespace keepalive landing BETWEEN two markers — which the stream
+    # emits once a backfill runs long enough — ended the skip early and left
+    # `PHP1...` in the buffer, failing as a bare "Expecting value: line 1
+    # column 1". That made these tests flaky in proportion to machine load.
+    return decode_streamed_json(asyncio.run(_collect()))
 
 
 def _drop_rows(sess, drop_mask):

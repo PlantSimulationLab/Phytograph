@@ -6,7 +6,6 @@ in numpy — a ground disk + trunk line + leaf blob, with ground_class / wood_cl
 they're filtered (not left to inflate the extent ~1000x and hang the fit).
 """
 import asyncio
-import json
 import math
 import queue
 import time
@@ -138,14 +137,13 @@ def _run(session_id, **body):
             async for c in resp.body_iterator
         ])
 
-    raw = asyncio.run(_collect())
-    i = 0
-    while i + 8 <= len(raw) and raw[i:i + 4] == b"PHP1":
-        mlen = int.from_bytes(raw[i + 4:i + 8], "little")
-        i += 8 + mlen
-    while i < len(raw) and raw[i:i + 1] in (b" ", b"\n", b"\t"):
-        i += 1
-    return json.loads(raw[i:])
+    # The canonical decoder, not a local copy: skipping markers only while they
+    # are CONTIGUOUS breaks as soon as a whitespace keepalive lands BETWEEN two
+    # of them, which the stream emits once the work runs long enough. That made
+    # the equivalent code in test_lad.py flaky in proportion to machine load.
+    from tests.binframe import decode_streamed_json
+
+    return decode_streamed_json(asyncio.run(_collect()))
 
 
 # ---------------------------------------------------------------------------

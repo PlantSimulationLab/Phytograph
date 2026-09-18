@@ -223,21 +223,15 @@ def _drain(resp):
             c if isinstance(c, (bytes, bytearray)) else c.encode()
             async for c in resp.body_iterator])
 
-    raw = asyncio.run(_collect())
-    # Split leading PHP1 markers from the trailing JSON. Each marker: 'PHP1' +
-    # uint32 len + len bytes (space-padded). Whitespace keepalives are 4 spaces.
-    markers = []
-    i = 0
-    while i + 8 <= len(raw) and raw[i:i + 4] == b"PHP1":
-        mlen = int.from_bytes(raw[i + 4:i + 8], "little")
-        payload = json.loads(raw[i + 8:i + 8 + mlen])
-        markers.append((payload["progress"], payload["message"]))
-        i += 8 + mlen
-    # Skip any trailing whitespace keepalives before the JSON tail.
-    while i < len(raw) and raw[i:i + 1] in (b" ", b"\n", b"\t"):
-        i += 1
-    result = json.loads(raw[i:]) if i < len(raw) else {}
-    return result, markers
+    # The canonical decoder, not a local copy. The walk that lived here skipped
+    # markers only while they were CONTIGUOUS from the start, so a whitespace
+    # keepalive landing BETWEEN two markers — which the stream emits once the
+    # work runs long enough — ended the skip early and left `PHP1...` in the
+    # buffer, failing as a bare "Expecting value: line 1 column 1". That made the
+    # equivalent code in test_lad.py flaky in proportion to machine load.
+    from tests.binframe import decode_streamed_json_with_markers
+
+    return decode_streamed_json_with_markers(asyncio.run(_collect()))
 
 
 def _call(session_id, **body):
