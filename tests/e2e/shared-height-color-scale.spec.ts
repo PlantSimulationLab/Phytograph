@@ -72,7 +72,7 @@ async function importBoth(app: ElectronApplication, page: Page) {
   await expect(rowByName(page, 'tiny')).toHaveAttribute('data-visible', 'true');
   await expect(rowByName(page, 'ground_plants')).toHaveAttribute('data-visible', 'true');
 
-  await page.getByTitle('Deselect All').click();
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
   await expect(page.locator('[data-testid="scan-row"][data-selected="true"]')).toHaveCount(0);
 
   // The default colour mode is 'per-scan', which maps no variable and raises no

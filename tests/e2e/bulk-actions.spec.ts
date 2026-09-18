@@ -78,7 +78,7 @@ test('header hide with no selection toggles the whole section', async () => {
   const rows = page.locator('[data-testid="scan-row"]');
 
   // Nothing selected (deselect any auto-selection from import).
-  await page.getByTitle('Deselect All').click();
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
   await expect(page.locator('[data-testid="scan-row"][data-selected="true"]')).toHaveCount(0);
 
   // First press hides everything (any visible → hide all).

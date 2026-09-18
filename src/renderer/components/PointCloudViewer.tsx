@@ -15388,6 +15388,19 @@ export default function PointCloudViewer({
     }
   }, [meshes, onDeselectAll]);
 
+  // Bulk select / deselect for the Meshes panel header, mirroring the Scans
+  // panel's Select All / Deselect All. Deliberately leaves the scan and
+  // skeleton selections alone: the Scans header behaves the same way, and a
+  // header press is an explicit bulk action, not the single-focus plain click
+  // handleSelectMesh implements.
+  const handleSelectAllMeshes = useCallback(() => {
+    setSelectedMeshIds(new Set(meshes.map(m => m.id)));
+  }, [meshes]);
+
+  const handleDeselectAllMeshes = useCallback(() => {
+    setSelectedMeshIds(new Set());
+  }, []);
+
   // Select a skeleton — same modifier semantics as meshes.
   const handleSelectSkeleton = useCallback((skeletonId: string, additive: boolean, range: boolean) => {
     setSelectedSkeletonIds(prev => nextSelection(prev, skeletonId, skeletons.map(s => s.id), lastSelectedSkeletonIdRef.current, additive, range));
@@ -22145,6 +22158,8 @@ export default function PointCloudViewer({
             anyTargetVisible={anyTargetVisible(meshes, selectedMeshIds)}
             onToggleVisibilityAll={handleToggleMeshesVisibility}
             onDeleteAll={handleDeleteMeshes}
+            onSelectAll={handleSelectAllMeshes}
+            onDeselectAll={handleDeselectAllMeshes}
             onSelect={handleSelectMesh}
             onToggleVisibility={handleToggleMeshVisibility}
             onRequestDelete={(id, name) => setDeleteConfirm({ type: 'mesh', ids: [id], label: name })}

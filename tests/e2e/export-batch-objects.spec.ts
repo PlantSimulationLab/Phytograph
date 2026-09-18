@@ -57,7 +57,7 @@ test('exports several plain clouds in one batch, with select-all', async () => {
     .toHaveCount(2, { timeout: 20_000 });
 
   // Deselect everything in the panel: the list must still show both clouds.
-  await page.getByTitle('Deselect All').click();
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
 
   await page.evaluate(() => (window as unknown as { __openExportPanel: () => void }).__openExportPanel());
   await expect(page.getByTestId('export-modal')).toBeVisible();
@@ -121,7 +121,7 @@ test('lists plain clouds alongside scans and blocks them only where the format n
 
   // Select exactly ONE scan in the panel — the export list must still show all
   // five objects, with only that one checked.
-  await page.getByTitle('Deselect All').click();
+  await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
   await panelRows.nth(0).getByTestId('scan-row-name').click();
   await expect(panelRows.nth(0)).toHaveAttribute('data-selected', 'true');
 

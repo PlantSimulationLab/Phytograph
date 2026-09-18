@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2, Download } from 'lucide-react';
+import { Box, Leaf, Eye, EyeOff, Trash2, ChevronRight, ChevronDown, Palette, ChartPie, Wand2, AlertTriangle, Filter, HelpCircle, Maximize2, Download, CheckSquare, XSquare } from 'lucide-react';
 import type { MeshEntry, MeshColorMode, PointCloudEntry } from '../../../lib/pointCloudTypes';
 import { meshDisplayNameFor, TRIANGULATION_METHOD_LABELS, DEM_SURFACE_LABELS, DEM_LAYER_ORDER } from '../../../lib/pointCloudTypes';
 import { meshHasScanColors } from '../../../lib/pointCloudHelpers';
@@ -424,6 +424,9 @@ interface MeshesListPanelProps {
   anyTargetVisible: boolean;
   onToggleVisibilityAll: () => void;
   onDeleteAll: () => void;
+  // Select / deselect every mesh, mirroring the Scans panel header.
+  onSelectAll: () => void;
+  onDeselectAll: () => void;
   // Modifier-aware select: Ctrl/Cmd toggles, Shift selects a range.
   onSelect: (id: string, additive: boolean, range: boolean) => void;
   onToggleVisibility: (id: string) => void;
@@ -494,6 +497,8 @@ export function MeshesListPanel({
   anyTargetVisible,
   onToggleVisibilityAll,
   onDeleteAll,
+  onSelectAll,
+  onDeselectAll,
   onSelect,
   onToggleVisibility,
   onRequestDelete,
@@ -521,6 +526,22 @@ export function MeshesListPanel({
       <div className="p-2 border-b border-neutral-700 flex items-center gap-2">
         <Box className="w-4 h-4 text-neutral-400" />
         <span className="text-xs font-medium text-neutral-300 flex-1">Meshes</span>
+        <button
+          data-testid="meshes-select-all"
+          onClick={onSelectAll}
+          className="p-1 hover:bg-neutral-700 rounded"
+          title="Select All"
+        >
+          <CheckSquare className="w-3 h-3 text-neutral-400" />
+        </button>
+        <button
+          data-testid="meshes-deselect-all"
+          onClick={onDeselectAll}
+          className="p-1 hover:bg-neutral-700 rounded"
+          title="Deselect All"
+        >
+          <XSquare className="w-3 h-3 text-neutral-400" />
+        </button>
         <button
           data-testid="meshes-bulk-hide"
           onClick={onToggleVisibilityAll}

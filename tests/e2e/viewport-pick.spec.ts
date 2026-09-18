@@ -212,7 +212,7 @@ test.describe('viewport picking', () => {
 
     // Importing the XML leaves all four scans selected; clear that via the
     // panel's Deselect All so each test starts from a known empty selection.
-    await page.getByTitle('Deselect All').click();
+    await page.getByTestId('scans-panel').getByTitle('Deselect All').click();
     await expect(selectedRows()).toHaveCount(0);
     return rows;
   }

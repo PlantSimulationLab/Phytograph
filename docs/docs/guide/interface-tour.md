@@ -207,6 +207,13 @@ asks for confirmation **once** for the whole batch, rather than once per
 entry. The same multi-select + header buttons work for **Meshes**,
 **Skeletons**, and **QSM** results.
 
+The **Scans** and **Meshes** headers also carry a **check** and a
+**cross** button — *Select All* and *Deselect All* for that list. They
+are the fast way to set up a bulk action (select everything, then press
+the eye or the trash) and the fast way to clear a selection without
+hunting for empty space in the viewport. Each acts only on its own list,
+so selecting every mesh leaves the scan selection as it was.
+
 The **legend stack** in the bottom-right shows one entry per
 pseudocolored object, each naming the geometry it describes and the
 variable it maps (e.g. *Oak scan 3* → *Z Height [m]*). Objects sharing a
