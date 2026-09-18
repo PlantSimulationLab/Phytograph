@@ -14,6 +14,38 @@ import pytest
 
 import memory_budget as mb
 
+# `available_bytes()` returns 0 when it cannot measure, by design, so an
+# assertion on it reads as a bare `assert 0 > 0` that names nothing. On macOS
+# there is no SC_AVPHYS_PAGES, so the os.sysconf fallback cannot answer either
+# and psutil is the ONLY path — which makes a venv missing it look like a
+# mysterious arithmetic failure rather than a missing dependency.
+_FIX_THE_VENV = (
+    "Almost always a venv that predates psutil being added to "
+    "requirements.txt: run `pip install -r backend-api/requirements.txt`. "
+    "psutil is a DECLARED dependency, but memory_budget degrades to "
+    "os.sysconf/resource rather than raising when it is absent, so the drift "
+    "is otherwise silent — and on macOS (no SC_AVPHYS_PAGES) that fallback "
+    "cannot measure at all."
+)
+_PSUTIL_MISSING = f"psutil is not importable. {_FIX_THE_VENV}"
+_MEASUREMENT_UNAVAILABLE = (
+    f"available_bytes() is 0, i.e. the OS memory measurement failed. "
+    f"{_FIX_THE_VENV}"
+)
+
+
+def test_psutil_the_declared_measurement_backend_is_installed():
+    """The drift-catcher, asserted on the dependency rather than its symptom.
+
+    Without psutil `rss_bytes()` falls back to `resource.ru_maxrss`, which is
+    the PEAK and never decreases — so admission control sizes every later job
+    against a high-water mark instead of current usage, silently and only on
+    the machines where the venv has drifted. Shipped builds are unaffected
+    (PyInstaller collects psutil via `collectAll` in build-backend.mjs); this
+    guards the dev venv, which nothing re-syncs on its own.
+    """
+    assert mb._psutil is not None, _PSUTIL_MISSING
+
 
 def test_physical_ram_is_measured_and_budget_is_a_fraction_of_it(monkeypatch):
     monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", raising=False)
@@ -41,7 +73,8 @@ def test_pinned_budget_wins_over_the_fraction(monkeypatch):
     snap = mb.snapshot()
     assert snap["budget_bytes"] == 3 * mb.GiB
     assert snap["rss_bytes"] > 0
-    assert snap["physical_bytes"] >= snap["available_bytes"] > 0
+    assert snap["available_bytes"] > 0, _MEASUREMENT_UNAVAILABLE
+    assert snap["physical_bytes"] >= snap["available_bytes"]
 
 
 def test_rss_includes_children_only_when_asked():
