@@ -23038,7 +23038,11 @@ def _robust_ground_z(positions: "np.ndarray") -> "Optional[float]":
     if positions is None or len(positions) == 0 or positions.shape[1] < 3:
         return None
     z = positions[:, 2]
-    z = z[np.isfinite(z)]
+    finite = np.isfinite(z)
+    # Same copy elision as _finite_xyz, for the same reason. Not shared with it
+    # because this one wants a 1-D column and the mask is per-value, not per-row.
+    if not bool(finite.all()):
+        z = z[finite]
     if z.size == 0:
         return None
 
@@ -23052,6 +23056,18 @@ _EXTENT_LOW_PERCENTILE = 1.0
 _EXTENT_HIGH_PERCENTILE = 99.0
 
 
+def _finite_xyz(positions: "np.ndarray") -> "np.ndarray":
+    """The finite rows of an (N,3+) position array, WITHOUT copying when it is
+    already all-finite — which, on every importer's output, it is.
+
+    `positions[mask, :3]` is a 447 MB copy on an 18.6 M-point scan, and the
+    robust stats each used to take their own. The `.all()` probe that replaces
+    it is one pass over a bool array (~10 ms) against ~350 ms for the copy.
+    """
+    ok = np.isfinite(positions[:, :3]).all(axis=1)
+    return positions[:, :3] if bool(ok.all()) else positions[ok, :3]
+
+
 def _robust_aabb(positions: "np.ndarray") -> "Optional[Dict[str, List[float]]]":
     """Outlier-resistant bounding box {"min": [...], "max": [...]}, or None.
 
@@ -23062,11 +23078,21 @@ def _robust_aabb(positions: "np.ndarray") -> "Optional[Dict[str, List[float]]]":
     """
     if positions is None or len(positions) == 0 or positions.shape[1] < 3:
         return None
-    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
+    finite = _finite_xyz(positions)
     if finite.shape[0] == 0:
         return None
-    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
-    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
+    # BOTH cutoffs in one call: np.percentile partitions the data once per call,
+    # so asking separately walked an 18.6 M x 3 array twice for two numbers that
+    # come out of the same partition. Measured 1.58 s -> 0.76 s on a VZ-1000
+    # position, and bit-identical HERE for a reason worth stating, because it is
+    # not general: for a float64 input both forms return float64, so the
+    # interpolation arithmetic is the same. For a float32 input the scalar form
+    # returns float32 and the sequence form float64, which differ in the last
+    # few ULPs (measured: 290 of 300 random trials). `positions` is float64 by
+    # CloudSession's invariant, and _robust_attribute_ranges — whose columns are
+    # float32 — deliberately does NOT do this.
+    lo, hi = np.percentile(finite, [_EXTENT_LOW_PERCENTILE,
+                                    _EXTENT_HIGH_PERCENTILE], axis=0)
     return {
         "min": [float(lo[i]) for i in range(3)],
         # A degenerate axis (all points identical) must not produce max < min.
@@ -23087,19 +23113,27 @@ def _robust_extent(positions: "np.ndarray") -> "Optional[List[float]]":
 
     A per-axis percentile span fixes it where the AABB cannot. Note this is NOT
     something the renderer can derive from min/max alone — discarding the tail
-    requires the points, which only exist here at import. Same cost profile as
-    `_robust_ground_z`: one `np.percentile` over an array already in RAM.
+    requires the points, which only exist here at import.
 
     Returns None for an empty/degenerate cloud so callers keep their own fallback.
+
+    THE SPAN OF `_robust_aabb`'S BOX, and nothing else. The two used to measure
+    the identical percentiles independently, so an import — which wants both —
+    paid for the whole thing twice: two 447 MB copies and two triple-percentile
+    passes, 3.4 s of a 22.7 s session build. A caller that needs both should ask
+    for the box once and call `_extent_of_aabb` on it, as the session build now
+    does; this composition stays for callers that want only the span.
     """
-    if positions is None or len(positions) == 0 or positions.shape[1] < 3:
+    return _extent_of_aabb(_robust_aabb(positions))
+
+
+def _extent_of_aabb(
+    box: "Optional[Dict[str, List[float]]]",
+) -> "Optional[List[float]]":
+    """Per-axis extent of a robust AABB — the free half of `_robust_extent`."""
+    if box is None:
         return None
-    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
-    if finite.shape[0] == 0:
-        return None
-    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
-    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
-    return [float(max(0.0, hi[i] - lo[i])) for i in range(3)]
+    return [float(max(0.0, box["max"][i] - box["min"][i])) for i in range(3)]
 
 
 def _robust_attribute_ranges(
@@ -23146,7 +23180,15 @@ def _robust_attribute_ranges(
         a = np.asarray(arr)
         if a.ndim != 1 or a.size == 0:
             return
-        finite = a[np.isfinite(a)]
+        ok = np.isfinite(a)
+        # Copy elided when the column is all-finite, as an instrument's columns
+        # are. The TWO percentile calls stay, unlike `_robust_aabb`'s single
+        # one: these columns are float32, where np.percentile returns float32
+        # for a scalar q and float64 for a sequence of them, so merging the
+        # calls would shift the colorbar's endpoints in their last few ULPs.
+        # A silent numerical change to every imported cloud's colour domain is
+        # not worth 0.5 s.
+        finite = a if bool(ok.all()) else a[ok]
         if finite.size == 0:
             return
         lo = float(np.percentile(finite, _EXTENT_LOW_PERCENTILE))
@@ -32860,8 +32902,11 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         ground_z = _robust_ground_z(_gz_src)
         # Same hits-only source: misses sit ~1 km out along the beam and would
         # dominate a percentile span exactly as they do the raw bounding box.
-        robust_extent = _robust_extent(_gz_src)
+        # ONE percentile pass for both: the extent is the box's span (see
+        # `_robust_extent`, which is now that composition), and computing them
+        # separately here used to do every bit of the work twice.
         robust_bounds = _robust_aabb(_gz_src)
+        robust_extent = _extent_of_aabb(robust_bounds)
         # Per-attribute percentile ranges for the colorbar. Hits-only like the
         # two above: a miss shell is a synthetic far-field value on every column
         # it carries, and it skews a scalar percentile exactly as it skews the
