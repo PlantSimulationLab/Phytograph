@@ -1977,8 +1977,12 @@ def riegl_project_inspect(request: RieglProjectInspectRequest):
     out = _run_riegl_container(
         ["inspect", "/project", "--frame", frame],
         _riegl_project_mounts(status, project),
-        # Bounded prefix reads only; a 6-position .riproject takes ~30 s. A
-        # .PROJ needs no point reads at all and returns effectively instantly.
+        # Bounded prefix reads only, and the bound is now reached early: the
+        # reader stops each position as soon as its GNSS and pose records
+        # appear, so the 19-position Vacaville project lists in ~0.6 s. A .PROJ
+        # needs no point reads at all. The timeout stays generous because the
+        # ladder's ceiling is unchanged for a position that never yields a pose,
+        # and a cold project still has to come off disk.
         timeout_s=600.0,
     )
     try:
@@ -23057,7 +23061,11 @@ def _robust_ground_z(positions: "np.ndarray") -> "Optional[float]":
     if positions is None or len(positions) == 0 or positions.shape[1] < 3:
         return None
     z = positions[:, 2]
-    z = z[np.isfinite(z)]
+    finite = np.isfinite(z)
+    # Same copy elision as _finite_xyz, for the same reason. Not shared with it
+    # because this one wants a 1-D column and the mask is per-value, not per-row.
+    if not bool(finite.all()):
+        z = z[finite]
     if z.size == 0:
         return None
 
@@ -23071,6 +23079,18 @@ _EXTENT_LOW_PERCENTILE = 1.0
 _EXTENT_HIGH_PERCENTILE = 99.0
 
 
+def _finite_xyz(positions: "np.ndarray") -> "np.ndarray":
+    """The finite rows of an (N,3+) position array, WITHOUT copying when it is
+    already all-finite — which, on every importer's output, it is.
+
+    `positions[mask, :3]` is a 447 MB copy on an 18.6 M-point scan, and the
+    robust stats each used to take their own. The `.all()` probe that replaces
+    it is one pass over a bool array (~10 ms) against ~350 ms for the copy.
+    """
+    ok = np.isfinite(positions[:, :3]).all(axis=1)
+    return positions[:, :3] if bool(ok.all()) else positions[ok, :3]
+
+
 def _robust_aabb(positions: "np.ndarray") -> "Optional[Dict[str, List[float]]]":
     """Outlier-resistant bounding box {"min": [...], "max": [...]}, or None.
 
@@ -23081,11 +23101,21 @@ def _robust_aabb(positions: "np.ndarray") -> "Optional[Dict[str, List[float]]]":
     """
     if positions is None or len(positions) == 0 or positions.shape[1] < 3:
         return None
-    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
+    finite = _finite_xyz(positions)
     if finite.shape[0] == 0:
         return None
-    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
-    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
+    # BOTH cutoffs in one call: np.percentile partitions the data once per call,
+    # so asking separately walked an 18.6 M x 3 array twice for two numbers that
+    # come out of the same partition. Measured 1.58 s -> 0.76 s on a VZ-1000
+    # position, and bit-identical HERE for a reason worth stating, because it is
+    # not general: for a float64 input both forms return float64, so the
+    # interpolation arithmetic is the same. For a float32 input the scalar form
+    # returns float32 and the sequence form float64, which differ in the last
+    # few ULPs (measured: 290 of 300 random trials). `positions` is float64 by
+    # CloudSession's invariant, and _robust_attribute_ranges — whose columns are
+    # float32 — deliberately does NOT do this.
+    lo, hi = np.percentile(finite, [_EXTENT_LOW_PERCENTILE,
+                                    _EXTENT_HIGH_PERCENTILE], axis=0)
     return {
         "min": [float(lo[i]) for i in range(3)],
         # A degenerate axis (all points identical) must not produce max < min.
@@ -23106,19 +23136,27 @@ def _robust_extent(positions: "np.ndarray") -> "Optional[List[float]]":
 
     A per-axis percentile span fixes it where the AABB cannot. Note this is NOT
     something the renderer can derive from min/max alone — discarding the tail
-    requires the points, which only exist here at import. Same cost profile as
-    `_robust_ground_z`: one `np.percentile` over an array already in RAM.
+    requires the points, which only exist here at import.
 
     Returns None for an empty/degenerate cloud so callers keep their own fallback.
+
+    THE SPAN OF `_robust_aabb`'S BOX, and nothing else. The two used to measure
+    the identical percentiles independently, so an import — which wants both —
+    paid for the whole thing twice: two 447 MB copies and two triple-percentile
+    passes, 3.4 s of a 22.7 s session build. A caller that needs both should ask
+    for the box once and call `_extent_of_aabb` on it, as the session build now
+    does; this composition stays for callers that want only the span.
     """
-    if positions is None or len(positions) == 0 or positions.shape[1] < 3:
+    return _extent_of_aabb(_robust_aabb(positions))
+
+
+def _extent_of_aabb(
+    box: "Optional[Dict[str, List[float]]]",
+) -> "Optional[List[float]]":
+    """Per-axis extent of a robust AABB — the free half of `_robust_extent`."""
+    if box is None:
         return None
-    finite = positions[np.isfinite(positions[:, :3]).all(axis=1), :3]
-    if finite.shape[0] == 0:
-        return None
-    lo = np.percentile(finite, _EXTENT_LOW_PERCENTILE, axis=0)
-    hi = np.percentile(finite, _EXTENT_HIGH_PERCENTILE, axis=0)
-    return [float(max(0.0, hi[i] - lo[i])) for i in range(3)]
+    return [float(max(0.0, box["max"][i] - box["min"][i])) for i in range(3)]
 
 
 def _robust_attribute_ranges(
@@ -23165,7 +23203,15 @@ def _robust_attribute_ranges(
         a = np.asarray(arr)
         if a.ndim != 1 or a.size == 0:
             return
-        finite = a[np.isfinite(a)]
+        ok = np.isfinite(a)
+        # Copy elided when the column is all-finite, as an instrument's columns
+        # are. The TWO percentile calls stay, unlike `_robust_aabb`'s single
+        # one: these columns are float32, where np.percentile returns float32
+        # for a scalar q and float64 for a sequence of them, so merging the
+        # calls would shift the colorbar's endpoints in their last few ULPs.
+        # A silent numerical change to every imported cloud's colour domain is
+        # not worth 0.5 s.
+        finite = a if bool(ok.all()) else a[ok]
         if finite.size == 0:
             return
         lo = float(np.percentile(finite, _EXTENT_LOW_PERCENTILE))
@@ -28256,6 +28302,60 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
     }
 
 
+def _read_octree_metadata_and_mark_used(octree_dir: _Path) -> dict:
+    """`_read_octree_metadata`, plus the LRU recency stamp.
+
+    Reading an entry's metadata IS adopting it: every caller does so because a
+    session is about to render from that directory. That makes this the one
+    chokepoint where "this entry was wanted" is known, which is why the stamp
+    lives here rather than at the build — the two REUSE paths (a bake that keeps
+    a current octree, the pose fast path re-adopting the previous one) never
+    reach a build, and those are exactly the signals an LRU exists to hear.
+    """
+    meta = _read_octree_metadata(octree_dir)
+    _touch_octree_dir(octree_dir)
+    return meta
+
+
+def _touch_octree_dir(octree_dir: _Path) -> None:
+    """Stamp a cache entry as USED, for the LRU in `_evict_octree_cache`.
+
+    The LRU ranks on the directory's MTIME, and this is the only thing that
+    maintains it. It cannot rank on ATIME, which is the obvious choice and was
+    the original one, for two independent reasons — both measured, both silent:
+
+      * THE EVICTOR DESTROYS ITS OWN KEY. `_dir_total_size` walks every entry to
+        total the cache, and walking a directory lists it, which sets its atime
+        to now. So a single `_evict_octree_cache` call — even one that is under
+        the cap and deletes nothing — flattens every entry's atime to the same
+        instant. Verified directly: four entries planted at t=1000/2000/3000/4000
+        all read back as `now` after one under-cap pass. From the second pass on,
+        "oldest accessed" means "whichever the filesystem happened to enumerate
+        first", i.e. sha1 order, i.e. random.
+      * ATIME IS NOT UPDATED BY THE THING THAT USES THESE. The renderer streams
+        an octree through `app://octree/<sha1>/<file>`, which opens a file INSIDE
+        the directory; that does not list the directory, so the directory's atime
+        does not move. Meanwhile Defender and the Search indexer reading a
+        freshly written entry DO move it (a planted atime does not survive one
+        second on a managed Windows box, which is also why
+        `test_trims_oldest_first_to_the_cap` failed at random).
+
+    Mtime has neither problem: nothing but an explicit write moves it, and the
+    evictor's own walk leaves it alone (verified). The cost is that recency has
+    to be recorded deliberately — which is what this is, called from the one
+    place every adoption of a cache entry passes through.
+    """
+    try:
+        os.utime(octree_dir, None)
+    except OSError:
+        # A concurrent eviction can remove the directory between the metadata
+        # read and here. Losing one recency stamp risks an early eviction of a
+        # REGENERABLE entry; raising would fail an import over bookkeeping.
+        # (An entry that must not be lost is pinned by session, not by recency —
+        # see `_evict_octree_cache`.)
+        pass
+
+
 def _dir_total_size(p: _Path) -> int:
     """Sum of sizes of regular files at any depth under p. Symlinks ignored."""
     total = 0
@@ -28424,12 +28524,14 @@ def _evict_octree_cache(max_bytes: int,
         if len(child.name) != 40 or not all(c in "0123456789abcdef" for c in child.name):
             continue
         try:
-            atime = child.stat().st_atime
+            # MTIME, not atime, and `_touch_octree_dir` explains at length why:
+            # the walk below would otherwise reset the very key being read here.
+            used = child.stat().st_mtime
         except FileNotFoundError:
             continue
-        entries.append((atime, child))
+        entries.append((used, child))
 
-    # Oldest first.
+    # Least recently used first.
     entries.sort(key=lambda e: e[0])
 
     total = sum(_dir_total_size(p) for _, p in entries)
@@ -32185,6 +32287,57 @@ def _session_to_las(sess: "CloudSession", out_las: _Path,
     return n
 
 
+# Rows per block in `_farthest_from_origin`. The peak transient is one block of
+# float64 xyz plus its squared-length column, so this trades memory for loop
+# iterations at no measured cost in time: on the 18.6 M-hit reference position,
+# 8M/4M/2M/1M rows all took 0.90 s and peaked at 571/288/142/71 MB. 2M keeps the
+# per-block numpy work comfortably vectorised while staying two orders of
+# magnitude below what materialising the whole selection costs.
+_FAR_SCAN_BLOCK = 2_000_000
+
+
+def _farthest_from_origin(positions: "np.ndarray", mask: "np.ndarray",
+                          origin: "np.ndarray") -> float:
+    """Greatest distance from `origin` to any point `mask` selects.
+
+    `np.max(np.linalg.norm(positions[mask] - origin, axis=1))` is the obvious
+    form, and it allocates roughly 3.5x the selected points to produce ONE
+    NUMBER: the boolean-index copy, the broadcast subtraction, norm's internal
+    square, and the reduced column. Measured on the reference position's 18.6 M
+    hits that is 1,636 MB of transient, on top of a session already holding
+    ~1.4 GB of the same cloud; this is 142 MB, and marginally faster besides.
+
+    SQUARES ARE COMPARED AND THE ROOT TAKEN ONCE, which is safe because sqrt is
+    monotonic, and BIT-IDENTICAL because `(d*d).sum(axis=1)` is the same
+    arithmetic `np.linalg.norm` does internally for an axis reduction (verified
+    over 400 random trials). `np.einsum("ij,ij->i", d, d)` is NOT a substitute
+    however natural it looks: it takes a different summation path and disagreed
+    with norm in 42 of those same 400 trials.
+
+    THE SESSION LOCK IS TAKEN PER BLOCK, not across the scan — the pattern and
+    the reasoning of `_session_to_las(block_lock=...)`. Holding it for the whole
+    scan would stall every concurrent session request for ~0.9 s on a global
+    registry lock; an edit landing between blocks can make the result straddle
+    it, which for a display radius that the next bake recomputes is the cheaper
+    side of that trade. The array REFERENCE is the caller's, captured under the
+    lock, so a bake that REPLACES `sess.positions` cannot desynchronise the
+    block indices from the array they were computed against.
+    """
+    best = 0.0
+    for start in range(0, positions.shape[0], _FAR_SCAN_BLOCK):
+        stop = start + _FAR_SCAN_BLOCK
+        with _cloud_session_lock:
+            block_mask = mask[start:stop]
+            if not block_mask.any():
+                continue
+            block = positions[start:stop][block_mask] - origin
+        value = float((block * block).sum(axis=1).max())
+        if value > best:
+            best = value
+        del block
+    return float(np.sqrt(best))
+
+
 def _gather_miss_positions(sess: "CloudSession",
                            origin: Optional[List[float]]) -> tuple[np.ndarray, float]:
     """Surviving sky/miss positions for the miss octree, in display form.
@@ -32216,7 +32369,14 @@ def _gather_miss_positions(sess: "CloudSession",
         else:
             hits = keep.copy()
             miss_pos = np.empty((0, 3), np.float64)
-        hit_pos = np.ascontiguousarray(sess.positions[hits], dtype=np.float64)
+        # The hits are wanted for ONE SCALAR — the farthest hit distance — and
+        # only when an origin was supplied. So keep the mask and a REFERENCE to
+        # the array rather than a materialised copy of every hit: see
+        # `_farthest_from_origin`, and note this also stops the `origin is None`
+        # path below from building a 447 MB array it then returns without ever
+        # reading.
+        hit_positions = sess.positions
+        any_hits = bool(hits.any())
         backfilled = sess.backfilled_misses
         if backfilled is not None and backfilled.get("positions") is not None:
             bf = np.ascontiguousarray(backfilled["positions"], dtype=np.float64)
@@ -32230,9 +32390,8 @@ def _gather_miss_positions(sess: "CloudSession",
         return miss_pos, 0.0
 
     origin_arr = np.asarray(origin, dtype=np.float64)
-    if hit_pos.shape[0] > 0:
-        hit_dists = np.linalg.norm(hit_pos - origin_arr, axis=1)
-        far = float(np.max(hit_dists))
+    if any_hits:
+        far = _farthest_from_origin(hit_positions, hits, origin_arr)
         # The radius places the miss shell at 1.4x the FARTHEST hit distance from
         # the scanner — a fixed 40% margin beyond the cloud so the sky/miss halo
         # sits clearly OUTSIDE the returns and reads as a distinct surrounding
@@ -32383,7 +32542,7 @@ def _build_octree_from_las(
                 raise
 
     _report(1.0, "Reading octree metadata…")
-    meta = _read_octree_metadata(cache_dir)
+    meta = _read_octree_metadata_and_mark_used(cache_dir)
     return cache_key, cache_dir, meta
 
 
@@ -32893,8 +33052,11 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         ground_z = _robust_ground_z(_gz_src)
         # Same hits-only source: misses sit ~1 km out along the beam and would
         # dominate a percentile span exactly as they do the raw bounding box.
-        robust_extent = _robust_extent(_gz_src)
+        # ONE percentile pass for both: the extent is the box's span (see
+        # `_robust_extent`, which is now that composition), and computing them
+        # separately here used to do every bit of the work twice.
         robust_bounds = _robust_aabb(_gz_src)
+        robust_extent = _extent_of_aabb(robust_bounds)
         # Per-attribute percentile ranges for the colorbar. Hits-only like the
         # two above: a miss shell is a synthetic far-field value on every column
         # it carries, and it skews a scalar percentile exactly as it skews the
@@ -34053,7 +34215,7 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
     if not is_posed and (not has_deletions or not compact):
         cache_dir = _octree_cache_root() / (sess.octree_cache_id or "")
         if sess.octree_cache_id and (cache_dir / "metadata.json").is_file():
-            meta = _read_octree_metadata(cache_dir)
+            meta = _read_octree_metadata_and_mark_used(cache_dir)
             with _cloud_session_lock:
                 display_stats = _bake_display_stats_locked(sess)
                 history_len = len(sess.deleted_history)
@@ -36600,7 +36762,7 @@ def _translate_octree_in_place(cache_id: Optional[str],
                             cache_id, exc_info=True)
                 return None
 
-    return cache_key, cache_dir, _read_octree_metadata(cache_dir)
+    return cache_key, cache_dir, _read_octree_metadata_and_mark_used(cache_dir)
 
 
 # ── Scalar fields: arithmetic, statistics, management ────────────────────────
@@ -37180,7 +37342,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             sess.octree_cache_id = prev_octree_id
             sess.octree_pose = [float(v) for v in request.matrix]
         cache_dir = _octree_cache_root() / prev_octree_id
-        meta = _read_octree_metadata(cache_dir)
+        meta = _read_octree_metadata_and_mark_used(cache_dir)
         # Deferring removes this session's only eviction trigger (today the sole
         # caller is `bake_cloud_session`), so a register-heavy workflow that never
         # bakes would grow the cache without bound. Trimming here costs a
