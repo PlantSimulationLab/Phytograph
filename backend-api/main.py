@@ -28269,6 +28269,60 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
     }
 
 
+def _read_octree_metadata_and_mark_used(octree_dir: _Path) -> dict:
+    """`_read_octree_metadata`, plus the LRU recency stamp.
+
+    Reading an entry's metadata IS adopting it: every caller does so because a
+    session is about to render from that directory. That makes this the one
+    chokepoint where "this entry was wanted" is known, which is why the stamp
+    lives here rather than at the build — the two REUSE paths (a bake that keeps
+    a current octree, the pose fast path re-adopting the previous one) never
+    reach a build, and those are exactly the signals an LRU exists to hear.
+    """
+    meta = _read_octree_metadata(octree_dir)
+    _touch_octree_dir(octree_dir)
+    return meta
+
+
+def _touch_octree_dir(octree_dir: _Path) -> None:
+    """Stamp a cache entry as USED, for the LRU in `_evict_octree_cache`.
+
+    The LRU ranks on the directory's MTIME, and this is the only thing that
+    maintains it. It cannot rank on ATIME, which is the obvious choice and was
+    the original one, for two independent reasons — both measured, both silent:
+
+      * THE EVICTOR DESTROYS ITS OWN KEY. `_dir_total_size` walks every entry to
+        total the cache, and walking a directory lists it, which sets its atime
+        to now. So a single `_evict_octree_cache` call — even one that is under
+        the cap and deletes nothing — flattens every entry's atime to the same
+        instant. Verified directly: four entries planted at t=1000/2000/3000/4000
+        all read back as `now` after one under-cap pass. From the second pass on,
+        "oldest accessed" means "whichever the filesystem happened to enumerate
+        first", i.e. sha1 order, i.e. random.
+      * ATIME IS NOT UPDATED BY THE THING THAT USES THESE. The renderer streams
+        an octree through `app://octree/<sha1>/<file>`, which opens a file INSIDE
+        the directory; that does not list the directory, so the directory's atime
+        does not move. Meanwhile Defender and the Search indexer reading a
+        freshly written entry DO move it (a planted atime does not survive one
+        second on a managed Windows box, which is also why
+        `test_trims_oldest_first_to_the_cap` failed at random).
+
+    Mtime has neither problem: nothing but an explicit write moves it, and the
+    evictor's own walk leaves it alone (verified). The cost is that recency has
+    to be recorded deliberately — which is what this is, called from the one
+    place every adoption of a cache entry passes through.
+    """
+    try:
+        os.utime(octree_dir, None)
+    except OSError:
+        # A concurrent eviction can remove the directory between the metadata
+        # read and here. Losing one recency stamp risks an early eviction of a
+        # REGENERABLE entry; raising would fail an import over bookkeeping.
+        # (An entry that must not be lost is pinned by session, not by recency —
+        # see `_evict_octree_cache`.)
+        pass
+
+
 def _dir_total_size(p: _Path) -> int:
     """Sum of sizes of regular files at any depth under p. Symlinks ignored."""
     total = 0
@@ -28437,12 +28491,14 @@ def _evict_octree_cache(max_bytes: int,
         if len(child.name) != 40 or not all(c in "0123456789abcdef" for c in child.name):
             continue
         try:
-            atime = child.stat().st_atime
+            # MTIME, not atime, and `_touch_octree_dir` explains at length why:
+            # the walk below would otherwise reset the very key being read here.
+            used = child.stat().st_mtime
         except FileNotFoundError:
             continue
-        entries.append((atime, child))
+        entries.append((used, child))
 
-    # Oldest first.
+    # Least recently used first.
     entries.sort(key=lambda e: e[0])
 
     total = sum(_dir_total_size(p) for _, p in entries)
@@ -32392,7 +32448,7 @@ def _build_octree_from_las(
                 raise
 
     _report(1.0, "Reading octree metadata…")
-    meta = _read_octree_metadata(cache_dir)
+    meta = _read_octree_metadata_and_mark_used(cache_dir)
     return cache_key, cache_dir, meta
 
 
@@ -34065,7 +34121,7 @@ def _do_bake_cloud_session(session_id: str, progress=None, compact: bool = True)
     if not is_posed and (not has_deletions or not compact):
         cache_dir = _octree_cache_root() / (sess.octree_cache_id or "")
         if sess.octree_cache_id and (cache_dir / "metadata.json").is_file():
-            meta = _read_octree_metadata(cache_dir)
+            meta = _read_octree_metadata_and_mark_used(cache_dir)
             with _cloud_session_lock:
                 display_stats = _bake_display_stats_locked(sess)
                 history_len = len(sess.deleted_history)
@@ -36612,7 +36668,7 @@ def _translate_octree_in_place(cache_id: Optional[str],
                             cache_id, exc_info=True)
                 return None
 
-    return cache_key, cache_dir, _read_octree_metadata(cache_dir)
+    return cache_key, cache_dir, _read_octree_metadata_and_mark_used(cache_dir)
 
 
 # ── Scalar fields: arithmetic, statistics, management ────────────────────────
@@ -37192,7 +37248,7 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             sess.octree_cache_id = prev_octree_id
             sess.octree_pose = [float(v) for v in request.matrix]
         cache_dir = _octree_cache_root() / prev_octree_id
-        meta = _read_octree_metadata(cache_dir)
+        meta = _read_octree_metadata_and_mark_used(cache_dir)
         # Deferring removes this session's only eviction trigger (today the sole
         # caller is `bake_cloud_session`), so a register-heavy workflow that never
         # bakes would grow the cache without bound. Trimming here costs a
