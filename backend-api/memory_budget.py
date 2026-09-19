@@ -23,12 +23,15 @@ Three things live here:
    derives from this number; nothing else should hard-code a byte count.
 
 3. ADMISSION - `Admission.admit(estimate, label)`. A heavy operation declares
-   the working set it is about to allocate and waits until that fits under the
-   budget alongside everything already admitted. This is deliberately NOT a
-   refusal: a single job larger than the whole budget is admitted as soon as it
-   is alone (the OS may page; that is recoverable, a refused export is not) and
-   logged. Refusing / prompting is the cost-advisory's job (see
-   `_cost_advisory` in main.py), which runs BEFORE the work is committed to.
+   the working set it is about to allocate and waits until that fits alongside
+   everything already admitted - under `admission_budget_bytes()`, which is the
+   budget capped by what the OS currently has FREE, because 50% of total RAM is
+   the wrong ceiling on a machine whose memory is already spoken for. This is
+   deliberately NOT a refusal: a single job larger than the whole budget is
+   admitted as soon as it is alone (the OS may page; that is recoverable, a
+   refused export is not) and logged. Refusing / prompting is the
+   cost-advisory's job (see `_cost_advisory` in main.py), which runs BEFORE the
+   work is committed to.
 
 Everything here is process-local and lock-protected; nothing holds a lock while
 sleeping except the admission Condition, which is the point.
@@ -50,6 +53,12 @@ _BUDGET_BYTES_ENV = "PHYTOGRAPH_MEMORY_BUDGET_BYTES"
 _BUDGET_FRACTION_ENV = "PHYTOGRAPH_MEMORY_BUDGET_FRACTION"
 
 GiB = 1024 ** 3
+
+# Fraction of CURRENTLY AVAILABLE memory that admission may commit to, and the
+# floor below which it stops shrinking. Only `admission_budget_bytes()` uses
+# these; the machine-level `budget_bytes()` is deliberately unaffected.
+_AVAILABLE_HEADROOM = 0.7
+_MIN_ADMISSION_BYTES = 1 * GiB
 
 
 # ---- measurement -------------------------------------------------------------
@@ -163,6 +172,36 @@ def budget_source() -> str:
     return "fraction"
 
 
+def admission_budget_bytes() -> int:
+    """The budget to ADMIT against right now, given what the OS has free.
+
+    `budget_bytes()` is a property of the MACHINE and must stay stable: it sets
+    a session's on-disk-vs-in-RAM layout at import and the eviction limit, and
+    a value that moved with momentary free memory would make a cloud spill or
+    not depending on when it happened to be imported.
+
+    Admission is the opposite: it is a decision about NOW, and 50% of total RAM
+    is the wrong number when the rest of the machine (browser, IDE, another
+    Phytograph window) is already using most of it. A 16 GB laptop with 2.4 GB
+    free would otherwise admit 8 GB of concurrent work and page itself to
+    death. So this returns the lesser of the budget and `_AVAILABLE_HEADROOM`
+    of what is actually available, floored at `_MIN_ADMISSION_BYTES` so a
+    machine under momentary pressure still makes progress one job at a time
+    (a lone job over the budget is admitted anyway - see `Admission`).
+
+    A PINNED budget is honoured as-is: the user said a number, and silently
+    admitting less than it would make the setting a lie. Unmeasurable
+    availability (0) also falls through to the plain budget.
+    """
+    budget = budget_bytes()
+    if budget_source() == "env":
+        return budget
+    avail = available_bytes()
+    if avail <= 0:
+        return budget
+    return max(min(budget, int(avail * _AVAILABLE_HEADROOM)), _MIN_ADMISSION_BYTES)
+
+
 def snapshot(include_children: bool = False) -> Dict[str, object]:
     """One dict with everything a health probe or a log line wants."""
     return {
@@ -172,6 +211,7 @@ def snapshot(include_children: bool = False) -> Dict[str, object]:
         "budget_bytes": budget_bytes(),
         "budget_fraction": budget_fraction(),
         "budget_source": budget_source(),
+        "admission_budget_bytes": admission_budget_bytes(),
         "psutil": _psutil is not None,
     }
 

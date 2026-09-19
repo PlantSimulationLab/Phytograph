@@ -82,3 +82,12 @@ rebuild it (`npm run build:backend`) for E2E and packaged installers.
 Edits to the PyHelios/Helios C++ source are recompiled too: the backend
 rebuilds `libhelios` on startup when the lib is stale, so restart the backend
 to pick up C++ edits.
+
+Because the supervisor stands down, `dev.mjs` is also the only thing that can
+pass the sidecar's environment in dev — including the **Memory budget (MB)**
+setting, which it reads from the dev profile's own `phytograph-store.json` and
+forwards as `PHYTOGRAPH_MEMORY_BUDGET_BYTES` (`devMemoryBudgetEnv()`, pinned by
+`src/main/memoryBudgetEnv.test.ts`). It was missing for a while, so the setting
+was silently inert in the whole hot-reload workflow and the dev backend always
+ran on auto. Note the dev profile is a throwaway user-data dir, so the value you
+set in a dev session is not your desktop app's.

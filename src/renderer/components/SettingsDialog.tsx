@@ -6,10 +6,18 @@ import { RieglStatusBadge } from './RieglStatusBadge';
 import {
   buildRieglImage,
   describeBackendError,
+  getMemoryBudget,
+  type MemoryBudgetInfo,
   type RieglStatus,
 } from '../utils/backendApi';
 import { getSettings, updateSettings, type AppSettings } from '../lib/store';
 import { POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS } from '../lib/pointCloudParsers';
+
+/** Bytes as GB for the memory readout, matching the MB field's units. */
+function formatGb(bytes: number): string {
+  const gb = bytes / 1024 ** 3;
+  return `${gb >= 10 ? Math.round(gb) : Math.round(gb * 10) / 10} GB`;
+}
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -25,6 +33,11 @@ interface SettingsDialogProps {
 export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  // What the backend's memory budget actually resolved to. Fetched per open
+  // (it moves with the machine's free memory) and null while in flight or if
+  // the backend is unreachable — the readout is then simply omitted rather
+  // than showing a wrong number.
+  const [memory, setMemory] = useState<MemoryBudgetInfo | null>(null);
 
   // Load persisted settings + the real app version each time the dialog opens, so
   // it always reflects what's on disk (another surface could have changed it).
@@ -40,6 +53,12 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
       ?.getInfo()
       .then((i) => {
         if (!cancelled) setAppVersion(i.appVersion);
+      })
+      .catch(() => {});
+    setMemory(null);
+    getMemoryBudget()
+      .then((m) => {
+        if (!cancelled) setMemory(m);
       })
       .catch(() => {});
     return () => {
@@ -338,7 +357,8 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 <p className="text-[11px] text-neutral-500 leading-snug">
                   Soft cap on the ray-tracing scratch buffers during a synthetic scan. Lower it to reduce peak
                   RAM on very large scans &mdash; the beam fan-out is chunked to stay near this budget, with
-                  identical results. Leave blank to use Helios's automatic default (&asymp;4&nbsp;GiB on this build).
+                  identical results. Leave blank to use Helios's automatic default (&asymp;4&nbsp;GiB on this
+                  build). Never exceeds the overall memory budget below, whichever is lower.
                 </p>
               </div>
               {/* Optional field: blank => null => Helios default. DebouncedNumberInput
@@ -368,6 +388,26 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                   enough to ask before starting. Leave blank for automatic (half of this machine&rsquo;s RAM).
                   Takes effect the next time Phytograph starts.
                 </p>
+                {memory && (
+                  <p
+                    className="text-[11px] text-neutral-400 leading-snug mt-1"
+                    data-testid="settings-memory-budget-detected"
+                  >
+                    {memory.source === 'env' ? 'Using ' : 'Auto: using '}
+                    <span className="text-neutral-200">{formatGb(memory.budgetBytes)}</span>
+                    {memory.source === 'fraction' && memory.physicalBytes > 0 && (
+                      <> of {formatGb(memory.physicalBytes)} detected</>
+                    )}
+                    {memory.source === 'env' && <> (set here)</>}
+                    {memory.admissionBytes > 0 && memory.admissionBytes < memory.budgetBytes && (
+                      <>
+                        {' '}&middot; {formatGb(memory.admissionBytes)} available for new work right
+                        now, limited by free memory
+                      </>
+                    )}
+                    {!memory.psutil && <> &middot; RAM could not be measured directly</>}
+                  </p>
+                )}
               </div>
               <input
                 type="text"

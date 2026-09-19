@@ -26,6 +26,10 @@ vi.mock('../lib/store', () => ({
 vi.mock('../utils/backendApi', () => ({
   buildRieglImage: vi.fn().mockResolvedValue({ ok: true, image: 'x' }),
   describeBackendError: (e: unknown) => ({ message: String(e) }),
+  // The dialog reads the resolved memory budget on open. Rejected here: this
+  // file is about the RIEGL controls, and the readout is simply omitted when
+  // the backend cannot be reached, which is the same branch.
+  getMemoryBudget: vi.fn().mockRejectedValue(new Error('no backend in this test')),
 }));
 
 // Stand in for the badge so the test drives the status directly instead of

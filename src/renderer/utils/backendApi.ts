@@ -379,6 +379,47 @@ export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
 }
 
 /**
+ * What the backend's memory budget actually resolved to, for the Settings
+ * readout. `source` is 'env' when the user pinned a value (Settings → Memory
+ * budget, or the env var) and 'fraction' when it was derived automatically
+ * from the machine's RAM — which is the case the UI needs to explain, since a
+ * blank field otherwise gives the user no way to see what "auto" chose.
+ *
+ * `admissionBytes` is the budget concurrent work is actually admitted against
+ * right now: the budget capped by what the OS currently has free, so it can sit
+ * well below `budgetBytes` on a busy machine. `psutil` false means the measurement
+ * degraded to an os.sysconf fallback (or to the 4 GB unmeasurable default).
+ */
+export interface MemoryBudgetInfo {
+  physicalBytes: number;
+  availableBytes: number;
+  rssBytes: number;
+  budgetBytes: number;
+  admissionBytes: number;
+  fraction: number;
+  source: 'env' | 'fraction';
+  psutil: boolean;
+}
+
+export async function getMemoryBudget(signal?: AbortSignal): Promise<MemoryBudgetInfo> {
+  const res = await fetch(`${getBackendUrl()}/health`, { signal });
+  if (!res.ok) throw new Error(`health failed: ${res.status}`);
+  const j = (await res.json()) as Record<string, unknown>;
+  const m = (j.memory ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return {
+    physicalBytes: num(m.physical_bytes),
+    availableBytes: num(m.available_bytes),
+    rssBytes: num(m.rss_bytes),
+    budgetBytes: num(m.budget_bytes),
+    admissionBytes: num(m.admission_budget_bytes),
+    fraction: num(m.budget_fraction),
+    source: m.budget_source === 'env' ? 'env' : 'fraction',
+    psutil: m.psutil === true,
+  };
+}
+
+/**
  * Whether RIEGL raw-project (.riproject / .rxp) import is available here, and
  * why not when it isn't.
  *

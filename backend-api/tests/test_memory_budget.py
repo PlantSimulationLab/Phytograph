@@ -159,3 +159,54 @@ def test_fmt_bytes_is_human():
     assert mb.fmt_bytes(3 * mb.GiB) == "3.0 GB"
     assert mb.fmt_bytes(200 * 1024 ** 2) == "200 MB"
     assert mb.fmt_bytes(1024) == "1 KB"
+
+
+# ---- admission_budget_bytes: the budget capped by what is actually free ------
+#
+# `budget_bytes()` is a property of the MACHINE and must stay stable (it decides
+# a session's on-disk-vs-in-RAM layout at import); admission is a decision about
+# NOW. Before this split, a 16 GB laptop with 2.4 GB free still admitted 8 GB of
+# concurrent work and paged itself to death. These pin the split in both
+# directions, since collapsing either one back into the other is silent.
+
+def test_admission_budget_is_capped_by_available_memory(monkeypatch):
+    monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", raising=False)
+    monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_FRACTION", raising=False)
+    monkeypatch.setattr(mb, "physical_ram_bytes", lambda: 16 * mb.GiB)
+    # Plenty free: the machine-level budget is the binding constraint.
+    monkeypatch.setattr(mb, "available_bytes", lambda: 14 * mb.GiB)
+    assert mb.budget_bytes() == 8 * mb.GiB
+    assert mb.admission_budget_bytes() == 8 * mb.GiB
+    # Busy machine: free memory binds instead, and the machine budget is unmoved.
+    monkeypatch.setattr(mb, "available_bytes", lambda: 3 * mb.GiB)
+    assert mb.admission_budget_bytes() == int(3 * mb.GiB * mb._AVAILABLE_HEADROOM)
+    assert mb.budget_bytes() == 8 * mb.GiB, (
+        "budget_bytes() must NOT move with free memory: it sets a session's "
+        "store-backed layout at import, which cannot flap"
+    )
+
+
+def test_admission_budget_never_starves_and_honours_a_pin(monkeypatch):
+    monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_FRACTION", raising=False)
+    monkeypatch.setattr(mb, "physical_ram_bytes", lambda: 16 * mb.GiB)
+    # Almost nothing free: floored, so work still proceeds one job at a time
+    # rather than deadlocking behind a budget of ~0.
+    monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", raising=False)
+    monkeypatch.setattr(mb, "available_bytes", lambda: 64 * 1024 * 1024)
+    assert mb.admission_budget_bytes() == mb._MIN_ADMISSION_BYTES
+    # Unmeasurable availability degrades to the plain budget, never to the floor.
+    monkeypatch.setattr(mb, "available_bytes", lambda: 0)
+    assert mb.admission_budget_bytes() == 8 * mb.GiB
+    # A PINNED budget is honoured exactly: the user named a number, and quietly
+    # admitting less would make the Settings field a lie.
+    monkeypatch.setenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", str(6 * mb.GiB))
+    monkeypatch.setattr(mb, "available_bytes", lambda: 1 * mb.GiB)
+    assert mb.admission_budget_bytes() == 6 * mb.GiB
+
+
+def test_snapshot_reports_the_admission_budget(monkeypatch):
+    """The Settings readout reads this key; losing it blanks the readout."""
+    monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", raising=False)
+    snap = mb.snapshot()
+    assert "admission_budget_bytes" in snap
+    assert 0 < int(snap["admission_budget_bytes"]) <= int(snap["budget_bytes"])

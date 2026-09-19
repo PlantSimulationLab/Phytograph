@@ -11,7 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -48,6 +48,32 @@ const devOctreeCacheRoot =
 // PHYTOGRAPH_DEV_USER_DATA_DIR to point dev at a specific profile.
 const devUserDataDir =
   process.env.PHYTOGRAPH_DEV_USER_DATA_DIR || join(tmpdir(), 'phytograph-dev-userdata');
+
+// The Settings "Memory budget (MB)" value, as the env var the backend reads.
+//
+// The packaged/`electron .` path gets this from `memoryBudgetEnv()` in
+// src/main/backend.ts at spawn — but in dev the supervisor STANDS DOWN
+// (PHYTOGRAPH_DEV_BACKEND=1) and never spawns, so uvicorn below is the only
+// backend and nothing was threading the setting to it. The setting was
+// therefore silently inert in the whole hot-reload dev workflow: the dev
+// backend always ran on auto, and a developer could not test a pinned budget
+// through the UI at all. Read from the DEV profile's store (dev uses its own
+// user-data dir, so this is not the desktop app's settings file). An explicit
+// env var from the shell still wins, matching backend.ts.
+function devMemoryBudgetEnv() {
+  if (process.env.PHYTOGRAPH_MEMORY_BUDGET_BYTES) return {};
+  try {
+    const storePath = join(devUserDataDir, 'phytograph-store.json');
+    if (!existsSync(storePath)) return {};
+    const mb = JSON.parse(readFileSync(storePath, 'utf8'))?.settings?.memoryBudgetMb;
+    if (typeof mb === 'number' && Number.isFinite(mb) && mb > 0) {
+      return { PHYTOGRAPH_MEMORY_BUDGET_BYTES: String(Math.round(mb * 1024 * 1024)) };
+    }
+  } catch (err) {
+    console.warn('[dev] could not read the memory budget setting:', err.message);
+  }
+  return {};
+}
 
 // Ask the OS for a free TCP port (bind :0, read the assignment). Each
 // `npm run dev` picks its own backend + renderer ports so concurrent dev
@@ -143,7 +169,7 @@ async function runOnce(cmd, args) {
         cwd: backendDir,
         // Point the dev backend at the same cache the Electron protocol handler
         // reads, so both ends of the octree pipeline agree on the dir.
-        env: { ...process.env, PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot },
+        env: { ...process.env, PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot, ...devMemoryBudgetEnv() },
       },
     );
     let stderrTail = '';

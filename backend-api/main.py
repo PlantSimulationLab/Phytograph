@@ -424,7 +424,7 @@ if _MAX_WORKER_THREADS is None:
 # alone with a log line rather than being refused. Refusing / prompting happens
 # BEFORE the work is committed to, via `_cost_advisory` and the 409 cost
 # warning, where the user can still say no.
-_ADMISSION = memory_budget.Admission(memory_budget.budget_bytes)
+_ADMISSION = memory_budget.Admission(memory_budget.admission_budget_bytes)
 
 
 @app.on_event("startup")
@@ -15012,13 +15012,20 @@ def _do_lidar_scan(request: LidarScanRequest, progress=None) -> dict:
                 # rays_per_pulse=1 collapses the cone to one exact ray per pulse — the
                 # idealized scan — for either mode.
                 record_misses = bool(request.record_misses)
-                # Optional user-set cap on the ray trace's transient buffers. Only
-                # override when a positive value is supplied; otherwise leave Helios's
-                # automatic path-dependent default in place.
-                if request.synthetic_scan_memory_budget_mb is not None \
-                        and request.synthetic_scan_memory_budget_mb > 0:
-                    lidar.setSyntheticScanMemoryBudget(
-                        int(request.synthetic_scan_memory_budget_mb) * 1024 * 1024)
+                # Cap on the ray trace's transient buffers. This is Helios's own
+                # knob, expressed in its own units, and it used to be wholly
+                # independent of the process memory budget -- so "Memory budget =
+                # 2048 MB" coexisted silently with the 4 GiB (CPU) / 8 GiB (GPU)
+                # Helios default, and the setting the user had actually touched
+                # was the one being ignored. Both directions are now reconciled
+                # against `_synthetic_scan_budget_bytes`: an explicit request is
+                # clamped to the process budget, and a request that names nothing
+                # still gets the budget rather than Helios's larger default,
+                # whenever the budget is the smaller of the two.
+                _scan_budget = _synthetic_scan_budget_bytes(
+                    request.synthetic_scan_memory_budget_mb)
+                if _scan_budget is not None:
+                    lidar.setSyntheticScanMemoryBudget(_scan_budget)
                 _prof["add_scans"] = time.perf_counter()
                 _ckpt()
                 # The ray trace's per-scan loop and inner ray loop honor a cancel
@@ -30159,10 +30166,40 @@ try:
     )
 except (ValueError, TypeError):
     _SESSION_IDLE_TTL_SECONDS = 30 * 60.0
+# The COUNT cap, which exists alongside the byte cap in `_eviction_victims_locked`
+# (`_SESSION_RAM_FRACTION` of the budget). A fixed 8 made the two disagree by an
+# order of magnitude across machines: on a 64 GB workstation the bytes allow far
+# more than 8 small clouds, and the count evicted sessions the budget would
+# happily have kept; on an 8 GB laptop 8 large ones are gone before the count
+# notices. So the default now scales with the budget at a nominal 1 GB/session,
+# clamped to [4, 32] — 4 so a multi-scan registration always fits, 32 so the
+# per-session bookkeeping (and the octree pin set) stays bounded. Still an int
+# module attribute, not a function: ~30 tests monkeypatch it directly, and the
+# byte cap is the real RAM bound in any case.
+_SESSION_COUNT_NOMINAL_BYTES = 1024 ** 3
+_SESSION_COUNT_MIN = 4
+_SESSION_COUNT_MAX = 32
+
+
+def _default_max_cloud_sessions(budget_bytes: "Optional[int]" = None) -> int:
+    """The count cap derived from `budget_bytes` (default: the live budget).
+
+    A function, not an inline expression, so a test can assert the derivation on
+    several budgets without reloading this module -- reloading `main` rebuilds
+    every pydantic model class in it, which breaks any other module holding a
+    reference to the old ones.
+    """
+    b = memory_budget.budget_bytes() if budget_bytes is None else int(budget_bytes)
+    return max(_SESSION_COUNT_MIN,
+               min(_SESSION_COUNT_MAX, int(b / _SESSION_COUNT_NOMINAL_BYTES)))
+
+
 try:
-    _MAX_CLOUD_SESSIONS = int(os.environ.get("PHYTOGRAPH_MAX_CLOUD_SESSIONS", "8"))
+    _MAX_CLOUD_SESSIONS = int(os.environ.get("PHYTOGRAPH_MAX_CLOUD_SESSIONS", "0")) or None
 except (ValueError, TypeError):
-    _MAX_CLOUD_SESSIONS = 8
+    _MAX_CLOUD_SESSIONS = None
+if _MAX_CLOUD_SESSIONS is None:
+    _MAX_CLOUD_SESSIONS = _default_max_cloud_sessions()
 try:
     _MAX_PLANT_SESSIONS = int(os.environ.get("PHYTOGRAPH_MAX_PLANT_SESSIONS", "8"))
 except (ValueError, TypeError):
@@ -30222,10 +30259,31 @@ def _evict_session_ids(sessions: Dict[str, Any], max_count: int, now: float) -> 
 # not a data-interchange format and must not become one.
 _SESSION_SPILL_SUFFIX = ".session"
 
-# Cap for the spill directory. Generous next to the octree cache's 20 GB because
-# these files ARE the clouds -- a trimmed spill is a cloud the user loses, which
-# is the failure this exists to stop, so trimming is the last resort.
-_DEFAULT_SESSION_SPILL_MAX_BYTES = 64 * 1024 * 1024 * 1024
+# Disk cap for the spill directory. Generous next to the octree cache's 20 GB
+# because these files ARE the clouds -- a trimmed spill is a cloud the user
+# loses, which is the failure this exists to stop, so trimming is a last resort.
+# Scaled off the memory budget (a spilled session is the on-disk twin of a
+# RAM-resident one, so a machine that holds bigger clouds needs proportionally
+# more spill room) and clamped to
+# [16 GiB, 256 GiB]. It was a flat 64 GiB, which is both far too much on a
+# 256 GB laptop SSD and far too little on a workstation holding 100 M-point
+# clouds — and overflowing it DROPS a session, which for an edited cloud is
+# unrecoverable work (see `_trim_session_spills`). 8x the budget: the budget
+# bounds what is in RAM at once, and spill holds what has been evicted from it.
+_SESSION_SPILL_BUDGET_MULTIPLE = 8
+_SESSION_SPILL_MIN_BYTES = 16 * 1024 ** 3
+_SESSION_SPILL_MAX_CAP_BYTES = 256 * 1024 ** 3
+
+
+def _default_session_spill_max_bytes(budget_bytes: "Optional[int]" = None) -> int:
+    """The spill disk cap derived from `budget_bytes` (default: the live budget).
+    A function for the same reason as `_default_max_cloud_sessions`."""
+    b = memory_budget.budget_bytes() if budget_bytes is None else int(budget_bytes)
+    return max(_SESSION_SPILL_MIN_BYTES,
+               min(_SESSION_SPILL_MAX_CAP_BYTES, b * _SESSION_SPILL_BUDGET_MULTIPLE))
+
+
+_DEFAULT_SESSION_SPILL_MAX_BYTES = _default_session_spill_max_bytes()
 
 # id -> {"path", "bytes", "at", "octree_ids"}. Guarded by `_cloud_session_lock`.
 _spilled_sessions: Dict[str, dict] = {}
@@ -35950,12 +36008,60 @@ class SessionDemRequest(BaseModel):
 # intensity, the pre-bin's ids + sort order (12) and the density layers' cell
 # ids. Measured at 10 M points with a ground column: +1.1 GB over the session
 # itself, i.e. ~110 B/pt; the whole-cloud DSM/CHM shapes sit under this too.
+# Helios's own default for the synthetic-scan scratch buffers: 4 GiB on a CPU
+# build, 8 GiB when the CUDA path compiled in (see LiDAR.h). Mirrored here only
+# to decide whether the process memory budget is the tighter of the two -- the
+# C++ side still owns the default itself.
+_HELIOS_SCAN_BUDGET_DEFAULT_CPU = 4 * 1024 ** 3
+_HELIOS_SCAN_BUDGET_DEFAULT_GPU = 8 * 1024 ** 3
+# A scan's scratch is transient and runs alone, so it may use more of the budget
+# than a session may hold; it must still not exceed it outright.
+_SYNTHETIC_SCAN_BUDGET_FRACTION = 1.0
+
+
+def _synthetic_scan_budget_bytes(requested_mb: "Optional[int]") -> "Optional[int]":
+    """Bytes to hand `setSyntheticScanMemoryBudget`, or None to leave Helios alone.
+
+    Reconciles the two memory settings, which were independent and could
+    contradict each other with no warning. `requested_mb` is the user's
+    "Synthetic scan memory budget (MB)"; the ceiling is the process memory
+    budget, which is the number the user set (or the machine's RAM) and so must
+    win. Returns None only when Helios's own default is already the smaller
+    number, in which case there is nothing to override.
+    """
+    ceiling = int(memory_budget.budget_bytes() * _SYNTHETIC_SCAN_BUDGET_FRACTION)
+    if requested_mb is not None and int(requested_mb) > 0:
+        return max(1, min(int(requested_mb) * 1024 * 1024, ceiling))
+    # Which default Helios will have picked, by the same rule /api/device-info
+    # uses: the CUDA path only exists off macOS, and only with a usable GPU.
+    gpu = False
+    try:
+        import platform as _pf
+
+        if _pf.system().lower() != "darwin":
+            from pyhelios.runtime import get_gpu_runtime_info
+
+            gpu = bool((get_gpu_runtime_info() or {}).get("cuda_runtime_available"))
+    except Exception:
+        gpu = False
+    helios_default = (_HELIOS_SCAN_BUDGET_DEFAULT_GPU if gpu
+                      else _HELIOS_SCAN_BUDGET_DEFAULT_CPU)
+    return ceiling if ceiling < helios_default else None
+
+
 _DEM_BYTES_PER_POINT = 112
 
 
-# Session DEMs of at least this many points (PHYTOGRAPH_DEM_STREAM_MIN_POINTS)
-# take the streamed worker whenever it can reproduce the in-memory answer.
-_DEM_STREAM_MIN_POINTS_DEFAULT = 5_000_000
+# Session DEMs whose in-memory working set would exceed this fraction of the
+# memory budget take the streamed worker instead, whenever it can reproduce the
+# in-memory answer. A fraction rather than the old flat 5 M points: the cost of
+# holding a DEM whole is `_DEM_BYTES_PER_POINT` (measured, just above), so the
+# point at which streaming becomes worth its slower path is a property of the
+# MACHINE, not a constant. 5 M points was ~0.56 GB, i.e. ~14% of an 8 GB
+# laptop's 4 GB budget but only ~1.7% of a 64 GB workstation's 32 GB — the
+# workstation streamed needlessly and the laptop streamed too late.
+# PHYTOGRAPH_DEM_STREAM_MIN_POINTS still pins an exact point count.
+_DEM_STREAM_BUDGET_FRACTION = 0.15
 # Gridded points per band in the streamed per-cell percentile. A band is what
 # the streamed worker holds in RAM at once (cell id + z + sort order, ~20 B/pt).
 _DEM_BAND_POINTS = 4_000_000
@@ -35963,12 +36069,19 @@ _DEM_BAND_POINTS = 4_000_000
 
 def _dem_stream_min_points() -> int:
     raw = os.environ.get("PHYTOGRAPH_DEM_STREAM_MIN_POINTS")
-    if not raw:
-        return _DEM_STREAM_MIN_POINTS_DEFAULT
-    try:
-        return max(0, int(float(raw)))
-    except ValueError:
-        return _DEM_STREAM_MIN_POINTS_DEFAULT
+    if raw:
+        try:
+            return max(0, int(float(raw)))
+        except ValueError:
+            pass
+    return _dem_stream_min_points_for(memory_budget.budget_bytes())
+
+
+def _dem_stream_min_points_for(budget_bytes: int) -> int:
+    """The DEM stream cutoff for a given budget. Split out so a test can assert
+    the derivation across machines without reloading this module."""
+    return max(1, int(int(budget_bytes) * _DEM_STREAM_BUDGET_FRACTION
+                      / _DEM_BYTES_PER_POINT))
 
 
 class _DemXYBox:

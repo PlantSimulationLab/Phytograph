@@ -111,7 +111,8 @@ the cloud. The result is the same as an untiled run to within a fraction of
 a percent, including along tile edges; with **Measure from the scan** on,
 the tolerance is measured once for the whole cloud rather than per tile.
 The memory the estimate is judged against is **Settings → Performance →
-Memory budget (MB)** (automatic by default: half of this machine's RAM).
+Memory budget (MB)** (automatic by default: half of this machine's RAM — the
+setting shows what it detected, so you can see the figure being used).
 
 ## Inspect and use the result
 

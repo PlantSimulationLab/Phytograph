@@ -450,6 +450,9 @@ Click **Run scan** to proceed.
     result-invariant — the points are identical to an uncapped run. Leave
     the field **blank** to use the engine's automatic default
     (≈4 GiB); lower it only if a large scan is straining your machine.
+    Either way it never exceeds **Settings → Performance → Memory budget
+    (MB)**, so a machine pinned to a small overall budget does not get a
+    large scan buffer by leaving this field blank.
 
 Phytograph loads all visible scannable geometry into one Helios scene,
 ray-traces it once from each scan position you selected, then writes each

@@ -54,10 +54,31 @@ indices each step *newly* deleted and `reset_edits` replays them; when the
 bounded stack (`_MAX_DELETED_HISTORY`) drops its oldest step, that step's
 deletions fold into `deleted_base`, the floor the replay starts from.
 
+### Session caps that scale with it
+
+Three limits used to be constants sitting next to budget-derived ones, which
+made them disagree by an order of magnitude across machines. All three keep
+their 16 GB values (the machine they were tuned on) and now scale from there:
+
+| Limit | Derivation | 8 GB RAM | 16 GB | 64 GB |
+|---|---|---|---|---|
+| `_MAX_CLOUD_SESSIONS` (count) | budget / 1 GB nominal, clamped [4, 32] | 4 | 8 | 32 |
+| spill directory cap (disk) | 8 x budget, clamped [16, 256] GiB | 32 GiB | 64 GiB | 256 GiB |
+| DEM stream cutoff | 15 % of budget / 112 B per point | ~5.8 M pts | ~11 M | ~46 M |
+
+`_MAX_CLOUD_SESSIONS` stays a plain int module attribute (the eviction path and
+~30 tests set it directly) and is applied *before* the byte cap, so a count too
+low for the machine evicted sessions the budget would have kept. The spill cap
+matters most: overflowing it **drops** a session, and for a cloud edited since
+import that is unrecoverable work, so a laptop wants a smaller cap than a
+workstation for the same reason it wants a smaller budget. Pinned by
+`backend-api/tests/test_budget_derived_thresholds.py`, which asserts the
+scaling relationship rather than the numbers.
+
 ## Store-backed sessions (memory-mapped columns)
 
 Above `_session_store_min_points()` — 10 % of the memory budget divided by
-the per-point cost, so ~12 M points on a 16 GB laptop and ~50 M on 64 GB;
+the per-point cost, so ~15 M points on a 16 GB laptop and ~60 M on 64 GB;
 `PHYTOGRAPH_SESSION_STORE_MIN_POINTS` pins it — a session's arrays live in a
 `session_store.SessionStore`: one memory-mapped `.npy` per column under
 `<octree cache root>/.sessions/<pid>-<nonce>/<session_id>.store/`. What
@@ -226,9 +247,14 @@ far above the key's float64 spacing so cells never interleave), which
 against 777 MB before. The result is identical to lexsort's — pinned by a
 test with exact ties and cells up to the cap — to within the key's spacing,
 about 1e-9 of the z range, which decides only which of two z values closer
-than that is picked. A session DEM of at least 5 M points
-(`PHYTOGRAPH_DEM_STREAM_MIN_POINTS`) no longer materialises the hits, the
-ground subset and the first-return subset (~24 B/pt each).
+than that is picked. A session DEM whose whole-cloud working set would exceed
+`_DEM_STREAM_BUDGET_FRACTION` (15 %) of the memory budget — i.e. that fraction
+divided by the measured `_DEM_BYTES_PER_POINT`, so ~11 M points on a 16 GB
+laptop and ~46 M on 64 GB, with `PHYTOGRAPH_DEM_STREAM_MIN_POINTS` still pinning
+an exact count — no longer materialises the hits, the ground subset and the
+first-return subset (~24 B/pt each). This was a flat 5 M points, which on a
+64 GB workstation took the slower streamed path for a DEM that fit in RAM twenty
+times over, and on an 8 GB laptop took it too late.
 `_do_session_dem_streamed` reads the session in 2 M-row blocks: one pass for
 subset counts and extents, one for per-row counts and the density,
 intensity and footprint grids, and one that appends each gridded point's
@@ -384,7 +410,43 @@ is the one knob that trades detail for frame rate on a 100 M-point plot.
 `GET /health` reports the budget, the backend's resident set, and what is
 currently admitted against the budget; the slow-request log line
 (`[slow] POST /api/... took 12.3s, rss 1.2 GB -> 4.8 GB of a 16.0 GB budget`)
-says what a slow request cost.
+says what a slow request cost. **Settings → Performance shows what the budget
+resolved to** (`getMemoryBudget()` reads `/health` when the dialog opens):
+`Auto: using 8 GB of 16 GB detected`, or `Using 6 GB (set here)` when pinned.
+Without it a blank field gave the user no way to tell half of 64 GB from the
+4 GB unmeasurable fallback, which is also why the readout says when `psutil`
+could not measure RAM at all.
+
+### The synthetic-scan budget is reconciled against it
+
+**Settings → Performance → Synthetic scan memory budget (MB)** is Helios's own
+knob (`setSyntheticScanMemoryBudget`, 4 GiB CPU / 8 GiB GPU by default) and was
+wholly independent of the process budget, so the two adjacent, near-identically
+labelled fields could contradict each other in silence: a 2 GB process budget
+left the ray trace on its 4 GiB default, and a 32 GB scan budget on an 8 GB
+machine was accepted without comment. `_synthetic_scan_budget_bytes` now clamps
+an explicit request to the process budget and, when nothing is requested,
+overrides Helios's default only if the budget is the tighter of the two — so a
+machine with plenty of RAM behaves exactly as before. Pinned by
+`backend-api/tests/test_synthetic_scan_budget.py`.
+
+### The budget vs. what is free right now
+
+`budget_bytes()` is a property of the MACHINE and deliberately does **not** move
+with free memory: it decides a session's on-disk-vs-in-RAM layout at import
+(`_session_store_min_points()`), and a value that drifted would make the same
+cloud spill or not depending on when it happened to be imported.
+
+Admission is the opposite — a decision about *now* — so it uses
+`admission_budget_bytes()`: the budget capped at `_AVAILABLE_HEADROOM` (70 %) of
+what the OS reports available, floored at `_MIN_ADMISSION_BYTES` (1 GiB) so a
+machine under pressure still makes progress one job at a time. A **pinned**
+budget is honoured as-is (the user named a number; quietly admitting less would
+make the setting a lie), and unmeasurable availability falls back to the plain
+budget. This is the laptop case: 16 GB physical is an 8 GB budget, but with
+2.4 GB actually free only ~1.7 GB of concurrent work is admitted instead of
+8 GB of page-thrashing. `available_bytes()` was measured and reported for a long
+time before anything acted on it.
 
 ### Admission control
 
