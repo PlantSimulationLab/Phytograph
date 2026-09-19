@@ -463,6 +463,33 @@ budget is advisory for a lone job and a hard cap only on concurrency, because
 paging is recoverable and a refused export is not. Refusing or prompting
 happens *before* the work is committed to, via the cost advisory.
 
+Two more families were outside the gate until recently, which is worse than it
+sounds: `Admission._acquire` admits freely whenever nothing is in flight, so
+unadmitted work is **arithmetically invisible** — it neither waits for a running
+job nor makes one wait for it.
+
+- **Session mutations** — `merge` (the single largest allocation the backend can
+  make: N sessions' survivor slices and the concatenated output are live at
+  once), `transform` (a float64 copy of positions and beam origins, charged
+  against the FULL count since deleted rows keep their coordinates for undo),
+  `split` and `extract` (survivor slice plus the child's columns). Sized by
+  `_session_mutation_bytes`, which reads the columns a session actually carries
+  rather than a flat per-point figure, so a bare xyz cloud is not charged for
+  colour, intensity, timestamps and beam origins it does not have.
+- **Registration** — `/api/c2c/icp-register`, `/api/c2m/icp-register` and
+  `/api/c2c/global-register`, via `_registration_bytes` (both clouds, Open3D's
+  own copies and its KD-trees, `_REGISTRATION_COPIES` = 4). `c2m/distance` is
+  deliberately **not** admitted: it streams the cloud in blocks and holds only
+  4 B/pt of distances plus the mesh scene, so it is already bounded.
+
+**Admission is always acquired OUTSIDE `_cloud_session_lock`, never under it.**
+`_acquire` sleeps on its Condition while it waits, and holding the global
+session lock across that sleep would stall every unrelated session request
+behind one queued operation — and deadlock against anything that admits while
+holding it. `test_admission_coverage.py` pins the ordering (by lock depth at
+admit time, since a merge takes and releases the lock several times) as well as
+the presence.
+
 ## Cost advisories (the 409 prompt)
 
 Ground segmentation estimates its wall time and transient memory before

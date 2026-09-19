@@ -30554,6 +30554,95 @@ def _new_session_store(session_id: str, n_points: int) -> "session_store.Session
     return session_store.SessionStore.create(root, int(n_points))
 
 
+def _session_mutation_bytes(sessions, out_points: "Optional[int]" = None,
+                            copies: float = 1.0) -> int:
+    """Estimated transient working set of a whole-cloud session mutation.
+
+    `sessions` is the input session(s); `out_points` the size of the result
+    (default: the inputs' surviving points); `copies` how many times that result
+    is held at once (a fancy-index gather materialises the slice AND the output).
+
+    Sized from the columns the session actually carries rather than a flat
+    bytes-per-point, so a bare xyz cloud is not charged for colour, intensity,
+    timestamps and beam origins it does not have. Memmapped columns still count:
+    the OUTPUT of a mutation is a fresh RAM array whatever the input's layout.
+
+    These paths were outside admission entirely: `merge` concatenates N sessions
+    and is the single largest allocation the backend can make, and because
+    `Admission` admits freely whenever nothing is in flight, unadmitted work is
+    arithmetically invisible -- it neither waits for a running job nor makes one
+    wait for it.
+    """
+    seq = list(sessions) if isinstance(sessions, (list, tuple)) else [sessions]
+    if not seq:
+        return 0
+    n_out = int(out_points) if out_points is not None else sum(
+        int((~s.deleted).sum()) for s in seq)
+    n_extras = max((len(s.extras or {}) for s in seq), default=0)
+    per_point = memory_budget.bytes_per_point(
+        n_extras=n_extras,
+        colors=any(getattr(s, "colors", None) is not None for s in seq),
+        intensity=any(getattr(s, "intensity", None) is not None for s in seq),
+        timestamps=any(getattr(s, "timestamps", None) is not None for s in seq),
+        origins=any(getattr(s, "beam_origins", None) is not None for s in seq),
+    )
+    return max(0, int(n_out * per_point * max(1.0, float(copies))))
+
+
+# Open3D's registration path holds, per cloud: the float64 Nx3 points it was
+# given, its own copy inside the PointCloud, and a KD-tree over it (measured at
+# roughly the point array again). ICP then keeps a correspondence index set.
+# ~3 copies plus the tree is the conservative shape; `_REGISTRATION_COPIES`
+# names it so the two registration families agree.
+_REGISTRATION_COPIES = 4.0
+
+
+def _request_registration_bytes(*arrays_or_counts) -> int:
+    """`_registration_bytes` sized from REQUEST fields rather than loaded arrays.
+
+    The `_do_*` workers load their own points deep inside a long `try`, so
+    wrapping their bodies would mean reindenting a hundred lines. The request
+    already carries what is needed: an inline flat array's length / 3, or a
+    session source's point-count estimate.
+    """
+    total = 0
+    for a in arrays_or_counts:
+        if a is None:
+            continue
+        if isinstance(a, int):
+            total += max(0, a)
+        else:
+            try:
+                total += len(a) // 3
+            except TypeError:
+                continue
+    return max(0, int(total * memory_budget.POSITION_BYTES * _REGISTRATION_COPIES))
+
+
+def _registration_bytes(*clouds) -> int:
+    """Estimated working set of an Open3D registration over `clouds`.
+
+    Registration paths (`/api/c2c/icp-register`, `/api/c2m/icp-register`,
+    `/api/c2c/global-register`) build KD-trees over two full clouds and were
+    outside admission entirely -- they are the synchronous twins of
+    `_run_killable`, so they never gained the admission it did.
+
+    `/api/c2m/distance` is deliberately NOT admitted: it queries the mesh scene
+    block by block and holds only a float32 distance per point (4 B/pt) plus the
+    mesh, so it is already bounded and does not need a gate.
+
+    Sized on raw xyz only: these paths take bare point arrays, not sessions, so
+    there are no extra columns to account for.
+    """
+    total = 0
+    for c in clouds:
+        try:
+            total += int(len(c))
+        except TypeError:
+            continue
+    return max(0, int(total * memory_budget.POSITION_BYTES * _REGISTRATION_COPIES))
+
+
 def _session_ram_bytes(sess: "CloudSession") -> int:
     """Bytes this session holds in RAM proper - memmapped columns count as
     nothing (they are page cache the OS reclaims on its own)."""
@@ -34943,11 +35032,18 @@ def session_split(session_id: str, request: SessionSplitRequest):
     if region_dict is None and not request.scalar_filters:
         raise HTTPException(status_code=400, detail="split requires `region` or `scalar_filters`.")
 
+    # The gather materialises the survivor slice of every column and then a
+    # second copy for the leftover child, so two full-size sets are live at
+    # once. Admitted outside `_cloud_session_lock` (admission sleeps while it
+    # waits; the session lock must never be held across that).
+    #
     # Compute the keep-mask AND commit the leftover deletion under ONE lock, so
     # the survivor snapshot used for the index scatter can't go stale against a
     # concurrent edit on the same session (the leftover subset is built from the
     # same snapshot before the lock is released for the slow rebuilds).
-    with _cloud_session_lock:
+    with _ADMISSION.admit(
+            _session_mutation_bytes([sess], copies=2.0),
+            f"split {session_id}"), _cloud_session_lock:
         surv = ~sess.deleted
         pos = sess.positions[surv]
         keep = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
@@ -35034,7 +35130,11 @@ def session_extract(session_id: str, request: SessionExtractRequest):
     if region_dict is None and not request.scalar_filters:
         raise HTTPException(status_code=400, detail="extract requires `region` or `scalar_filters`.")
 
-    with _cloud_session_lock:
+    # Survivor slice plus the extracted child's own columns; see `split` above
+    # for why this is admitted outside the session lock.
+    with _ADMISSION.admit(
+            _session_mutation_bytes([sess], copies=2.0),
+            f"extract from {session_id}"), _cloud_session_lock:
         surv = ~sess.deleted
         pos = sess.positions[surv]
         sel = _region_mask(pos, region_dict) if region_dict is not None else np.ones(len(pos), dtype=bool)
@@ -35531,12 +35631,28 @@ def session_merge(request: SessionMergeRequest):
 
     sessions = [_get_cloud_session(sid) for sid in ids]  # 404 propagates per id
 
-    with _cloud_session_lock:
-        # Refuse an all-empty merge (nothing survives) — PotreeConverter can't
-        # ingest 0 points, and there's nothing to stitch.
-        if sum(int((~s.deleted).sum()) for s in sessions) == 0:
-            raise HTTPException(status_code=400, detail="merge inputs have no surviving points.")
-        merged = _merge_sessions_locked(sessions)
+    # Sizing read only, outside the lock: an unlocked count may be stale by a
+    # few points under a concurrent delete, which moves the ESTIMATE by a
+    # rounding error. The authoritative zero-check stays under the lock below,
+    # exactly where it was.
+    n_est = sum(int((~s.deleted).sum()) for s in sessions)
+
+    # The biggest allocation the backend can make: every input's surviving
+    # points are sliced out and then vstacked into one new cloud, so the inputs'
+    # slices and the output are live at the same time. Admitted OUTSIDE
+    # `_cloud_session_lock` — `_acquire` sleeps on its Condition while it waits,
+    # and holding the session lock across that would stall every other session
+    # operation behind this one (and deadlock anything that admits under it).
+    with _ADMISSION.admit(
+            _session_mutation_bytes(sessions, out_points=n_est, copies=2.0),
+            f"merge {len(sessions)} sessions into {n_est:,} pts"):
+        with _cloud_session_lock:
+            # Refuse an all-empty merge (nothing survives) — PotreeConverter
+            # can't ingest 0 points, and there's nothing to stitch.
+            if sum(int((~s.deleted).sum()) for s in sessions) == 0:
+                raise HTTPException(
+                    status_code=400, detail="merge inputs have no surviving points.")
+            merged = _merge_sessions_locked(sessions)
 
     _sweep_cloud_sessions()
     cache_key, cache_dir, meta = _session_rebuild(merged)
@@ -37330,7 +37446,16 @@ def session_transform(session_id: str, request: SessionTransformRequest):
         return (world @ R.T + t) - shift
 
     had_miss_octree = False
-    with _cloud_session_lock:
+    # `_apply` materialises a float64 copy of positions (and of beam_origins)
+    # before assigning it back, so the old and new arrays are both live. Charged
+    # against the FULL point count, not the survivors: a transform rewrites
+    # deleted rows too (they keep their coordinates for undo). Admitted outside
+    # `_cloud_session_lock` — admission sleeps while it waits, and the session
+    # lock must never be held across that.
+    _n_all = int(len(sess.positions))
+    with _ADMISSION.admit(
+            _session_mutation_bytes([sess], out_points=_n_all, copies=2.0),
+            f"transform {_n_all:,} pts"), _cloud_session_lock:
         shift = sess.world_shift if sess.world_shift is not None else np.zeros(3, dtype=np.float64)
         shift = np.asarray(shift, dtype=np.float64)
 
@@ -37884,6 +38009,7 @@ def _do_c2m_distance(request: "C2MDistanceRequest", progress=None) -> dict:
         _cancel_checkpoint(progress)
         if progress is not None:
             progress(0.30, "Building raycasting scene")
+
 
         # RECENTRE BEFORE THE float32 CAST. Open3D's RaycastingScene is Embree-
         # backed and accepts float32 only (a float64 tensor is rejected outright),
@@ -38452,9 +38578,20 @@ def icp_register_mesh_to_cloud(request: ICPRegistrationRequest, http_request: Re
     Streams PHP1 progress markers ahead of the JSON result (cancellable pill).
     """
     run_id, cancel_event = _new_cancel_token()
+    # The cloud, Open3D's copy of it, its KD-tree and the mesh-sampled cloud are
+    # all live at once. Admitted around the worker call rather than inside it:
+    # the estimate comes from the request, and the lambda runs in the streaming
+    # response's thread, so the admission must span it from out here.
+    est = _request_registration_bytes(
+        request.points, request.mesh_vertices,
+        _source_point_count_estimate(request.source) if request.source else None)
+
+    def _run(progress):
+        with _ADMISSION.admit(est, "c2m ICP"):
+            return json.dumps(_do_c2m_icp(request, progress=progress)).encode("utf-8")
+
     return _bin_frame_streaming_response(
-        lambda progress: json.dumps(_do_c2m_icp(request, progress=progress)).encode("utf-8"),
-        request=http_request, cancel_event=cancel_event, run_id=run_id)
+        _run, request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 class CloudToCloudICPRequest(BaseModel):
@@ -38641,11 +38778,17 @@ def _do_c2c_icp(request: "CloudToCloudICPRequest", progress=None) -> dict:
                 return dict(success=False,
                             error="init_transform contains non-finite values")
 
-        return _c2c_align(
-            target_points, source_points, init_transform=init,
-            max_correspondence_distance=request.max_correspondence_distance,
-            max_iterations=request.max_iterations,
-            rmse_threshold=request.rmse_threshold, progress=progress)
+        # Open3D holds each cloud as its own float64 point array plus a KD-tree
+        # over it, and ICP keeps a correspondence set alongside; the sync twin of
+        # `_run_killable`, which is where this path's admission went missing.
+        with _ADMISSION.admit(
+                _registration_bytes(target_points, source_points),
+                f"c2c ICP {len(source_points):,} -> {len(target_points):,} pts"):
+            return _c2c_align(
+                target_points, source_points, init_transform=init,
+                max_correspondence_distance=request.max_correspondence_distance,
+                max_iterations=request.max_iterations,
+                rmse_threshold=request.rmse_threshold, progress=progress)
 
     except ScanCancelled:
         raise
@@ -39976,9 +40119,23 @@ def global_register_cloud_to_cloud(request: GlobalRegisterRequest, http_request:
     PHP1 progress markers ahead of the JSON result (cancellable pill).
     """
     run_id, cancel_event = _new_cancel_token()
+    # Both clouds are loaded in full before anchor extraction reduces them, and
+    # the optional ICP refinement then runs on the full clouds again. Sized from
+    # the request for the same reason as c2m ICP above.
+    est = _request_registration_bytes(
+        request.target_points, request.source_points,
+        (_source_point_count_estimate(request.target_source)
+         if request.target_source else None),
+        (_source_point_count_estimate(request.source_source)
+         if request.source_source else None))
+
+    def _run(progress):
+        with _ADMISSION.admit(est, "c2c global register"):
+            return json.dumps(
+                _do_global_register(request, progress=progress)).encode("utf-8")
+
     return _bin_frame_streaming_response(
-        lambda progress: json.dumps(_do_global_register(request, progress=progress)).encode("utf-8"),
-        request=http_request, cancel_event=cancel_event, run_id=run_id)
+        _run, request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 class MeshToMeshICPRequest(BaseModel):
