@@ -160,6 +160,25 @@ HK_SELECTOR_ALL = b"all"
 # `gnss_to_enu` anchors on whatever fixes did resolve.
 _ANCHOR_PROBE_POINTS = 250_000
 
+# The ladder `probe_scan` climbs, stopping at the first rung that yields both
+# records. _ANCHOR_PROBE_POINTS stays the CEILING, so nothing reads less of a
+# scan than it used to unless that scan has already given up what was wanted.
+#
+# The flat 250k above is a margin over a requirement, and the margin is what it
+# costs: the probe's price is the demultiplexer, which writes ~44 bytes of ASCII
+# per decoded echo, so it scales linearly with the prefix and nothing else.
+# Measured on all 19 positions of the Vacaville .riproject, `hk_gps_hr` and a
+# finite `scanner_pose_hr` are both present within 5,000 points -- 0.02 s per
+# position against 0.50 s for the flat read, i.e. the margin was 25x the work.
+#
+# A ladder rather than a smaller constant because the margin was not paranoia:
+# `parse_scanner_pose_hr` has to skip leading all-NaN rows, and some positions
+# emit ONLY NaN rows (4 of 8 in one project). Those, and any position whose
+# receiver never locked, fall through every rung to the ceiling and read exactly
+# what they read before -- which is what keeps the hk_incl fallback's averaging
+# window, and every other prefix-sensitive behaviour, unchanged.
+_PROBE_LADDER = (5_000, 50_000)
+
 # Points whose range is below this are the scanner seeing itself (mount, tripod
 # collar). RiVLib reports them as ordinary returns.
 _MIN_RANGE_M = 0.15
@@ -1745,18 +1764,27 @@ def read_scan(
         mins = np.full(3, np.inf)
         maxs = np.full(3, -np.inf)
 
-        xyz_buf = (ScanifcXYZ * _READ_CHUNK)()
-        attr_buf = (ScanifcAttributes * _READ_CHUNK)()
-        time_buf = (ctypes.c_uint64 * _READ_CHUNK)()
+        # A bounded read asks for exactly what it wants. RiVLib returns a whole
+        # batch or nothing, so sizing the buffer at the full _READ_CHUNK made
+        # `max_points` round UP to the next multiple of it: a 250k probe decoded
+        # 400k points, and a 5k one would have decoded 200k. That overshoot is
+        # the entire cost of a probe, because the "all" demultiplexer writes
+        # ~44 bytes of ASCII per echo as a side effect.
+        n_chunk = _READ_CHUNK if max_points is None else min(_READ_CHUNK, max_points)
+
+        xyz_buf = (ScanifcXYZ * n_chunk)()
+        attr_buf = (ScanifcAttributes * n_chunk)()
+        time_buf = (ctypes.c_uint64 * n_chunk)()
         got = ctypes.c_uint32()
         end_of_frame = ctypes.c_int32()
 
         while True:
             if max_points is not None and total >= max_points:
                 break
+            want = n_chunk if max_points is None else min(n_chunk, max_points - total)
             rc = ifc.lib.scanifc_point3dstream_read(
                 handle,
-                _READ_CHUNK,
+                want,
                 xyz_buf,
                 attr_buf,
                 time_buf,
@@ -1800,6 +1828,63 @@ def read_scan(
         return result
     finally:
         ifc.close(handle)
+
+
+def probe_scan(
+    ifc: _Scanifc,
+    rxp_path: str,
+    hk_path: str,
+    *,
+    ceiling: int,
+) -> dict:
+    """Decode the shortest prefix of a scan that gives up its housekeeping.
+
+    Returns read_scan's metadata dict and leaves `hk_path` holding the records
+    from the prefix it settled on, for the caller to parse exactly as it would
+    after a flat read_scan — the parsing here is only to decide when to stop.
+
+    Each rung re-opens the stream and decodes from the start, so the rungs do
+    not compose: the worst case is 5k + 50k + 250k = 305k points against the
+    flat 400k the ceiling used to overshoot to. There is no rung at which this
+    is slower than what it replaced.
+    """
+    for points in tuple(n for n in _PROBE_LADDER if n < ceiling) + (ceiling,):
+        info = read_scan(
+            ifc, rxp_path, hk_path, count_points=False, max_points=points
+        )
+        if parse_hk_gps(hk_path) is None:
+            continue
+        # Only the FUSED pose ends the climb. An hk_incl fallback would also be
+        # present this early, but it is an AVERAGE over the records in the file,
+        # so accepting it here would silently shrink its window — the one way a
+        # shorter probe could change an answer rather than just reach it sooner.
+        probe: dict = {}
+        attach_sensor_pose(probe, hk_path)
+        if probe.get("sensor_pose", {}).get("source") == "scanner_pose_hr":
+            break
+    return info
+
+
+def discard_hk(hk_path: str, *, keep: bool) -> None:
+    """Delete a demultiplexed housekeeping file once its records are parsed.
+
+    These are not small — the "all" selector writes ~44 bytes of ASCII per echo,
+    so a fully decoded VZ-1000 position is ~750 MB — and nothing reads one twice.
+    Because the name is fixed per position in the system temp directory, they
+    also accumulate silently: one five-position import of the Vacaville project
+    left 3.8 GB of them behind in %TEMP%.
+
+    Kept when the caller named a directory with --hk-dir, since that flag exists
+    precisely so a human can go and read the records afterwards.
+    """
+    if keep:
+        return
+    try:
+        os.remove(hk_path)
+    except OSError:
+        # A probe that failed before the demultiplexer wrote anything leaves no
+        # file, which is not a problem worth reporting.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -2298,7 +2383,6 @@ def _write_scan_arrays(out_dir: str, arrays: dict) -> None:
 def stream_scan(
     ifc: _Scanifc,
     rxp_path: str,
-    hk_path: str,
     out_dir: str,
     *,
     progress=None,
@@ -2312,8 +2396,22 @@ def stream_scan(
     read boundary), so points are accumulated in memory and emitted after
     grouping. That is the same peak as the LAS path had; the saving is the
     encode, not the buffering.
+
+    NO DEMULTIPLEXER, deliberately, and the signature takes no `hk_path` at all
+    so that cannot be reintroduced by accident. This is the only full-length
+    decode in the module, and attaching the "all" selector to it wrote ~44 bytes
+    of ASCII per echo — 747 MB for one VZ-1000 position — recording the very
+    records `cmd_stream` had already harvested from a bounded probe in pass 1,
+    into a file nothing ever read back and nothing deleted. That was 17.5 s of a
+    28.6 s decode: 61% of the cost of importing a scan. Dropping it leaves every
+    emitted column byte-identical (verified by hashing all ten against the old
+    path) and takes the same position to 11.1 s.
+
+    extract_scan is NOT the same case and keeps its demultiplexer: it is the
+    standalone LAS path, has no pass 1 in front of it, and parses the records
+    itself afterwards.
     """
-    handle = ifc.open(_uri(rxp_path), hk_path=hk_path, selector=HK_SELECTOR_ALL)
+    handle = ifc.open(_uri(rxp_path), hk_path=None)
     try:
         meta = ifc.meta(handle)
 
@@ -2701,6 +2799,7 @@ def _inspect_proj(args: argparse.Namespace, positions: list[dict]) -> tuple[list
 def _inspect_riproject(args, ifc, positions: list[dict]) -> tuple[list[dict], list]:
     """Metadata pass for a raw .riproject — needs a bounded decode per position."""
     hk_dir = args.hk_dir or tempfile.gettempdir()
+    keep_hk = args.hk_dir is not None
     os.makedirs(hk_dir, exist_ok=True)
 
     scans: list[dict] = []
@@ -2714,12 +2813,12 @@ def _inspect_riproject(args, ifc, positions: list[dict]) -> tuple[list[dict], li
             "registration": pos["registration"],
         }
         try:
-            info = read_scan(
-                ifc,
-                pos["rxp_path"],
-                hk_path,
-                count_points=args.count_points,
-                max_points=None if args.count_points else args.probe_points,
+            info = (
+                read_scan(ifc, pos["rxp_path"], hk_path, count_points=True)
+                if args.count_points
+                else probe_scan(
+                    ifc, pos["rxp_path"], hk_path, ceiling=args.probe_points
+                )
             )
             entry.update(info)
             if not args.count_points:
@@ -2735,6 +2834,7 @@ def _inspect_riproject(args, ifc, positions: list[dict]) -> tuple[list[dict], li
         fix = parse_hk_gps(hk_path)
         entry["gnss"] = fix
         attach_sensor_pose(entry, hk_path)
+        discard_hk(hk_path, keep=keep_hk)
         fixes.append(fix)
         scans.append(entry)
     return scans, fixes
@@ -2834,6 +2934,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
     os.makedirs(args.out, exist_ok=True)
     hk_dir = args.hk_dir or tempfile.gettempdir()
+    keep_hk = args.hk_dir is not None
     os.makedirs(hk_dir, exist_ok=True)
 
     scans: list[dict] = []
@@ -2878,6 +2979,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         fix = parse_hk_gps(hk_path)
         entry["gnss"] = fix
         attach_sensor_pose(entry, hk_path)
+        discard_hk(hk_path, keep=keep_hk)
         fixes.append(fix)
         scans.append(entry)
 
@@ -2972,6 +3074,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
     # imported alongside. Pass 2 filters instead (see `selected` below).
 
     hk_dir = args.hk_dir or tempfile.gettempdir()
+    keep_hk = args.hk_dir is not None
     os.makedirs(hk_dir, exist_ok=True)
 
     # Pass 1 (cheap): scan-pattern + instrument + GNSS + pose for every
@@ -2982,10 +3085,10 @@ def cmd_stream(args: argparse.Namespace) -> int:
     # It runs over EVERY position, including unselected ones, because the ENU
     # anchor is a project-level quantity (see the note by the `wanted` check).
     # An unselected position contributes its GNSS fix to that anchor and nothing
-    # else, so it is probed with a much smaller prefix -- enough to flush a
-    # housekeeping record, but none of the work that only a decoded position
-    # needs. On the six-position VZ-1000 project that keeps the added cost of
-    # anchoring correctly to well under a second in total.
+    # else, so it gets the smaller ceiling -- though `probe_scan` climbs the
+    # same ladder either way and normally stops at its first rung long before
+    # either ceiling binds. On the 19-position Vacaville project the whole pass
+    # is ~0.6 s, so anchoring correctly against every position is free.
     frame = getattr(args, "frame", FRAME_LOCAL)
     header_scans: list[dict] = []
     fixes: list[dict | None] = []
@@ -3002,10 +3105,9 @@ def cmd_stream(args: argparse.Namespace) -> int:
         else:
             hk_path = os.path.join(hk_dir, f"hk_{pos['name']}.txt")
             try:
-                info = read_scan(
+                info = probe_scan(
                     ifc, pos["rxp_path"], hk_path,
-                    count_points=False,
-                    max_points=(
+                    ceiling=(
                         args.probe_points if chosen else _ANCHOR_PROBE_POINTS
                     ),
                 )
@@ -3016,6 +3118,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
                 entry["error"] = str(exc)
             fix = parse_hk_gps(hk_path)
             attach_sensor_pose(entry, hk_path)
+            discard_hk(hk_path, keep=keep_hk)
         params = scan_params_for(pos)
         if params:
             entry["scan_params"] = params
@@ -3083,10 +3186,9 @@ def cmd_stream(args: argparse.Namespace) -> int:
                 file=sys.stderr, flush=True,
             )
 
-        hk_path = os.path.join(hk_dir, f"hk_{pos['name']}.txt")
         try:
             info = stream_scan(
-                ifc, pos["rxp_path"], hk_path,
+                ifc, pos["rxp_path"],
                 os.path.join(args.out, pos["name"]), progress=_progress,
             )
             info["name"] = pos["name"]
@@ -3131,8 +3233,9 @@ def main(argv: list[str] | None = None) -> int:
         "--probe-points",
         type=int,
         default=_ANCHOR_PROBE_POINTS,
-        help="Points to read per scan when not counting exactly. Must be enough "
-        f"to flush at least one GNSS housekeeping record "
+        help="CEILING on the points read per scan when not counting exactly. "
+        "The probe climbs a ladder and stops early once the GNSS and pose "
+        "records have appeared, so most positions read far fewer than this "
         f"(default: {_ANCHOR_PROBE_POINTS}).",
     )
     inspect.add_argument(
@@ -3176,8 +3279,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     stream.add_argument(
         "--probe-points", type=int, default=_ANCHOR_PROBE_POINTS,
-        help="Points read per position in the metadata pass (must be enough to "
-             "flush a GNSS housekeeping record).",
+        help="Ceiling on the points read per position in the metadata pass; the "
+             "probe stops earlier once the housekeeping records have appeared.",
     )
     stream.add_argument("--hk-dir", default=None)
     stream.add_argument(

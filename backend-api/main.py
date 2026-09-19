@@ -1977,8 +1977,12 @@ def riegl_project_inspect(request: RieglProjectInspectRequest):
     out = _run_riegl_container(
         ["inspect", "/project", "--frame", frame],
         _riegl_project_mounts(status, project),
-        # Bounded prefix reads only; a 6-position .riproject takes ~30 s. A
-        # .PROJ needs no point reads at all and returns effectively instantly.
+        # Bounded prefix reads only, and the bound is now reached early: the
+        # reader stops each position as soon as its GNSS and pose records
+        # appear, so the 19-position Vacaville project lists in ~0.6 s. A .PROJ
+        # needs no point reads at all. The timeout stays generous because the
+        # ladder's ceiling is unchanged for a position that never yields a pose,
+        # and a cold project still has to come off disk.
         timeout_s=600.0,
     )
     try:

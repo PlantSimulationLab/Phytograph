@@ -265,12 +265,14 @@ A small plan view shows the layout — from the surveyed poses where the project
 has them, and from the GNSS fixes otherwise — so an implausible layout is
 visible before you commit to the import.
 
-!!! note "A `.PROJ` opens much faster"
-    A `.riproject` hides its GNSS inside the point stream, so previewing one
-    means decoding the start of every position — under a second each, though
-    the first read of a project that isn't in the operating system's file cache
-    is slower. A `.PROJ` states everything in small JSON sidecars, so a
-    24-position project lists in about a second.
+!!! note "Both layouts open quickly"
+    A `.PROJ` states everything in small JSON sidecars, so a 24-position
+    project lists in about a second. A `.riproject` hides its GNSS inside the
+    point stream, so previewing one means decoding the start of every position
+    — but only until that position's GNSS and orientation records appear,
+    which is typically within the first few thousand points. A 19-position
+    `.riproject` lists in about a second too. The first read of a project that
+    isn't in the operating system's file cache is slower.
 
 Every readable position is selected already, so untick the ones you don't want
 and click **Import**. The header checkbox toggles them all at once — it reads
@@ -580,8 +582,11 @@ loaded.**
 Windows or Linux.**
 : Expected. RiVLib runs natively in those cases; on macOS it runs under x86
   emulation inside a container. Phytograph also builds a level-of-detail octree
-  either way so large scans stay interactive. For scale, one 22 M-point VZ-1000
-  position takes roughly a minute end to end on Windows.
+  either way so large scans stay interactive, and that octree build — not
+  reading the scan — is the larger half of the time on every platform. For
+  scale, one 23 M-point VZ-1000 position takes roughly half a minute end to end
+  on Windows, of which about ten seconds is RiVLib decoding the `.rxp` and the
+  rest is building the octree.
 
 **Dropping the folder does nothing / files are rejected one by one.**
 : Make sure you are dropping the `.riproject` **folder**, not its contents. A
