@@ -23,6 +23,7 @@ import math
 import numpy as np
 import pytest
 
+import lad_gtheta
 import lad_wood as W
 
 
@@ -385,17 +386,19 @@ class TestWoodSplitRealPath:
         assert (c["lad"] * 0.5 + c["wad"] * wood["wood_gtheta"]
                 == pytest.approx(b["lad"] * b["gtheta"], rel=1e-6))
 
-    def test_pooled_gtheta_is_reported_with_its_provenance(self, tmp_path):
-        """A consumer must be able to tell a measured coefficient from the
-        fallback, and how much evidence backed it."""
+    def test_wood_gtheta_is_the_constant_and_is_echoed(self, tmp_path):
+        """G_wood is the randomly-oriented-cylinder constant, and the run reports
+        which value it used.
+
+        A branch-axis estimator was built and removed (see the `lad_wood` module
+        docstring for the measurements). This pins the decision: if per-cloud
+        estimation ever returns, this test is what says so, deliberately.
+        """
         pytest.importorskip("pyhelios")
         r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class")
-        assert r["wood_gtheta_source"] in ("pooled", "default")
+        assert r["wood_gtheta"] == pytest.approx(W.WOOD_G_DEFAULT)
+        # Echoed so a consumer can recompute wood area from the leaf figure.
         assert 0.0 < r["wood_gtheta"] <= 1.0
-        if r["wood_gtheta_source"] == "pooled":
-            assert r["wood_angle_n"] > 0
-        # Whatever the source, the coefficient must lie in the achievable band.
-        assert 0.23 < r["wood_gtheta"] < 0.29
 
 
 # ===========================================================================
@@ -526,17 +529,29 @@ class TestWoodCubeFixture:
         lad = r["cells"][0]["lad"]
         assert 0.3 * (_WC_LEAF_AREA / _WC_VOLUME) < lad < 1.5 * (_WC_LEAF_AREA / _WC_VOLUME)
 
-    def test_vertical_trunks_raise_G_wood_above_the_default(self):
-        """The fixture's wood is ALL VERTICAL, whose true G at a terrestrial beam
-        spread is ~0.28, above the randomly-oriented default of 0.25. The pooled
-        estimator must detect that -- if it silently fell back to the default,
-        this is the test that says so.
+    def test_documents_what_the_constant_costs_on_pure_trunks(self):
+        """The fixture's wood is ALL VERTICAL -- the axis population furthest from
+        random, and so the worst case for a fixed G_wood.
+
+        True G here is ~0.318 against the constant's 0.250, i.e. the constant
+        understates wood area by ~21% on pure trunks. This is pinned, not fixed:
+        a removed branch-axis estimator only recovered about half of it for 4-6 s
+        of work, while spatial segregation on such a cloud is -21% to -53%. The
+        test exists so the size of the trade stays visible.
         """
         pytest.importorskip("pyhelios")
+        d = np.loadtxt(_WOODCUBE_XYZ)
+        hits = d[d[:, 3] == 0]
+        wood = hits[hits[:, 4] == main.WOOD_CLASS_WOOD][:, :3]
+        dirs = main._directions_from_origin(wood, np.array([-5.0, 0.0, 0.5]))
+        zen = lad_gtheta.beam_zenith_from_spherical(dirs)
+        true_g = float(W.cylinder_G(zen, np.array([0.0])).mean())
+        assert 0.30 < true_g < 0.33, true_g
+        shortfall = (W.WOOD_G_DEFAULT - true_g) / true_g
+        assert -0.25 < shortfall < -0.18, f"constant now off by {shortfall:.1%}"
+
         r = _run_woodcube()
-        assert r["wood_gtheta_source"] == "pooled", r.get("warnings")
-        assert r["wood_gtheta"] > W.WOOD_G_DEFAULT
-        assert 0.26 < r["wood_gtheta"] < 0.30
+        assert r["wood_gtheta"] == pytest.approx(W.WOOD_G_DEFAULT)
 
     def test_totals_and_summary_agree_on_the_fixture(self):
         """The reported totals must equal the per-voxel values, and the exported

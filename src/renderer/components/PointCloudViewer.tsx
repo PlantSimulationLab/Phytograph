@@ -17591,8 +17591,6 @@ export default function PointCloudViewer({
             hasWood: true,
             totalWoodArea: response.total_wood_area ?? undefined,
             gtheta: response.wood_gtheta ?? undefined,
-            gthetaSource: response.wood_gtheta_source ?? undefined,
-            angleN: response.wood_angle_n ?? undefined,
           },
         } : {}),
       };

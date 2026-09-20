@@ -276,7 +276,7 @@ export function LADResultsPanel({
                   {result.wood?.hasWood && (
                     <div
                       data-testid="lad-wood-summary"
-                      data-wood-gtheta-source={result.wood.gthetaSource ?? ''}
+                      data-wood-gtheta={result.wood.gtheta ?? ''}
                       className="rounded bg-neutral-900/60 border border-neutral-700/60 px-2 py-1.5"
                     >
                       <div className="text-[10px] text-neutral-300">
@@ -292,14 +292,12 @@ export function LADResultsPanel({
                         </div>
                       )}
                       <div className="text-[9px] text-neutral-500 mt-0.5">
-                        {/* Say plainly whether G(theta) was measured or assumed —
-                            the panel must never present an assumption as a
-                            measurement (the same rule the occlusion block follows). */}
-                        {result.wood.gthetaSource === 'pooled'
-                          ? `Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} `
-                            + `from ${result.wood.angleN ?? 0} branch axes`
-                          : `Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} assumed `
-                            + '(randomly-oriented cylinders): too few reliable branch axes'}
+                        {/* G(theta) is ASSUMED, and says so. It is the
+                            randomly-oriented-cylinder value, not measured from
+                            this cloud — the panel must never let an assumption
+                            read as a measurement. */}
+                        {`Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} assumed `
+                          + '(randomly-oriented cylinders)'}
                       </div>
                       <div
                         className="text-[9px] text-amber-300/80 mt-1 cursor-help"

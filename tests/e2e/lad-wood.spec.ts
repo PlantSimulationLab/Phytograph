@@ -79,14 +79,16 @@ test.afterAll(async () => {
   await ctx?.close();
 });
 
-test('reports leaf and wood area, and says how G(theta) was obtained', async () => {
+test('reports leaf and wood area, and marks the wood G(theta) as assumed', async () => {
   const { page } = ctx;
   const summary = page.getByTestId('lad-wood-summary');
   await expect(summary).toBeVisible();
 
-  // The split must be REPORTED as measured or assumed — never silently assumed.
-  const source = await summary.getAttribute('data-wood-gtheta-source');
-  expect(['pooled', 'default']).toContain(source);
+  // The coefficient must be stated, and stated as ASSUMED — it is the
+  // randomly-oriented-cylinder constant, not measured from this cloud.
+  const g = parseFloat((await summary.getAttribute('data-wood-gtheta'))!);
+  expect(g).toBeCloseTo(0.25, 6);
+  expect((await summary.textContent()) ?? '').toContain('assumed');
 
   // Both media present, stated in m^2. A split that collapsed to leaf-only
   // would render this box with a wood total of 0 and fail here.

@@ -71,8 +71,45 @@ Two consequences, both of which shaped this module:
     larger terms. Do not spend heavy machinery here before checking it against
     this bound.
 
-Why the axis distribution is POOLED, not per-voxel
---------------------------------------------------
+Why the shipped code uses the CONSTANT, and what the rest of this module is for
+-------------------------------------------------------------------------------
+`_resolve_wood_split` in main.py applies `WOOD_G_DEFAULT` and nothing else. The
+kernel below is not dead: it is the EVIDENCE for that choice (it computes the
++-13% bound quoted above, and its tests pin the three analytic limits), and it
+is what any future estimator would be measured against.
+
+A pooled branch-axis estimator WAS built, wired and measured, then removed
+(2026-09-20). The numbers, on the committed `lad-woodcube` fixture through the
+real endpoint:
+
+    true G_wood (all-vertical trunks, that scan's beams)   0.3179
+    pooled PCA estimate                0.2791    -12.2%
+    WOOD_G_DEFAULT                     0.2500    -21.4%
+
+so on the case MOST favourable to it -- a pure-trunk axis population, the
+furthest any real canopy gets from random -- it recovered about half the
+available error and still missed by more than the bound the constant is
+defended by. It cost 4-6 s per classified run (k=200 KD-tree PCA over up to
+200 k points) and its elongation gate discarded >99% of the sample. On the
+realistic mixed distributions above the constant is already within 0-3%.
+
+Decisive context: the error that actually dominates a trunk-heavy cloud is
+SPATIAL SEGREGATION of the two media within a voxel, at -21% to -53% (see
+`_resolve_wood_split`). Spending seconds to chase 9% inside a 50% term is the
+"heavy machinery" this module's own guidance warns against.
+
+Also worth recording, since it is the obvious next idea: the EXISTING
+triangulation cannot supply G_wood either, even with a per-triangle class
+channel threaded through helios-core. `computeGtheta` accumulates
+`fabs(normal . raydir)` over the triangles that exist, and a TLS mesh only
+covers the SCANNER-FACING half of a branch -- measured, that reads ~2.00x the
+total-surface value, and the visible fraction is not a constant (it varies with
+range, beam divergence, occlusion and the triangulation's own Lmax). So the
+conversion to the total-surface convention this module requires is not a fixed
+factor. Any revival of per-cloud estimation should start from that fact.
+
+Why an axis distribution would be POOLED, not per-voxel
+--------------------------------------------------------
 Estimating a branch axis per voxel by local PCA has a silent catastrophic
 failure. For a short, fat segment (length/radius <~ 2) the dominant spread is
 AROUND the circumference, so PCA returns a direction roughly PERPENDICULAR to

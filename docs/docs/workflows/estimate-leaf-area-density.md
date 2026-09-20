@@ -315,9 +315,9 @@ What appears once a result carries a split:
 - A **Colour by** picker in the result row switches the voxels between LAD, WAD
   and PAD. The colourbar rescales and its label follows, so the legend always
   names the quantity on screen.
-- A **Leaf and wood area** box reports both totals and states whether the wood
-  G(θ) was *measured* from branch axes or *assumed* — an assumption is never
-  presented as a measurement.
+- A **Leaf and wood area** box reports both totals and states the wood G(θ) it
+  applied, marked *assumed* — it is the randomly-oriented-cylinder value, not a
+  measurement of your cloud, and the panel never lets it read as one.
 - The export variable list gains wood area density, wood area, plant area
   density, wood fraction and wood G(θ).
 - **Profile & LAI** reports **WAI** and **PAI** beside LAI, and the summary and

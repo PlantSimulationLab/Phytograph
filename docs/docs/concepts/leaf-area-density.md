@@ -267,13 +267,18 @@ has no such doubling — its two-sided area *is* its surface area. Using each
 convention's own coefficient makes the two add up: **LAI + WAI = PAI**, and the
 summary export reports all three.
 
-Phytograph estimates the wood projection coefficient from the branch axes it can
-measure in the cloud, pooled into one value per cloud rather than one per voxel
-(a per-voxel estimate is unreliable on short, thick wood and can be worse than
-no estimate at all). Where too few reliable axes exist it falls back to the
-randomly-oriented value and says so. This matters less than it might sound:
-across every achievable branch-angle distribution the coefficient only spans
-about ±13%, because a cylinder is symmetric about its axis.
+The wood projection coefficient is **assumed**, not measured from the cloud:
+Phytograph uses the randomly-oriented-cylinder value (0.25) and says so in the
+result. That matters less than it might sound, because a cylinder is symmetric
+about its axis — across every achievable branch-angle distribution the
+coefficient spans only about ±13%, and on a realistically mixed canopy it is
+within a few percent.
+
+An estimator that measured branch axes from the cloud was built and removed. On
+pure vertical trunks — the case furthest from random, where a fixed value costs
+most — it recovered only about half the available error while adding seconds to
+every run. The error that actually dominates such a cloud is the voxel-mixing
+one below, which is an order of magnitude larger.
 
 Both LAD and WAD are **absolute** areas, not just a ratio. A discrete-return
 scan records the first thing each beam hits, so leaf and wood compete as

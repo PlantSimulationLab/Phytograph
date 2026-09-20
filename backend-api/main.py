@@ -8677,8 +8677,9 @@ class LADCell(BaseModel):
     wood_fraction: Optional[float] = None
     wood_hit_count: Optional[int] = None
     leaf_hit_count: Optional[int] = None
-    # The wood projection coefficient applied (pooled per cloud, not per voxel --
-    # see `_pooled_wood_gtheta` for why).
+    # The wood projection coefficient applied. A constant (the
+    # randomly-oriented-cylinder value), the same for every voxel; carried
+    # per-cell so a consumer can recover wood area from the cell alone.
     wood_gtheta: Optional[float] = None
 
 class LADComputeResponse(BaseModel):
@@ -8721,14 +8722,11 @@ class LADComputeResponse(BaseModel):
     # Total woody SURFACE area over MEASURED voxels only -- never under-sampled,
     # never filled, matching `total_leaf_area`.
     total_wood_area: Optional[float] = None
-    # The pooled wood projection coefficient actually applied, and where it came
-    # from: "pooled" (measured from branch axes) or "default" (too few reliable
-    # axes; the randomly-oriented-cylinder value, which is within ~13% across
-    # every achievable branch-angle distribution). `wood_angle_n` is how many
-    # trusted axes backed a pooled estimate.
+    # The wood projection coefficient applied: the randomly-oriented-cylinder
+    # value (Cauchy S/4), which is within ~13% across every achievable
+    # branch-angle distribution and within 0-3% on a realistic mixed canopy.
+    # Echoed so a consumer can reproduce the wood area from the leaf one.
     wood_gtheta: Optional[float] = None
-    wood_gtheta_source: Optional[str] = None
-    wood_angle_n: Optional[int] = None
     # "kriging" | "layer_mean" | "none" — which path the fill actually took, since
     # kriging degrades to a layer mean when the donors can't support a variogram.
     fill_method_used: Optional[str] = None
@@ -11256,9 +11254,7 @@ def _resolve_wood_split(scans_arrays, scan_xyz_for_counts, scan_class_for_counts
     Returns a dict with:
       wood_counts / leaf_counts  (n_cells,) int64 -- intercepted returns per class
       wood_fraction              (n_cells,) float -- wood share of interceptions
-      g_wood                     float  -- pooled wood projection coefficient
-      g_wood_source              'pooled' | 'default'
-      wood_angle_n               int    -- trusted branch axes behind g_wood
+      g_wood                     float  -- wood projection coefficient (constant)
 
     WHY THE SPLIT IS BY INTERCEPTION COUNT. One transmission P per voxel cannot
     separate two media on its own -- it is one equation in two unknowns. The
@@ -11331,17 +11327,15 @@ def _resolve_wood_split(scans_arrays, scan_xyz_for_counts, scan_class_for_counts
     np.divide(wood_counts, classified, out=wood_fraction,
               where=classified > 0)
 
-    # Pooled G_wood from the branch axes of every wood return in the cloud.
-    g_wood, n_axes = _pooled_wood_gtheta(
-        scans_arrays, scan_xyz_for_counts, scan_class_for_counts)
-    source = "pooled" if n_axes > 0 else "default"
-    if source == "default":
-        warnings.append(
-            "Wood area density used the default projection coefficient "
-            f"G={lad_wood.WOOD_G_DEFAULT} (randomly-oriented cylinders): too few "
-            "wood returns formed a reliable branch axis. Across every achievable "
-            "branch-angle distribution this coefficient is within about 13%, so "
-            "the wood area is approximate rather than wrong.")
+    # G_wood is the randomly-oriented-cylinder value, not an estimate from the
+    # cloud. A branch-axis estimator was built, measured and REMOVED; see the
+    # note in `lad_wood` for the numbers. The short version: across every
+    # achievable branch-angle distribution this coefficient is within ~13%, and
+    # on a realistic mixed canopy within 0-3% -- while the error that actually
+    # dominates a trunk-heavy cloud is spatial segregation at -21% to -53%
+    # ([[project_wood_partition_by_count_bias]]). Chasing the smaller term with
+    # a multi-second neighbourhood PCA was the wrong trade.
+    g_wood = lad_wood.WOOD_G_DEFAULT
 
     if int(wood_counts.sum()) == 0:
         warnings.append(
@@ -11354,150 +11348,7 @@ def _resolve_wood_split(scans_arrays, scan_xyz_for_counts, scan_class_for_counts
         "leaf_counts": leaf_counts,
         "wood_fraction": wood_fraction,
         "g_wood": float(g_wood),
-        "g_wood_source": source,
-        "wood_angle_n": int(n_axes),
     }
-
-
-def _pooled_wood_gtheta(scans_arrays, scan_xyz_for_counts, scan_class_for_counts):
-    """Pooled wood G(theta) and the number of trusted branch axes behind it.
-
-    Branch axes come from local PCA over each wood point's neighbourhood, kept
-    only where the neighbourhood is convincingly elongated (see
-    `_trusted_branch_axes`). Beam zeniths come from the SAME spherical-direction
-    arrays the leaf G(theta) path uses.
-
-    Falls back to (`lad_wood.WOOD_G_DEFAULT`, 0) when nothing is trustworthy.
-    """
-    import numpy as np
-    import lad_gtheta
-    import lad_wood
-
-    # Beam zeniths, HITS ONLY and from the ELEVATION column. Both constraints are
-    # inherited from the leaf G(theta) path and each has its own past bug:
-    # `_directions_from_origin` returns SPHERICAL [radius, elevation, azimuth], so
-    # the Cartesian `beam_zenith_samples` would divide an angle by a range in
-    # metres; and misses concentrate at the angles that see sky, so pooling them
-    # tilts the zenith distribution.
-    beam_dirs = []
-    for s in scans_arrays:
-        d = s.get("dirs")
-        if d is None or len(d) == 0:
-            continue
-        labels, vals = s.get("labels"), s.get("vals")
-        if (labels is not None and vals is not None and _MISS_SLUG in labels
-                and np.asarray(vals).shape[0] == len(d)):
-            hit = np.asarray(vals)[:, labels.index(_MISS_SLUG)] == 0
-            d = np.asarray(d)[hit]
-        if len(d) > 0:
-            beam_dirs.append(d)
-    if not beam_dirs:
-        return lad_wood.WOOD_G_DEFAULT, 0
-    beam_zen = lad_gtheta.beam_zenith_from_spherical(np.vstack(beam_dirs))
-
-    wood_pts = []
-    for xyz, cls in zip(scan_xyz_for_counts, scan_class_for_counts):
-        if cls is None:
-            continue
-        xyz = np.asarray(xyz, dtype=np.float64)
-        cls = np.asarray(cls)
-        if cls.shape[0] != xyz.shape[0]:
-            continue
-        wood_pts.append(xyz[np.rint(cls).astype(np.int64) == WOOD_CLASS_WOOD])
-    if not wood_pts:
-        return lad_wood.WOOD_G_DEFAULT, 0
-    pts = np.vstack(wood_pts) if len(wood_pts) > 1 else wood_pts[0]
-
-    axes = _trusted_branch_axes(pts)
-    if axes is None or len(axes) == 0:
-        return lad_wood.WOOD_G_DEFAULT, 0
-    inc = lad_wood.axis_inclination(axes)
-    return lad_wood.gtheta_wood_from_axes(inc, beam_zen), int(len(inc))
-
-
-# Branch-axis PCA: neighbourhood size and the elongation gate. BOTH values are
-# measured, and both are counter-intuitive, so do not "tighten" them casually.
-#
-# NEIGHBOURHOOD SIZE. A cylinder's points only spread most ALONG its axis once
-# the neighbourhood is bigger than the cylinder's RADIUS; below that, PCA sees a
-# locally flat surface patch whose leading eigenvector is arbitrary. Measured on
-# a 0.05 m-radius branch (4.3 mm spacing), the median axis error by k was:
-#     k=10  41.7 deg    k=50  27.1 deg    k=200   6.6 deg
-#     k=20  38.0 deg    k=100 14.1 deg    k=400   3.3 deg
-# so a small k -- the natural choice, and what the wood CLASSIFIER uses for its
-# own shape features -- is simply wrong for this purpose.
-_WOOD_AXIS_K = 200
-# ELONGATION GATE, on the ratio of the two leading eigenvalues. Deliberately
-# PERMISSIVE. A strict gate keeps only the most elongated neighbourhoods, which
-# is a BIASED subset of the branch population, and measured on a synthetic tree
-# it made the pooled estimate WORSE than not estimating at all:
-#     k=200 ratio>1.5  ->  -0.2% vs truth        (default G alone: -4.9%)
-#     k=400 ratio>3.0  ->  -7.7% vs truth        i.e. worse than the default
-# The gate exists to drop neighbourhoods with NO dominant direction, not to
-# select the best-looking ones; pooling (see `_pooled_wood_gtheta`) handles the
-# residual noise. Validated across four tree shapes, where k=200/1.5 beat the
-# fixed default on every one (worst case -3.2% against the default's -10.1%).
-#
-# The gate is on the eigenvalue ratio rather than on `linearity` because
-# linearity is NOT monotone in trustworthiness: a short fat segment whose PCA
-# axis is ~90 deg WRONG scores linearity 0.70, HIGHER than a working slender one
-# at 0.34, so a linearity gate endorses the worst case most confidently.
-_WOOD_AXIS_EIGRATIO = 1.5
-# Fewer wood points than this and no neighbourhood can span a branch, so the
-# pooled estimate degrades to the default rather than reporting noise.
-_WOOD_AXIS_MIN_POINTS = 64
-# Above this many wood points the axes are estimated from a random subsample:
-# G is a POOLED mean, so its standard error is already negligible here, and the
-# KD-tree query is the cost.
-_WOOD_AXIS_MAX_POINTS = 200_000
-
-
-def _trusted_branch_axes(points: "np.ndarray"):
-    """Local branch-axis directions for wood points whose neighbourhood is
-    convincingly elongated, as an (M, 3) array (M may be 0).
-
-    The axis is the eigenvector of the LARGEST eigenvalue -- a cylinder's points
-    spread most ALONG its axis -- which is the opposite end of the spectrum from
-    a surface normal (smallest eigenvalue).
-    """
-    import numpy as np
-    from scipy.spatial import cKDTree
-
-    pts = np.ascontiguousarray(np.asarray(points, dtype=np.float64)[:, :3])
-    n = pts.shape[0]
-    k = min(_WOOD_AXIS_K, n)
-    # Below a few dozen wood points the neighbourhood cannot span a branch (see
-    # _WOOD_AXIS_K), so any axis would be surface noise. Return nothing and let
-    # the caller fall back to the default G, which is within ~13% regardless.
-    if n < _WOOD_AXIS_MIN_POINTS or k < 8:
-        return None
-
-    if n > _WOOD_AXIS_MAX_POINTS:
-        sel = np.random.default_rng(0).choice(n, _WOOD_AXIS_MAX_POINTS, replace=False)
-        query = pts[sel]
-    else:
-        query = pts
-
-    tree = cKDTree(pts)
-    axes = []
-    # Chunked so the (m, k) index block and the (m, k, 3) neighbourhood gather
-    # stay bounded on a large cloud.
-    for start in range(0, query.shape[0], 50_000):
-        block = query[start:start + 50_000]
-        _, idx = tree.query(block, k=k, workers=-1)
-        if idx.ndim == 1:
-            idx = idx[:, None]
-        nb = pts[idx]                                   # (m, k, 3)
-        d = nb - nb.mean(axis=1, keepdims=True)
-        cov = np.einsum("mki,mkj->mij", d, d) / float(k - 1)
-        w, v = np.linalg.eigh(cov)                      # ascending
-        lam1, lam2 = w[:, 2], w[:, 1]
-        keep = lam1 > _WOOD_AXIS_EIGRATIO * np.maximum(lam2, 1e-20)
-        if np.any(keep):
-            axes.append(v[keep][:, :, 2])               # eigenvector of lambda1
-    if not axes:
-        return np.empty((0, 3), dtype=np.float64)
-    return np.vstack(axes)
 
 
 def _do_lad_computation(request: "LADComputeRequest", progress=None,
@@ -12654,10 +12505,6 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "has_wood_classification": wood_split is not None,
             "total_wood_area": (total_wood_area if wood_split is not None else None),
             "wood_gtheta": (wood_split["g_wood"] if wood_split is not None else None),
-            "wood_gtheta_source": (wood_split["g_wood_source"]
-                                   if wood_split is not None else None),
-            "wood_angle_n": (wood_split["wood_angle_n"]
-                             if wood_split is not None else None),
             "occlusion_threshold_m": occlusion_threshold,
             "under_sampled_count": under_sampled_count,
             "filled_count": filled_count,

@@ -937,16 +937,14 @@ export interface LADResultEntry {
   };
   // Leaf/wood split summary. Absent (or hasWood false) => the source cloud had
   // no wood/leaf classification and every voxel's wood field is undefined.
-  // `gthetaSource` is 'pooled' (measured from branch axes) or 'default' (too few
-  // reliable axes, so the randomly-oriented-cylinder value was assumed), and
-  // `angleN` is how many trusted axes backed a pooled estimate — surfaced so a
-  // reader can tell a measurement from an assumption.
+  // `gtheta` is the wood projection coefficient applied: the
+  // randomly-oriented-cylinder constant, ASSUMED rather than measured from this
+  // cloud. Carried so the panel can say so and a reader can reproduce the wood
+  // area from the leaf one.
   wood?: {
     hasWood: boolean;
     totalWoodArea?: number;    // m², measured voxels only
     gtheta?: number;
-    gthetaSource?: string;
-    angleN?: number;
   };
   // ---- Export support ----------------------------------------------------
   // These exist so a result can be written out faithfully; nothing renders them.
