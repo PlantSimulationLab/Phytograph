@@ -505,14 +505,42 @@ the estimate errs long):
   ground/plant children counts the parent's points twice.
 
 Past `PHYTOGRAPH_COST_WARNING_SECONDS` (default 90) — or when the transient
-working set alone exceeds the memory budget — the endpoint answers **409**
+working set exceeds the room actually left — the endpoint answers **409**
 with a structured `cost_warning` (`message`, `estimated_seconds`,
-`estimated_bytes`, `budget_bytes`, `over_time`, `over_memory`). The renderer's
+`estimated_bytes`, `budget_bytes`, `headroom_bytes`, `admitted_bytes`,
+`over_time`, `over_memory`). The renderer's
 existing `CostWarningError` path (shared with TreeIso) turns that into an
 amber advisory and a **Segment Anyway** button, which re-sends with
 `acknowledge_cost: true`. A cloth resolution that would build more than
 25 M cloth nodes is refused outright (400) with the coarsest resolution that
 fits, because that is a hang, not a slowdown, and independent of point count.
+
+### What the memory arm is judged against
+
+`bytes_needed > budget_bytes()` was the wrong comparison twice over, and both
+misses were in the direction that hurts:
+
+- **work already in flight.** A 3 GB run under an 8 GB budget did not warn even
+  with 6 GB of exports admitted, because the test never consulted `_ADMISSION`.
+  It would then simply block in `admit()` — correct, but the user had committed
+  to a wait nobody mentioned.
+- **memory the rest of the machine has taken.** Admission derates the budget by
+  what the OS reports free (`admission_budget_bytes`), so an advisory using the
+  nominal budget contradicts the gate it is warning about.
+
+The arm now compares against `admission_budget_bytes() - admitted_bytes()`, and
+the message names the other work ("more than the 2.0 GB free right now, 6.0 GB
+is already in use by another operation") rather than quoting a budget the user
+cannot reconcile with the numbers in front of them. `budget_bytes` stays in the
+body for the renderer's existing field.
+
+TreeIso's prompt gained a memory arm at the same time. Its node count is a good
+TIME signal and a poor memory one — decimation bounds the nodes, but the worker
+still stages and holds the FULL cloud, so a 40 M-point cloud that decimates to
+500 k voxels is ~2.1 GB of resident work while reporting nothing unusual. Both
+the prompt and the admission now size that from one shared
+`_killable_worker_bytes`, so the number the user is shown is the number the gate
+will use.
 
 ## Octree LOD sampling policy
 

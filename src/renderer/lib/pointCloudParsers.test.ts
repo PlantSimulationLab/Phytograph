@@ -4,6 +4,7 @@ import {
   isSkeletonFile,
   MESH_FORMATS,
   parseLAS,
+  MAX_FLAT_LAS_POINTS,
   parseLAZ,
   parseMesh,
   parseOBJMesh,
@@ -330,6 +331,40 @@ function makeMinimalLasBuffer(): ArrayBuffer {
 
   return buf;
 }
+
+describe('parseLAS point ceiling', () => {
+  // The flat reader silently did `Math.min(pointCount, 5_000_000)` and carried
+  // on, so a 20 M-point LAS became a 5 M-point cloud with no error and no
+  // warning -- every downstream number then computed confidently on three
+  // quarters of the file missing. It must refuse instead, and say what to do.
+  it('refuses a file with more points than it can hold', async () => {
+    const buf = makeMinimalLasBuffer();
+    // Forge the header's point count; the body stays tiny, which is the point --
+    // the refusal must happen from the HEADER, before any allocation.
+    new DataView(buf).setUint32(107, MAX_FLAT_LAS_POINTS + 1, true);
+    const file = new File([buf], 'huge.las');
+    // Names the real size, the limit, and the route that does work.
+    await expect(parseLAS(file)).rejects.toThrow(/5,000,001 points/);
+    await expect(parseLAS(file)).rejects.toThrow(/more than the 5,000,000/);
+    await expect(parseLAS(file)).rejects.toThrow(/Import/);
+  });
+
+  it('reports the real count rather than a clamped one', async () => {
+    // The old code reported `Math.min(count, 5_000_000)`, so an oversized file
+    // came back claiming exactly 5,000,000 points -- a plausible-looking number
+    // that hid the loss. The refusal must quote the file's OWN count.
+    const buf = makeMinimalLasBuffer();
+    new DataView(buf).setUint32(107, 12_345_678, true);
+    await expect(parseLAS(new File([buf], 'huge.las')))
+      .rejects.toThrow(/12,345,678 points/);
+  });
+
+  it('still reads a file within the ceiling', async () => {
+    // The guard must not break the ordinary path it was added to.
+    const data = await parseLAS(new File([makeMinimalLasBuffer()], 'ok.las'));
+    expect(data.pointCount).toBe(2);
+  });
+});
 
 describe('parseLAS', () => {
   it('parses a synthetic LAS 1.2 point-format-0 file', async () => {

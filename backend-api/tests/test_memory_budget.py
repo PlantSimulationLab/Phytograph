@@ -210,3 +210,53 @@ def test_snapshot_reports_the_admission_budget(monkeypatch):
     snap = mb.snapshot()
     assert "admission_budget_bytes" in snap
     assert 0 < int(snap["admission_budget_bytes"]) <= int(snap["budget_bytes"])
+
+
+def test_estimate_session_bytes_can_skip_memmapped_columns(tmp_path):
+    """`main._session_ram_bytes` is this function plus a memmap skip.
+
+    They were two separate copies of the same traversal, so a column added to
+    CloudSession had to be remembered in both -- and the RAM tally, which decides
+    eviction, was the copy that would silently undercount. This pins the skip
+    that makes one definition serve both.
+    """
+    import numpy as np
+
+    n = 1000
+    path = tmp_path / "positions.npy"
+    mapped = np.lib.format.open_memmap(
+        str(path), mode="w+", dtype=np.float64, shape=(n, 3))
+
+    class Sess:
+        positions = mapped                      # on disk: page cache, not RAM
+        colors = np.zeros((n, 3), dtype=np.uint16)   # in RAM
+        intensity = None
+        deleted = np.zeros(n, dtype=bool)            # in RAM
+        timestamps = None
+        beam_origins = None
+        deleted_base = None
+        extras: dict = {}
+        deleted_history: list = []
+        backfilled_misses: dict = {}
+
+    everything = mb.estimate_session_bytes(Sess())
+    ram_only = mb.estimate_session_bytes(
+        Sess(), skip=lambda a: isinstance(a, np.memmap))
+
+    assert everything == n * 24 + n * 6 + n * 1
+    assert ram_only == n * 6 + n * 1, "the memmapped column must not count as RAM"
+    assert ram_only < everything
+
+
+def test_session_ram_bytes_is_the_shared_traversal():
+    """The chokepoint: `main` must not grow its own copy again."""
+    import inspect
+
+    import main
+
+    src = inspect.getsource(main._session_ram_bytes)
+    assert "estimate_session_bytes" in src, (
+        "_session_ram_bytes must delegate to memory_budget.estimate_session_bytes, "
+        "not re-walk the session's arrays"
+    )
+    assert "np.memmap" in src, "it must still skip memmapped columns"

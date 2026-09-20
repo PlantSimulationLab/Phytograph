@@ -5543,15 +5543,32 @@ def _cost_advisory(label: str, seconds: float, bytes_needed: int, *,
                    breakdown: "Optional[str]" = None) -> "Optional[dict]":
     """A structured `cost_warning` when a run is worth confirming, else None.
 
-    Fires on TIME (estimate past `_COST_WARNING_SECONDS`) or on MEMORY (the
-    run's transient working set alone exceeds the machine's budget - it will
-    still be admitted, alone, but the user should know it may page). Same body
-    shape as `_treeiso_cost_warning` so the renderer's `CostWarningError` path
-    handles it unchanged.
+    Fires on TIME (estimate past `_COST_WARNING_SECONDS`) or on MEMORY. Same
+    body shape as `_treeiso_cost_warning` so the renderer's `CostWarningError`
+    path handles it unchanged.
+
+    The memory arm compares against the room the run will ACTUALLY find, not the
+    machine's nominal budget. It used to test `bytes_needed > budget_bytes()`,
+    which missed the two cases most likely to hurt:
+
+    - work already IN FLIGHT. A 6 GB run under an 8 GB budget did not warn even
+      with 5 GB of exports already admitted, because the test never looked at
+      `_ADMISSION`. It would then block in `admit()` -- correct, but the user
+      committed to a wait nobody told them about.
+    - memory the rest of the MACHINE has taken. The budget is half of total RAM;
+      admission already derates that by what the OS reports free
+      (`admission_budget_bytes`), so the advisory has to use the same number or
+      it contradicts the gate it is warning about.
+
+    `headroom` is therefore the admission budget minus what is admitted now.
+    A run larger than that will wait, page, or both, and that is worth a prompt.
     """
     budget = memory_budget.budget_bytes()
+    admission_budget = memory_budget.admission_budget_bytes()
+    admitted = _ADMISSION.admitted_bytes()
+    headroom = max(0, admission_budget - admitted)
     over_time = seconds >= _COST_WARNING_SECONDS
-    over_memory = budget > 0 and bytes_needed > budget
+    over_memory = headroom > 0 and bytes_needed > headroom
     if not (over_time or over_memory):
         return None
     parts = [f"{label} is estimated at about {_fmt_duration(seconds)}"]
@@ -5559,15 +5576,27 @@ def _cost_advisory(label: str, seconds: float, bytes_needed: int, *,
         parts[0] += f" ({breakdown})"
     parts.append(f"and roughly {memory_budget.fmt_bytes(bytes_needed)} of memory")
     if over_memory:
-        parts.append(
-            f"- more than this machine's {memory_budget.fmt_bytes(budget)} budget, "
-            "so it may slow down the whole computer while it runs")
+        if admitted > 0:
+            # Name the other work: "more than the budget" is baffling when the
+            # budget is 8 GB and the run is 2 GB.
+            parts.append(
+                f"- more than the {memory_budget.fmt_bytes(headroom)} free right now "
+                f"({memory_budget.fmt_bytes(admitted)} is already in use by another "
+                "operation), so it will wait or slow the whole computer down")
+        else:
+            parts.append(
+                f"- more than the {memory_budget.fmt_bytes(headroom)} this machine "
+                "has available, so it may slow down the whole computer while it runs")
     message = " ".join(parts) + ". You can cancel while it runs."
     return {
         "message": message,
         "estimated_seconds": float(round(seconds, 1)),
         "estimated_bytes": int(bytes_needed),
+        # The nominal budget, kept for the renderer's existing field.
         "budget_bytes": int(budget),
+        # What the estimate was actually judged against, and why it was lower.
+        "headroom_bytes": int(headroom),
+        "admitted_bytes": int(admitted),
         "over_time": bool(over_time),
         "over_memory": bool(over_memory),
     }
@@ -7807,19 +7836,43 @@ def _treeiso_cost_warning(points: np.ndarray, param_dict: dict) -> Optional[dict
         return None
     _auto_treeiso_decimation(points, resolved)
     nodes = _count_treeiso_nodes(points, resolved)
-    if nodes is None or nodes <= _TREEISO_MAX_NODES:
+
+    # MEMORY arm. The node count is a good TIME signal and a poor memory one:
+    # decimation bounds the nodes but the worker still stages and holds the FULL
+    # cloud (`_killable_worker_bytes`), so a 40 M-point cloud that decimates to
+    # 500 k voxels is ~2.1 GB of resident work while reporting nothing unusual.
+    # This prompt was node-count-only and never mentioned memory, even though the
+    # run it describes is admitted against the budget and will simply block when
+    # there is no room. Judged against the room actually left, for the reasons in
+    # `_cost_advisory`.
+    est_bytes = _killable_worker_bytes(len(points))
+    headroom = max(
+        0, memory_budget.admission_budget_bytes() - _ADMISSION.admitted_bytes())
+    over_memory = headroom > 0 and est_bytes > headroom
+    over_nodes = nodes is not None and nodes > _TREEISO_MAX_NODES
+    if not (over_nodes or over_memory):
         return None
+
+    if over_nodes:
+        msg = (f"This cloud will run tree segmentation on {nodes:,} voxels after "
+               f"decimation, above the {_TREEISO_MAX_NODES:,} guideline "
+               f"({len(points):,} points at a {resolved.decimate_res1:g} m voxel "
+               "size). It may take 15 minutes or more.")
+    else:
+        msg = (f"Tree segmentation on {len(points):,} points needs about "
+               f"{memory_budget.fmt_bytes(est_bytes)} of memory.")
+    if over_memory:
+        msg += (f" That is more than the {memory_budget.fmt_bytes(headroom)} free "
+                "right now, so it will wait or slow the whole computer down.")
     return {
-        "nodes": int(nodes),
+        "nodes": int(nodes) if nodes is not None else 0,
         "node_guideline": int(_TREEISO_MAX_NODES),
         "points": int(len(points)),
         "decimate_res1": float(resolved.decimate_res1),
-        "message": (
-            f"This cloud will run tree segmentation on {nodes:,} voxels after "
-            f"decimation, above the {_TREEISO_MAX_NODES:,} guideline "
-            f"({len(points):,} points at a {resolved.decimate_res1:g} m voxel "
-            "size). It may take 15 minutes or more. You can cancel while it runs."
-        ),
+        "estimated_bytes": int(est_bytes),
+        "headroom_bytes": int(headroom),
+        "over_memory": bool(over_memory),
+        "message": msg + " You can cancel while it runs.",
     }
 
 
@@ -24718,6 +24771,25 @@ def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
         return (np.load(outputs[0]), np.load(outputs[1]), np.load(outputs[2]))
 
 
+# Bytes one killable worker holds: the staged copy on disk is paged back in by
+# the worker (N x 24 B), the worker's own compute holds at least one more copy,
+# and the labels come back (N x 8 B).
+_KILLABLE_BYTES_PER_POINT = 24 + 24 + 8
+
+
+def _killable_worker_bytes(n_points: int, *, reflectance=None) -> int:
+    """Working set of a `_run_killable` worker on `n_points`.
+
+    Shared by the admission in `_run_killable` and by the cost advisories that
+    warn about the same run BEFORE it starts, so the number the user is shown is
+    the number the gate will use. They were two separate expressions, which is
+    how TreeIso ended up with a prompt that never mentioned memory at all.
+    """
+    n = max(0, int(n_points))
+    extra = int(reflectance.nbytes) if reflectance is not None else 0
+    return n * _KILLABLE_BYTES_PER_POINT + extra
+
+
 async def _run_killable(
     tool: str,
     points: "np.ndarray",
@@ -24748,12 +24820,10 @@ async def _run_killable(
     import tempfile
 
     loop = asyncio.get_event_loop()
-    # Declare the working set to the memory budget: the staged copy on disk is
-    # paged back in by the worker (N x 24 B), the worker's own compute holds at
-    # least one more copy, and the labels come back (N x 8 B). Acquired off the
-    # event loop - a queued job must not stall unrelated requests while it waits.
+    # Declare the working set to the memory budget. Acquired off the event loop -
+    # a queued job must not stall unrelated requests while it waits.
     n_pts = int(len(points))
-    estimate = n_pts * (24 + 24 + 8) + (int(reflectance.nbytes) if reflectance is not None else 0)
+    estimate = _killable_worker_bytes(n_pts, reflectance=reflectance)
     admitted = _ADMISSION.admit(estimate, f"{tool} worker on {n_pts:,} pts")
     await run_in_threadpool(admitted.__enter__)
     try:
@@ -30645,23 +30715,15 @@ def _registration_bytes(*clouds) -> int:
 
 def _session_ram_bytes(sess: "CloudSession") -> int:
     """Bytes this session holds in RAM proper - memmapped columns count as
-    nothing (they are page cache the OS reclaims on its own)."""
-    total = 0
+    nothing (they are page cache the OS reclaims on its own).
 
-    def _add(arr):
-        nonlocal total
-        if arr is not None and not isinstance(arr, np.memmap):
-            total += int(getattr(arr, "nbytes", 0))
-
-    for f in _SESSION_STORE_ARRAY_FIELDS:
-        _add(getattr(sess, f, None))
-    for arr in (sess.extras or {}).values():
-        _add(arr)
-    for arr in sess.deleted_history or []:
-        _add(arr)
-    for arr in (sess.backfilled_misses or {}).values():
-        _add(arr)
-    return total
+    One traversal, shared with `memory_budget.estimate_session_bytes`, which this
+    used to duplicate: the two differed only in the memmap skip, so a new session
+    column had to be added in both and the RAM tally here was the copy that would
+    silently undercount if it were missed.
+    """
+    return memory_budget.estimate_session_bytes(
+        sess, skip=lambda arr: isinstance(arr, np.memmap))
 
 
 def _next_extra_column(store, used: set) -> str:
@@ -33929,6 +33991,14 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
         # _MAX_DELETED_HISTORY steps (older undos are dropped). Dropping the
         # OLDEST would break replay-from-zero, so the dropped steps are folded
         # into a permanent base: the mask keeps them, the stack forgets them.
+        #
+        # This cap bounds REPLAY COST, not bytes, and deliberately so: entries
+        # hold the indices NEWLY deleted by each step, and a point can be newly
+        # deleted only once, so the sum over the whole stack can never exceed N
+        # int64 however many steps there are (763 MB on a 100 M-point cloud, and
+        # only if every point was erased). An audit read this as "50 x a full
+        # (N,) mask" and wanted it byte-derived like the session caps; it is
+        # already self-limiting, and `estimate_session_bytes` counts it.
         if len(sess.deleted_history) > _MAX_DELETED_HISTORY:
             sess.deleted_history = sess.deleted_history[-_MAX_DELETED_HISTORY:]
             sess.deleted_base = sess.deleted.copy()

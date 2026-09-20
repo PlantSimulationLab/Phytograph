@@ -251,28 +251,45 @@ def bytes_per_point(
     return total
 
 
-def estimate_session_bytes(sess) -> int:
-    """Resident bytes of a CloudSession-like object (duck-typed on its arrays).
+# The array-bearing attributes of a CloudSession, in the order they are summed.
+# `deleted_base` rides in `main._SESSION_STORE_ARRAY_FIELDS` too; it is included
+# here so the two callers traverse the same object.
+_SESSION_ARRAY_FIELDS = ("positions", "colors", "intensity", "deleted",
+                         "timestamps", "beam_origins", "deleted_base")
 
-    Counts the arrays it actually holds, including the undo snapshots, so the
-    result is what the process pays now - not what a fresh import would cost.
+
+def estimate_session_bytes(sess, *, skip=None) -> int:
+    """Bytes of a CloudSession-like object (duck-typed on its arrays).
+
+    Counts the arrays it actually holds, including the undo deltas, so the result
+    is what the process pays now - not what a fresh import would cost.
+
+    `skip` is an optional predicate; an array it accepts contributes nothing.
+    `main._session_ram_bytes` passes one that skips `np.memmap`, because a
+    memmapped column is page cache the OS reclaims on its own and must not count
+    against the RAM-resident limit. The two were separate copies of this
+    traversal, differing only in that skip -- so adding a column to the session
+    meant remembering to add it in both, and the sweep's RAM tally was the one
+    that would silently undercount.
     """
     total = 0
-    for name in ("positions", "colors", "intensity", "deleted", "timestamps",
-                 "beam_origins"):
-        arr = getattr(sess, name, None)
-        total += _nbytes(arr)
+    for name in _SESSION_ARRAY_FIELDS:
+        total += _nbytes(getattr(sess, name, None), skip)
     for arr in (getattr(sess, "extras", None) or {}).values():
-        total += _nbytes(arr)
+        total += _nbytes(arr, skip)
     for arr in getattr(sess, "deleted_history", None) or []:
-        total += _nbytes(arr)
+        total += _nbytes(arr, skip)
     misses = getattr(sess, "backfilled_misses", None) or {}
     for arr in misses.values():
-        total += _nbytes(arr)
+        total += _nbytes(arr, skip)
     return int(total)
 
 
-def _nbytes(arr) -> int:
+def _nbytes(arr, skip=None) -> int:
+    if arr is None:
+        return 0
+    if skip is not None and skip(arr):
+        return 0
     try:
         return int(arr.nbytes)
     except AttributeError:

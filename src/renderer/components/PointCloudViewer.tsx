@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom';
 import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
+import { shouldDeferOctreeRebuild } from '../lib/deferOctreeRebuild';
 import { OctreeRefreshQueue, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
@@ -11926,7 +11927,7 @@ export default function PointCloudViewer({
       // Defer the octree rebuild on a big cloud: the columns land (so export,
       // meshing and any later reuse can see them) while the COLOURING catches
       // up on the background refresh queue. Same trade the ground split makes.
-      const willDefer = (cloud.data.pointCount ?? 0) > 5_000_000;
+      const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
       const meta = await sessionComputeNormals(
         sessionId, { ...params, defer_octree: willDefer }, abort.signal);
 
@@ -12094,7 +12095,7 @@ export default function PointCloudViewer({
     // Defer the rebuild on a big cloud, exactly as Compute Normals does: the
     // column lands immediately (export, a further formula and every other tool
     // can read it) while the COLOURING catches up on the refresh queue.
-    const willDefer = (cloud.data.pointCount ?? 0) > 5_000_000;
+    const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
 
     try {
       const result = await computeScalarField(sessionId, {
@@ -12243,7 +12244,7 @@ export default function PointCloudViewer({
     setScalarError(null);
     const abort = new AbortController();
     scalarAbortRef.current = abort;
-    const willDefer = (cloud.data.pointCount ?? 0) > 5_000_000;
+    const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
 
     try {
       const result = await manageScalarField(sessionId, {

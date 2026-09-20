@@ -67,7 +67,51 @@ def test_advisory_fires_on_memory_even_when_fast(monkeypatch):
     w = main._cost_advisory("x", 5.0, 3 * mb.GiB)
     assert w is not None
     assert w["over_memory"] and not w["over_time"]
-    assert "more than this machine's 1.0 GB budget" in w["message"]
+    assert "more than the 1.0 GB this machine has available" in w["message"]
+    assert w["headroom_bytes"] == 1 * mb.GiB, "nothing else admitted"
+
+
+def test_advisory_counts_work_already_in_flight(monkeypatch):
+    """The gap that made the memory arm nearly unreachable in practice.
+
+    It compared against the whole budget, so a 3 GB run under an 8 GB budget did
+    not warn even with 6 GB of exports already admitted -- it just blocked in
+    `admit()`, and the user had committed to a wait nobody mentioned. The arm now
+    measures the room actually LEFT.
+    """
+    monkeypatch.setattr(main, "_COST_WARNING_SECONDS", 90.0)
+    monkeypatch.setenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", str(8 * mb.GiB))
+
+    # Alone under an 8 GB budget, a 3 GB run is unremarkable.
+    assert main._cost_advisory("x", 5.0, 3 * mb.GiB) is None
+
+    # With 6 GB in flight, the same run has 2 GB of room and must say so.
+    with main._ADMISSION.admit(6 * mb.GiB, "an export"):
+        w = main._cost_advisory("x", 5.0, 3 * mb.GiB)
+        assert w is not None, "a run that will block must warn first"
+        assert w["over_memory"] and not w["over_time"]
+        assert w["admitted_bytes"] == 6 * mb.GiB
+        assert w["headroom_bytes"] == 2 * mb.GiB
+        # And it must name the other work: "more than the budget" is baffling
+        # when the budget is 8 GB and the run is 3 GB.
+        assert "already in use by another operation" in w["message"]
+        assert "2.0 GB free right now" in w["message"]
+
+
+def test_advisory_is_judged_against_free_memory_not_total_ram(monkeypatch):
+    """A pinned budget is honoured, but an AUTO budget derates by what is free,
+    and the advisory must use the same number as the gate it warns about."""
+    monkeypatch.delenv("PHYTOGRAPH_MEMORY_BUDGET_BYTES", raising=False)
+    monkeypatch.setattr(main, "_COST_WARNING_SECONDS", 90.0)
+    monkeypatch.setattr(mb, "physical_ram_bytes", lambda: 16 * mb.GiB)
+    monkeypatch.setattr(mb, "available_bytes", lambda: 3 * mb.GiB)
+    # Budget is 8 GB, but admission (and so the advisory) allows 0.7 x 3 GB.
+    assert mb.budget_bytes() == 8 * mb.GiB
+    w = main._cost_advisory("x", 5.0, 4 * mb.GiB)
+    assert w is not None, "4 GB does not fit in 2.1 GB of real headroom"
+    assert w["over_memory"]
+    assert w["budget_bytes"] == 8 * mb.GiB, "the nominal budget is still reported"
+    assert w["headroom_bytes"] < 4 * mb.GiB
 
 
 def test_fmt_duration():

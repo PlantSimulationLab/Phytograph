@@ -499,6 +499,11 @@ export async function parsePCD(file: File): Promise<PointCloudData> {
   return result;
 }
 
+// Ceiling for the in-renderer flat LAS reader (see the note in `parseLAS`).
+// Not a memory budget: this reader exists only for files with no on-disk path,
+// and anything larger should take the octree import, which streams.
+export const MAX_FLAT_LAS_POINTS = 5_000_000;
+
 // Parse LAS format (simplified - handles LAS 1.2-1.4)
 export async function parseLAS(file: File): Promise<PointCloudData> {
   const buffer = await file.arrayBuffer();
@@ -537,9 +542,26 @@ export async function parseLAS(file: File): Promise<PointCloudData> {
   const offsetY = view.getFloat64(163, true);
   const offsetZ = view.getFloat64(171, true);
 
-  // Limit points for performance
-  const maxPoints = 5_000_000;
-  const actualPointCount = Math.min(pointCount, maxPoints);
+  // This is the FLAT FALLBACK reader, used only when a LAS arrives with no
+  // on-disk path (a Blob, a drag from an archive, a test fixture) so the import
+  // wizard cannot preview it and the octree path is unavailable. It builds
+  // Float32Array columns in the renderer, which is why it has a ceiling at all.
+  //
+  // It used to `Math.min(pointCount, 5_000_000)` and carry on, so a 20 M-point
+  // LAS silently became a 5 M-point cloud: no error, no warning, and every
+  // downstream number (counts, bounds, LAD, exports) computed confidently on
+  // three quarters of the file missing. Refusing is strictly better -- the same
+  // file imported BY PATH takes the octree route, which has no such limit, so
+  // the fix the message names is one the user can actually act on.
+  if (pointCount > MAX_FLAT_LAS_POINTS) {
+    throw new Error(
+      `This LAS file has ${pointCount.toLocaleString()} points, more than the `
+      + `${MAX_FLAT_LAS_POINTS.toLocaleString()} this reader can hold. Open it with `
+      + `File \u2192 Import (or drag it from a folder rather than from an archive) `
+      + `to load it as a streamed point cloud instead, which has no size limit.`,
+    );
+  }
+  const actualPointCount = pointCount;
 
   const positions = new Float32Array(actualPointCount * 3);
   const intensities = new Float32Array(actualPointCount);
