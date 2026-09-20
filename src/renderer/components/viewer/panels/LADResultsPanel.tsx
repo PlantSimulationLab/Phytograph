@@ -4,7 +4,7 @@ import type { LADResultEntry } from '../../../lib/pointCloudTypes';
 import { ladRange } from '../../../lib/pointCloudHelpers';
 import { ColormapName, COLORMAP_NAMES, COLORMAP_LABELS } from '../../../lib/colormaps';
 import {
-  LAD_EXPORT_VARIABLES, rasterBlockedReason, type LadExportFormat,
+  ladExportVariables, rasterBlockedReason, type LadExportFormat,
 } from '../../../lib/ladExport';
 
 // Export controls for one LAD result. Four formats, because the canopy-structure
@@ -27,13 +27,16 @@ function LadExportControls({
   onExport: (id: string, format: LadExportFormat, variables: string[]) => void;
 }) {
   const [checked, setChecked] = useState<Set<string>>(() => new Set(['lad']));
+  // Wood variables are offered only when this result actually carries a split —
+  // bands that would be NoData in every voxel are worse than no bands at all.
+  const variables = ladExportVariables(result.wood?.hasWood === true);
   const toggle = (key: string, on: boolean) =>
     setChecked((prev) => {
       const next = new Set(prev);
       if (on) next.add(key); else next.delete(key);
       return next;
     });
-  const selected = LAD_EXPORT_VARIABLES.filter((v) => checked.has(v.key)).map((v) => v.key);
+  const selected = variables.filter((v) => checked.has(v.key)).map((v) => v.key);
   // Non-null when this grid has no axis-aligned lattice, i.e. a raster would be
   // confidently mis-georeferenced. Disables GeoTIFF and explains why.
   const rasterBlocked = rasterBlockedReason(result);
@@ -45,7 +48,7 @@ function LadExportControls({
         Export
       </div>
       <div className="space-y-0.5" data-testid="lad-export-variables">
-        {LAD_EXPORT_VARIABLES.map((v) => (
+        {variables.map((v) => (
           <label
             key={v.key}
             className="flex items-center gap-1.5 text-[10px] text-neutral-300 cursor-pointer"
@@ -94,7 +97,7 @@ function LadExportControls({
         <button
           data-testid="lad-export-txt"
           onClick={(e) => { e.stopPropagation(); onExport(result.id, 'txt', selected); }}
-          title="Plain-text summary — voxel and occlusion counts, total leaf area, and LAI"
+          title="Plain-text summary — voxel and occlusion counts, total leaf area and LAI, plus wood area, WAI and PAI when the cloud was classified"
           className="px-2 py-1 text-[11px] bg-neutral-700 hover:bg-neutral-600 text-neutral-200 rounded"
         >
           Summary
@@ -250,6 +253,71 @@ export function LADResultsPanel({
                       </div>
                     </div>
                   )}
+                  {/* No leaf/wood split ran. Said explicitly rather than left to
+                      an absence, because "LAD" on an unclassified cloud is really
+                      PLANT area density — branches are being counted as foliage —
+                      and a user who does not know that will over-read the number.
+                      Only shown on the selected result to keep the list quiet. */}
+                  {!result.wood?.hasWood && selectedLadId === result.id && (
+                    <div
+                      data-testid="lad-no-wood-note"
+                      className="rounded bg-neutral-900/60 border border-neutral-700/60 px-2 py-1.5"
+                    >
+                      <div className="text-[10px] text-neutral-400">
+                        Every return counted as foliage
+                      </div>
+                      <div className="text-[9px] text-neutral-500 mt-0.5">
+                        This cloud carried no wood/leaf classification, so branches
+                        are included in LAD. Run Segment Wood / Leaf before
+                        computing to separate leaf and wood area.
+                      </div>
+                    </div>
+                  )}
+                  {result.wood?.hasWood && (
+                    <div
+                      data-testid="lad-wood-summary"
+                      data-wood-gtheta-source={result.wood.gthetaSource ?? ''}
+                      className="rounded bg-neutral-900/60 border border-neutral-700/60 px-2 py-1.5"
+                    >
+                      <div className="text-[10px] text-neutral-300">
+                        Leaf and wood area
+                      </div>
+                      {result.wood.totalWoodArea != null && (
+                        <div className="text-[10px] text-neutral-400 mt-0.5">
+                          Wood {result.wood.totalWoodArea.toFixed(1)} m²
+                          {' · '}
+                          Leaf {result.totalLeafArea != null
+                            ? `${result.totalLeafArea.toFixed(1)} m²`
+                            : '—'}
+                        </div>
+                      )}
+                      <div className="text-[9px] text-neutral-500 mt-0.5">
+                        {/* Say plainly whether G(theta) was measured or assumed —
+                            the panel must never present an assumption as a
+                            measurement (the same rule the occlusion block follows). */}
+                        {result.wood.gthetaSource === 'pooled'
+                          ? `Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} `
+                            + `from ${result.wood.angleN ?? 0} branch axes`
+                          : `Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} assumed `
+                            + '(randomly-oriented cylinders): too few reliable branch axes'}
+                      </div>
+                      <div
+                        className="text-[9px] text-amber-300/80 mt-1 cursor-help"
+                        title={
+                          'Wood area is the TOTAL woody surface area; leaf area is '
+                          + 'one-sided. Both are absolute, so LAI + WAI = PAI.\n\n'
+                          + 'Accuracy depends on the two being mixed within a voxel. '
+                          + 'A voxel holding a whole trunk AND the foliage beside it '
+                          + 'will misattribute between them — leaf area stays accurate, '
+                          + 'wood is the number that suffers. If woody area is the '
+                          + 'point of the run, use voxels small enough that a trunk '
+                          + 'gets its own.'
+                        }
+                      >
+                        Sized the grid for the wood? ⓘ
+                      </div>
+                    </div>
+                  )}
                   {result.occlusion && (
                     <div
                       data-testid="lad-occlusion-summary"
@@ -328,6 +396,31 @@ export function LADResultsPanel({
                       className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer"
                     />
                   </div>
+                  {/* Which density the voxels are colored by. Offered only when
+                      this result carries a leaf/wood split — otherwise there is
+                      exactly one quantity and a picker would be noise. Changing
+                      it rescales the colorbar and relabels the legend; it does
+                      not alter any stored value. */}
+                  {result.wood?.hasWood && (
+                    <div>
+                      <label className="text-[10px] text-neutral-400 block mb-1">
+                        Color by
+                      </label>
+                      <select
+                        data-testid="lad-display-field"
+                        value={result.displayField ?? 'lad'}
+                        onChange={(e) => onUpdate(result.id, {
+                          displayField: e.target.value as 'lad' | 'wad' | 'pad',
+                        })}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-full bg-neutral-700 text-neutral-200 text-[11px] rounded px-1.5 py-1 border border-neutral-600"
+                      >
+                        <option value="lad">Leaf area density (LAD)</option>
+                        <option value="wad">Wood area density (WAD)</option>
+                        <option value="pad">Plant area density (PAD)</option>
+                      </select>
+                    </div>
+                  )}
                   <label className="flex items-center gap-2 text-[10px] text-neutral-400 cursor-pointer">
                     <input
                       type="checkbox"

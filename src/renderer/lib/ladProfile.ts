@@ -70,6 +70,18 @@ export interface LADProfile {
    * withholding — shown as context, never as the headline.
    */
   laiWithFilled: number;
+  /**
+   * Wood area (m²) over MEASURED voxels, and the wood area index it gives over
+   * the same footprint as `lai`. Both undefined when the result carries no
+   * leaf/wood split, so a caller can tell "no classification" from "no wood".
+   *
+   * The same measured-voxel rule as `lai` — an occluded voxel is excluded here
+   * too, for the identical reason. `wai` is TOTAL woody surface area per unit
+   * ground while `lai` is one-sided leaf area, so `lai + wai` is PAI.
+   */
+  woodArea?: number;
+  wai?: number;
+  pai?: number;
   /** Voxels excluded from every aggregate above (unsolved or under-sampled). */
   occludedCount: number;
   totalCount: number;
@@ -112,6 +124,10 @@ export function computeLadProfile(result: LADResultEntry): LADProfile {
   const nMeasured = zeros(), nVoxels = zeros(), nOccluded = zeros(), nFilled = zeros();
 
   let filledLeafArea = 0;
+  // Wood totals; `sawWood` distinguishes a result with no split from one whose
+  // wood genuinely sums to zero.
+  let woodArea = 0;
+  let sawWood = false;
 
   for (const v of result.voxels) {
     const level = Math.min(Math.max(0, Math.floor(v.index / cellsPerLevel)), nz - 1);
@@ -129,6 +145,12 @@ export function computeLadProfile(result: LADResultEntry): LADProfile {
     sumLad[level] += v.lad;
     sumLadSq[level] += v.lad * v.lad;
     sumArea[level] += v.leafArea;
+    // Wood rides the SAME measured-voxel gate as leaf: an occluded voxel is an
+    // absence of measurement for both media, not a zero for either.
+    if (v.woodArea != null) {
+      woodArea += v.woodArea;
+      sawWood = true;
+    }
   }
 
   // The FULL grid footprint, not the occupied one. This matches the summary
@@ -175,6 +197,11 @@ export function computeLadProfile(result: LADResultEntry): LADProfile {
     groundArea,
     filledLeafArea,
     laiWithFilled: groundArea > 0 ? (leafArea + filledLeafArea) / groundArea : 0,
+    ...(sawWood ? {
+      woodArea,
+      wai: groundArea > 0 ? woodArea / groundArea : 0,
+      pai: groundArea > 0 ? (leafArea + woodArea) / groundArea : 0,
+    } : {}),
     occludedCount,
     totalCount: result.voxels.length,
     terrainFollow: result.terrainFollow === true,
@@ -220,5 +247,14 @@ export function ladProfileCsv(profile: LADProfile, terrainFollow = profile.terra
   rows.push(`# interpolated leaf area m2 (excluded),${profile.filledLeafArea.toFixed(4)}`);
   rows.push(`# LAI if interpolated area were included,${profile.laiWithFilled.toFixed(6)}`);
   rows.push(`# occluded voxels excluded,${profile.occludedCount} of ${profile.totalCount}`);
+  // Wood, appended only when the result carries a split, so an unclassified
+  // profile's CSV is byte-identical to before. The per-level COLUMNS are left
+  // alone deliberately: they are a parsing contract, and the wood totals are
+  // grid-scale numbers that belong with the other bulk provenance lines.
+  if (profile.wai != null && profile.pai != null) {
+    rows.push(`# measured wood surface area m2,${(profile.woodArea ?? 0).toFixed(4)}`);
+    rows.push(`# bulk WAI (measured voxels only),${profile.wai.toFixed(6)}`);
+    rows.push(`# bulk PAI (LAI + WAI),${profile.pai.toFixed(6)}`);
+  }
   return rows.join('\n') + '\n';
 }

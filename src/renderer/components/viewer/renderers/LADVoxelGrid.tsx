@@ -26,8 +26,27 @@ export interface LADVoxelGridProps {
   max: number;            // colorbar domain high
   opacity: number;        // 0..1 cell translucency
   hideEmpty: boolean;
+  // Which per-voxel density drives the color. 'lad' is one-sided LEAF area
+  // (the historical behaviour and the default); 'wad' is TOTAL woody SURFACE
+  // area; 'pad' is their sum. Only meaningful on a result that carries a
+  // leaf/wood split — a voxel with no wood fields reads 0 for wad/pad, which is
+  // correct (no wood was attributed there).
+  field?: LadDisplayField;
   onHoverVoxel?: (v: LADVoxel | null) => void;
   onClickVoxel?: (v: LADVoxel | null) => void;
+}
+
+export type LadDisplayField = 'lad' | 'wad' | 'pad';
+
+/** The density a voxel contributes for the selected display field.
+ *
+ * Single chokepoint so the hide-empty filter, the empty test and the color ramp
+ * cannot disagree about what is being shown — three call sites read this, and a
+ * mismatch between them would hide cells that then render, or vice versa. */
+export function ladVoxelValue(v: LADVoxel, field: LadDisplayField = 'lad'): number {
+  if (field === 'wad') return v.wad ?? 0;
+  if (field === 'pad') return v.pad ?? (v.lad + (v.wad ?? 0));
+  return v.lad;
 }
 
 const EMPTY_COLOR = new THREE.Color('#3a3a3a');
@@ -46,6 +65,7 @@ export function LADVoxelGrid({
   max,
   opacity,
   hideEmpty,
+  field = 'lad',
   onHoverVoxel,
   onClickVoxel,
 }: LADVoxelGridProps) {
@@ -59,8 +79,8 @@ export function LADVoxelGrid({
   const drawn = useMemo(
     () => voxels.filter(v => !hideEmpty || v.underSampled === true
                               || v.ladFilled === true
-                              || (v.hitCount > 0 && v.lad > 0)),
-    [voxels, hideEmpty],
+                              || (v.hitCount > 0 && ladVoxelValue(v, field) > 0)),
+    [voxels, hideEmpty, field],
   );
 
   const geometry = useMemo(() => new THREE.BoxGeometry(1, 1, 1), []);
@@ -113,10 +133,10 @@ export function LADVoxelGrid({
         // is the exception — it was occluded, but it now carries an estimate, and
         // painting that estimate is the entire point of having filled it.
         color.copy(OCCLUDED_COLOR);
-      } else if (v.hitCount === 0 || v.lad <= 0) {
+      } else if (v.hitCount === 0 || ladVoxelValue(v, field) <= 0) {
         color.copy(EMPTY_COLOR);
       } else {
-        const rgb = sampleColormap(colormap, ladColorT(v.lad, min, max));
+        const rgb = sampleColormap(colormap, ladColorT(ladVoxelValue(v, field), min, max));
         color.setRGB(rgb[0], rgb[1], rgb[2]);
       }
       mesh.setColorAt(i, color);
@@ -124,7 +144,10 @@ export function LADVoxelGrid({
     mesh.count = drawn.length;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  }, [drawn, rotationDeg, gridCenter, colormap, min, max]);
+  // `field` MUST be here: switching LAD->WAD changes every instance COLOR while
+  // `drawn` may be identical (same cells, different value), so omitting it
+  // leaves the grid painted with the previous field's ramp.
+  }, [drawn, rotationDeg, gridCenter, colormap, min, max, field]);
 
   // (1) Re-fill when render inputs change while the mesh identity is stable
   //     (colorbar drag, colormap switch, rotation tweak, hide-empty toggle that

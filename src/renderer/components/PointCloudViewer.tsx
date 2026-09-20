@@ -17501,6 +17501,16 @@ export default function PointCloudViewer({
         ...(c.path_length_total != null ? { pathLengthTotal: c.path_length_total } : {}),
         ...(c.under_sampled != null ? { underSampled: c.under_sampled } : {}),
         ...(c.lad_filled != null ? { ladFilled: c.lad_filled } : {}),
+        // Leaf/wood split. Only present when the cloud carried a wood/leaf
+        // classification, so an unclassified run leaves these absent and every
+        // existing reader sees exactly what it saw before.
+        ...(c.wad != null ? { wad: c.wad } : {}),
+        ...(c.wood_area != null ? { woodArea: c.wood_area } : {}),
+        ...(c.pad != null ? { pad: c.pad } : {}),
+        ...(c.wood_fraction != null ? { woodFraction: c.wood_fraction } : {}),
+        ...(c.wood_hit_count != null ? { woodHitCount: c.wood_hit_count } : {}),
+        ...(c.leaf_hit_count != null ? { leafHitCount: c.leaf_hit_count } : {}),
+        ...(c.wood_gtheta != null ? { woodGtheta: c.wood_gtheta } : {}),
       }));
 
       const entry: LADResultEntry = {
@@ -17565,6 +17575,18 @@ export default function PointCloudViewer({
             groupLadMean: response.group_lad_mean ?? undefined,
             groupLadCiLower: response.group_lad_ci_lower ?? undefined,
             groupLadCiUpper: response.group_lad_ci_upper ?? undefined,
+          },
+        } : {}),
+        // Leaf/wood split summary. Attached only when the backend actually did a
+        // split, so an unclassified result carries no `wood` key at all and the
+        // panel's wood section stays hidden.
+        ...(response.has_wood_classification ? {
+          wood: {
+            hasWood: true,
+            totalWoodArea: response.total_wood_area ?? undefined,
+            gtheta: response.wood_gtheta ?? undefined,
+            gthetaSource: response.wood_gtheta_source ?? undefined,
+            angleN: response.wood_angle_n ?? undefined,
           },
         } : {}),
       };
@@ -19223,14 +19245,20 @@ export default function PointCloudViewer({
 
     for (const result of ladResults) {
       if (!result.visible) continue;
-      const auto = ladRange(result.voxels);
+      const auto = ladRange(result.voxels, true, result.displayField ?? 'lad');
       const min = result.ladMinOverride ?? auto.min;
       const max = result.ladMaxOverride ?? auto.max;
       out.push({
         objectId: result.id,
         objectName: `LAD ${result.nx}×${result.ny}×${result.nz}`,
         objectKindPlural: 'LAD grids',
-        variableLabel: 'LAD [m²/m³]',
+        // Name the quantity actually painted. A colorbar reading "LAD" over a
+        // wood-area ramp is a wrong label on a real number, not a cosmetic slip.
+        variableLabel: (result.displayField ?? 'lad') === 'wad'
+          ? 'WAD [m²/m³]'
+          : (result.displayField ?? 'lad') === 'pad'
+            ? 'PAD [m²/m³]'
+            : 'LAD [m²/m³]',
         channel: { mode: 'lad', colormap: colormapFor(result.id), range: { min, max } },
         dataRange: { min, max },
         selected: selectedLadId === result.id,
@@ -19956,7 +19984,9 @@ export default function PointCloudViewer({
             by LAD through the shared colormap. */}
         {ladResults.map(result => {
           if (!result.visible) return null;
-          const auto = ladRange(result.voxels);
+          // Domain from the SAME field the grid paints, or the ramp and the
+          // colorbar disagree the moment the user switches to wood.
+          const auto = ladRange(result.voxels, true, result.displayField ?? 'lad');
           const min = result.ladMinOverride ?? auto.min;
           const max = result.ladMaxOverride ?? auto.max;
           return (
@@ -19972,6 +20002,7 @@ export default function PointCloudViewer({
                 max={max}
                 opacity={result.opacity}
                 hideEmpty={result.hideEmpty}
+                field={result.displayField ?? 'lad'}
                 onHoverVoxel={setHoveredLadVoxel}
               />
             </group>

@@ -868,6 +868,23 @@ export interface LADVoxel {
   // True => `lad` here is an INTERPOLATION (LAD-kriging) over neighbouring reliable
   // voxels, not a measurement. Never counted into a measured total.
   ladFilled?: boolean;
+  // ---- Leaf / wood split ---------------------------------------------------
+  // Present only when the source cloud carried a wood/leaf classification (run
+  // Segment Wood / Leaf first). When present, `lad`/`leafArea` above hold the
+  // LEAF-only part, so every existing reader keeps its meaning.
+  //
+  // The two densities use different, deliberate conventions and both mean "area
+  // that intercepts light": `lad` is one-sided leaf area per m³, `wad` is TOTAL
+  // woody SURFACE area per m³. Hence pad === lad + wad, and LAI + WAI = PAI.
+  wad?: number;              // m²/m³
+  woodArea?: number;         // m²
+  pad?: number;              // lad + wad
+  // Wood share of this voxel's classified interceptions — what the split is made
+  // on. An unbiased estimator of the extinction ratio for well-mixed media.
+  woodFraction?: number;
+  woodHitCount?: number;
+  leafHitCount?: number;
+  woodGtheta?: number;       // pooled per cloud, not per voxel
 }
 
 // A leaf-area-density result: a 3D grid of voxels each carrying an LAD scalar.
@@ -901,6 +918,11 @@ export interface LADResultEntry {
   ladMinOverride?: number;
   ladMaxOverride?: number;
   hideEmpty: boolean;        // hide cells with lad<=0 / hitCount===0
+  // Which density the voxels are COLORED by: 'lad' (one-sided leaf area, the
+  // default and the historical behaviour), 'wad' (total woody surface area) or
+  // 'pad' (their sum). Only offered when `wood.hasWood`; absent means 'lad'.
+  // Purely a display choice — it changes nothing about the stored values.
+  displayField?: 'lad' | 'wad' | 'pad';
   opacity: number;           // 0..1 cell translucency
   // Group-scale Pimont (2018) uncertainty summary over solved voxels — the
   // recommended aggregate, shown in the result panel. Absent for results
@@ -912,6 +934,19 @@ export interface LADResultEntry {
     groupLadMean?: number;      // m²/m³
     groupLadCiLower?: number;   // m²/m³
     groupLadCiUpper?: number;   // m²/m³
+  };
+  // Leaf/wood split summary. Absent (or hasWood false) => the source cloud had
+  // no wood/leaf classification and every voxel's wood field is undefined.
+  // `gthetaSource` is 'pooled' (measured from branch axes) or 'default' (too few
+  // reliable axes, so the randomly-oriented-cylinder value was assumed), and
+  // `angleN` is how many trusted axes backed a pooled estimate — surfaced so a
+  // reader can tell a measurement from an assumption.
+  wood?: {
+    hasWood: boolean;
+    totalWoodArea?: number;    // m², measured voxels only
+    gtheta?: number;
+    gthetaSource?: string;
+    angleN?: number;
   };
   // ---- Export support ----------------------------------------------------
   // These exist so a result can be written out faithfully; nothing renders them.

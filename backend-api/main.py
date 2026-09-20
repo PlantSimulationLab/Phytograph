@@ -6996,6 +6996,16 @@ _LAD_EXPORT_VARIABLES = {
     # the raster and a user summing it gets a number the summary file contradicts.
     # 1.0 = interpolated, 0.0 = measured.
     "lad_filled": "Filled (interpolated) flag",
+    # Leaf/wood split. Present only on a result computed from a cloud that
+    # carried a wood/leaf classification; a cell without them exports NoData for
+    # these bands rather than a misleading zero (see `_lad_variable_value`).
+    # Units: `lad` is one-sided LEAF area per m^3, `wad` is TOTAL woody SURFACE
+    # area per m^3, and `pad` is their sum -- so LAI + WAI = PAI.
+    "wad": "Wood area density (m2/m3)",
+    "wood_area": "Wood area (m2)",
+    "pad": "Plant area density (m2/m3)",
+    "wood_fraction": "Wood fraction of interceptions",
+    "wood_gtheta": "Wood G(theta)",
 }
 
 # Frozen column order for the voxel CSV. This is the contract with anyone parsing
@@ -7009,6 +7019,10 @@ _LAD_CSV_HEADER = [
     "leaf_area_ci_lower", "leaf_area_ci_upper",
     "solved",
     "path_length_total", "under_sampled", "lad_filled",
+    # Appended (never reordered -- see the note above): the leaf/wood split.
+    # Blank for a result with no wood/leaf classification.
+    "wad", "wood_area", "pad", "wood_fraction",
+    "wood_hit_count", "leaf_hit_count", "wood_gtheta",
 ]
 
 
@@ -7041,6 +7055,14 @@ class LADExportCell(BaseModel):
     path_length_total: Optional[float] = None
     under_sampled: Optional[bool] = None
     lad_filled: Optional[bool] = None
+    # Leaf/wood split; None throughout on a result with no classification.
+    wad: Optional[float] = None
+    wood_area: Optional[float] = None
+    pad: Optional[float] = None
+    wood_fraction: Optional[float] = None
+    wood_hit_count: Optional[int] = None
+    leaf_hit_count: Optional[int] = None
+    wood_gtheta: Optional[float] = None
 
 
 class LADExportRequest(BaseModel):
@@ -7212,6 +7234,15 @@ def _lad_csv_bytes(request: "LADExportRequest") -> bytes:
             num(cell.path_length_total),
             "" if cell.under_sampled is None else ("true" if cell.under_sampled else "false"),
             "" if cell.lad_filled is None else ("true" if cell.lad_filled else "false"),
+            # Leaf/wood split. Gated on `solved` exactly like lad/leaf_area above:
+            # an occluded voxel must not export a confident wood zero either.
+            num(cell.wad) if solved else "",
+            num(cell.wood_area) if solved else "",
+            num(cell.pad) if solved else "",
+            num(cell.wood_fraction) if solved else "",
+            "" if cell.wood_hit_count is None else str(int(cell.wood_hit_count)),
+            "" if cell.leaf_hit_count is None else str(int(cell.leaf_hit_count)),
+            num(cell.wood_gtheta),
         ]))
     return ("\n".join(rows) + "\n").encode("utf-8")
 
@@ -7242,7 +7273,12 @@ def _lad_vox_bytes(request: "LADExportRequest") -> bytes:
                                 request.nx, request.ny, request.nz)
         beams = -1 if cell.beam_count is None else int(cell.beam_count)
         mpl = 0.0 if cell.mean_path_length is None else float(cell.mean_path_length)
-        lines.append(f"{i} {j} {k} {cell.lad:.6f} {beams} {int(cell.hit_count)} "
+        # PadBVTotal is AMAPVox's PLANT area density, which is exactly `pad` when a
+        # wood/leaf split was computed (leaf + wood). Without a classification the
+        # only available number is `lad`, which is what this always wrote and which
+        # is the same quantity under the old "every return is foliage" reading.
+        pad = cell.pad if cell.pad is not None else cell.lad
+        lines.append(f"{i} {j} {k} {pad:.6f} {beams} {int(cell.hit_count)} "
                      f"{mpl:.4f} {cell.gtheta:.4f}")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -7299,6 +7335,23 @@ def _lad_statistics_bytes(request: "LADExportRequest") -> bytes:
         f"filled leaf area (interpolated, excluded from the total) {filled_leaf_area:.1f}",
         f"LAI {lai:.3f}",
     ]
+    # Wood, appended only when the grid carries a leaf/wood split, so a result
+    # without a classification produces byte-identical output to before.
+    #
+    # WAI is woody SURFACE area over the footprint, LAI is one-sided leaf area, and
+    # PAI is their sum -- the standard decomposition. Both are summed over MEASURED
+    # voxels only, the same rule the leaf total follows.
+    if any(c.wad is not None for c in request.cells):
+        wood_area = sum(float(c.wood_area or 0.0) for c in request.cells if _measured(c))
+        filled_wood_area = sum(float(c.wood_area or 0.0) for c in request.cells
+                               if c.lad_filled is True)
+        wai = (wood_area / ground) if ground > 0 else 0.0
+        lines += [
+            f"total wood area {wood_area:.1f}",
+            f"filled wood area (interpolated, excluded from the total) {filled_wood_area:.1f}",
+            f"WAI {wai:.3f}",
+            f"PAI {(lai + wai):.3f}",
+        ]
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -8602,6 +8655,31 @@ class LADCell(BaseModel):
     # True => `lad` here is an INTERPOLATION over neighbouring reliable voxels
     # (LAD-kriging), not a measurement. Never counted into total_leaf_area.
     lad_filled: Optional[bool] = None
+    # ---- Leaf / wood split ---------------------------------------------------
+    # Present only when the cloud carried a wood/leaf classification (see
+    # `_resolve_wood_split`); None on every other run, so a consumer can tell
+    # "unclassified" from "no wood present".
+    #
+    # When these ARE present, `lad` / `leaf_area` above hold the LEAF-only part,
+    # so existing consumers keep their meaning and silently gain the correction.
+    #
+    # Units differ by design, and both mean "the area that intercepts light":
+    # `lad` is one-sided leaf area per m^3 (G~0.5 for a spherical leaf-angle
+    # distribution); `wad` is TOTAL woody surface area per m^3 (G=0.25, the
+    # Cauchy mean-projection result for randomly-oriented convex bodies). So
+    # pad == lad + wad is plant area density, and LAI + WAI = PAI.
+    wad: Optional[float] = None            # m^2/m^3, total woody surface area
+    wood_area: Optional[float] = None      # m^2 within the voxel
+    pad: Optional[float] = None            # lad + wad
+    # Wood share of this voxel's INTERCEPTIONS (classified returns), the quantity
+    # the split is made on. Returns carrying class 0 -- every miss, and any
+    # unclassified point -- are in neither class and never reach this ratio.
+    wood_fraction: Optional[float] = None
+    wood_hit_count: Optional[int] = None
+    leaf_hit_count: Optional[int] = None
+    # The wood projection coefficient applied (pooled per cloud, not per voxel --
+    # see `_pooled_wood_gtheta` for why).
+    wood_gtheta: Optional[float] = None
 
 class LADComputeResponse(BaseModel):
     """Response model for leaf area density computation."""
@@ -8635,6 +8713,22 @@ class LADComputeResponse(BaseModel):
     # Leaf area contributed by FILLED voxels, reported separately so a consumer can
     # add it deliberately rather than having an interpolation folded into the total.
     filled_leaf_area: float = 0.0
+    # ---- Leaf / wood split ---------------------------------------------------
+    # False => the cloud carried no wood/leaf classification, every wood field
+    # below is None, and `total_leaf_area` means what it always did (all returns
+    # treated as foliage). Run Segment Wood / Leaf first to populate these.
+    has_wood_classification: bool = False
+    # Total woody SURFACE area over MEASURED voxels only -- never under-sampled,
+    # never filled, matching `total_leaf_area`.
+    total_wood_area: Optional[float] = None
+    # The pooled wood projection coefficient actually applied, and where it came
+    # from: "pooled" (measured from branch axes) or "default" (too few reliable
+    # axes; the randomly-oriented-cylinder value, which is within ~13% across
+    # every achievable branch-angle distribution). `wood_angle_n` is how many
+    # trusted axes backed a pooled estimate.
+    wood_gtheta: Optional[float] = None
+    wood_gtheta_source: Optional[str] = None
+    wood_angle_n: Optional[int] = None
     # "kriging" | "layer_mean" | "none" — which path the fill actually took, since
     # kriging degrades to a layer mean when the donors can't support a variogram.
     fill_method_used: Optional[str] = None
@@ -10317,7 +10411,8 @@ def _lad_labels_vals(column_getter, n: int):
     the label's absence. A cloud with no `is_miss` column (e.g. plain XYZ) does
     NOT get a synthesised one — those recover misses via gapfillMisses(), which
     sets the same flag C++-side. Returns labels (list[str]), vals ((N,k)|None),
-    flags (see `_lad_flags`).
+    flags (see `_lad_flags`, plus `has_wood_class` when the cloud carries a
+    wood/leaf classification).
     """
     import numpy as np
 
@@ -10353,9 +10448,27 @@ def _lad_labels_vals(column_getter, n: int):
         if gcol is not None:
             labels.append(grid_slug)
             cols.append(np.asarray(gcol, dtype=np.float64))
+    # Forward the wood/leaf class when the cloud carries one, so the inversion can
+    # split each voxel's intercepted area into leaf and wood (see
+    # `_wood_leaf_cell_counts`). Helios itself ignores the column -- nothing in
+    # calculateLeafArea reads a classification -- but carrying it HERE means it
+    # rides the same lockstep cull as xyz/dirs and stays aligned for the per-voxel
+    # binning, instead of needing a second, separately-culled array.
+    #
+    # NOTE the value convention: WOOD_CLASS_WOOD=1 / WOOD_CLASS_LEAF=2, and 0 means
+    # UNCLASSIFIED -- which every miss is, because the classifier runs on hit
+    # survivors only and `_append_backfilled_misses` zero-fills new columns for the
+    # miss rows. Consumers must treat 0 as "no class", never as a class.
+    wood = column_getter(WOOD_CLASS_SLUG)
+    has_wood = wood is not None
+    if has_wood:
+        labels.append(WOOD_CLASS_SLUG)
+        cols.append(np.asarray(wood, dtype=np.float64))
 
     vals = np.column_stack(cols).astype(np.float64) if cols else None
-    return labels, vals, _lad_flags(has_timestamp, is_multi, has_misses, has_grid)
+    flags = _lad_flags(has_timestamp, is_multi, has_misses, has_grid)
+    flags["has_wood_class"] = has_wood
+    return labels, vals, flags
 
 
 def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: bool = True,
@@ -10616,7 +10729,10 @@ def _las_to_lad_arrays(file_path: str, origin):
     # dimension through the canonical table (`_CANONICAL_NAME_ALIASES`) rather
     # than a local list — that local list is how `gps_time` could be understood
     # here and not by the miss/backfill path.
-    wanted = ('timestamp', 'target_index', 'target_count', _MISS_SLUG)
+    # WOOD_CLASS_SLUG rides along so a LAS carrying a wood/leaf classification
+    # can drive the leaf/wood split (see `_resolve_wood_split`).
+    wanted = ('timestamp', 'target_index', 'target_count', _MISS_SLUG,
+              WOOD_CLASS_SLUG)
     aliases = {slug: _dims_for_slug(dims, slug) for slug in wanted}
     cache: dict = {}
     for slug, names in aliases.items():
@@ -10654,7 +10770,7 @@ def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
     tokens = fmt.split()
     xi, yi, zi = _xyz_column_indices(fmt)
     # Locate every per-pulse / miss column the format declares.
-    wanted = list(_LAD_MULTI_RETURN_COLUMNS) + [_MISS_SLUG]
+    wanted = list(_LAD_MULTI_RETURN_COLUMNS) + [_MISS_SLUG, WOOD_CLASS_SLUG]
     col_idx = {c: tokens.index(c) for c in wanted if c in tokens}
 
     rows = []
@@ -11131,6 +11247,259 @@ def _lad_cropped_return_stats(cloud) -> "Optional[dict]":
     return {k: int(v) for k, v in dict(st).items()}
 
 
+def _resolve_wood_split(scans_arrays, scan_xyz_for_counts, scan_class_for_counts,
+                        cell_centers, cell_sizes, grid_rotation_rad,
+                        column_offsets, ndiv, warnings):
+    """Resolve the leaf/wood split for one LAD run, or None when the cloud
+    carries no wood/leaf classification.
+
+    Returns a dict with:
+      wood_counts / leaf_counts  (n_cells,) int64 -- intercepted returns per class
+      wood_fraction              (n_cells,) float -- wood share of interceptions
+      g_wood                     float  -- pooled wood projection coefficient
+      g_wood_source              'pooled' | 'default'
+      wood_angle_n               int    -- trusted branch axes behind g_wood
+
+    WHY THE SPLIT IS BY INTERCEPTION COUNT. One transmission P per voxel cannot
+    separate two media on its own -- it is one equation in two unknowns. The
+    classification supplies the missing information: of the returns intercepted
+    INSIDE a voxel, the wood share estimates how much of that voxel's
+    interception each medium caused. The inversion itself is left completely
+    intact (every return, every miss, one beam walk), so the beam bookkeeping
+    that `accumulateBeamCell` depends on is untouched. The alternative --
+    inverting a wood-only and a leaf-only cloud separately -- DELETES returns
+    from inside the grid, which turns a beam stopped by a branch into a
+    transmitted one; `inferHiddenReturns` explicitly calls that case ambiguous
+    and unrecoverable, and the endpoint already warns about it.
+
+    WHY COUNTING RETURNS GIVES ABSOLUTE AREA. A discrete-return scan records the
+    FIRST stop per beam, so the two media compete as exponential risks along the
+    path. For that process the probability the element which stopped a beam is
+    wood is exactly the ratio of extinction coefficients:
+
+        P(stopper is wood) = k_wood / (k_leaf + k_wood)
+
+    so the wood share of a voxel's returns is an UNBIASED estimator of its
+    extinction ratio -- and extinction is projected area per unit volume, which
+    is precisely what the inversion measures in total. Hence
+
+        a_wood = f * k_total / G_wood       a_leaf = (1-f) * k_total / G_leaf
+
+    recovers both densities ABSOLUTELY, not merely their ratio. Simulated
+    against truth (a_leaf 2.0, a_wood 0.6): recovered 2.001 and 0.599.
+
+    THE ONE ASSUMPTION is that the two media are WELL MIXED inside the voxel.
+    The competing-risks identity needs them to compete beam by beam. A medium
+    that SATURATES over its own footprint -- an opaque trunk spanning the cell --
+    takes nearly every stop there while contributing only its share to the
+    cell-average extinction, so the estimate drifts. Measured, holding the true
+    areas fixed and varying only how the wood is distributed:
+
+        all fine twigs, well mixed      wood  -0.2%     leaf  +0.0%
+        mostly twigs + small trunk      wood  -6.1%     leaf  -0.2%
+        half twigs, half trunk          wood -21.0%     leaf  -0.9%
+        mostly trunk                    wood -52.8%     leaf  -0.6%
+
+    Note LEAF area stays accurate throughout: wood is the minority component, so
+    misattributing it barely moves the leaf number -- the split makes LAD better,
+    never worse. Wood accuracy is a VOXEL-SIZING question: size the grid so a
+    trunk is not averaged together with the foliage beside it. The direction of
+    the drift depends on which medium saturates, so it can go either way.
+
+    WHY G_wood IS POOLED. Per-voxel branch-axis estimation by local PCA fails
+    silently on short/fat wood (length/radius <~ 2): it returns an axis ~90 deg
+    wrong, and its usual confidence proxies ENDORSE that answer (linearity reads
+    higher for the failing case than for a working one). A 90-degree flip costs
+    up to 18.8% in G -- worse than the fixed default's bounded 11%. Pooling one
+    distribution over the cloud removes the failure, because flips partially
+    cancel: measured, a pooled estimate stays within 1.8% even with half its
+    axes flipped. See `lad_wood` for the measurements.
+    """
+    import numpy as np
+    import lad_wood
+
+    if not any(s.get("has_wood_class") for s in scans_arrays):
+        return None
+
+    n_cells = len(cell_centers)
+    wood_counts, leaf_counts = _count_points_per_cell_by_class(
+        scan_xyz_for_counts, scan_class_for_counts, cell_centers, cell_sizes,
+        grid_rotation_rad, column_z_offsets=column_offsets, ndiv=ndiv)
+
+    classified = wood_counts + leaf_counts
+    wood_fraction = np.zeros(n_cells, dtype=np.float64)
+    np.divide(wood_counts, classified, out=wood_fraction,
+              where=classified > 0)
+
+    # Pooled G_wood from the branch axes of every wood return in the cloud.
+    g_wood, n_axes = _pooled_wood_gtheta(
+        scans_arrays, scan_xyz_for_counts, scan_class_for_counts)
+    source = "pooled" if n_axes > 0 else "default"
+    if source == "default":
+        warnings.append(
+            "Wood area density used the default projection coefficient "
+            f"G={lad_wood.WOOD_G_DEFAULT} (randomly-oriented cylinders): too few "
+            "wood returns formed a reliable branch axis. Across every achievable "
+            "branch-angle distribution this coefficient is within about 13%, so "
+            "the wood area is approximate rather than wrong.")
+
+    if int(wood_counts.sum()) == 0:
+        warnings.append(
+            "The cloud carries a wood/leaf classification but no return inside the "
+            "voxel grid is classified as wood, so wood area density is zero "
+            "everywhere. Check that the grid encloses the woody structure.")
+
+    return {
+        "wood_counts": wood_counts,
+        "leaf_counts": leaf_counts,
+        "wood_fraction": wood_fraction,
+        "g_wood": float(g_wood),
+        "g_wood_source": source,
+        "wood_angle_n": int(n_axes),
+    }
+
+
+def _pooled_wood_gtheta(scans_arrays, scan_xyz_for_counts, scan_class_for_counts):
+    """Pooled wood G(theta) and the number of trusted branch axes behind it.
+
+    Branch axes come from local PCA over each wood point's neighbourhood, kept
+    only where the neighbourhood is convincingly elongated (see
+    `_trusted_branch_axes`). Beam zeniths come from the SAME spherical-direction
+    arrays the leaf G(theta) path uses.
+
+    Falls back to (`lad_wood.WOOD_G_DEFAULT`, 0) when nothing is trustworthy.
+    """
+    import numpy as np
+    import lad_gtheta
+    import lad_wood
+
+    # Beam zeniths, HITS ONLY and from the ELEVATION column. Both constraints are
+    # inherited from the leaf G(theta) path and each has its own past bug:
+    # `_directions_from_origin` returns SPHERICAL [radius, elevation, azimuth], so
+    # the Cartesian `beam_zenith_samples` would divide an angle by a range in
+    # metres; and misses concentrate at the angles that see sky, so pooling them
+    # tilts the zenith distribution.
+    beam_dirs = []
+    for s in scans_arrays:
+        d = s.get("dirs")
+        if d is None or len(d) == 0:
+            continue
+        labels, vals = s.get("labels"), s.get("vals")
+        if (labels is not None and vals is not None and _MISS_SLUG in labels
+                and np.asarray(vals).shape[0] == len(d)):
+            hit = np.asarray(vals)[:, labels.index(_MISS_SLUG)] == 0
+            d = np.asarray(d)[hit]
+        if len(d) > 0:
+            beam_dirs.append(d)
+    if not beam_dirs:
+        return lad_wood.WOOD_G_DEFAULT, 0
+    beam_zen = lad_gtheta.beam_zenith_from_spherical(np.vstack(beam_dirs))
+
+    wood_pts = []
+    for xyz, cls in zip(scan_xyz_for_counts, scan_class_for_counts):
+        if cls is None:
+            continue
+        xyz = np.asarray(xyz, dtype=np.float64)
+        cls = np.asarray(cls)
+        if cls.shape[0] != xyz.shape[0]:
+            continue
+        wood_pts.append(xyz[np.rint(cls).astype(np.int64) == WOOD_CLASS_WOOD])
+    if not wood_pts:
+        return lad_wood.WOOD_G_DEFAULT, 0
+    pts = np.vstack(wood_pts) if len(wood_pts) > 1 else wood_pts[0]
+
+    axes = _trusted_branch_axes(pts)
+    if axes is None or len(axes) == 0:
+        return lad_wood.WOOD_G_DEFAULT, 0
+    inc = lad_wood.axis_inclination(axes)
+    return lad_wood.gtheta_wood_from_axes(inc, beam_zen), int(len(inc))
+
+
+# Branch-axis PCA: neighbourhood size and the elongation gate. BOTH values are
+# measured, and both are counter-intuitive, so do not "tighten" them casually.
+#
+# NEIGHBOURHOOD SIZE. A cylinder's points only spread most ALONG its axis once
+# the neighbourhood is bigger than the cylinder's RADIUS; below that, PCA sees a
+# locally flat surface patch whose leading eigenvector is arbitrary. Measured on
+# a 0.05 m-radius branch (4.3 mm spacing), the median axis error by k was:
+#     k=10  41.7 deg    k=50  27.1 deg    k=200   6.6 deg
+#     k=20  38.0 deg    k=100 14.1 deg    k=400   3.3 deg
+# so a small k -- the natural choice, and what the wood CLASSIFIER uses for its
+# own shape features -- is simply wrong for this purpose.
+_WOOD_AXIS_K = 200
+# ELONGATION GATE, on the ratio of the two leading eigenvalues. Deliberately
+# PERMISSIVE. A strict gate keeps only the most elongated neighbourhoods, which
+# is a BIASED subset of the branch population, and measured on a synthetic tree
+# it made the pooled estimate WORSE than not estimating at all:
+#     k=200 ratio>1.5  ->  -0.2% vs truth        (default G alone: -4.9%)
+#     k=400 ratio>3.0  ->  -7.7% vs truth        i.e. worse than the default
+# The gate exists to drop neighbourhoods with NO dominant direction, not to
+# select the best-looking ones; pooling (see `_pooled_wood_gtheta`) handles the
+# residual noise. Validated across four tree shapes, where k=200/1.5 beat the
+# fixed default on every one (worst case -3.2% against the default's -10.1%).
+#
+# The gate is on the eigenvalue ratio rather than on `linearity` because
+# linearity is NOT monotone in trustworthiness: a short fat segment whose PCA
+# axis is ~90 deg WRONG scores linearity 0.70, HIGHER than a working slender one
+# at 0.34, so a linearity gate endorses the worst case most confidently.
+_WOOD_AXIS_EIGRATIO = 1.5
+# Fewer wood points than this and no neighbourhood can span a branch, so the
+# pooled estimate degrades to the default rather than reporting noise.
+_WOOD_AXIS_MIN_POINTS = 64
+# Above this many wood points the axes are estimated from a random subsample:
+# G is a POOLED mean, so its standard error is already negligible here, and the
+# KD-tree query is the cost.
+_WOOD_AXIS_MAX_POINTS = 200_000
+
+
+def _trusted_branch_axes(points: "np.ndarray"):
+    """Local branch-axis directions for wood points whose neighbourhood is
+    convincingly elongated, as an (M, 3) array (M may be 0).
+
+    The axis is the eigenvector of the LARGEST eigenvalue -- a cylinder's points
+    spread most ALONG its axis -- which is the opposite end of the spectrum from
+    a surface normal (smallest eigenvalue).
+    """
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    pts = np.ascontiguousarray(np.asarray(points, dtype=np.float64)[:, :3])
+    n = pts.shape[0]
+    k = min(_WOOD_AXIS_K, n)
+    # Below a few dozen wood points the neighbourhood cannot span a branch (see
+    # _WOOD_AXIS_K), so any axis would be surface noise. Return nothing and let
+    # the caller fall back to the default G, which is within ~13% regardless.
+    if n < _WOOD_AXIS_MIN_POINTS or k < 8:
+        return None
+
+    if n > _WOOD_AXIS_MAX_POINTS:
+        sel = np.random.default_rng(0).choice(n, _WOOD_AXIS_MAX_POINTS, replace=False)
+        query = pts[sel]
+    else:
+        query = pts
+
+    tree = cKDTree(pts)
+    axes = []
+    # Chunked so the (m, k) index block and the (m, k, 3) neighbourhood gather
+    # stay bounded on a large cloud.
+    for start in range(0, query.shape[0], 50_000):
+        block = query[start:start + 50_000]
+        _, idx = tree.query(block, k=k, workers=-1)
+        if idx.ndim == 1:
+            idx = idx[:, None]
+        nb = pts[idx]                                   # (m, k, 3)
+        d = nb - nb.mean(axis=1, keepdims=True)
+        cov = np.einsum("mki,mkj->mij", d, d) / float(k - 1)
+        w, v = np.linalg.eigh(cov)                      # ascending
+        lam1, lam2 = w[:, 2], w[:, 1]
+        keep = lam1 > _WOOD_AXIS_EIGRATIO * np.maximum(lam2, 1e-20)
+        if np.any(keep):
+            axes.append(v[keep][:, :, 2])               # eigenvector of lambda1
+    if not axes:
+        return np.empty((0, 3), dtype=np.float64)
+    return np.vstack(axes)
+
+
 def _do_lad_computation(request: "LADComputeRequest", progress=None,
                         reuse_mesh: "Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]" = None) -> dict:
     """Compute per-voxel leaf area density via PyHelios. Returns a result dict.
@@ -11276,6 +11645,12 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         # Points are then culled to the grid's beam frustum before ingest.
         scans_arrays = []
         scan_xyz_for_counts = []
+        # Per-scan wood/leaf class arrays, aligned 1:1 with scan_xyz_for_counts
+        # (None for a scan that carries no classification). Collected alongside
+        # rather than re-derived later: `vals` is culled in lockstep with `xyz`,
+        # so pulling the column out HERE is the only place the two are guaranteed
+        # to correspond.
+        scan_class_for_counts = []
         n_scans = max(len(request.scans), 1)
         # Terrain-following column offsets lift voxel columns OUT of the base grid
         # box, so the per-scan beam-frustum cull below must widen its z-slab to the
@@ -11516,8 +11891,16 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 "moving": scan_moving,
                 "has_timestamp": scan_flags["has_timestamp"],
                 "has_misses": scan_flags["has_misses"],
+                "has_wood_class": bool(scan_flags.get("has_wood_class")),
             })
             scan_xyz_for_counts.append(xyz)
+            # The wood/leaf column, post-cull and therefore aligned with `xyz`.
+            # `_lad_labels_vals` put it on `vals`; misses carry 0 (unclassified),
+            # which `_count_points_per_cell_by_class` counts as neither class.
+            _wc = None
+            if vals is not None and WOOD_CLASS_SLUG in labels:
+                _wc = np.asarray(vals)[:, labels.index(WOOD_CLASS_SLUG)]
+            scan_class_for_counts.append(_wc)
 
         is_multi = any(s["multi"] for s in scans_arrays)
         return_mode = "multi" if is_multi else "single"
@@ -11827,6 +12210,30 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 "threshold; defaulted to 5. Set 'Min Voxel Hits' to control which "
                 "voxels are solved."
             )
+        # ---- Grid geometry + per-voxel return counts ------------------------
+        # Resolved BEFORE the inversion because the wood/leaf split below needs
+        # each voxel's interception counts to blend its G(theta). These depend
+        # only on addGrid(), not on the inversion, so computing them here is
+        # order-independent.
+        n_cells = cloud.getGridCellCount()
+        # UNROTATED (axis-aligned lattice) centers, deliberately: _count_points_per_cell
+        # inverse-rotates the POINTS into the lattice frame rather than rotating the
+        # cells, and the renderer likewise rotates the whole voxel group itself using
+        # the echoed grid_rotation. Helios's getCellCenter() applies the rotation (since
+        # helios-core v1.3.84), so using it here would rotate the lattice twice.
+        cell_centers = [cloud.getCellCenterUnrotated(i) for i in range(n_cells)]
+        cell_sizes = [cloud.getCellSize(i) for i in range(n_cells)]
+        hit_counts = _count_points_per_cell(scan_xyz_for_counts, cell_centers, cell_sizes,
+                                            grid_rotation_rad,
+                                            column_z_offsets=column_offsets,
+                                            ndiv=(grid_nx, grid_ny, grid_nz))
+
+        # ---- Wood / leaf split ----------------------------------------------
+        wood_split = _resolve_wood_split(
+            scans_arrays, scan_xyz_for_counts, scan_class_for_counts,
+            cell_centers, cell_sizes, grid_rotation_rad, column_offsets,
+            (grid_nx, grid_ny, grid_nz), warnings)
+
         _ckpt()
         _report(0.80, "Inverting Beer's law")
         gtheta_arg = None
@@ -11837,6 +12244,43 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # override. A per-cell vector (vertical-profile override) is passed
             # straight through; otherwise a single scalar is broadcast.
             gtheta_arg = gtheta_per_cell if gtheta_per_cell is not None else supplied_gtheta
+
+        # Blend the supplied G(theta) per voxel with the wood coefficient, weighted
+        # by each voxel's wood share of interceptions. The inversion solves
+        # mean(exp(-a*dr*G)) = P for ONE a per voxel, so the G it is given must be
+        # the one that makes that single `a` the voxel's true PROJECTED area
+        # density across BOTH media:
+        #     G_eff = f_wood * G_wood + (1 - f_wood) * G_leaf
+        # Without this, a voxel full of branches would be inverted with the leaf
+        # coefficient and its projected area density would be wrong before any
+        # leaf/wood split was applied.
+        #
+        # Only on the supplied-G(theta) path. A TRIANGULATED G(theta) is measured
+        # from the mesh per voxel and already reflects whatever surfaces are in
+        # that voxel, so overriding it with a blend would discard a measurement in
+        # favour of an assumption.
+        #
+        # `wood_split_gleaf` records the PRE-blend (leaf) coefficient per voxel,
+        # which the split needs afterwards to turn the leaf share of the
+        # interception back into one-sided leaf area. It is set in the same block
+        # that builds the blend so the two cannot disagree; None means "no blend
+        # happened", and the split then reads the per-cell G(theta) Helios
+        # reports, which on the triangulated path is the mesh measurement.
+        gtheta_blended_per_cell = None
+        wood_split_gleaf = None
+        if wood_split is not None and use_supplied_gtheta and gtheta_arg is not None:
+            g_wood = wood_split["g_wood"]
+            f_wood = wood_split["wood_fraction"]
+            base_gleaf = (list(gtheta_arg) if isinstance(gtheta_arg, (list, tuple))
+                          else [float(gtheta_arg)] * n_cells)
+            if len(base_gleaf) == n_cells:
+                gtheta_blended_per_cell = [
+                    float(min(1.0, max(1e-4,
+                              f_wood[i] * g_wood + (1.0 - f_wood[i]) * base_gleaf[i])))
+                    for i in range(n_cells)
+                ]
+                gtheta_arg = gtheta_blended_per_cell
+                wood_split_gleaf = base_gleaf
 
         # A grid too large for its inversion scratch is inverted a block of the
         # lattice at a time (helios-core v1.3.86), so the per-voxel accumulators
@@ -11910,21 +12354,6 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             return None if (x != x) else x
 
         _report(0.92, "Collecting voxel results")
-        # Per-cell hit counts: Helios exposes no getter, so bin the points into
-        # the grid AABBs ourselves. Reads each scan file once (positions only).
-        n_cells = cloud.getGridCellCount()
-        # UNROTATED (axis-aligned lattice) centers, deliberately: _count_points_per_cell
-        # inverse-rotates the POINTS into the lattice frame rather than rotating the
-        # cells, and the renderer likewise rotates the whole voxel group itself using
-        # the echoed grid_rotation. Helios's getCellCenter() applies the rotation (since
-        # helios-core v1.3.84), so using it here would rotate the lattice twice.
-        cell_centers = [cloud.getCellCenterUnrotated(i) for i in range(n_cells)]
-        cell_sizes = [cloud.getCellSize(i) for i in range(n_cells)]
-        hit_counts = _count_points_per_cell(scan_xyz_for_counts, cell_centers, cell_sizes,
-                                            grid_rotation_rad,
-                                            column_z_offsets=column_offsets,
-                                            ndiv=(grid_nx, grid_ny, grid_nz))
-
         # Occlusion threshold (m of total probed path length). Resolved from the grid
         # when unset: 100 * mean voxel side length (Soma, Pimont & Dupuy 2021). Uses
         # the MEAN of the three sides so non-cubic cells behave sensibly.
@@ -11938,6 +12367,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
 
         cells = []
         total_leaf_area = 0.0
+        total_wood_area = 0.0
         filled_leaf_area = 0.0
         solved_indices = []  # voxels with a real LAD solution + defined variance
         # For terrain following, cells in dropped columns (outside the DEM footprint)
@@ -11996,6 +12426,48 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 "lad_solved": lad_solved,
             }
 
+            # ---- Leaf / wood split -----------------------------------------
+            # Helios solves mean(exp(-a*dr*G)) = P, so `a` (== lad) is the area
+            # density with the supplied G ALREADY divided out -- not a projected
+            # density. The quantity the beams actually measured is therefore the
+            # INTERCEPTION density lad * G, and it is that which splits by class:
+            #
+            #   I       = lad * G_used                  (projected area per m^3)
+            #   I_wood  = I * f_wood                    (wood's share)
+            #   WAD     = I_wood / G_wood               (total woody SURFACE area)
+            #   LAD     = (I - I_wood) / G_leaf         (one-sided leaf area)
+            #
+            # G_wood = 0.25 expresses wood area as TOTAL SURFACE area (Cauchy: a
+            # convex body's mean projected area is S/4), while G_leaf keeps the
+            # existing one-sided leaf convention -- so LAI + WAI = PAI holds and
+            # both numbers mean "the area that intercepts light".
+            if wood_split is not None:
+                cell_volume = float(s.x) * float(s.y) * float(s.z)
+                f_w = float(wood_split["wood_fraction"][i])
+                g_w = wood_split["g_wood"]
+                # The LEAF coefficient this voxel was inverted against. On the
+                # supplied path that is the pre-blend value; on the triangulated
+                # path the mesh-derived per-cell G already describes whatever
+                # surfaces are present, so it serves as both.
+                g_leaf = (wood_split_gleaf[i]
+                          if wood_split_gleaf is not None else gt)
+                interception = lad * gt
+                i_wood = interception * f_w
+                wad = (i_wood / g_w) if g_w > 0 else 0.0
+                lad_leaf = ((interception - i_wood) / g_leaf) if g_leaf > 0 else 0.0
+                # `lad`/`leaf_area` become the LEAF-only quantities, so every
+                # existing consumer (exports, LAI, profiles, the renderer) keeps
+                # meaning leaf area and silently gains the wood correction.
+                cell["lad"] = lad_leaf
+                cell["leaf_area"] = lad_leaf * cell_volume
+                cell["wad"] = wad
+                cell["wood_area"] = wad * cell_volume
+                cell["pad"] = lad_leaf + wad
+                cell["wood_fraction"] = f_w
+                cell["wood_hit_count"] = int(wood_split["wood_counts"][i])
+                cell["leaf_hit_count"] = int(wood_split["leaf_counts"][i])
+                cell["wood_gtheta"] = g_w
+
             # --- Occlusion screening ------------------------------------------
             # Total probed path length = sum over beams of the chord each cut through
             # this voxel. mean_path_length (zbar_e) is only written by Helios on the
@@ -12028,7 +12500,11 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             # neither leaf area nor a term to the group-scale CI (whose whole premise
             # is that the beams adequately sampled the voxel).
             if not under:
-                total_leaf_area += la
+                # Use the CELL's leaf area, not the raw Helios value: when a
+                # wood/leaf split is active `cell["leaf_area"]` is the leaf-only
+                # part, and the total must match what the per-voxel results say.
+                total_leaf_area += float(cell["leaf_area"])
+                total_wood_area += float(cell.get("wood_area", 0.0))
                 if lad_solved and var >= 0:
                     solved_indices.append(i)
             cells.append(cell)
@@ -12147,6 +12623,16 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "is_multi_return": is_multi,
             "return_mode": return_mode,
             "total_leaf_area": total_leaf_area,
+            # Wood area, reported ONLY when the cloud carried a classification.
+            # None (not 0.0) when it did not, so a consumer can tell "no wood
+            # classification was available" from "there is no wood here".
+            "has_wood_classification": wood_split is not None,
+            "total_wood_area": (total_wood_area if wood_split is not None else None),
+            "wood_gtheta": (wood_split["g_wood"] if wood_split is not None else None),
+            "wood_gtheta_source": (wood_split["g_wood_source"]
+                                   if wood_split is not None else None),
+            "wood_angle_n": (wood_split["wood_angle_n"]
+                             if wood_split is not None else None),
             "occlusion_threshold_m": occlusion_threshold,
             "under_sampled_count": under_sampled_count,
             "filled_count": filled_count,
@@ -12312,6 +12798,60 @@ def _count_points_per_cell(scan_xyz_list: list, cell_centers: list, cell_sizes: 
         np.add.at(counts, cell_idx, 1)
 
     return counts
+
+
+def _count_points_per_cell_by_class(scan_xyz_list: list, scan_class_list: list,
+                                    cell_centers: list, cell_sizes: list,
+                                    grid_rotation_rad: float = 0.0,
+                                    column_z_offsets: "Optional[list]" = None,
+                                    ndiv: "Optional[tuple]" = None):
+    """Per-voxel counts of WOOD and LEAF returns, for the leaf/wood split of the
+    inverted area density.
+
+    Returns (wood_counts, leaf_counts), both (n_cells,) int64.
+
+    `scan_class_list` holds one (N,) array per scan, aligned 1:1 with the matching
+    entry of `scan_xyz_list`, carrying `WOOD_CLASS_WOOD` / `WOOD_CLASS_LEAF`.
+    Anything else -- notably 0, which every MISS carries and which is also the
+    value an un-classified point keeps -- counts as neither class. That is the
+    point: a miss is a transmitted beam, not an intercepted element, so it must
+    never appear in an interception fraction. A scan whose class array is None or
+    length-mismatched contributes nothing rather than misaligning.
+
+    Geometry is delegated to `_count_points_per_cell` by binning each class as its
+    own point set, so there is exactly ONE binner in the file and the rotation /
+    terrain-offset handling (both of which have had real bugs) cannot drift
+    between the total and the per-class counts.
+    """
+    import numpy as np
+
+    n_cells = len(cell_centers)
+    if n_cells == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+
+    wood_pts, leaf_pts = [], []
+    for xyz, cls in zip(scan_xyz_list, scan_class_list):
+        xyz = np.asarray(xyz, dtype=np.float64)
+        if cls is None or xyz.size == 0:
+            continue
+        cls = np.asarray(cls)
+        if cls.shape[0] != xyz.shape[0]:
+            continue
+        # Round before comparing: the class rides a float64 data column (and a
+        # float32 session extra before that), so an exact == 1 could miss.
+        c = np.rint(cls).astype(np.int64)
+        wood_pts.append(xyz[c == WOOD_CLASS_WOOD])
+        leaf_pts.append(xyz[c == WOOD_CLASS_LEAF])
+
+    def _bin(pts):
+        if not pts:
+            return np.zeros(n_cells, dtype=np.int64)
+        return _count_points_per_cell(pts, cell_centers, cell_sizes,
+                                      grid_rotation_rad,
+                                      column_z_offsets=column_z_offsets,
+                                      ndiv=ndiv)
+
+    return _bin(wood_pts), _bin(leaf_pts)
 
 
 def _parse_bin_request_frame(body: bytes) -> "Tuple[dict, dict]":

@@ -225,7 +225,98 @@ scanner and the tree in the file.
 Two warnings catch the cases the inversion cannot repair: LAD warns when a
 session has deleted points inside the voxel box, and when the inversion found
 returns it could not place. Separating wood from leaf area is a correction
-applied after the inversion, not a point filter before it.
+applied after the inversion, not a point filter before it — which is exactly
+how Phytograph does it; see [Wood area](#wood-area) below.
+
+## Wood area
+
+Branches and trunks intercept beams too, so an inversion that treats every
+return as foliage reports **plant** area density under the name LAD. When the
+cloud carries a wood/leaf classification (run
+[Segment Wood / Leaf](../workflows/segment-wood.md) first), Phytograph splits
+each voxel's result into a leaf part and a wood part, and reports both.
+
+The split happens **after** the inversion, never by filtering points before it.
+Every return and every sky miss stays in the cloud, so the beam bookkeeping is
+untouched; what the classification changes is only how each voxel's measured
+interception is attributed. Deleting wood points instead would turn a beam
+stopped by a branch into a transmitted one and bias the leaf density — the
+failure described under [cropped and segmented
+clouds](#cropped-and-segmented-clouds).
+
+The two numbers use different, deliberate conventions, and both mean "the area
+that intercepts light":
+
+| | Reported as | Projection coefficient |
+|---|---|---|
+| **LAD** | one-sided leaf area per m³ | G ≈ 0.5 for a spherical leaf-angle distribution |
+| **WAD** | **total** woody surface area per m³ | G = 0.25 for randomly-oriented cylinders |
+
+A leaf is flat, so its "two-sided" area is twice its one-sided area. A branch
+has no such doubling — its two-sided area *is* its surface area. Using each
+convention's own coefficient makes the two add up: **LAI + WAI = PAI**, and the
+summary export reports all three.
+
+Phytograph estimates the wood projection coefficient from the branch axes it can
+measure in the cloud, pooled into one value per cloud rather than one per voxel
+(a per-voxel estimate is unreliable on short, thick wood and can be worse than
+no estimate at all). Where too few reliable axes exist it falls back to the
+randomly-oriented value and says so. This matters less than it might sound:
+across every achievable branch-angle distribution the coefficient only spans
+about ±13%, because a cylinder is symmetric about its axis.
+
+Both LAD and WAD are **absolute** areas, not just a ratio. A discrete-return
+scan records the first thing each beam hits, so leaf and wood compete as
+independent risks along the path — and for that process the share of returns
+that are wood is exactly the share of *interception* that wood is responsible
+for. Multiplying that share by the total interception the inversion measured
+gives each medium's own area density.
+
+!!! warning "Wood accuracy depends on voxel size"
+
+    The one assumption is that leaf and wood are **mixed** within a voxel. A
+    trunk thick enough to block a beam by itself takes nearly every return in
+    its footprint, so a voxel large enough to hold both a trunk *and* the
+    foliage beside it will misattribute between them. Holding the true areas
+    fixed and varying only how the wood is distributed:
+
+    | Wood in the voxel | Wood area error | Leaf area error |
+    | --- | --- | --- |
+    | Fine twigs, well mixed | −0.2% | ±0.0% |
+    | Mostly twigs, small trunk | −6% | −0.2% |
+    | Half twigs, half trunk | −21% | −0.9% |
+    | Mostly trunk | −53% | −0.6% |
+
+    **Leaf area stays accurate throughout** — wood is the minority component, so
+    misattributing it barely moves the leaf number. The split makes LAD *better*,
+    never worse.
+
+    For accurate **wood** area the voxel has to be comparable to the trunk, so
+    that the trunk fills its footprint rather than competing with foliage inside
+    the same cell. Simulated for a 20 cm trunk in a canopy of LAD 2:
+
+    | Voxel side | Trunk fills | Wood area error |
+    | --- | --- | --- |
+    | 2.0 m | 10% | −20% |
+    | 1.0 m | 20% | −23% |
+    | 0.5 m | 40% | −20% |
+    | 0.25 m | 80% | −8% |
+    | 0.15 m | 100% | ±0% |
+
+    Fine woody material in the crown — twigs and small branches — is mixed
+    through the foliage and is accurate at any resolution. It is specifically
+    trunks and thick scaffold branches that need the fine grid.
+
+    The reason a finer grid is the *only* remedy is that a trunk **saturates**
+    the beams that meet it: with a trunk in 5% of a voxel's footprint, 95% of
+    the beams never meet wood at all and the few that do are stopped almost
+    every time. A saturated return is a lower bound, not a measurement, so no
+    reweighting of the beam data can recover what was never sampled.
+
+    If you need woody area for a trunk and cannot use a fine grid, measure it
+    structurally instead: a [QSM](qsm.md) fits cylinders to the woody skeleton
+    and reports their surface area directly, which is the right tool for
+    trunks and the wrong one for foliage.
 
 ## Sky/miss points and gapfilling
 

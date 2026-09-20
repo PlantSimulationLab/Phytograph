@@ -57,7 +57,33 @@
     "",
     "Coordinates are WORLD-frame (the frame the export request carries), at a",
     "UTM-scale origin so a dropped worldShift would show up as a gross error.",
-    "Voxel `index` is the Helios k-major cell index, index // (nx*ny) = z-level."
+    "Voxel `index` is the Helios k-major cell index, index // (nx*ny) = z-level.",
+    "",
+    "WOOD (added with the leaf/wood split). When a cloud carries a wood/leaf",
+    "classification the same voxels also yield a woody area, and the SAME",
+    "measured-voxel rule governs it:",
+    "",
+    "  WAI = (wood area summed over MEASURED voxels) / (dx*nx * dy*ny)",
+    "  PAI = LAI + WAI",
+    "",
+    "The units differ on purpose and both mean 'area that intercepts light':",
+    "`lad`/`leaf_area` are ONE-SIDED leaf area, `wad`/`wood_area` are TOTAL woody",
+    "SURFACE area. That is what makes LAI + WAI = PAI a real identity rather than",
+    "a coincidence of conventions.",
+    "",
+    "The trap is the one occlusion always poses, and it is easy to get right for",
+    "leaf and wrong for wood: an occluded voxel is an absence of measurement for",
+    "BOTH media. Counting its wood biases WAI exactly the way counting its leaf",
+    "biases LAI, so the wood case gives its occluded voxel a LARGE wood area - a",
+    "fixture that zeroed it would pass either way and prove nothing.",
+    "",
+    "A result with no classification carries no wood fields at all, and both sides",
+    "must then report no WAI/PAI rather than a zero: 'no classification' and 'no",
+    "wood present' are different statements.",
+    "",
+    "Wood areas here are kept clear of a 1-decimal rounding tie (0.15 is a tie",
+    "where Python round() banker-rounds down while '%.1f' rounds up), so the",
+    "assertion measures the rule rather than float tie-breaking."
   ],
   "cases": [
     {
@@ -152,6 +178,33 @@
         "lai": 0.4375,
         "occluded_count": 0,
         "level_mean_lad": [0.375, 0.0625]
+      }
+    },
+    {
+      "name": "wood rides the same measured-voxel rule as leaf",
+      "why": "The leaf/wood split must obey the occlusion rule on BOTH media. The occluded voxel here carries a large wood area (5.0 m2) as well as leaf; counting either would inflate its index. WAI uses the same full-footprint denominator as LAI, and PAI is their sum - which only closes because leaf is one-sided and wood is total surface.",
+      "nx": 2,
+      "ny": 2,
+      "nz": 1,
+      "origin": [412300.0, 4512100.0, 0.0],
+      "cell_size": [0.5, 0.5, 0.5],
+      "cells": [
+        {"index": 0, "i": 0, "j": 0, "k": 0, "lad": 2.0, "leaf_area": 0.25, "wad": 2.4, "wood_area": 0.3, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 1, "i": 1, "j": 0, "k": 0, "lad": 1.0, "leaf_area": 0.125, "wad": 0.96, "wood_area": 0.12, "solved": true, "under_sampled": false, "lad_filled": false},
+        {"index": 2, "i": 0, "j": 1, "k": 0, "lad": 6.4, "leaf_area": 0.8, "wad": 40.0, "wood_area": 5.0, "solved": true, "under_sampled": true, "lad_filled": false},
+        {"index": 3, "i": 1, "j": 1, "k": 0, "lad": 0.0, "leaf_area": 0.0, "wad": 0.0, "wood_area": 0.0, "solved": true, "under_sampled": false, "lad_filled": false}
+      ],
+      "expected": {
+        "measured_leaf_area": 0.375,
+        "measured_wood_area": 0.42,
+        "ground_area": 1.0,
+        "lai": 0.375,
+        "wai": 0.42,
+        "pai": 0.795,
+        "occluded_count": 1,
+        "_wood_note": "The occluded voxel's 5.0 m2 of wood is excluded, exactly as its 0.8 m2 of leaf is. Including it would give WAI 5.42 instead of 0.42.",
+        "_level_mean_lad_note": "Level 0's measured voxels are indices 0, 1 and 3 at LAD 2.0, 1.0 and 0.0 => 1.0. Averaging the occluded index 2 (LAD 6.4) in would give 2.35 instead.",
+        "level_mean_lad": [1.0]
       }
     }
   ]

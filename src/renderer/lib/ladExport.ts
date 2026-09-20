@@ -22,6 +22,25 @@ export const LAD_EXPORT_VARIABLES: { key: string; label: string }[] = [
   { key: 'lad_filled', label: 'Filled (interpolated) flag' },
 ];
 
+// Wood variables, offered only when the result carries a leaf/wood split. Kept
+// as a separate list so an unclassified result's picker is unchanged — offering
+// bands that would be NoData everywhere is worse than not offering them.
+export const LAD_WOOD_EXPORT_VARIABLES: { key: string; label: string }[] = [
+  { key: 'wad', label: 'Wood area density (m²/m³)' },
+  { key: 'wood_area', label: 'Wood area (m²)' },
+  { key: 'pad', label: 'Plant area density (m²/m³)' },
+  { key: 'wood_fraction', label: 'Wood fraction of interceptions' },
+  { key: 'wood_gtheta', label: 'Wood G(θ)' },
+];
+
+/** The variables offerable for one result: the leaf set, plus the wood set when
+ * the result actually has a split. */
+export function ladExportVariables(hasWood: boolean): { key: string; label: string }[] {
+  return hasWood
+    ? [...LAD_EXPORT_VARIABLES, ...LAD_WOOD_EXPORT_VARIABLES]
+    : LAD_EXPORT_VARIABLES;
+}
+
 // 'txt' is the plain-text grid summary — the one place LAI is reported, since no
 // other format carries it. (A VoxLAD-flavoured '.asc' was offered briefly and
 // removed: one tool's undocumented output, with a leaf-angle class we could only
@@ -129,6 +148,15 @@ export function buildLadExportRequest(
     leaf_area_ci_lower: v.leafAreaCiLower ?? null,
     leaf_area_ci_upper: v.leafAreaCiUpper ?? null,
     solved: v.solved !== false,
+    // Leaf/wood split; null throughout on an unclassified result, which the
+    // writers treat as "no wood columns" rather than as zeros.
+    wad: v.wad ?? null,
+    wood_area: v.woodArea ?? null,
+    pad: v.pad ?? null,
+    wood_fraction: v.woodFraction ?? null,
+    wood_hit_count: v.woodHitCount ?? null,
+    leaf_hit_count: v.leafHitCount ?? null,
+    wood_gtheta: v.woodGtheta ?? null,
   }));
 
   return {

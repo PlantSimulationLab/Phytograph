@@ -115,6 +115,8 @@ export function LADProfilePopup({ isOpen, onClose, result }: LADProfilePopupProp
             data-lai={profile.lai}
             data-leaf-area={profile.leafArea}
             data-ground-area={profile.groundArea}
+            data-wai={profile.wai ?? ''}
+            data-pai={profile.pai ?? ''}
             className="rounded-lg bg-neutral-900/60 border border-neutral-700/60 px-3 py-2"
           >
             <div className="flex items-baseline gap-3 flex-wrap">
@@ -126,6 +128,23 @@ export function LADProfilePopup({ isOpen, onClose, result }: LADProfilePopupProp
                 {profile.groundArea.toFixed(1)} m² footprint
               </div>
             </div>
+            {/* Wood, only when the cloud carried a leaf/wood classification.
+                WAI is TOTAL woody surface area per unit ground while LAI is
+                one-sided leaf area, so the two add to PAI. */}
+            {profile.wai != null && profile.pai != null && (
+              <div className="flex items-baseline gap-3 flex-wrap mt-1">
+                <div className="text-sm font-semibold text-amber-300/90">
+                  WAI {profile.wai.toFixed(3)}
+                </div>
+                <div className="text-sm font-semibold text-neutral-300">
+                  PAI {profile.pai.toFixed(3)}
+                </div>
+                <div className="text-[11px] text-neutral-400">
+                  m²/m² · {(profile.woodArea ?? 0).toFixed(1)} m² measured wood
+                  surface area · LAI + WAI = PAI
+                </div>
+              </div>
+            )}
             {profile.occludedCount > 0 && (
               <div className="text-[10px] text-neutral-500 mt-1">
                 {profile.occludedCount} of {profile.totalCount} voxels were occluded and

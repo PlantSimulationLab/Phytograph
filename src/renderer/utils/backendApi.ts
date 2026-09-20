@@ -1223,6 +1223,16 @@ export interface LADExportCell {
   path_length_total?: number | null;
   under_sampled?: boolean | null;
   lad_filled?: boolean | null;
+  // Leaf/wood split; null throughout when the source cloud had no wood/leaf
+  // classification. Gated on `solved` by the writers exactly like lad/leaf_area,
+  // so an occluded voxel never exports a confident wood zero either.
+  wad?: number | null;
+  wood_area?: number | null;
+  pad?: number | null;
+  wood_fraction?: number | null;
+  wood_hit_count?: number | null;
+  leaf_hit_count?: number | null;
+  wood_gtheta?: number | null;
 }
 
 export interface LADExportRequest {
@@ -1760,6 +1770,23 @@ export interface LADVoxelResult {
   under_sampled?: boolean | null;
   // True => `lad` is an interpolation over neighbours, not a measurement.
   lad_filled?: boolean | null;
+  // ---- Leaf / wood split -------------------------------------------------
+  // Present only when the cloud carried a wood/leaf classification; null or
+  // absent otherwise, so "unclassified" is distinguishable from "no wood here".
+  // When present, `lad`/`leaf_area` above are the LEAF-only part.
+  //
+  // Units differ by design and both mean "area that intercepts light": `lad` is
+  // one-sided leaf area per m³, `wad` is TOTAL woody surface area per m³. So
+  // pad === lad + wad, and LAI + WAI = PAI.
+  wad?: number | null;            // m²/m³, total woody surface area
+  wood_area?: number | null;      // m² within the voxel
+  pad?: number | null;            // lad + wad
+  // Wood share of this voxel's classified interceptions — the quantity the
+  // split is made on. Misses and unclassified points are in neither class.
+  wood_fraction?: number | null;
+  wood_hit_count?: number | null;
+  leaf_hit_count?: number | null;
+  wood_gtheta?: number | null;    // pooled per cloud, not per voxel
 }
 
 export interface LADResponse {
@@ -1803,6 +1830,19 @@ export interface LADResponse {
   dropped_columns?: number;
   // EPSG shared by every source scan, else null. Drives raster georeferencing.
   crs_epsg?: number | null;
+  // ---- Leaf / wood split ---------------------------------------------------
+  // false => the cloud carried no wood/leaf classification and every wood field
+  // is null. Run Segment Wood / Leaf first to populate them.
+  has_wood_classification?: boolean;
+  // Total woody surface area over MEASURED voxels only (never under-sampled,
+  // never filled) — the same rule total_leaf_area follows.
+  total_wood_area?: number | null;
+  // The pooled wood projection coefficient applied and where it came from:
+  // 'pooled' (measured from branch axes) or 'default' (too few reliable axes).
+  // wood_angle_n is how many trusted axes backed a pooled estimate.
+  wood_gtheta?: number | null;
+  wood_gtheta_source?: string | null;
+  wood_angle_n?: number | null;
   // What the inversion inferred from target_count for pulses whose returns are
   // no longer in the cloud (a crop to the grid). hidden_after were placed beyond
   // the grid and counted as transmitted; hidden_ambiguous could not be placed

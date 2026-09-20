@@ -264,15 +264,16 @@ ninety, and the plotted line alone can't show you the difference.
 
 Select a LAD result and use **Export** in its row. Tick the variables you want
 (leaf area density, leaf area, G(θ), hit count, beam count, relative density
-index, mean path length, total probed path length, LAD std), then choose a
-format:
+index, mean path length, total probed path length, LAD std — plus wood area
+density, wood area, plant area density, wood fraction and wood G(θ) when the
+cloud was classified), then choose a format:
 
 | Format | What you get | Use it for |
 | --- | --- | --- |
 | **GeoTIFF** | One file per variable, each with **one band per vertical level** (band 1 = lowest), georeferenced when the source CRS is known | QGIS / ArcGIS / R `terra`; the same shape `canopyLazR` and AMAPVox's `toRaster()` produce |
 | **Voxel CSV** | One row per voxel with *every* field, including the lattice indices and the per-voxel Pimont uncertainty | Analysis in R / Python / Excel. The lossless option |
 | **AMAPVox** | `.vox` voxel space — `#min_corner` / `#max_corner` / `#split` / `#res` header, then `i j k PadBVTotal …` rows | The R `AMAPVox` package, DART / `pytools4dart` |
-| **Summary** | A small `.txt`: voxel, occlusion, under-sampled and filled counts, total leaf area (measured only), interpolated leaf area, and **LAI** | Reading the headline canopy numbers — LAI is not carried by any other format |
+| **Summary** | A small `.txt`: voxel, occlusion, under-sampled and filled counts, total leaf area (measured only), interpolated leaf area, and **LAI** — plus total wood area, **WAI** and **PAI** when the cloud was classified | Reading the headline canopy numbers — LAI is not carried by any other format |
 
 Exporting several raster variables at once asks for a **folder**; a single file
 asks for a save location.
@@ -296,6 +297,51 @@ asks for a save location.
     would produce a confidently *mis-georeferenced* file. The GeoTIFF button is
     disabled for those grids; export **CSV** or **.vox** instead, which store
     each voxel's own position and carry them exactly.
+
+## Separating wood from leaf
+
+By default every return counts as foliage, so the result is really *plant* area
+density reported as LAD. To split it:
+
+1. Run [**Segment Wood / Leaf**](segment-wood.md) on the cloud first. It adds a
+   `wood_class` column to the session.
+2. Compute LAD as usual. The split happens automatically — no extra option.
+
+Each voxel then reports **LAD** (one-sided leaf area per m³), **WAD** (total
+woody *surface* area per m³) and **PAD** (their sum).
+
+What appears once a result carries a split:
+
+- A **Colour by** picker in the result row switches the voxels between LAD, WAD
+  and PAD. The colourbar rescales and its label follows, so the legend always
+  names the quantity on screen.
+- A **Leaf and wood area** box reports both totals and states whether the wood
+  G(θ) was *measured* from branch axes or *assumed* — an assumption is never
+  presented as a measurement.
+- The export variable list gains wood area density, wood area, plant area
+  density, wood fraction and wood G(θ).
+- **Profile & LAI** reports **WAI** and **PAI** beside LAI, and the summary and
+  profile CSV exports carry them too.
+
+A result computed from an unclassified cloud says so in its row, because "LAD"
+there still includes the branches.
+
+**Do not** split the cloud and invert the leaf part on its own. Removing the
+wood returns turns every beam that a branch stopped into a beam that passed
+through, which biases the leaf density — see
+[cropped and segmented clouds](../concepts/leaf-area-density.md#cropped-and-segmented-clouds).
+Keeping one cloud and letting the classification steer the *attribution* is
+what Phytograph does, and it leaves the beam bookkeeping intact.
+
+!!! tip "Size the grid for the wood you care about"
+
+    Both numbers are absolute areas. The one assumption is that leaf and wood
+    are **mixed** inside a voxel — a voxel holding a whole trunk *and* the
+    foliage beside it will misattribute between them (leaf area stays accurate;
+    wood is the number that suffers). If woody area is the point of the run,
+    use voxels small enough that a trunk gets its own. Remember too that the
+    wood/leaf classification's own error rides on top of this. See
+    [Wood area](../concepts/leaf-area-density.md#wood-area).
 
 ## Terrain following — snap the grid to the ground
 

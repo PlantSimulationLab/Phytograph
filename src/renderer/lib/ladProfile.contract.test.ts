@@ -22,6 +22,9 @@ interface ContractCell {
   i: number; j: number; k: number;
   lad: number;
   leaf_area: number;
+  // Present only on the wood case: the leaf/wood split's per-voxel outputs.
+  wad?: number;
+  wood_area?: number;
   solved?: boolean;
   under_sampled?: boolean;
   lad_filled?: boolean;
@@ -41,6 +44,11 @@ interface ContractCase {
     ground_area: number;
     lai: number;
     occluded_count: number;
+    // Wood totals, present only on the wood case. WAI applies the SAME
+    // measured-voxel rule as LAI, and PAI is their sum.
+    measured_wood_area?: number;
+    wai?: number;
+    pai?: number;
     filled_leaf_area?: number;
     // Per-level mean LAD, asserted on this side only — the Python summary has
     // no per-level output. Same measured-voxel rule as the LAI above.
@@ -75,6 +83,11 @@ function toResult(c: ContractCase): LADResultEntry {
     ...(cell.solved !== undefined ? { solved: cell.solved } : {}),
     ...(cell.under_sampled !== undefined ? { underSampled: cell.under_sampled } : {}),
     ...(cell.lad_filled !== undefined ? { ladFilled: cell.lad_filled } : {}),
+    // Absent in the JSON => absent on the voxel, which is how a result with no
+    // wood/leaf classification looks. The profile must then report no WAI/PAI
+    // at all rather than zeros.
+    ...(cell.wad !== undefined ? { wad: cell.wad } : {}),
+    ...(cell.wood_area !== undefined ? { woodArea: cell.wood_area } : {}),
   }));
 
   return {
@@ -99,7 +112,10 @@ describe('LAI contract (src/shared/ladLai.contract.json)', () => {
   it('carries the cases the Python side also asserts', () => {
     // A truncated/emptied contract file must fail loudly rather than turn both
     // sides' tests into no-ops that pass.
-    expect(cases.length).toBeGreaterThanOrEqual(4);
+    expect(cases.length).toBeGreaterThanOrEqual(5);
+    // The wood case must be one of them, or the leaf/wood half of the contract
+    // silently stops being asserted on either side.
+    expect(cases.some(c => c.expected.wai !== undefined)).toBe(true);
   });
 
   for (const c of cases) {
@@ -111,6 +127,23 @@ describe('LAI contract (src/shared/ladLai.contract.json)', () => {
       expect(p.occludedCount).toBe(c.expected.occluded_count);
       if (c.expected.filled_leaf_area !== undefined) {
         expect(p.filledLeafArea).toBeCloseTo(c.expected.filled_leaf_area, 9);
+      }
+
+      if (c.expected.wai !== undefined) {
+        // Wood obeys the SAME measured-voxel rule. The wood case gives its
+        // occluded voxel a large wood area on purpose, so an implementation
+        // that excluded occluded LEAF but not occluded WOOD fails here.
+        expect(p.woodArea).toBeCloseTo(c.expected.measured_wood_area!, 9);
+        expect(p.wai).toBeCloseTo(c.expected.wai, 9);
+        expect(p.pai).toBeCloseTo(c.expected.pai!, 9);
+        // The identity the two area conventions exist to preserve.
+        expect(p.pai!).toBeCloseTo(p.lai + p.wai!, 9);
+      } else {
+        // No classification => no wood aggregates at all. Reporting 0 would
+        // claim there is no wood, which is a different statement.
+        expect(p.wai).toBeUndefined();
+        expect(p.pai).toBeUndefined();
+        expect(p.woodArea).toBeUndefined();
       }
     });
 

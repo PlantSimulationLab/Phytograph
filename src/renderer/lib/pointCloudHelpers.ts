@@ -1133,14 +1133,23 @@ export function ladColorT(lad: number, min: number, max: number): number {
 export function ladRange(
   voxels: LADVoxel[],
   ignoreEmpty = true,
+  field: 'lad' | 'wad' | 'pad' = 'lad',
 ): { min: number; max: number } {
   let min = Infinity;
   let max = -Infinity;
   for (const v of voxels) {
-    if (ignoreEmpty && (v.hitCount === 0 || v.lad <= 0)) continue;
-    if (!isFinite(v.lad)) continue;
-    if (v.lad < min) min = v.lad;
-    if (v.lad > max) max = v.lad;
+    // Same value the renderer paints, so the colorbar domain cannot disagree
+    // with the ramp. A voxel with no wood fields reads 0 for wad/pad, which is
+    // the correct "no wood attributed here".
+    const value = field === 'wad'
+      ? (v.wad ?? 0)
+      : field === 'pad'
+        ? (v.pad ?? (v.lad + (v.wad ?? 0)))
+        : v.lad;
+    if (ignoreEmpty && (v.hitCount === 0 || value <= 0)) continue;
+    if (!isFinite(value)) continue;
+    if (value < min) min = value;
+    if (value > max) max = value;
   }
   if (!isFinite(min) || !isFinite(max)) return { min: 0, max: 0 };
   return { min, max };

@@ -53,6 +53,12 @@ def _request(case):
         for key in ("solved", "under_sampled", "lad_filled"):
             if key in c:
                 cell[key] = c[key]
+        # Wood fields exist only on the leaf/wood case. Absent stays absent, so
+        # every other case still exercises the no-classification path where the
+        # summary must print no WAI/PAI at all.
+        for key in ("wad", "wood_area"):
+            if key in c:
+                cell[key] = c[key]
         cells.append(cell)
     return main.LADExportRequest(
         format="txt",
@@ -80,13 +86,22 @@ def _summary_fields(case):
                 out["occluded"] = int(tail)
         elif line.startswith("filled leaf area "):
             out["filled_leaf_area"] = float(line.rsplit(" ", 1)[1])
+        elif line.startswith("WAI "):
+            out["wai"] = float(line.split()[1])
+        elif line.startswith("PAI "):
+            out["pai"] = float(line.split()[1])
+        elif line.startswith("total wood area "):
+            out["wood_area"] = float(line.rsplit(" ", 1)[1])
     return out
 
 
 def test_contract_file_carries_the_cases_both_sides_assert():
     # A truncated contract must fail loudly rather than turn both sides' tests
     # into no-ops that pass.
-    assert len(CASES) >= 4
+    assert len(CASES) >= 5
+    # The wood case must be present, or the leaf/wood half of the contract
+    # silently stops being asserted on either side.
+    assert any("wai" in c["expected"] for c in CASES)
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
@@ -105,6 +120,18 @@ def test_summary_export_lai_matches_the_contract(case):
     assert got["occluded"] == exp["occluded_count"]
     if "filled_leaf_area" in exp:
         assert got["filled_leaf_area"] == round(exp["filled_leaf_area"], 1)
+
+    if "wai" in exp:
+        # Wood obeys the SAME measured-voxel rule as leaf. The wood case gives
+        # its occluded voxel a large wood area deliberately, so an implementation
+        # that excluded occluded LEAF but not occluded WOOD fails right here.
+        assert got["wood_area"] == round(exp["measured_wood_area"], 1)
+        assert got["wai"] == round(exp["wai"], 3)
+        assert got["pai"] == round(exp["pai"], 3)
+    else:
+        # No classification => the summary must not print wood lines at all.
+        # Printing 0 would claim there is no wood, a different statement.
+        assert "wai" not in got and "pai" not in got and "wood_area" not in got
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
