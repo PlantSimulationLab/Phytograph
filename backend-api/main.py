@@ -11704,6 +11704,13 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     # before the crop still matches the hits it sees. (A moved
                     # buffer warns from its own `misses_moved` flag instead.)
                     scan_flags["misses_stale"] = False
+                # WHICH of the two routes kept the flag alive decides what the
+                # user should do about it, and they need opposite advice:
+                # rows that are GONE (bake / split / extract) can be recovered
+                # as misses by re-running Backfill against what remains, while
+                # an in-grid deletion of rows still present cannot — Backfill
+                # restores those hits and reconstructs the scan as measured.
+                scan_flags["misses_stale_recoverable"] = bool(n_unrestorable > 0)
                 unrestorable_hits_total += n_unrestorable
                 if n_unrestorable > 0:
                     # These rows are gone from the session outright (compacted by
@@ -11847,10 +11854,10 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     "points (E57 / structured PLY) or a timestamp column so misses "
                     "can be recovered by gapfilling."
                 )
-            # Backfilled misses that predate a later crop reflect the pre-crop
-            # hits, so their ratio against the surviving hits is off and the
-            # inversion may be inaccurate. (Set by delete_region; carried through
-            # _session_to_lad_arrays.) Warn so the user re-runs Backfill Misses.
+            # Backfilled misses that predate a later crop. This only survives to
+            # here when the crop deleted hits INSIDE the voxel grid (the block
+            # above clears the flag otherwise), since a deletion outside the grid
+            # is restored to the inversion and leaves the buffer exact.
             if scan_flags.get("misses_moved"):
                 warnings.append(
                     f"Scan '{scan_label}' has sky/miss points that were computed "
@@ -11860,12 +11867,30 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     "recompute them."
                 )
             elif scan_flags.get("misses_stale"):
-                warnings.append(
-                    f"Scan '{scan_label}' has sky/miss points that were computed "
-                    "before a later crop, so the leaf-area-density result may be "
-                    "inaccurate. Re-run Backfill Misses on the cropped cloud to "
-                    "recompute them against the current points."
-                )
+                if scan_flags.get("misses_stale_recoverable"):
+                    # Rows are GONE from the session (bake / split / extract), so
+                    # gap-filling over what remains re-creates the lost pulses as
+                    # misses. Here a re-run genuinely is the fix.
+                    warnings.append(
+                        f"Scan '{scan_label}' has sky/miss points that were computed "
+                        "before a later crop, and points that crop removed are no "
+                        "longer in the session, so the leaf-area-density result may "
+                        "be inaccurate. Re-run Backfill Misses on this cloud to "
+                        "recover the lost pulses as misses."
+                    )
+                else:
+                    # The rows are still present, just deleted inside the grid.
+                    # Backfill restores deleted hits and reconstructs the scan as
+                    # measured, so re-running it changes nothing.
+                    warnings.append(
+                        f"Scan '{scan_label}' has sky/miss points that were computed "
+                        "before a crop that removed points from INSIDE the voxel grid, "
+                        "so beams the inversion cannot place are missing and the "
+                        "leaf-area-density result may be inaccurate. Re-running Backfill "
+                        "Misses will NOT fix this — it reconstructs the scan as measured. "
+                        "Undo the deletions inside the grid, or size the grid to the "
+                        "region you kept."
+                    )
 
             # Ntheta/Nphi describe the scanner's angular raster, not the surviving
             # points — so estimate from the PRE-cull count when the scan doesn't
@@ -32652,6 +32677,10 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
                     "arr": np.empty(n, dtype=_las_dim_dtype(pf.dimension_by_name(src_dim))),
                     "slug": slug, "label": _MULTI_RETURN_LABELS[slug],
                     "first": None, "const": True,
+                    # The vary-or-drop rule below is WRONG for these two, and
+                    # wrong precisely on the files that need them most. See the
+                    # resolution step for the rule that replaces it.
+                    "multireturn": True,
                 }
         # Carry the remaining STANDARD LAS dimensions (classification, scan_angle,
         # point_source_id, user_data, scanner_channel, …) as user-selectable scalar
@@ -32744,7 +32773,43 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
 
         # Resolve the content-dependent candidates now that every chunk is in:
         # keep (as float32) only those that actually vary.
+        #
+        # EXCEPT the multi-return pair, where "constant" does not mean "no signal".
+        # `target_count` is read PER PULSE — `inferHiddenReturns` compares it against
+        # the number of that beam's returns still present, to place a cropped return
+        # before or beyond the voxel grid from index order alone. A column reading 3
+        # on every point carries exactly that, and a pre-cropped single-tree extract
+        # is *likely* to be uniform: crop a mixed-density scan to one crown and the
+        # distribution narrows, so the file most dependent on the inference was the
+        # most likely to lose it. Dropping it silently disabled the whole crop-aware
+        # path (LiDAR.cpp inferHiddenReturns early-returns without either column,
+        # printing nothing), and the user got a clean-looking LAD that had counted
+        # none of the removed returns.
+        #
+        # The one genuinely empty case is a single-return file: target_count == 1
+        # everywhere says every pulse recorded exactly one return, so nothing was
+        # removed and there is nothing to infer. That is the same predicate
+        # `_session_multireturn_columns_for_triangulation` already applies (keep only
+        # when some target_count > 1), so the two agree on what "multi-return" means.
+        # target_index is kept whenever target_count is, since the inference needs
+        # BOTH and a lone index column is what silently half-disabled case B.
+        _tc = candidates.get("number_of_returns")
+        _keep_multireturn = bool(
+            n and _tc is not None
+            and not (_tc["const"] and float(_tc["first"]) <= 1.0)
+        )
         for name, cand in candidates.items():
+            if cand.get("multireturn"):
+                if _keep_multireturn:
+                    vals32 = cand["arr"].astype(np.float32)
+                    if store is not None:
+                        col = f"x{len(extra_cols)}"
+                        extra_cols[col] = cand["slug"]
+                        vals32 = store.add_column(col, vals32)
+                    extras[cand["slug"]] = vals32
+                    extra_dims_meta.append({"slug": cand["slug"], "label": cand["label"]})
+                del cand["arr"]
+                continue
             if n and not cand["const"]:
                 vals32 = cand["arr"].astype(np.float32)
                 if store is not None:
@@ -34217,7 +34282,8 @@ def create_multi_cloud_session(request: CloudSessionCreateRequest, http_request:
         _build, request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
-def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None) -> dict:
+def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=None,
+                        n_restored: int = 0) -> dict:
     """Build an ephemeral PyHelios cloud from a session's hits, gap-fill the misses,
     and persist them in `sess.backfilled_misses`. Returns the result dict.
 
@@ -34405,6 +34471,7 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "scan_origin": list(origin),
         "already_had_misses": False,
         "miss_octree_cache_id": miss_cache_id,
+        "restored_deleted_hits": int(n_restored),
     }
 
 
@@ -34426,8 +34493,10 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
     is a clean 404/400); the heavy build/gapfill/extract streams PHP1 progress
     markers ahead of the JSON tail (see `_bin_frame_streaming_response`) so the
     renderer shows a per-stage progress bar. The JSON tail is
-    {backfilled, miss_count, has_misses, scan_origin, already_had_misses} on
-    success, or carries `error` when reconstruction failed.
+    {backfilled, miss_count, has_misses, scan_origin, already_had_misses,
+    restored_deleted_hits} on success, or carries `error` when reconstruction
+    failed. `restored_deleted_hits` counts deleted hits fed back to the gapfill
+    so it reconstructs the raster the scanner measured (see below).
     """
     sess = _get_cloud_session(session_id)
     origin = request.origin
@@ -34435,8 +34504,26 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
         raise HTTPException(status_code=400, detail="origin must have 3 elements")
 
     with _cloud_session_lock:
+        # Gap-fill against the scan AS MEASURED, not against the survivors of a
+        # crop. `gapfillMisses()` reconstructs the angular raster from the returns
+        # it is handed and synthesises a miss into every cell that has none — so a
+        # pulse whose only return was cropped away comes back as a MISS, i.e. a
+        # fully transmitted beam. That is wrong in both directions: the beam was
+        # extinguished at its (now deleted) hit, and if that hit was in FRONT of
+        # the voxel grid the pulse should not sample the grid at all, whereas a
+        # synthesised miss is projected ~1 km out and rays straight through it.
+        # Restoring every deleted hit makes a re-run reproduce the measured miss
+        # set instead of inventing beams. Deletions are the user's view of the
+        # cloud; the raster is a property of the instrument, and this buffer
+        # describes the latter. (`_session_to_lad_arrays` tags none of these as
+        # hits for LAD — the buffer it produces holds only synthesised misses.)
+        _deleted = getattr(sess, "deleted", None)
+        _restore = (np.asarray(_deleted, dtype=bool)
+                    if _deleted is not None and _deleted.shape[0] == len(sess.positions)
+                    else None)
+        n_restored = int(_restore.sum()) if _restore is not None else 0
         xyz, dirs, labels, vals, flags = _session_to_lad_arrays(
-            sess, origin, include_backfilled=False)
+            sess, origin, include_backfilled=False, restore_mask=_restore)
 
     # Already carries real misses (E57 / structured PLY): nothing to recover. A
     # trivial no-op — return a plain JSON response (no streaming needed).
@@ -34490,7 +34577,7 @@ def backfill_cloud_misses(session_id: str, request: BackfillMissesRequest,
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
             _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags,
-                                progress=progress)).encode("utf-8"),
+                                progress=progress, n_restored=n_restored)).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 

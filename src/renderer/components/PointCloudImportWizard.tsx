@@ -1205,7 +1205,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 data-testid="import-wizard-units-select"
                 value={cfg.units}
                 onChange={(e) => setUnits(e.target.value as LengthUnit)}
-                className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1
+                className="w-44 bg-neutral-900 border border-neutral-700 rounded px-2 py-1
                            text-[11px] text-neutral-200 focus:outline-none focus:border-neutral-500"
               >
                 {UNIT_ORDER.map((u) => (

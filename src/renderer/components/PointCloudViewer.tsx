@@ -4302,15 +4302,21 @@ export default function PointCloudViewer({
               emptied.push({ id: cloud.id, name: src.fileName || 'Unnamed' });
               return;
             }
-            // A crop that touched a cloud with separately-backfilled misses leaves
-            // them stale (gap-filled against the pre-crop hits). We keep them but
-            // warn so the user re-runs Backfill Misses before LAD.
+            // A crop that touched a cloud with separately-backfilled misses. The
+            // buffer is KEPT and stays usable: LAD restores deleted hits that lie
+            // outside the voxel grid, so a crop around the grid — the usual reason
+            // to crop before LAD — leaves the beam population untouched and LAD
+            // clears the flag itself. Deleting points from INSIDE the grid is the
+            // case LAD cannot repair, and it warns then. Deliberately NOT advising
+            // a re-run: Backfill reconstructs the scan as measured (it restores
+            // deleted hits), so re-running changes nothing here.
             if (result.backfilled_misses_stale) {
               showToast({
-                type: 'warning',
-                title: 'Sky/miss points are now stale',
-                message: `Misses for ${src.fileName || 'this cloud'} were computed before this crop. `
-                  + 'Re-run Backfill Misses on the cropped cloud before estimating leaf-area density.',
+                type: 'info',
+                title: 'Sky/miss points kept',
+                message: `Misses for ${src.fileName || 'this cloud'} were computed before this crop and have been kept. `
+                  + 'Leaf-area density restores cropped points outside the voxel grid, so a crop around the grid stays exact; '
+                  + 'it will warn if you cropped points from inside it.',
               });
             }
             // Hide the cropped-away points now, and record the backend's count

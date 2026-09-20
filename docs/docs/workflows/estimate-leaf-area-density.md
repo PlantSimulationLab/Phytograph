@@ -463,10 +463,19 @@ entirely and uses those origins directly.
   its Lmax filter and recompute via **Reuse**.
 - Segment out ground and trunk first if you only want foliage density —
   the inversion counts every return inside the grid.
-- If you **crop a scan after backfilling its misses**, the result warns that
-  the misses are stale (they were computed against the pre-crop hits, so the
-  hit/miss ratio is off). Re-run [Backfill Misses](backfill-misses.md) on the
-  cropped cloud before trusting the LAD.
+- If you **crop a scan after backfilling its misses**, the misses are kept and
+  stay usable. Cropped-away points *outside* the voxel grid are fed back into
+  the inversion, so a crop drawn around the grid is exact and raises no
+  warning. You are warned in two cases, which want opposite responses:
+
+    - the crop removed points from *inside* the grid — those returns cannot be
+      placed, and re-running [Backfill Misses](backfill-misses.md) will not
+      repair it (it reconstructs the scan as measured). Undo those deletions,
+      or size the grid to the region you kept;
+    - the cropped points are no longer in the session at all (**Permanently
+      apply deletions**, or a cloud made by split / extract / duplicate). Here
+      re-running Backfill Misses *is* the fix: gap-filling over what remains
+      re-creates the lost pulses as misses.
 - For a canopy-wide LAI, just read it off **Profile & LAI** — it is computed
   over whatever grid you ran, so you do not need to collapse the grid to a
   single cell to get it. Keep the grid subdivided: a multi-level grid gives you

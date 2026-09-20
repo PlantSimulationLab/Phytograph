@@ -88,12 +88,32 @@ one-click **Backfill Misses** button. See
   from the scan's points, so a sparse scan that is mostly sky doesn't
   bloat memory. They aren't exported with the point cloud; they exist to
   drive (and let you verify) the LAD inversion.
-- **Cropping a scan after backfilling marks the recovered misses stale.**
-  They were reconstructed against the pre-crop hits, so their hit/miss ratio
-  no longer matches the surviving points. Phytograph keeps them but warns you
-  — at crop time and again in the LAD result — to **re-run Backfill Misses**
-  on the cropped cloud before estimating leaf-area density. (A crop never
-  deletes sky/miss points themselves; it only removes hits.)
+- **Cropping a scan after backfilling keeps the recovered misses, and they
+  usually stay exact.** LAD feeds cropped-away hits that lie *outside* the
+  voxel grid back into the inversion, so a crop drawn around the grid — the
+  normal prelude to a per-tree LAD — leaves the beam population untouched and
+  produces no warning. LAD warns when points were deleted from *inside* the
+  grid (unrepairable — see below), and when the cropped points have left the
+  session altogether. (A crop never deletes sky/miss points themselves; it
+  only removes hits.)
+- **Re-running Backfill after a crop does not "recompute against the
+  survivors" — and must not.** The reconstruction is a property of the
+  *instrument*: it rebuilds the scan's angular raster and synthesises a miss
+  into every cell that has no return. Fed only the survivors of a crop, a
+  pulse whose single return you cropped away would come back as a **miss** —
+  a fully transmitted beam — when the beam was really extinguished at that
+  deleted hit. If that hit sat in *front* of the voxel grid, the pulse should
+  not sample the grid at all, whereas a synthesised miss is projected about a
+  kilometre out and rays straight through it. Phytograph therefore restores
+  deleted hits before gap-filling, so a re-run reproduces the scan as
+  measured rather than inventing beams.
+
+    This holds while the deleted points are still in the session. Once they
+    are gone — **Permanently apply deletions**, or a cloud made by split,
+    extract or duplicate — there is nothing left to restore, and gap-filling
+    over what remains recovers the lost pulses as misses instead. That is the
+    one case where re-running Backfill after a crop is the right move, and LAD
+    says so in its warning.
 - **No editing tool ever discards sky/miss points.** Crop, erase, filter,
   segment and split all act on hits alone: a miss sits about a kilometre out
   along its beam, so it falls outside any region you draw around the canopy,

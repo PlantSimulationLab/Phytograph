@@ -4328,6 +4328,12 @@ export interface BackfillMissesResult {
   // in via MissOctree once the cloud's OctreeRef adopts it). Absent on the
   // no-op/error paths, where the existing miss octree is unchanged.
   miss_octree_cache_id?: string | null;
+  // How many cropped/erased hits were fed back to the gapfill. The reconstruction
+  // is a property of the INSTRUMENT, so it runs over the scan as measured: a
+  // pulse whose only return was cropped away would otherwise be reconstructed as
+  // a sky miss — a fully transmitted beam — when it was actually extinguished at
+  // the deleted hit. 0 on an uncropped cloud.
+  restored_deleted_hits?: number;
 }
 
 /** The angular raster of the scan being backfilled, forwarded to the backend so

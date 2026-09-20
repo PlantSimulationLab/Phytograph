@@ -7,6 +7,10 @@ at once - the 2x import transient that made a 100 M-point import need
 must survive the rewrite is pinned here against laspy's own whole-file read:
 every column, dtype, the constant-column pruning, the gps_time / beam-origin
 routing, and a chunk size that does not divide the point count.
+
+The pruning has one deliberate exemption: the multi-return pair
+(`return_number` / `number_of_returns`), which is read per PULSE and so carries
+signal even when constant. See the section at the bottom of this file.
 """
 import numpy as np
 import pytest
@@ -38,7 +42,7 @@ def _write_las(path, n, *, origins=True, constant_user_data=True, colors=True, s
             rec.blue = rng.integers(0, 65535, n).astype(np.uint16)
         rec.gps_time = 1.0e9 + np.arange(n, dtype=np.float64) * 0.01
         rec.return_number = rng.integers(1, 3, n).astype(np.uint8)
-        rec.number_of_returns = np.full(n, 2, dtype=np.uint8)          # constant -> pruned
+        rec.number_of_returns = np.full(n, 2, dtype=np.uint8)          # constant but KEPT (per-pulse signal)
         rec.classification = rng.integers(1, 5, n).astype(np.uint8)   # varies -> las_classification
         rec.user_data = (np.full(n, 7, dtype=np.uint8) if constant_user_data
                          else rng.integers(0, 9, n).astype(np.uint8))
@@ -76,9 +80,17 @@ def test_chunked_read_matches_a_whole_file_read(tmp_path, monkeypatch, chunk):
     np.testing.assert_array_equal(got.extras["reflectance"], np.asarray(ref.Reflectance))
     assert {"slug": "reflectance", "label": "Reflectance"} in got.extra_dims_meta
     np.testing.assert_array_equal(got.extras["is_miss"], np.asarray(ref.is_miss).astype(np.float32))
-    # Multi-return: varying return_number mapped, constant number_of_returns pruned.
+    # Multi-return: BOTH columns kept, including the constant number_of_returns.
+    # This test used to assert `"target_count" not in got.extras`, pinning the
+    # constant-column pruning as if it applied here — it must not. target_count
+    # is read per PULSE (inferHiddenReturns compares it against that beam's
+    # surviving returns to place a cropped return relative to the voxel grid), so
+    # a column reading 2 everywhere is exactly the signal, not noise. Only a
+    # single-return file (target_count == 1 everywhere) is genuinely empty; see
+    # test_multireturn_columns_survive_a_uniform_crop below.
     np.testing.assert_array_equal(got.extras["target_index"], np.asarray(ref.return_number).astype(np.float32))
-    assert "target_count" not in got.extras
+    np.testing.assert_array_equal(got.extras["target_count"],
+                                  np.asarray(ref.number_of_returns).astype(np.float32))
     # Standard dims: varying classification carried with the las_ prefix and
     # "LAS classification" label; constant user_data / point_source_id pruned.
     np.testing.assert_array_equal(got.extras["las_classification"],
@@ -128,3 +140,118 @@ def test_empty_las_reads_to_empty_arrays(tmp_path):
     assert got.positions.shape == (0, 3)
     assert got.timestamps is None
     assert got.extras == {}
+
+
+# ---------------------------------------------------------------------------
+# Multi-return columns vs the constant-column pruning
+# ---------------------------------------------------------------------------
+#
+# `return_number` / `number_of_returns` are the ONLY way a pre-cropped file can
+# say what it lost. Helios's inferHiddenReturns places a removed return before or
+# beyond the voxel grid from index order alone — indices below every survivor
+# terminated nearer, above terminated farther — which is what lets a segmented
+# tree file be inverted for LAD at all. It needs BOTH columns (LiDAR.cpp
+# early-returns without either) and prints nothing when it bails, so losing them
+# silently disables the whole crop-aware path and LAD reads low.
+#
+# The pruning rule for the other standard dims ("drop a column that does not
+# vary") is wrong for these two, and wrong on exactly the files that need them:
+# crop a mixed-density scan to one crown and the return-count distribution
+# narrows, so uniformity is evidence of cropping, not of absence.
+
+def _write_multireturn_las(path, return_number, number_of_returns):
+    """Minimal LAS carrying just the multi-return pair (+ gps_time)."""
+    import laspy
+
+    n = len(return_number)
+    hdr = laspy.LasHeader(point_format=1, version="1.2")
+    hdr.scales = [0.001, 0.001, 0.001]
+    hdr.offsets = [0.0, 0.0, 0.0]
+    with laspy.open(str(path), mode="w", header=hdr) as w:
+        rec = laspy.ScaleAwarePointRecord.zeros(n, header=hdr)
+        rec.x = np.linspace(0.0, 10.0, n)
+        rec.y = np.linspace(0.0, 10.0, n)
+        rec.z = np.linspace(0.0, 5.0, n)
+        rec.gps_time = np.arange(n, dtype=np.float64) * 0.01
+        rec.return_number = np.asarray(return_number, dtype=np.uint8)
+        rec.number_of_returns = np.asarray(number_of_returns, dtype=np.uint8)
+        w.write_points(rec)
+    return path
+
+
+@pytest.mark.parametrize("label, return_number, number_of_returns, expect_kept", [
+    # A crop that kept only mid-canopy returns: every survivor is return 2 of 3.
+    # Both columns constant, and both are still the whole signal.
+    ("uniform crop, both constant", [2] * 60, [3] * 60, True),
+    # The case that made this a real bug: an ordinary pre-cropped extract where
+    # return_number varies but every pulse declared the same total. target_index
+    # survived the old rule and target_count did not, which half-disables the
+    # inference just as completely as losing both.
+    ("uniform pulse count", [(i % 3) + 1 for i in range(60)], [3] * 60, True),
+    # Ordinary uncropped multi-return data: both vary, kept before and after.
+    ("both vary", [(i % 3) + 1 for i in range(60)],
+     [3 if i % 2 else 1 for i in range(60)], True),
+    # Genuinely single-return: every pulse recorded exactly one return, so
+    # nothing was removed and there is nothing to infer. Must still be pruned.
+    ("single-return file", [1] * 60, [1] * 60, False),
+    # Point-format dims present but never populated — the case the pruning rule
+    # exists for. Must still be pruned.
+    ("all-zero dims", [0] * 60, [0] * 60, False),
+])
+def test_multireturn_columns_survive_a_uniform_crop(
+        tmp_path, label, return_number, number_of_returns, expect_kept):
+    las_path = _write_multireturn_las(
+        tmp_path / "mr.las", return_number, number_of_returns)
+
+    got = main._read_las_into_arrays(las_path)
+
+    kept = ("target_index" in got.extras) and ("target_count" in got.extras)
+    assert kept is expect_kept, (
+        f"{label}: target_index={'target_index' in got.extras} "
+        f"target_count={'target_count' in got.extras}, expected both={expect_kept}")
+    if expect_kept:
+        # Values, not just presence — a column of the wrong dtype or scale would
+        # make the per-pulse comparison meaningless.
+        np.testing.assert_array_equal(
+            got.extras["target_count"], np.asarray(number_of_returns, dtype=np.float32))
+        np.testing.assert_array_equal(
+            got.extras["target_index"], np.asarray(return_number, dtype=np.float32))
+        # And the columns must be advertised, or the scalar picker/export lose them.
+        slugs = [m["slug"] for m in got.extra_dims_meta]
+        assert "target_index" in slugs and "target_count" in slugs
+    else:
+        assert not any(m["slug"] in ("target_index", "target_count")
+                       for m in got.extra_dims_meta)
+
+
+def test_kept_multireturn_columns_reach_the_lad_arrays(tmp_path):
+    """Presence in `extras` is not the point — the columns have to arrive at
+    Helios. `_session_to_lad_arrays` is what builds the label list the C++ side
+    probes, so assert the inference's precondition there rather than at import."""
+    import time
+
+    las_path = _write_multireturn_las(
+        tmp_path / "mr.las", [(i % 3) + 1 for i in range(60)], [3] * 60)
+    res = main._read_las_into_arrays(las_path)
+    sess = main.CloudSession(
+        session_id="mr-lad",
+        source_path=str(las_path),
+        ascii_format=None,
+        column_plan=None,
+        positions=res.positions,
+        colors=None,
+        intensity=None,
+        extras=res.extras,
+        extra_dims_meta=res.extra_dims_meta,
+        deleted=np.zeros(len(res.positions), dtype=bool),
+        deleted_history=[],
+        octree_cache_id=None,
+        created_at=time.time(),
+    )
+    sess.timestamps = res.timestamps
+
+    _xyz, _dirs, labels, _vals, _flags = main._session_to_lad_arrays(
+        sess, [0.0, 0.0, 50.0])
+
+    # inferHiddenReturns needs BOTH, and bails silently with either missing.
+    assert "target_index" in labels and "target_count" in labels, labels

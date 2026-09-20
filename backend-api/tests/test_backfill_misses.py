@@ -903,3 +903,156 @@ def test_recovered_cells_reach_the_lad_arrays(stub_pyhelios):
     assert list(row_col) == [0.0, 1.0, 2.0]
     assert list(col_col) == [10.0, 11.0, 12.0]
     assert not np.all(col_col == 0.0), "every recovered miss landed in column 0"
+
+
+# ---------------------------------------------------------------------------
+# Re-running backfill on a CROPPED session
+# ---------------------------------------------------------------------------
+#
+# gapfillMisses() reconstructs the angular raster from the returns it is handed
+# and synthesises a miss into every cell that has none. So if a re-run were fed
+# only the survivors of a crop, a pulse whose sole return was cropped away would
+# come back as a MISS — a fully transmitted beam. That is wrong twice over: the
+# beam was extinguished at its (deleted) hit, and if that hit was in FRONT of the
+# LAD voxel grid the pulse should not sample the grid at all, whereas a
+# synthesised miss is projected ~1 km out and rays straight through it. The
+# endpoint therefore restores deleted hits before gap-filling.
+
+def test_backfill_rerun_feeds_deleted_hits_to_the_gapfill(stub_pyhelios):
+    """A cropped-away hit must still reach the ephemeral cloud, so its pulse is
+    reconstructed as the extinguished beam it was — never as a sky miss."""
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+    # Crop away the middle point (index 1 → [1, 1, 1]).
+    sess.deleted[1] = True
+
+    resp = _call(sess.session_id, origin=[0, 0, 5])
+
+    cloud = stub_pyhelios.instances[-1]
+    # Read the INGEST call, not `_hit_xyz` — the fake's gapfillMisses() appends
+    # its synthetic misses to that array, so it holds hits+misses afterwards.
+    ingested = [c for c in cloud.calls if c[0] == "addHitPointsWithData"]
+    assert len(ingested) == 1
+    # All three hits ingested, not the two survivors.
+    assert ingested[0][2] == len(_TS_POSITIONS), (
+        "backfill gap-filled over the crop survivors only — the cropped pulse "
+        "will be resurrected as a transmitted beam")
+    assert np.isclose(cloud._hit_xyz[:len(_TS_POSITIONS)],
+                      np.float32([1.0, 1.0, 1.0])).all(axis=1).any(), (
+        "the deleted hit's coordinates never reached the gapfill")
+    # Its pulse time must ride along too, or the timestamp path groups it wrong.
+    assert 2.0 in list(cloud._ts)
+    assert resp["restored_deleted_hits"] == 1
+
+
+class _RasterCloud(_FakeCloud):
+    """Models the part of gapfillMisses() the fixed-count fake cannot: a miss is
+    synthesised for every raster cell that has NO return.
+
+    `_FakeCloud` emits a constant 3 misses whatever it is fed, so it cannot tell
+    a re-run that resurrects a cropped pulse from one that reproduces the
+    measured scan — both come back as 3. Here the scan is a fixed 4-cell raster
+    (pulse times 1..4) of which 3 returned, so an honest re-run yields exactly
+    one miss (the never-returned pulse) and a survivors-only re-run yields two
+    (that pulse PLUS the cropped one, wrongly called transmitted)."""
+
+    RASTER_TIMES = (1.0, 2.0, 3.0, 4.0)
+
+    def gapfillMisses(self):
+        self.calls.append(("gapfill",))
+        seen = set(np.asarray(self._ts, dtype=np.float64).tolist())
+        empty = [t for t in self.RASTER_TIMES if t not in seen]
+        n = len(empty)
+        synth = np.array([[100.0 + i, 0.0, 0.0] for i in range(n)], dtype=np.float32)
+        self._hit_xyz = (np.vstack([self._hit_xyz, synth])
+                         if self._hit_xyz.size else synth)
+        self._codes = np.concatenate([self._codes, np.ones(n, np.float64)])
+        self._ts = np.concatenate([self._ts, np.asarray(empty, np.float64)])
+        nan = np.full(n, np.nan, np.float64)
+        self._row = np.concatenate([self._row, nan])
+        self._col = np.concatenate([self._col, nan])
+
+
+@pytest.fixture
+def stub_raster_pyhelios(monkeypatch):
+    import sys
+    import types
+    _RasterCloud.instances = []
+    _RasterCloud.gapfill_error = None
+    _RasterCloud.grid_path = False
+    _RasterCloud.stamp_timestamps = True
+    fake = types.ModuleType("pyhelios")
+    fake.LiDARCloud = _RasterCloud
+    monkeypatch.setitem(sys.modules, "pyhelios", fake)
+    return _RasterCloud
+
+
+def test_backfill_rerun_reproduces_the_uncropped_miss_set(stub_raster_pyhelios):
+    """The buffer a re-run produces after a crop equals the one from before it.
+
+    This is the property the user cares about: cropping then re-running Backfill
+    must not change the miss population, because the miss population is a fact
+    about the instrument, not about which points are currently kept. Without the
+    restore, cropping pulse 2 makes its cell read empty and the re-run returns it
+    as a sky miss — a beam that was actually extinguished at the cropped hit."""
+    def _buffer_for(deleted_idx):
+        sess = _make_session(
+            _TS_POSITIONS,
+            {"timestamp": [1.0, 2.0, 3.0]},
+            [{"slug": "timestamp", "label": "Timestamp"}],
+            session_id=f"bf-crop-{deleted_idx}",
+        )
+        _register(sess)
+        if deleted_idx is not None:
+            sess.deleted[deleted_idx] = True
+        _call(sess.session_id, origin=[0, 0, 5])
+        return np.asarray(sess.backfilled_misses["positions"])
+
+    uncropped = _buffer_for(None)
+    cropped = _buffer_for(1)
+
+    # 3 returns over a 4-cell raster => exactly one genuinely transmitted pulse.
+    assert uncropped.shape[0] == 1, uncropped
+    assert cropped.shape[0] == 1, (
+        "cropping resurrected the deleted hit's pulse as a sky miss: the buffer "
+        f"grew to {cropped.shape[0]} misses")
+    np.testing.assert_allclose(cropped, uncropped)
+
+
+def test_backfill_rerun_clears_the_stale_flag(stub_pyhelios):
+    """A re-run is computed against the measured scan, so the buffer is no longer
+    stale regardless of the crop that set the flag."""
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+    sess.deleted[1] = True
+    sess.backfilled_misses_stale = True
+
+    _call(sess.session_id, origin=[0, 0, 5])
+
+    assert sess.backfilled_misses_stale is False
+
+
+def test_backfill_with_no_deletions_restores_nothing(stub_pyhelios):
+    """The restore path must be inert on an uncropped session — no double-count,
+    and `restored_deleted_hits` reports 0 so the renderer says nothing."""
+    sess = _make_session(
+        _TS_POSITIONS,
+        {"timestamp": [1.0, 2.0, 3.0]},
+        [{"slug": "timestamp", "label": "Timestamp"}],
+    )
+    _register(sess)
+
+    resp = _call(sess.session_id, origin=[0, 0, 5])
+
+    cloud = stub_pyhelios.instances[-1]
+    ingested = [c for c in cloud.calls if c[0] == "addHitPointsWithData"]
+    assert len(ingested) == 1 and ingested[0][2] == len(_TS_POSITIONS)
+    assert resp["restored_deleted_hits"] == 0

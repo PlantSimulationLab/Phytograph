@@ -146,7 +146,12 @@ one point per beam leaves no later echoes to weight. Formats that keep them:
   carries per-pulse target index and count directly.
 - **Structured `.e57`** — keeps every echo for a cell.
 - Any format retaining `timestamp`, `target_index`, and `target_count` as
-  columns (LAS/LAZ, PLY, or the text formats).
+  columns (LAS/LAZ, PLY, or the text formats). In LAS/LAZ these are the
+  standard `return_number` / `number_of_returns` fields, and they are carried
+  even when every point holds the same value — a cropped single-tree extract
+  in which every pulse declares the same return count still supports the
+  inference below. Only a genuinely single-return file (`number_of_returns`
+  of 1 throughout) is treated as carrying nothing.
 
 **`.ptx` cannot** — it is a complete raster of one line per grid cell, so it
 collapses each pulse to a single echo and has no schema slot for those three
@@ -192,6 +197,11 @@ only the points it took, so the rest of the scan's returns are gone from it.
 Either crop without applying deletions, or re-run **Backfill Misses** on the
 new or applied cloud. Backfilling against the points that remain recovers the
 lost pulses as misses, which brings LAD back in line and clears the warning.
+This recovery applies only once the points are *gone* — after Permanently
+apply deletions, a split, or an extract. While a crop is still just a mask,
+Backfill deliberately restores the deleted hits and reconstructs the scan as
+measured, so re-running it after an ordinary crop changes nothing (and is not
+needed: LAD already restores the cropped points outside the grid).
 Likewise, after you move or rotate a cloud, LAD warns until you re-run
 Backfill Misses, because the misses' beam directions predate the move.
 
