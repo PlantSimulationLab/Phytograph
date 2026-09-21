@@ -8,7 +8,7 @@ import { OctreeRefreshQueue, type OctreeRefreshRunner } from '../lib/octreeRefre
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, GitBranch, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator} from 'lucide-react';
 import GIF from 'gif.js';
 import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStats, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
@@ -193,8 +193,8 @@ import { CropCornerMarker } from './viewer/gizmos/CropCornerMarker';
 import { PointCloud } from './viewer/renderers/PointCloud';
 import { TriangleMesh } from './viewer/renderers/TriangleMesh';
 import { JFAOutline, OutlineSelect } from './viewer/outline/JFAOutline';
-import { setPointBudget, DEFAULT_POINT_BUDGET, CROP_PREVIEW_POINT_BUDGET } from './viewer/potreeManager';
-import { resolveDisplayPointBudget } from '../lib/displayPointBudget';
+import { setPointBudget, DEFAULT_POINT_BUDGET } from './viewer/potreeManager';
+import { resolveDisplayPointBudget, resolveCropPreviewPointBudget } from '../lib/displayPointBudget';
 import { VoxelGridOverlay } from './viewer/renderers/VoxelGridOverlay';
 import { LADVoxelGrid } from './viewer/renderers/LADVoxelGrid';
 import { TexturedPlantMesh } from './viewer/renderers/TexturedPlantMesh';
@@ -204,6 +204,7 @@ import { QSM3D, type QSMColorMode } from './viewer/renderers/QSM3D';
 import { QsmIcon } from './icons/QsmIcon';
 import { GroundSegmentIcon } from './icons/GroundSegmentIcon';
 import { NormalsIcon } from './icons/NormalsIcon';
+import { WoodLeafIcon } from './icons/WoodLeafIcon';
 import { SkeletonPoints } from './viewer/renderers/SkeletonPoints';
 import { CameraController } from './viewer/scene/CameraController';
 import { DepthProbe } from './viewer/scene/DepthProbe';
@@ -2305,6 +2306,13 @@ export default function PointCloudViewer({
   // fragment invocations. Apply re-converts at full resolution, so the reduced
   // preview detail never reaches the saved cloud.
   //
+  // A FRACTION of the user's display budget, never a constant — see
+  // resolveCropPreviewPointBudget. The old flat 150k both ignored the setting
+  // (a workstation configured for 10M still fell to 150k) and sat below the
+  // app's own MIN_DISPLAY_POINT_BUDGET of 250k, i.e. below the documented
+  // threshold where a large cloud degrades to scattered dots. That is the
+  // "almost unviewable while cropping" report.
+  //
   // The budget is global to the shared potree manager and is spent across ALL
   // visible clouds in one pass (PotreeFrameDriver), so this caps total on-screen
   // points during preview no matter how many scans are selected — which is the
@@ -2335,7 +2343,9 @@ export default function PointCloudViewer({
   const cropVolumePreviewActive =
     (editMode === 'crop' || isApplyingCrop) && !screenSpaceRegionActive;
   useEffect(() => {
-    const budget = cropVolumePreviewActive ? CROP_PREVIEW_POINT_BUDGET : displayPointBudget;
+    const budget = cropVolumePreviewActive
+      ? resolveCropPreviewPointBudget(displayPointBudget)
+      : displayPointBudget;
     setPointBudget(budget);
     // E2E hook: lets a test confirm the preview budget engages/restores.
     (window as { __pointBudget?: number }).__pointBudget = budget;
@@ -6869,15 +6879,42 @@ export default function PointCloudViewer({
           return;
         }
         if (editMode === 'crop' && cropDrawState === 'drawing-rect') {
+          // Abandon the drag in progress but stay ARMED — 'idle' here would be
+          // Rect mode with nothing drawn and a live camera under the ortho
+          // override (see commitRectDrag). A second Escape, with no drag under
+          // way and no region, closes the tool.
           setRectDragStart(null);
           rectDragCurrentRef.current = null;
+          if (rectDragStart) {
+            setCropDrawState('drawing-rect');
+            return;
+          }
+          // Closing the tool must ALSO clear the draw state. Leaving it at
+          // 'drawing-rect' is what froze the camera permanently: the gate read
+          // the state directly, so the freeze outlived the panel that could
+          // have released it. The gate is now scoped to an open tool as well —
+          // belt and braces, because this is a silent, total loss of camera
+          // control and one guard is not enough for that.
           setCropDrawState('idle');
+          setEditMode('none');
           return;
         }
         if (editMode === 'crop' && (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2')) {
           boxDrawFirstCornerRef.current = null;
           boxDrawCursorRef.current = null;
           setCropDrawState('idle');
+          return;
+        }
+        // A committed rect locks the camera (see `rectRegionLive`), so Escape
+        // clears the region and hands the view back rather than closing the
+        // tool — innermost first, as above. Without this the only way out of
+        // the lock would be Redraw/Apply or leaving Crop entirely, and Escape
+        // would skip straight past the thing it most obviously ought to undo.
+        if (editMode === 'crop' && cropMode === 'rect' && cropPolygon) {
+          setCropPolygon(null);
+          setRectDragStart(null);
+          rectDragCurrentRef.current = null;
+          setCropDrawState('drawing-rect');
           return;
         }
         setEditMode('none');
@@ -6935,7 +6972,7 @@ export default function PointCloudViewer({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, editMode, cropDrawState, polygonInProgress, pointPickMode, originSelected, closePolygonFrom, pendingVertices, pickerMode]);
+  }, [handleUndo, handleRedo, editMode, cropMode, cropPolygon, cropDrawState, rectDragStart, polygonInProgress, pointPickMode, originSelected, closePolygonFrom, pendingVertices, pickerMode]);
 
   // Track shift key state for mixed selection (cloud + mesh)
   useEffect(() => {
@@ -7486,6 +7523,13 @@ export default function PointCloudViewer({
     const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
     const corner = new THREE.Vector3();
 
+    // Outlier-resistant union of the clouds' PERCENTILE boxes, accumulated
+    // alongside the raw one. This is what the scene origin's lateral position
+    // comes from; see the `contentCenter` derivation below for why the raw box
+    // is unusable for it.
+    const robustMin = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const robustMax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+
     // Include cloud bounds (original positions only, no translations)
     for (const cloud of clouds) {
       if (!cloud.visible) continue;
@@ -7495,6 +7539,11 @@ export default function PointCloudViewer({
       max.x = Math.max(max.x, cloud.data.bounds.max.x);
       max.y = Math.max(max.y, cloud.data.bounds.max.y);
       max.z = Math.max(max.z, cloud.data.bounds.max.z);
+      const rb = cloud.data.robustBounds;
+      if (rb) {
+        robustMin.min(corner.set(rb.min[0], rb.min[1], rb.min[2]));
+        robustMax.max(corner.set(rb.max[0], rb.max[1], rb.max[2]));
+      }
     }
 
     // Include mesh bounds in WORLD space. A mesh's vertices are authored in
@@ -7569,7 +7618,9 @@ export default function PointCloudViewer({
     }
 
     // CONTENT-ONLY bounds, snapshotted before the scanner/trajectory loop below.
-    // The scene origin's LATERAL position comes from this, not from the full box.
+    // The scene origin's LATERAL position comes from this when no cloud carries
+    // a percentile box (`robustMin`/`robustMax` above, which is preferred) — but
+    // never from the full box.
     //
     // Same reasoning as `groundZ` further down, one axis over: a scanner rig at
     // head height is not the ground, and a flight path is not the plot. A drone
@@ -7635,11 +7686,27 @@ export default function PointCloudViewer({
     }
     if (!isFinite(groundZ)) groundZ = min.z;
 
-    // No content at all (a data-less moving scan): fall back to the full centre,
-    // which is the trajectory's own midpoint — the only thing there is to look at.
-    const contentCenter = isFinite(contentMin.x)
-      ? new THREE.Vector3().addVectors(contentMin, contentMax).multiplyScalar(0.5)
-      : center.clone();
+    // Prefer the clouds' PERCENTILE box. A terrestrial scan carries a sparse
+    // halo of very distant returns — sky/atmospheric hits, a treeline 3 km off,
+    // the odd multipath artefact — and they define the raw AABB while
+    // contributing essentially nothing to look at. Measured on a real RIEGL
+    // single scan (ScanPos002): the raw box centre sits at (1605, −978) while
+    // the content sits at (59, 20) — the pivot lands ~1.8 km from the data. The
+    // camera FRAMES fine (it already uses the percentile box) so nothing looks
+    // wrong until the first orbit, which swings the whole cloud out of the
+    // frustum because the rotation centre is a kilometre away.
+    //
+    // Falls back to the raw content box (clouds+meshes+skeletons, scanners
+    // excluded) when no cloud carries a percentile box — a mesh-only scene,
+    // renderer-side synthetic data, or a cloud imported before robust_bounds
+    // existed — and to the full centre when there is no content at all (a
+    // data-less moving scan), whose trajectory midpoint is the only thing there
+    // is to look at.
+    const contentCenter = isFinite(robustMin.x)
+      ? new THREE.Vector3().addVectors(robustMin, robustMax).multiplyScalar(0.5)
+      : isFinite(contentMin.x)
+        ? new THREE.Vector3().addVectors(contentMin, contentMax).multiplyScalar(0.5)
+        : center.clone();
 
     const result = { min, max, center, size, groundZ, contentCenter };
     stableStaticBoundsRef.current = result;
@@ -7670,28 +7737,42 @@ export default function PointCloudViewer({
   // a floating panel — the overlay never sees that mouseup, so before this the
   // drag simply got stuck mid-rubber-band.
   const commitRectDrag = useCallback((start: { x: number; y: number }, end: { x: number; y: number }) => {
-    // Ignore zero-area drags (a click without movement).
-    if (Math.abs(end.x - start.x) < 3 || Math.abs(end.y - start.y) < 3) {
+    // A drag that produced no region leaves the tool ARMED (still
+    // 'drawing-rect') rather than dropping to 'idle'. Two cases reach here:
+    // a zero-area drag (a click without movement) and a commit whose camera
+    // snapshot is missing. Both used to land in rect + idle + no polygon,
+    // which is a state with nothing drawn, nothing to apply, and — since the
+    // ortho override now spans the whole of Rect mode — a freely movable
+    // camera under a flattened projection, where zoom-to-cursor's depth probe
+    // raycasts as if the matrix were still perspective. Staying armed keeps
+    // Rect mode to states that are either drawing or region-locked, and it is
+    // the better UX anyway: a stray click no longer silently disarms the tool.
+    const rearm = () => {
       setRectDragStart(null);
       rectDragCurrentRef.current = null;
-      setCropDrawState('idle');
+      setCropDrawState('drawing-rect');
+    };
+    if (Math.abs(end.x - start.x) < 3 || Math.abs(end.y - start.y) < 3) {
+      rearm();
       return;
     }
-    if (polygonCameraRef.current && polygonCanvasSizeRef.current) {
-      const region = polygonRegionFromCamera(
-        rectCornersOf(start, end),
-        polygonCameraRef.current,
-        polygonCanvasSizeRef.current,
-        false,
-        displayOffsetRef.current,
-      );
-      setCropPolygon({
-        points: region.points,
-        projection: region.projection,
-        view: region.view,
-        canvasSize: region.canvasSize,
-      });
+    if (!polygonCameraRef.current || !polygonCanvasSizeRef.current) {
+      rearm();
+      return;
     }
+    const region = polygonRegionFromCamera(
+      rectCornersOf(start, end),
+      polygonCameraRef.current,
+      polygonCanvasSizeRef.current,
+      false,
+      displayOffsetRef.current,
+    );
+    setCropPolygon({
+      points: region.points,
+      projection: region.projection,
+      view: region.view,
+      canvasSize: region.canvasSize,
+    });
     setRectDragStart(null);
     rectDragCurrentRef.current = null;
     setCropDrawState('idle');
@@ -7708,7 +7789,53 @@ export default function PointCloudViewer({
   // box — both its wireframe and its GPU clip — so the box being replaced can't
   // hide the points you're aiming at, and it freezes the camera so an orbit drag
   // can't land as a corner.
-  const boxDrawing = cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2';
+  // Gated on Crop being open for the same reason as `cropDrawFreezesCamera`
+  // below: this freezes the camera, and a draw state that outlives its tool
+  // would freeze it with no way left to release it.
+  const boxDrawing = editMode === 'crop'
+    && (cropDrawState === 'awaiting-box-corner-1' || cropDrawState === 'awaiting-box-corner-2');
+  // A COMMITTED rect region is on screen and the camera must not move.
+  //
+  // The region is frozen in canvas PIXELS against the draw-time camera — that
+  // is what makes the apply stable, and the masked preview correctly stays
+  // pinned to the same world points however the view turns. The outline,
+  // though, is redrawn at those same fixed pixels forever, so any camera move
+  // slides the points out from under it: the rectangle and the region it
+  // selected visibly disagree, which reads as the crop having grabbed the
+  // wrong area. (It hasn't — the apply was always right and the DISPLAY was
+  // lying, which is the more dangerous of the two failures.)
+  //
+  // Locking the camera is the fix rather than tracking the region through the
+  // move, because none of the three gestures can be tracked honestly here:
+  // ROTATION changes the view direction, and the frozen prism only projects to
+  // a rectangle from the direction it was drawn along (from anywhere else its
+  // silhouette is a hexagon, so re-projecting four corners would draw a shape
+  // that is not the region). ZOOM is zoom-to-cursor, which flies the camera
+  // along camera→anchor and re-seats the target — an off-axis anchor turns the
+  // view too, so it is a rotation in disguise. Only PAN is a pure screen
+  // translation, which is not worth a special case on its own.
+  //
+  // Scoped to a live region, so it never blocks ordinary navigation: the view
+  // is free while the user frames the shot, free again the moment they Redraw,
+  // Apply, switch shape or close the tool. Esc clears the region (see the key
+  // handler), which is the explicit way out.
+  const rectRegionLive = editMode === 'crop' && cropMode === 'rect' && !!cropPolygon;
+  // Every reason the camera is currently frozen by a CROP/LABEL draw, in one
+  // place — and every one of them gated on the owning tool still being open.
+  //
+  // That gate is not decoration. `cropDrawState` is module-level state shared
+  // with the label lasso and is NOT reset on all of crop's exits: closing the
+  // tool from the Escape-while-drawing path leaves it at 'drawing-rect'. The
+  // camera gate used to test `cropDrawState` bare, so that exit disabled the
+  // camera permanently — tool closed, no panel left to release it, nothing on
+  // screen explaining why the view had stopped responding. Read the freeze off
+  // a tool that is actually open and the state can no longer outlive its
+  // owner, whatever a future exit path forgets to reset.
+  const cropDrawFreezesCamera =
+    (editMode === 'crop' || editMode === 'label') &&
+    (cropDrawState === 'drawing-polygon' || cropDrawState === 'drawing-rect');
+  // `boxDrawing` and `rectRegionLive` carry their own editMode gate.
+  const cameraFrozenByCropDraw = cropDrawFreezesCamera || boxDrawing || rectRegionLive;
   // Keep the ref the raycaster's onPick reads in step with the state. See the
   // declaration for why that handler cannot read `cropDrawState` directly.
   boxDrawStateRef.current = boxDrawing
@@ -7775,7 +7902,9 @@ export default function PointCloudViewer({
   // Laterally this is `contentCenter`, NOT `center`: the full box includes the
   // scanner markers and the whole platform trajectory, so a drone leg that runs
   // wide of the plot pushes the pivot off the cloud (measured: 11.7 m outside its
-  // north edge). See the contentCenter derivation in staticBounds.
+  // north edge) — and, worse, it is defined by the clouds' far outliers, which on
+  // a terrestrial scan sit kilometres out (measured: pivot 1.8 km from the data).
+  // See the contentCenter derivation in staticBounds.
   const sceneOrigin = useMemo<[number, number, number]>(
     () => sceneOriginOverride
       ?? scannerSceneOrigin
@@ -8290,7 +8419,7 @@ export default function PointCloudViewer({
       { id: 'cloud-cross-section', name: 'Cross-section', keywords: ['section', 'slab', 'slice', 'profile', 'transect'], action: () => setShowSectionPanel(v => !v), category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Layers3, testId: 'tool-cross-section', isActive: () => showSectionPanel },
       { id: 'cloud-label', name: 'Label Points', keywords: ['label', 'classify', 'classification', 'class', 'paint', 'annotate', 'ground truth', 'manual'], action: () => { closeAllToolPanels('label'); setShowLabelPanel(v => !v); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Brush, testId: 'tool-label', isActive: () => showLabelPanel },
       { id: 'cloud-ground-segment', name: 'Segment Ground', keywords: ['ground', 'classify', 'classification', 'plant', 'csf', 'cloth', 'lidar'], action: () => { closeAllToolPanels('ground-segment'); setShowGroundSegmentPanel(!showGroundSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GroundSegmentIcon, testId: 'tool-ground-segment', isActive: () => showGroundSegmentPanel },
-      { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: GitBranch, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
+      { id: 'cloud-wood-segment', name: 'Segment Wood / Leaf', keywords: ['wood', 'leaf', 'branch', 'foliage', 'classify', 'classification', 'lewos', 'remove wood', 'separate'], action: () => { closeAllToolPanels('wood-segment'); setShowWoodSegmentPanel(!showWoodSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: WoodLeafIcon, testId: 'tool-wood-segment', isActive: () => showWoodSegmentPanel },
       { id: 'cloud-segment-trees', name: 'Segment Trees', keywords: ['tree', 'trees', 'instance', 'treeiso', 'individual', 'forest', 'isolate', 'crown', 'trunk'], action: () => { closeAllToolPanels('tree-segment'); setShowTreeSegmentPanel(!showTreeSegmentPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'segment', icon: Trees, testId: 'tool-tree-segment', isActive: () => showTreeSegmentPanel },
 
       // ── Reconstruction & analysis ───────────────────────────────────
@@ -20302,7 +20431,7 @@ export default function PointCloudViewer({
           // orbit drag that happens to end over that plane registers as a
           // corner placement. Freezing the camera removes that path outright
           // (rather than bolting on a drag-slop guard). Esc still cancels.
-          enabled={!gizmoDragging && cropDrawState !== 'drawing-polygon' && cropDrawState !== 'drawing-rect' && !boxDrawing && !eraseActive && !labelBrushPainting}
+          enabled={!gizmoDragging && !cameraFrozenByCropDraw && !eraseActive && !labelBrushPainting}
           // While the brush owns plain wheel for its radius, zoom moves to Alt.
           zoomOnAltWheel={labelBrushActive}
           displayOffset={displayOffset}
@@ -20339,12 +20468,23 @@ export default function PointCloudViewer({
           />
         )}
 
-        {/* While drawing a Rect, project orthographically so the screen
+        {/* Project orthographically for the WHOLE of Rect mode, so the screen
             rectangle extrudes as a straight prism (true rectangle footprint)
-            instead of a perspective trapezoid. The projection is snapshotted
-            into the region on mouse-up, so it only needs to be active up to
-            the commit. */}
-        {editMode === 'crop' && cropMode === 'rect' && cropDrawState === 'drawing-rect' && (
+            instead of a perspective trapezoid.
+
+            Deliberately NOT scoped to `drawing-rect`, though the snapshot is
+            only taken on mouse-up. Mounting it at the drag's start meant the
+            view visibly flattened the instant the user began to draw — the
+            data slid under a rectangle they had already started aiming, and
+            the more oblique the view the further it slid. Unmounting it on
+            commit was the same jump in reverse, and worse: the frozen region
+            is orthographic while the viewport snapped back to perspective, so
+            the committed outline and the points it had just selected no longer
+            agreed even with the camera untouched. Both ends are fixed by
+            flattening BEFORE the user aims and holding it until they leave
+            Rect mode, which is what keeps drawn rectangle and cropped region
+            showing the same thing throughout. */}
+        {editMode === 'crop' && cropMode === 'rect' && (
           <OrthoProjectionOverride />
         )}
 
@@ -22976,6 +23116,10 @@ export default function PointCloudViewer({
           setEditMode('none');
           setCropDrawState('idle');
           setPolygonInProgress([]);
+          // Drop the committed region too. It is what locks the camera in Rect
+          // mode, and keeping it across a close meant reopening Crop silently
+          // restored a rectangle (and its lock) the user had walked away from.
+          setCropPolygon(null);
           setRectDragStart(null);
           rectDragCurrentRef.current = null;
           setCropRetainOriginal(false);
@@ -23029,6 +23173,7 @@ export default function PointCloudViewer({
             cropBoxMinStr={cropBoxMinStr}
             cropBoxMaxStr={cropBoxMaxStr}
             cropProjectionKind={cropProjectionKind}
+            cameraLocked={rectRegionLive}
             onClose={closeCropPanel}
             onSelectShape={(mode) => {
               setCropMode(mode);

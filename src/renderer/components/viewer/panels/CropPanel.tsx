@@ -43,6 +43,10 @@ interface CropPanelProps {
   cropBoxMinStr: string;
   cropBoxMaxStr: string;
   cropProjectionKind: 'orthographic' | 'perspective' | '';
+  // True while a committed Rect region is holding the camera still. The region
+  // is frozen in draw-time pixels, so any camera move would slide the points
+  // out from under the outline — see `rectRegionLive` in PointCloudViewer.
+  cameraLocked: boolean;
   onClose: () => void;
   onSelectShape: (mode: CropMode) => void;
   onKeepInside: () => void;
@@ -78,6 +82,7 @@ export function CropPanel({
   cropBoxMinStr,
   cropBoxMaxStr,
   cropProjectionKind,
+  cameraLocked,
   onClose,
   onSelectShape,
   onKeepInside,
@@ -102,6 +107,7 @@ export function CropPanel({
       data-crop-min={cropBoxMinStr}
       data-crop-max={cropBoxMaxStr}
       data-crop-projection-kind={cropProjectionKind}
+      data-crop-camera-locked={cameraLocked ? 'true' : 'false'}
       // z-20 keeps the panel above the polygon lasso overlay (z-10), which fills
       // the whole viewport while drawing — without this the transparent SVG would
       // swallow clicks on the panel's controls.
@@ -340,6 +346,13 @@ export function CropPanel({
             <>
               <div className="font-medium text-neutral-200 mb-1">Rectangle ready</div>
               Preview shown above. Press Apply, or click below to redraw.
+              {/* The camera lock is deliberate and needs saying, or a frozen
+                  view reads as the app having hung. */}
+              <div data-testid="crop-rect-lock-hint" className="mt-2 text-amber-400/90 leading-tight">
+                🔒 View locked while the rectangle is set — it&apos;s pinned to
+                the angle you drew it from. Redraw or press Esc to move the
+                view again.
+              </div>
               <button
                 onClick={onRedrawRect}
                 className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"

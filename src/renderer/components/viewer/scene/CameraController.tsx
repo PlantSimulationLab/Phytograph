@@ -1045,6 +1045,16 @@ export function CameraController({
     (window as any).__getCameraState = () => ({
       position: [camera.position.x, camera.position.y, camera.position.z],
       up: [camera.up.x, camera.up.y, camera.up.z],
+      // Which projection the camera is CURRENTLY rendering with. Read from the
+      // live matrix, not from the camera class: OrthoProjectionOverride (crop
+      // Rect, erase) rewrites `projectionMatrix` in place on a
+      // PerspectiveCamera, so `isPerspectiveCamera` stays true throughout. Same
+      // probe as lib/cameraRay.ts — ortho keeps the bottom row (0,0,0,1).
+      projectionKind:
+        Math.abs(camera.projectionMatrix.elements[15] - 1) < 1e-6 &&
+        Math.abs(camera.projectionMatrix.elements[11]) < 1e-6
+          ? 'orthographic'
+          : 'perspective',
       target: controlsRef.current
         ? [controlsRef.current.target.x, controlsRef.current.target.y, controlsRef.current.target.z]
         : null,
@@ -1052,6 +1062,11 @@ export function CameraController({
       // WORLD-space centre of the content (outlier-resistant); the zoom fallback
       // anchor converges here when the pointer misses geometry.
       contentCenter: [...contentCentreRef.current],
+      // WORLD-space scene origin — the point left-drag orbits about, and what
+      // the 3D-cursor marker shows. Exposed because a pivot that drifts off the
+      // content is invisible until the first orbit throws the cloud out of the
+      // frustum; a test needs to read it directly.
+      orbitPivot: orbitPivotRef.current ? [...orbitPivotRef.current] : null,
       // What "fit everything" fits — the content box when the scene has one.
       framingBounds: {
         center: [

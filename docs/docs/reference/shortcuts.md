@@ -85,12 +85,16 @@ apply to them.)
 | <kbd>Enter</kbd> | Close the polygon |
 | <kbd>Esc</kbd> | Cancel the polygon |
 
-## Crop rect (while drawing)
+## Crop rect
+
+The view is locked for as long as a rectangle is set, so the outline stays
+over the points it selected. Redraw or <kbd>Esc</kbd> releases it.
 
 | Shortcut | Action |
 |---|---|
 | Left-click-drag | Draw the rectangle (release to commit) |
-| <kbd>Esc</kbd> | Cancel the rectangle |
+| <kbd>Esc</kbd> | Clear the rectangle, leaving Rect ready for another |
+| <kbd>Esc</kbd> | Exit Crop (with no rectangle set and no drag under way) |
 
 ## Crop box draw (while placing corners)
 

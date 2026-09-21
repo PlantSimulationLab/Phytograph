@@ -240,15 +240,23 @@ to Box. Unlike the world-space box, it works from any camera angle.
 3. On release the cloud redraws with the cropped-away points hidden, the
    same live preview described under [Polygon mode](#polygon-mode).
 4. Click **Apply** in the panel, or use **Redraw rectangle** to start over.
-   <kbd>Esc</kbd> cancels.
+   <kbd>Esc</kbd> clears the rectangle and leaves Crop open, ready for
+   another one; a second <kbd>Esc</kbd> (with nothing drawn) exits Crop.
 
 Like the polygon, the rectangle lives in screen space, so the in/out test
-uses the camera as it was when you released the drag — orbiting afterwards
-doesn't change the result. Because the draw is orthographic, the selection
-extrudes straight into the scene: the cropped region is a true rectangular
-slab from **any** viewing angle, not a perspective wedge. So you can, for
-example, orbit to a side view, drag a rectangle around the part of a plant
-you want, and get a clean axis-true cut.
+uses the camera as it was when you released the drag. The view stays locked
+for as long as a rectangle is set, which is what keeps the outline you drew
+sitting over the points it selected — the outline is drawn in the pixels you
+dragged, so a view that moved underneath it would show the rectangle in one
+place and the highlighted points in another. Redraw or <kbd>Esc</kbd> to
+release the lock and move the view again.
+
+Because the draw is orthographic, the selection extrudes straight into the
+scene: the cropped region is a true rectangular slab from **any** viewing
+angle, not a perspective wedge. The flattening happens when you *pick* Rect,
+before you start dragging, so nothing shifts under a rectangle you're already
+aiming. So you can, for example, orbit to a side view, pick Rect, drag a
+rectangle around the part of a plant you want, and get a clean axis-true cut.
 
 ### Polygon mode
 
