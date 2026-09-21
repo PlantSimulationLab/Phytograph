@@ -149,10 +149,17 @@ is what commits the move):
 | <kbd>Esc</kbd> / right-click | Cancel this entry |
 
 The <kbd>T</kbd> translate gesture works on point clouds, skeletons, scan
-positions, and meshes. <kbd>S</kbd> scales the selected mesh only.
-<kbd>R</kbd> rotates the selected mesh or scan position. To **rotate a point
+positions, and meshes. <kbd>S</kbd> scales selected meshes only.
+<kbd>R</kbd> rotates selected meshes or a scan position. To **rotate a point
 cloud**, use the Transform panel's Rotation fields or its rotation rings
 (see below).
+
+All three gestures apply to **every** selected mesh (or skeleton), not just
+one — select several from the Meshes panel (<kbd>Ctrl</kbd>/<kbd>Cmd</kbd>-click,
+or **Select All**) and they move, turn, and scale together. Each object is
+transformed by the same amount relative to its own starting position, so their
+relative sizes and spacing are preserved. Undo covers the first object in the
+selection.
 
 For a **point cloud**, this gesture only sets the pending position in the
 Transform panel — it does not apply the move. Click **OK** in the panel to
@@ -180,7 +187,7 @@ dialog's **Scanner heading** field.
 
 Two cases where the gesture deliberately stands aside:
 
-- **While the Transform Point Cloud tool is open**, <kbd>T</kbd> keeps its
+- **While the Transform tool is open on a point cloud**, <kbd>T</kbd> keeps its
   usual meaning of moving the selected cloud's points. Close the tool to
   move the scanner instead.
 - **Moving-platform scans** (those carrying a trajectory) take their

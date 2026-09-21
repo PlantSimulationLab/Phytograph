@@ -61,6 +61,19 @@ describe('isCommandAvailable', () => {
     expect(isCommandAvailable(cmd({ requires: 'plant' }), { ...EMPTY, hasMesh: true })).toBe(false);
   });
 
+  it('cloud-or-mesh accepts EITHER selection', () => {
+    // The Transform button fronts two panels (cloud draft / mesh TransformPanel).
+    // It used to be `requires: 'cloud'`, which greyed it out for a mesh whose
+    // transform panel was fully built — reachable only from the mesh row.
+    const c = cmd({ requires: 'cloud-or-mesh' });
+    expect(isCommandAvailable(c, EMPTY)).toBe(false);
+    expect(isCommandAvailable(c, { ...EMPTY, hasCloud: true })).toBe(true);
+    expect(isCommandAvailable(c, { ...EMPTY, hasMesh: true })).toBe(true);
+    expect(isCommandAvailable(c, { ...EMPTY, hasCloud: true, hasMesh: true })).toBe(true);
+    // A skeleton alone is NOT enough — it has no Transform panel of its own.
+    expect(isCommandAvailable(c, { ...EMPTY, hasSkeleton: true })).toBe(false);
+  });
+
   it('requires 2+ for multiple-clouds / multiple-meshes', () => {
     const mc = cmd({ requires: 'multiple-clouds' });
     expect(isCommandAvailable(mc, { ...EMPTY, hasCloud: true, cloudCount: 1 })).toBe(false);
@@ -103,6 +116,7 @@ describe('requiresText', () => {
   it('returns a human phrase for each prerequisite', () => {
     expect(requiresText('cloud')).toBe('a point cloud');
     expect(requiresText('mesh')).toBe('a mesh');
+    expect(requiresText('cloud-or-mesh')).toBe('a point cloud or mesh');
     expect(requiresText('multiple-clouds')).toBe('2+ point clouds');
     expect(requiresText(null)).toBe('');
   });

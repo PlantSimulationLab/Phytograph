@@ -90,7 +90,7 @@ the "shrink-wrap" artifacts that come from cloud-only methods. See
 |---|---|
 | Filter triangles (Lmax / aspect) | Expand a **Helios** mesh row → **Filter** — drops long or mis-shapen triangles live. Helios-only: cloud methods (ball pivot, Poisson, alpha shape, Delaunay) apply their length scale during reconstruction, so there's nothing left to filter |
 | Plot leaf angles | Expand the mesh row → **Leaf angles…** — inclination PDF + azimuth rose + de Wit fit from the triangle normals; works on any triangulation method ([details](../workflows/triangulate.md#plot-leaf-angles-any-method)) |
-| Translate / rotate / scale | Click the **⤢** (double-arrow) button on the mesh's row in the Meshes panel to open its Transform panel |
+| Translate / rotate / scale | Select the mesh and click **Transform** in the Tools toolbar, or the **⤢** (double-arrow) button on the mesh's row in the Meshes panel — both open its Transform panel |
 | Scan it into a point cloud | [Synthetic LiDAR scan](../workflows/simulate-scan.md) |
 | Align two meshes (ICP) | [Register & compare: M2M](../workflows/register-compare.md#mesh-to-mesh-icp) |
 | Compare a cloud to a mesh | [Register & compare: C2M](../workflows/register-compare.md#cloud-to-mesh-distance) |

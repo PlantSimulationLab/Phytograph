@@ -11,6 +11,14 @@ export type ToolRequires =
   | 'cloud'
   | 'mesh'
   | 'skeleton'
+  /**
+   * Either a cloud or a mesh will do. Transform is the case: one toolbar button
+   * fronts two different panels (the cloud Transform draft and the mesh
+   * TransformPanel), so gating it on `cloud` alone greyed it out for a mesh
+   * whose transform machinery was fully built and reachable only from the mesh
+   * row's own button.
+   */
+  | 'cloud-or-mesh'
   | 'plant'
   | 'multiple-clouds'
   | 'multiple-meshes'
@@ -106,6 +114,7 @@ export function isCommandAvailable(cmd: ToolCommand, sel: SelectionState): boole
   switch (cmd.requires) {
     case 'cloud': return sel.hasCloud;
     case 'mesh': return sel.hasMesh;
+    case 'cloud-or-mesh': return sel.hasCloud || sel.hasMesh;
     case 'skeleton': return sel.hasSkeleton;
     case 'plant': return sel.hasPlantMesh;
     case 'multiple-clouds': return sel.cloudCount >= 2;
@@ -121,6 +130,7 @@ export function requiresText(requires: ToolRequires): string {
   switch (requires) {
     case 'cloud': return 'a point cloud';
     case 'mesh': return 'a mesh';
+    case 'cloud-or-mesh': return 'a point cloud or mesh';
     case 'skeleton': return 'a skeleton';
     case 'plant': return 'a plant mesh';
     case 'multiple-clouds': return '2+ point clouds';

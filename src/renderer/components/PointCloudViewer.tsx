@@ -2570,8 +2570,14 @@ export default function PointCloudViewer({
     startScreen: { x: number; y: number };
     pivot: { x: number; y: number; z: number };
     target: 'mesh' | 'skeleton' | 'cloud' | 'pose' | 'scan';
-    meshId?: string;
-    skeletonId?: string;
+    // Every selected mesh / skeleton, not just the first: t/s/r transform the
+    // whole selection as a group about a shared pivot (the centroid of the set).
+    // The originals are per-id, captured up front, so each object's delta is
+    // always applied to its OWN pre-gesture transform and repeated mouse moves
+    // don't compound — the same shape `cloudIds` + `originalCloudTranslations`
+    // already used for a multi-cloud translate.
+    meshIds?: string[];
+    skeletonIds?: string[];
     cloudIds?: string[];
     // Scan position (scanner marker). `t` drives params.origin and `r` drives
     // the scanner tilt — the same fields the Scan Parameters dialog edits.
@@ -2588,10 +2594,10 @@ export default function PointCloudViewer({
     poseIndex?: number;
     originalPosePos?: { x: number; y: number; z: number };
     originalPoseRot?: { rollDeg: number; pitchDeg: number; yawDeg: number };
-    originalMeshPos?: { x: number; y: number; z: number };
-    originalMeshScale?: { x: number; y: number; z: number };
-    originalMeshRot?: { x: number; y: number; z: number };
-    originalSkeletonPos?: { x: number; y: number; z: number };
+    originalMeshPos?: Map<string, { x: number; y: number; z: number }>;
+    originalMeshScale?: Map<string, { x: number; y: number; z: number }>;
+    originalMeshRot?: Map<string, { x: number; y: number; z: number }>;
+    originalSkeletonPos?: Map<string, { x: number; y: number; z: number }>;
     originalCloudTranslations?: Map<string, { x: number; y: number; z: number }>;
     // Numeric input buffer (Blender-style). When parseable, overrides mouse-driven value.
     numericBuffer: string;
@@ -2871,6 +2877,11 @@ export default function PointCloudViewer({
   // Helper to close all tool panels and reset edit mode (for mutual exclusivity)
   const closeAllToolPanels = useCallback((except?: string) => {
     if (except !== 'editMode') setEditMode('none');
+    // The mesh TransformPanel is now fronted by the Transform toolbar button
+    // (not just the Meshes-panel row button), so it joins the mutually
+    // exclusive set like every other tool panel — opening another tool closes
+    // it instead of leaving two transform surfaces stacked on screen.
+    if (except !== 'mesh-transform') setShowResizePanel(false);
     if (except !== 'filter') setShowFilterPanel(false);
     if (except !== 'resample') {
       setShowResamplePanel(false);
@@ -8203,7 +8214,29 @@ export default function PointCloudViewer({
 
 
       // ── Pre-processing ──────────────────────────────────────────────
-      { id: 'cloud-translate', name: 'Transform Point Cloud', keywords: ['move', 'position', 'translate', 'rotate', 'rotation', 'transform'], action: () => { closeAllToolPanels('editMode'); setEditMode(editMode === 'translate' ? 'none' : 'translate'); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'preprocess', icon: Move3d, isActive: () => editMode === 'translate' },
+      // ONE toolbar button fronting two panels, chosen by what's selected.
+      //
+      // A mesh has had full transform support all along (position / rotation /
+      // scale, Move to Origin, Fit to Scans) in its own floating TransformPanel
+      // — but the only way in was the transform button on the mesh's own row in
+      // the Meshes panel, and this button was gated `requires: 'cloud'`, so it
+      // greyed out for the exact selection it can serve. A MESH selection now
+      // opens that panel; a cloud keeps the editMode draft it always had.
+      //
+      // Mesh wins when both are selected: the cloud path is a draft the panel
+      // must commit, so silently preferring it would leave a pending bake
+      // behind a button the user pressed expecting the mesh dialog.
+      { id: 'cloud-translate', name: 'Transform', keywords: ['move', 'position', 'translate', 'rotate', 'rotation', 'transform', 'scale', 'resize', 'mesh'], action: () => {
+        if (hasMeshSelected) {
+          const open = showResizePanel;
+          closeAllToolPanels('mesh-transform');
+          setShowResizePanel(!open);
+          return;
+        }
+        setShowResizePanel(false);
+        closeAllToolPanels('editMode');
+        setEditMode(editMode === 'translate' ? 'none' : 'translate');
+      }, category: 'Point Cloud', requires: 'cloud-or-mesh', toolGroup: 'preprocess', icon: Move3d, isActive: () => (hasMeshSelected ? showResizePanel : editMode === 'translate') },
       // Viewport-level, not scan-level: the scene origin is the rotation pivot,
       // meaningful even with an empty scene (you can type coordinates), so it is
       // NOT gated on a selection (`requires: null`). It is a SCENE CONTROL, not an
@@ -8321,7 +8354,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud]);
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud]);
 
   // While the Translate tool is open it owns an unbaked draft that must be
   // resolved (OK/Cancel/X) before anything else runs — otherwise a compute tool
@@ -15651,6 +15684,19 @@ export default function PointCloudViewer({
     return skeletons.find(s => s.id === selectedSkeletonId) || null;
   }, [skeletons, selectedSkeletonId]);
 
+  // EVERY selected mesh / skeleton, in selection order. The `selectedMesh` /
+  // `selectedSkeleton` singletons above are the first of these and drive the
+  // single-target surfaces (resize panel, gizmo, plant popups); the keyboard
+  // transform modal (t/s/r) transforms the whole set, so it reads these instead
+  // — with only one selected the two are identical, so nothing else changes.
+  const selectedMeshes = useMemo(() => {
+    return meshes.filter(m => selectedMeshIds.has(m.id));
+  }, [meshes, selectedMeshIds]);
+
+  const selectedSkeletons = useMemo(() => {
+    return skeletons.filter(sk => selectedSkeletonIds.has(sk.id));
+  }, [skeletons, selectedSkeletonIds]);
+
   // Blender-style modal transform shortcuts (T translate, S scale, R rotate;
   // X/Y/Z lock axis, Shift+X/Y/Z lock to the perpendicular plane; typing digits
   // enters an exact value — units for rotate are degrees). Enter/click commits,
@@ -15706,32 +15752,56 @@ export default function PointCloudViewer({
         }
         return null;
       }
-      if (selectedMesh) {
-        const pos = meshPositionsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 };
-        const scl = meshScalesRef.current.get(selectedMesh.id) || { x: 1, y: 1, z: 1 };
-        const { vertices, vertexCount } = selectedMesh.data;
-        if (vertexCount === 0) return pos;
-        let cx = 0, cy = 0, cz = 0;
-        for (let i = 0; i < vertexCount; i++) {
-          cx += vertices[i * 3];
-          cy += vertices[i * 3 + 1];
-          cz += vertices[i * 3 + 2];
+      // Meshes: ONE shared pivot for the whole selection — the mean of each
+      // selected mesh's world centroid. With several meshes selected, a
+      // per-object pivot would spin each about its own center instead of
+      // rotating the group, and scale them in place instead of spreading them.
+      if (selectedMeshes.length > 0) {
+        let px = 0, py = 0, pz = 0, n = 0;
+        for (const mesh of selectedMeshes) {
+          const pos = meshPositionsRef.current.get(mesh.id) || { x: 0, y: 0, z: 0 };
+          const scl = meshScalesRef.current.get(mesh.id) || { x: 1, y: 1, z: 1 };
+          const { vertices, vertexCount } = mesh.data;
+          if (vertexCount === 0) {
+            px += pos.x; py += pos.y; pz += pos.z; n++;
+            continue;
+          }
+          let cx = 0, cy = 0, cz = 0;
+          for (let i = 0; i < vertexCount; i++) {
+            cx += vertices[i * 3];
+            cy += vertices[i * 3 + 1];
+            cz += vertices[i * 3 + 2];
+          }
+          cx /= vertexCount; cy /= vertexCount; cz /= vertexCount;
+          px += cx * scl.x + pos.x;
+          py += cy * scl.y + pos.y;
+          pz += cz * scl.z + pos.z;
+          n++;
         }
-        cx /= vertexCount; cy /= vertexCount; cz /= vertexCount;
-        return { x: cx * scl.x + pos.x, y: cy * scl.y + pos.y, z: cz * scl.z + pos.z };
+        if (n === 0) return null;
+        return { x: px / n, y: py / n, z: pz / n };
       }
-      if (selectedSkeleton) {
-        const pos = skeletonPositionsRef.current.get(selectedSkeleton.id) || { x: 0, y: 0, z: 0 };
-        const { points, pointCount } = selectedSkeleton.data;
-        if (pointCount === 0) return pos;
-        let cx = 0, cy = 0, cz = 0;
-        for (let i = 0; i < pointCount; i++) {
-          cx += points[i * 3];
-          cy += points[i * 3 + 1];
-          cz += points[i * 3 + 2];
+      if (selectedSkeletons.length > 0) {
+        let px = 0, py = 0, pz = 0, n = 0;
+        for (const skel of selectedSkeletons) {
+          const pos = skeletonPositionsRef.current.get(skel.id) || { x: 0, y: 0, z: 0 };
+          const { points, pointCount } = skel.data;
+          if (pointCount === 0) {
+            px += pos.x; py += pos.y; pz += pos.z; n++;
+            continue;
+          }
+          let cx = 0, cy = 0, cz = 0;
+          for (let i = 0; i < pointCount; i++) {
+            cx += points[i * 3];
+            cy += points[i * 3 + 1];
+            cz += points[i * 3 + 2];
+          }
+          cx /= pointCount; cy /= pointCount; cz /= pointCount;
+          px += cx + pos.x; py += cy + pos.y; pz += cz + pos.z;
+          n++;
         }
-        cx /= pointCount; cy /= pointCount; cz /= pointCount;
-        return { x: cx + pos.x, y: cy + pos.y, z: cz + pos.z };
+        if (n === 0) return null;
+        return { x: px / n, y: py / n, z: pz / n };
       }
       // Scan position. Must precede the cloud branch below: a data-bearing scan
       // is in BOTH sets (selectedIds is the scan selection set), and when the
@@ -15930,19 +16000,32 @@ export default function PointCloudViewer({
         });
         return;
       }
-      if (modal.target !== 'mesh' || !modal.meshId || !modal.originalMeshRot) return;
-      const orig = modal.originalMeshRot;
-      // Free rotation has no meaningful single Euler component on screen; default
-      // to the Z (view-facing) axis until the user locks an axis with X/Y/Z.
-      const newRot = { ...orig };
-      if (modal.axis === 'x') newRot.x = orig.x + angleDeg;
-      else if (modal.axis === 'y') newRot.y = orig.y + angleDeg;
-      else if (modal.axis === 'z' || modal.axis === 'free') newRot.z = orig.z + angleDeg;
-      else if (modal.axis === 'yz') { newRot.y = orig.y + angleDeg; newRot.z = orig.z + angleDeg; }
-      else if (modal.axis === 'xz') { newRot.x = orig.x + angleDeg; newRot.z = orig.z + angleDeg; }
-      else if (modal.axis === 'xy') { newRot.x = orig.x + angleDeg; newRot.y = orig.y + angleDeg; }
-      meshRotationsRef.current.set(modal.meshId, newRot);
-      setMeshRotations(prev => new Map(prev).set(modal.meshId!, newRot));
+      if (modal.target !== 'mesh' || !modal.meshIds || !modal.originalMeshRot) return;
+      // Every selected mesh turns by the SAME angle about its own origin — the
+      // per-object convention the rotation gizmo already uses. Each is computed
+      // from its own captured original, so a drag never compounds.
+      const updates = new Map<string, { x: number; y: number; z: number }>();
+      for (const id of modal.meshIds) {
+        const orig = modal.originalMeshRot.get(id);
+        if (!orig) continue;
+        // Free rotation has no meaningful single Euler component on screen; default
+        // to the Z (view-facing) axis until the user locks an axis with X/Y/Z.
+        const newRot = { ...orig };
+        if (modal.axis === 'x') newRot.x = orig.x + angleDeg;
+        else if (modal.axis === 'y') newRot.y = orig.y + angleDeg;
+        else if (modal.axis === 'z' || modal.axis === 'free') newRot.z = orig.z + angleDeg;
+        else if (modal.axis === 'yz') { newRot.y = orig.y + angleDeg; newRot.z = orig.z + angleDeg; }
+        else if (modal.axis === 'xz') { newRot.x = orig.x + angleDeg; newRot.z = orig.z + angleDeg; }
+        else if (modal.axis === 'xy') { newRot.x = orig.x + angleDeg; newRot.y = orig.y + angleDeg; }
+        updates.set(id, newRot);
+        meshRotationsRef.current.set(id, newRot);
+      }
+      if (updates.size === 0) return;
+      setMeshRotations(prev => {
+        const next = new Map(prev);
+        for (const [id, rot] of updates) next.set(id, rot);
+        return next;
+      });
     };
 
     const applyTranslate = (modal: TransformModalState, delta: THREE.Vector3) => {
@@ -15974,16 +16057,36 @@ export default function PointCloudViewer({
         });
         return;
       }
-      if (modal.target === 'mesh' && modal.meshId && modal.originalMeshPos) {
-        const orig = modal.originalMeshPos;
-        const newPos = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
-        meshPositionsRef.current.set(modal.meshId, newPos);
-        setMeshPositions(prev => new Map(prev).set(modal.meshId!, newPos));
-      } else if (modal.target === 'skeleton' && modal.skeletonId && modal.originalSkeletonPos) {
-        const orig = modal.originalSkeletonPos;
-        const newPos = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
-        skeletonPositionsRef.current.set(modal.skeletonId, newPos);
-        setSkeletonPositions(prev => new Map(prev).set(modal.skeletonId!, newPos));
+      if (modal.target === 'mesh' && modal.meshIds && modal.originalMeshPos) {
+        const updates = new Map<string, { x: number; y: number; z: number }>();
+        for (const id of modal.meshIds) {
+          const orig = modal.originalMeshPos.get(id);
+          if (!orig) continue;
+          const newPos = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
+          updates.set(id, newPos);
+          meshPositionsRef.current.set(id, newPos);
+        }
+        if (updates.size === 0) return;
+        setMeshPositions(prev => {
+          const next = new Map(prev);
+          for (const [id, pos] of updates) next.set(id, pos);
+          return next;
+        });
+      } else if (modal.target === 'skeleton' && modal.skeletonIds && modal.originalSkeletonPos) {
+        const updates = new Map<string, { x: number; y: number; z: number }>();
+        for (const id of modal.skeletonIds) {
+          const orig = modal.originalSkeletonPos.get(id);
+          if (!orig) continue;
+          const newPos = { x: orig.x + delta.x, y: orig.y + delta.y, z: orig.z + delta.z };
+          updates.set(id, newPos);
+          skeletonPositionsRef.current.set(id, newPos);
+        }
+        if (updates.size === 0) return;
+        setSkeletonPositions(prev => {
+          const next = new Map(prev);
+          for (const [id, pos] of updates) next.set(id, pos);
+          return next;
+        });
       } else if (modal.target === 'cloud' && modal.cloudIds && modal.originalCloudTranslations) {
         setEditStates(prev => {
           const next = new Map(prev);
@@ -16005,15 +16108,26 @@ export default function PointCloudViewer({
     };
 
     const applyScale = (modal: TransformModalState, factor: { x: number; y: number; z: number }) => {
-      if (modal.target === 'mesh' && modal.meshId && modal.originalMeshScale) {
-        const orig = modal.originalMeshScale;
-        const newScale = {
-          x: Math.max(0.001, orig.x * factor.x),
-          y: Math.max(0.001, orig.y * factor.y),
-          z: Math.max(0.001, orig.z * factor.z),
-        };
-        meshScalesRef.current.set(modal.meshId, newScale);
-        setMeshScales(prev => new Map(prev).set(modal.meshId!, newScale));
+      if (modal.target === 'mesh' && modal.meshIds && modal.originalMeshScale) {
+        // Same factor onto each mesh's own captured scale, so meshes of
+        // different sizes keep their relative proportions.
+        const updates = new Map<string, { x: number; y: number; z: number }>();
+        for (const id of modal.meshIds) {
+          const orig = modal.originalMeshScale.get(id);
+          if (!orig) continue;
+          updates.set(id, {
+            x: Math.max(0.001, orig.x * factor.x),
+            y: Math.max(0.001, orig.y * factor.y),
+            z: Math.max(0.001, orig.z * factor.z),
+          });
+        }
+        if (updates.size === 0) return;
+        for (const [id, scl] of updates) meshScalesRef.current.set(id, scl);
+        setMeshScales(prev => {
+          const next = new Map(prev);
+          for (const [id, scl] of updates) next.set(id, scl);
+          return next;
+        });
       }
     };
 
@@ -16109,26 +16223,47 @@ export default function PointCloudViewer({
         setGizmoDragging(false);
         return;
       }
-      if (modal.target === 'mesh' && modal.meshId) {
-        if (modal.originalMeshPos) {
-          const orig = modal.originalMeshPos;
-          meshPositionsRef.current.set(modal.meshId, orig);
-          setMeshPositions(prev => new Map(prev).set(modal.meshId!, orig));
+      if (modal.target === 'mesh' && modal.meshIds) {
+        // Restore EVERY mesh the gesture touched, not just the first.
+        const ids = modal.meshIds;
+        const restore = (
+          originals: Map<string, { x: number; y: number; z: number }> | undefined,
+          ref: React.MutableRefObject<Map<string, { x: number; y: number; z: number }>>,
+          setter: React.Dispatch<React.SetStateAction<Map<string, { x: number; y: number; z: number }>>>,
+        ) => {
+          if (!originals) return;
+          const found: [string, { x: number; y: number; z: number }][] = [];
+          for (const id of ids) {
+            const orig = originals.get(id);
+            if (!orig) continue;
+            ref.current.set(id, orig);
+            found.push([id, orig]);
+          }
+          if (found.length === 0) return;
+          setter(prev => {
+            const next = new Map(prev);
+            for (const [id, v] of found) next.set(id, v);
+            return next;
+          });
+        };
+        restore(modal.originalMeshPos, meshPositionsRef, setMeshPositions);
+        restore(modal.originalMeshScale, meshScalesRef, setMeshScales);
+        restore(modal.originalMeshRot, meshRotationsRef, setMeshRotations);
+      } else if (modal.target === 'skeleton' && modal.skeletonIds && modal.originalSkeletonPos) {
+        const found: [string, { x: number; y: number; z: number }][] = [];
+        for (const id of modal.skeletonIds) {
+          const orig = modal.originalSkeletonPos.get(id);
+          if (!orig) continue;
+          skeletonPositionsRef.current.set(id, orig);
+          found.push([id, orig]);
         }
-        if (modal.originalMeshScale) {
-          const orig = modal.originalMeshScale;
-          meshScalesRef.current.set(modal.meshId, orig);
-          setMeshScales(prev => new Map(prev).set(modal.meshId!, orig));
+        if (found.length > 0) {
+          setSkeletonPositions(prev => {
+            const next = new Map(prev);
+            for (const [id, v] of found) next.set(id, v);
+            return next;
+          });
         }
-        if (modal.originalMeshRot) {
-          const orig = modal.originalMeshRot;
-          meshRotationsRef.current.set(modal.meshId, orig);
-          setMeshRotations(prev => new Map(prev).set(modal.meshId!, orig));
-        }
-      } else if (modal.target === 'skeleton' && modal.skeletonId && modal.originalSkeletonPos) {
-        const orig = modal.originalSkeletonPos;
-        skeletonPositionsRef.current.set(modal.skeletonId, orig);
-        setSkeletonPositions(prev => new Map(prev).set(modal.skeletonId!, orig));
       } else if (modal.target === 'cloud' && modal.cloudIds && modal.originalCloudTranslations) {
         setEditStates(prev => {
           const next = new Map(prev);
@@ -16208,32 +16343,50 @@ export default function PointCloudViewer({
           originalPoseRot: { rollDeg: d.rollDeg, pitchDeg: d.pitchDeg, yawDeg: d.yawDeg },
           numericBuffer: '',
         };
-      } else if (selectedMesh) {
+      } else if (selectedMeshes.length > 0) {
+        const meshIds: string[] = [];
+        const origPos = new Map<string, { x: number; y: number; z: number }>();
+        const origScale = new Map<string, { x: number; y: number; z: number }>();
+        const origRot = new Map<string, { x: number; y: number; z: number }>();
+        for (const mesh of selectedMeshes) {
+          meshIds.push(mesh.id);
+          origPos.set(mesh.id, { ...(meshPositionsRef.current.get(mesh.id) || { x: 0, y: 0, z: 0 }) });
+          origScale.set(mesh.id, { ...(meshScalesRef.current.get(mesh.id) || { x: 1, y: 1, z: 1 }) });
+          origRot.set(mesh.id, { ...(meshRotationsRef.current.get(mesh.id) || { x: 0, y: 0, z: 0 }) });
+        }
         state = {
           op,
           axis: 'free',
           startScreen: { x: lastMouse.x, y: lastMouse.y },
           pivot,
           target: 'mesh',
-          meshId: selectedMesh.id,
-          originalMeshPos: { ...(meshPositionsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 }) },
-          originalMeshScale: { ...(meshScalesRef.current.get(selectedMesh.id) || { x: 1, y: 1, z: 1 }) },
-          originalMeshRot: { ...(meshRotationsRef.current.get(selectedMesh.id) || { x: 0, y: 0, z: 0 }) },
+          meshIds,
+          originalMeshPos: origPos,
+          originalMeshScale: origScale,
+          originalMeshRot: origRot,
           numericBuffer: '',
         };
-        startHistoryEntry('mesh', selectedMesh.id);
-      } else if (op === 'translate' && selectedSkeleton) {
+        // History only captures one entry at a time (existing limitation, same
+        // as the multi-cloud translate below), so undo covers the first mesh.
+        startHistoryEntry('mesh', meshIds[0]);
+      } else if (op === 'translate' && selectedSkeletons.length > 0) {
+        const skeletonIds: string[] = [];
+        const origPos = new Map<string, { x: number; y: number; z: number }>();
+        for (const skel of selectedSkeletons) {
+          skeletonIds.push(skel.id);
+          origPos.set(skel.id, { ...(skeletonPositionsRef.current.get(skel.id) || { x: 0, y: 0, z: 0 }) });
+        }
         state = {
           op,
           axis: 'free',
           startScreen: { x: lastMouse.x, y: lastMouse.y },
           pivot,
           target: 'skeleton',
-          skeletonId: selectedSkeleton.id,
-          originalSkeletonPos: { ...(skeletonPositionsRef.current.get(selectedSkeleton.id) || { x: 0, y: 0, z: 0 }) },
+          skeletonIds,
+          originalSkeletonPos: origPos,
           numericBuffer: '',
         };
-        startHistoryEntry('skeleton', selectedSkeleton.id);
+        startHistoryEntry('skeleton', skeletonIds[0]);
       } else if (op !== 'scale' && editMode !== 'translate' && scanTarget) {
         // Scan position. Ahead of the cloud branch and gated on the Transform
         // tool being closed: with it OPEN, `t` keeps its existing meaning of
@@ -16303,7 +16456,7 @@ export default function PointCloudViewer({
         // already falsifies the guard and the cloud keeps the gesture.
         const cloudTranslateBlocked =
           k === 't' && editMode !== 'translate' &&
-          selectedIds.size > 0 && !selectedMesh && !selectedSkeleton &&
+          selectedIds.size > 0 && selectedMeshes.length === 0 && selectedSkeletons.length === 0 &&
           !scanTransformTarget();
         if (cloudTranslateBlocked) return;
         if (k === 't') { e.preventDefault(); startModal('translate'); }
@@ -16390,8 +16543,8 @@ export default function PointCloudViewer({
       window.removeEventListener('contextmenu', handleContextMenu);
     };
   }, [
-    selectedMesh,
-    selectedSkeleton,
+    selectedMeshes,
+    selectedSkeletons,
     selectedIds,
     clouds,
     editStates,
@@ -22378,6 +22531,9 @@ export default function PointCloudViewer({
               }
               setSelectedMeshIds(new Set([id]));
               setSelectedSkeletonIds(new Set());
+              // Same panel the Transform toolbar button opens, so it closes any
+              // other open tool exactly as pressing that button would.
+              closeAllToolPanels('mesh-transform');
               setShowResizePanel(true);
             }}
             onRename={handleRenameMesh}
