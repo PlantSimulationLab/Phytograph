@@ -1,4 +1,5 @@
-import { Trees, Loader2, X } from 'lucide-react';
+import { Loader2, X } from 'lucide-react';
+import { WoodLeafIcon } from '../../icons/WoodLeafIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
 
@@ -79,7 +80,7 @@ export function WoodSegmentPanel({
     <div data-testid="wood-segment-panel" className="absolute top-4 right-[280px] z-20 bg-neutral-800/90 backdrop-blur-sm rounded-lg p-3 shadow-lg w-64">
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs font-medium text-neutral-300 flex items-center gap-2">
-          <Trees className="w-3 h-3" />
+          <WoodLeafIcon className="w-3 h-3" />
           Wood / Leaf Segmentation
         </div>
         <button onClick={onClose} className="p-1 hover:bg-neutral-700 rounded">
@@ -320,7 +321,7 @@ export function WoodSegmentPanel({
           onClick={onSegment}
           className="w-full px-3 py-2 text-xs rounded font-medium flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white"
         >
-          <Trees className="w-3 h-3" />
+          <WoodLeafIcon className="w-3 h-3" />
           Segment Wood / Leaf
         </button>
       )}
