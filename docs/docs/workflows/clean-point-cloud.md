@@ -103,6 +103,15 @@ With no placement of your own, the origin sits laterally at the center of the
 loaded scene but vertically at its **base** — on the ground rather than
 halfway up — which is usually the point you want to circle.
 
+Both of those are measured **robustly**, ignoring the outermost few percent of
+points, so far strays cannot drag the pivot off the data. This matters most on
+a terrestrial scan, which typically carries a thin halo of very distant returns
+(a treeline hundreds of metres off, atmospheric hits, the odd artefact) spread
+unevenly to one side. Those points define the raw bounding box while
+contributing nothing you want to look at, and a pivot at its center can end up
+a kilometre from the cloud — at which range even a small orbit drag sweeps the
+whole scene out of view.
+
 **Scan projects start at the scanner instead.** If the first thing you load
 into an empty scene records where the instrument stood — a RIEGL project, a
 Helios XML with `<origin>` tags, an E57 with poses — the origin starts at the

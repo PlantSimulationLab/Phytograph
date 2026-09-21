@@ -463,3 +463,109 @@ test('zoom stays responsive after a deep zoom — no permanent freeze', async ()
   const after = distToContent(await readState());
   expect(after).toBeGreaterThan(before);
 });
+
+// ── Regression: the default ORBIT PIVOT must sit on the content ─────────────
+//
+// Reported on a real RIEGL single scan (ScanPos002): "the auto viewport frames
+// the dense part nicely, but the scene origin is at some odd location, and if
+// you rotate the view even slightly you lose the whole cloud."
+//
+// Both halves were one bug. Framing already used the backend's percentile box,
+// so import LOOKED right — but the scene origin's lateral position came from
+// `staticBounds.contentCenter`, which excluded the scanner markers and the
+// platform trajectory yet still took each cloud's RAW AABB. On that scan the
+// raw box centre is (1605, -978) while the content is at (59, 20): the pivot
+// landed ~1.8 km away. A rotation about a pivot that far off is very nearly a
+// translation of everything near the camera, so the first small drag swept the
+// cloud out of the frustum with no way back short of Reset View.
+//
+// This runs on its OWN fixture, not outlier-extent.xyz: that one's strays sit
+// on opposite sides (+500/-480 in x, +505/-495 in y) and very nearly cancel in
+// the midpoint, so it displaces the raw centre by only ~7 m. A real scan's halo
+// is ONE-SIDED — see outlier-halo.xyz, which puts the raw centre ~960 m off the
+// content, the magnitude actually reported.
+const HALO_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'outlier-halo.xyz');
+
+test('the default scene origin sits on the content, so a small orbit keeps the cloud in view', async () => {
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', HALO_FIXTURE);
+  await completeImportWizard(page);
+  await expect(
+    page.locator('[data-testid="scan-row"][data-scan-name="outlier-halo"]'),
+  ).toBeVisible({ timeout: 20_000 });
+  await page.waitForFunction(
+    () => (window as any).__getCameraState?.()?.framedContent === true,
+    { timeout: 20_000 },
+  );
+
+  const s = await readState();
+
+  // The raw box centre really is far from the content — otherwise the pivot
+  // could pass this test by accident and it would prove nothing.
+  const rawCentre = s.bounds.min.map((v: number, i: number) => (v + s.bounds.max[i]) / 2);
+  const rawOff = Math.hypot(...CONTENT_CENTRE.map((v, i) => rawCentre[i] - v));
+  const contentSpan = Math.max(...CONTENT_MAX.map((v, i) => v - CONTENT_MIN[i]));
+  expect(rawOff, 'fixture no longer has a one-sided halo displacing the raw centre')
+    .toBeGreaterThan(500);
+
+  // The pivot is the thing under test: laterally it must be ON the plot, not
+  // out with the halo. (Vertically it is deliberately the GROUND level, not the
+  // mid-height, so only x/y are compared against the content centre.)
+  expect(s.orbitPivot, '__getCameraState exposes no orbitPivot').not.toBeNull();
+  const lateralOff = Math.hypot(
+    s.orbitPivot[0] - CONTENT_CENTRE[0],
+    s.orbitPivot[1] - CONTENT_CENTRE[1],
+  );
+  expect(
+    lateralOff,
+    `orbit pivot ${JSON.stringify(s.orbitPivot)} is off the content (centre ${JSON.stringify(CONTENT_CENTRE)})`,
+  ).toBeLessThan(contentSpan);
+  // And it is at the plot's height, not floating up among the strays.
+  expect(s.orbitPivot[2]).toBeGreaterThan(CONTENT_MIN[2] - contentSpan);
+  expect(s.orbitPivot[2]).toBeLessThan(CONTENT_MAX[2] + contentSpan);
+
+  // The consequence the user actually reported. Project the content centre to
+  // the screen before and after a modest orbit drag: it must stay in frame.
+  // With the pivot ~960 m out, a 60 px drag is a few degrees about a distant
+  // axis, which sweeps the content clean off the viewport.
+  const onScreen = () => page.evaluate(
+    (w) => (window as any).__worldToScreen(w),
+    CONTENT_CENTRE as [number, number, number],
+  );
+
+  const before = await onScreen();
+  expect(before.visible, 'content is not in frame after the initial auto-frame').toBe(true);
+
+  const box = (await page.locator('canvas').first().boundingBox())!;
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  // Assert what the drag will actually land on: a floating panel over the
+  // viewport would swallow it and the camera would simply not move, which reads
+  // as a pass on a weaker test.
+  const overEl = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x as number, y as number)?.tagName ?? 'NONE',
+    [cx, cy],
+  );
+  expect(overEl, `pointer is over ${overEl}, not the viewport`).toBe('CANVAS');
+
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx + 60, cy + 30, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+
+  const rotated = await readState();
+  // The drag genuinely rotated the view — a no-op drag would pass trivially.
+  const moved = Math.hypot(
+    rotated.position[0] - s.position[0],
+    rotated.position[1] - s.position[1],
+    rotated.position[2] - s.position[2],
+  );
+  expect(moved, 'the orbit drag did not move the camera').toBeGreaterThan(0.01);
+
+  const after = await onScreen();
+  expect(
+    after.visible,
+    `content left the viewport after a small orbit: (${before.x.toFixed(0)}, ${before.y.toFixed(0)}) -> (${after.x.toFixed(0)}, ${after.y.toFixed(0)}); pivot ${JSON.stringify(rotated.orbitPivot)}`,
+  ).toBe(true);
+});

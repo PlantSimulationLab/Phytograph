@@ -13,10 +13,11 @@
 The camera orbits around the **scene origin** — the red-and-white ring
 marker in the viewport. It starts laterally centered on everything you have
 loaded, at ground level (the bottom of the scene), since these scenes
-generally stand on the ground. That ground level ignores a small fraction of
-the lowest points, so stray returns beneath the terrain do not drag it down.
-Panning moves the view without moving that pivot, so you can pan off to one
-side and still turn about the same point.
+generally stand on the ground. Both are measured ignoring the outermost few
+percent of points, so neither a stray return beneath the terrain nor a halo of
+very distant ones — the kind a terrestrial scan always collects — can drag the
+pivot away from your data. Panning moves the view without moving that pivot,
+so you can pan off to one side and still turn about the same point.
 
 **Zoom goes wherever you point.** The scroll wheel moves the camera toward
 whatever surface is under the mouse cursor, so the point you are pointing at
