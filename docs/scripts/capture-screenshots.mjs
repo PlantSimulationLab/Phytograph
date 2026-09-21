@@ -26,7 +26,8 @@
 
 import { _electron } from 'playwright';
 import { existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -79,8 +80,17 @@ async function main() {
   }
 
   console.log('Launching Phytograph (visible window)...');
+  // Give the capture its own Chromium profile, for the same reason dev.mjs and
+  // tests/e2e/helpers/launchApp.ts do. `electron .` otherwise derives userData
+  // from the app NAME, which is the name the installed Phytograph.app uses, so
+  // this script would (a) trip the single-instance lock and exit windowless
+  // whenever the user has the desktop app open, and (b) share that app's
+  // profile — including `<userData>/Cache`, which Chromium EMPTIES on startup,
+  // wiping the running app's octree cache mid-session. A stable path (not
+  // mkdtemp) so repeat captures reuse one profile instead of littering tmp.
+  const userDataDir = join(tmpdir(), 'phytograph-screenshots-userdata');
   const app = await _electron.launch({
-    args: ['.'],
+    args: ['.', `--user-data-dir=${userDataDir}`],
     cwd: repoRoot,
     timeout: 60_000,
     // Deliberately NOT setting PHYTOGRAPH_E2E=1 — we want the window visible.
@@ -103,10 +113,39 @@ async function main() {
     console.log('Saved 01-empty-viewer.png');
 
     // ── 03: Viewer with the fixture cloud loaded ───────────────────────
-    // Import via the dropzone's hidden file input directly (auto-detect is
-    // the default). The in-window import dropdown was removed; the live
-    // import paths are drag-and-drop and the File → Import menu.
-    await page.getByTestId('app-dropzone-input').setInputFiles(FIXTURE);
+    // Import through the File → Import menu pathway, the same one
+    // tests/e2e/helpers/importFiles.ts drives. Setting the dropzone's hidden
+    // file input directly does NOT work: the renderer reads the chosen file's
+    // bytes over `fs:readBinary`, which is gated by the main process's fs
+    // allowlist (src/main/fsAllowlist.ts), and only the real `dialog:open`
+    // handler seeds that allowlist. A setInputFiles() import is therefore
+    // denied downstream and never produces a scan row — it fails silently,
+    // which is exactly how this script broke.
+    const fixtureAbs = resolve(repoRoot, FIXTURE);
+    await page.getByTestId('app-dropzone-input').waitFor({ state: 'attached', timeout: 60_000 });
+    await app.evaluate(async ({ ipcMain }, fixturePath) => {
+      ipcMain.removeHandler('dialog:open');
+      const allow = globalThis.__phytographAllowPath;
+      allow?.(fixturePath);
+      ipcMain.handle('dialog:open', async () => [fixturePath]);
+    }, fixtureAbs);
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'import-point-cloud' });
+    });
+    // Every path-backed point-cloud import now goes through the import wizard
+    // (column mapping / preview), so it must be confirmed before anything lands
+    // in the scene. Mirrors tests/e2e/helpers/importWizard.ts.
+    const wizard = page.getByTestId('import-wizard');
+    await wizard.waitFor({ state: 'visible', timeout: 120_000 });
+    const next = page.getByTestId('import-wizard-next');
+    while ((await next.isVisible()) && (await next.isEnabled())) await next.click();
+    const importBtn = page.getByTestId('import-wizard-import');
+    await importBtn.waitFor({ state: 'visible', timeout: 120_000 });
+    for (let i = 0; i < 600 && (await importBtn.isDisabled()); i++) await page.waitForTimeout(200);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await importBtn.click();
+    await wizard.waitFor({ state: 'hidden', timeout: 120_000 });
+
     // Wait for the cloud to appear in the scene panel. The row testid is
     // "scan-row" (matches tests/e2e). Allow a generous timeout — a real TLS
     // scan can be hundreds of MB and take a while to parse and render.
