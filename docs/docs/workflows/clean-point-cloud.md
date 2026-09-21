@@ -284,6 +284,20 @@ Unlike Box mode, the polygon and rectangle previews keep the cloud at full
 detail — only the points the crop removes disappear. If the rest of the
 cloud visibly thins out, that's a bug, not the crop.
 
+!!! note "Why Box previews look sparser"
+    Box mode draws its preview with a GPU clip volume, which forces the
+    graphics card to process points it then throws away — the cost climbs
+    steeply when you shrink the box onto a dense region. To stay responsive,
+    Box mode previews at a reduced point density (a quarter of your
+    **Settings → Display point budget**, never below the minimum viewable
+    density). Rect and Polygon don't use a clip volume, so they pay no such
+    cost and preview at your full budget.
+
+    The reduction is display-only: **Apply** always re-runs at full
+    resolution, so the saved cloud is unaffected either way. If Box previews
+    are too sparse for you to aim with, raise **Display point budget** in
+    Settings — the crop preview scales with it.
+
 !!! note "Panels block the draw"
     The floating panels (Crop, the scan/mesh stack on the right, Display,
     and any toast) sit *over* the viewport, so they take the click before the

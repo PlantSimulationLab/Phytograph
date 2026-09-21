@@ -15,22 +15,32 @@ import type { PotreeRequestManager } from '../../lib/pointCloudTypes';
 // see that many.
 export const DEFAULT_POINT_BUDGET = 2_000_000;
 
-// Reduced budget used WHILE a crop box is being previewed. potree clips points
-// with a fragment-shader `discard`, which disables early-Z; the GPU then can no
-// longer cull occluded points, so overdraw is driven by depth complexity
-// (points stacked per pixel). Shrinking the crop box concentrates the survivors
-// into a small screen area and the frame becomes GPU-bound (measured: ~600K
-// points at ~6 fps on a large cloud while a full uncropped 2M view stays at
-// 60 fps because early-Z culls the occluded points). Fragment invocations scale
-// with point COUNT, so a smaller preview budget restores responsiveness. The
-// preview is approximate anyway — Apply re-converts at full resolution. Value
-// chosen from measured frame times: ~520K rendered points ≈ 125 ms/frame on the
-// reporting machine when concentrated, so ~150K targets ~30 fps in the worst
-// (most concentrated) case while staying detailed enough to aim the crop box.
+// The reduced budget used WHILE a crop box is previewed now lives in
+// `lib/displayPointBudget.ts` as `resolveCropPreviewPointBudget`, because it is
+// a FRACTION of the user's display-budget setting rather than a constant. It
+// used to be a flat `CROP_PREVIEW_POINT_BUDGET = 150_000` here; that both
+// ignored the setting and fell below MIN_DISPLAY_POINT_BUDGET (250k), which is
+// the documented point where a large cloud degrades to scattered dots.
 //
-// This is a budget for the WHOLE SCENE, not per cloud — the shared manager
+// Why a reduced budget at all: potree clips points with a fragment-shader
+// `discard`, which disables early-Z; the GPU then can no longer cull occluded
+// points, so overdraw is driven by depth complexity (points stacked per pixel).
+// Shrinking the crop box concentrates the survivors into a small screen area
+// and the frame becomes GPU-bound (measured: ~600K points at ~6 fps on a large
+// cloud while a full uncropped 2M view stays at 60 fps because early-Z culls
+// the occluded points; ~520K rendered points ≈ 125 ms/frame when concentrated).
+// Fragment invocations scale with point COUNT, so a smaller preview budget
+// restores responsiveness. The preview is approximate anyway — Apply
+// re-converts at full resolution.
+//
+// Those figures were taken on one machine against the then-current renderer,
+// and they are a WORST CASE (box concentrated on the densest region). They are
+// the reason a guard exists, not evidence for any particular number — which is
+// why the value is now derived from the user's setting and floored at the
+// app's own viewability threshold instead of being pinned to them.
+//
+// It is a budget for the WHOLE SCENE, not per cloud — the shared manager
 // divides it across every registered octree in one pass (see updateAllPointClouds).
-export const CROP_PREVIEW_POINT_BUDGET = 150_000;
 
 let _sharedPotreeManager: Potree | null = null;
 export function getPotreeManager(): Potree {
@@ -63,8 +73,8 @@ export function setPointBudget(budget: number): void {
 //     refreshed to the tail. With N clouds the head is always a DIFFERENT
 //     cloud, so every frame disposed one cloud's subtree and reloaded it next
 //     frame — clouds visibly cycling in and out, worst during crop preview
-//     where the budget drops to CROP_PREVIEW_POINT_BUDGET and demand exceeds
-//     the `2 × pointBudget` eviction threshold every frame.
+//     where the budget drops to the reduced clip-volume value and demand
+//     exceeds the `2 × pointBudget` eviction threshold every frame.
 //
 // Passing the whole array instead lets potree interleave one priority queue
 // across all clouds (each node carries its `pointCloudIndex`), so the budget is

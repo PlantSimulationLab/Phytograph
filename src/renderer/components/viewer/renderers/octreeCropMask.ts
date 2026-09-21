@@ -51,15 +51,17 @@
 // exact and free: drop the index, and the original geometry is untouched
 // underneath. Nothing here can corrupt the cloud's data.
 //
-// Cost: bounded by the crop preview point budget (CROP_PREVIEW_POINT_BUDGET,
-// 150k) rather than by the cloud size, and it only re-runs when the closed
-// polygon changes — a closed polygon is static, unlike a dragging box gizmo —
-// so a 100 M-point cloud costs the same as a 1 M-point one.
+// Cost: bounded by the resident point budget rather than by the cloud size, and
+// it only re-runs when the closed polygon changes — a closed polygon is static,
+// unlike a dragging box gizmo — so a 100 M-point cloud costs the same as a
+// 1 M-point one.
 //
-// The tradeoff this inherits: CROP_PREVIEW_MAX_LEVEL caps the LOD while a CROP
-// preview is active, so the preview is SPARSE. The silhouette is exact; the
-// density is not the full cloud. The apply still goes through the backend at
-// full resolution.
+// Note that budget is the FULL display budget here, not the reduced one: a
+// screen-space region uses no clip volume, hence no fragment `discard`, hence
+// none of the overdraw the reduction guards against (see the gating in
+// PointCloudViewer). Both of the crop preview's decimations — the reduced
+// budget and CROP_PREVIEW_MAX_LEVEL — are keyed on `clipBox` and so apply to
+// Box mode ALONE. Rect and Polygon preview at full detail.
 //
 // A FILTER preview deliberately does NOT cap the LOD. The cap exists because a
 // dragging box gizmo re-masks continuously; a filter is static between edits

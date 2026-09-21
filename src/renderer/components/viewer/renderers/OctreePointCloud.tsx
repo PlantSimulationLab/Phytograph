@@ -255,9 +255,21 @@ function applyScalarSwapToVisibleNodes(octree: any, field: string): void {
 // preview by point budget alone makes potree refine the highest-priority nodes
 // deeply and leave the rest coarse — visibly uneven density (a sparse "notch"
 // beside dense blobs). Capping the level instead makes potree render every
-// region at one consistent level, so the reduced preview is uniform. Tunable:
-// higher = denser/uniform but heavier; lower = sparser/lighter. Removed on exit.
-const CROP_PREVIEW_MAX_LEVEL = 4;
+// region at one consistent level, so the reduced preview is uniform. Removed
+// on exit.
+//
+// This is the UNIFORMITY knob, not the cost knob — cost is bounded by the
+// point budget (resolveCropPreviewPointBudget), which potree enforces however
+// deep the tree is allowed to go. That division matters because `maxLevel` is
+// a HARD traversal cap: set it too low and it, not the budget, decides the
+// point count, so raising the budget buys nothing on a deep cloud.
+//
+// It was 4, which did exactly that. Measured on a real cloud in this very
+// file's history: capping at 4 dropped it from 42 loaded tiles to 3 (722k
+// points to 143k). Combined with the old flat 150k budget, Box mode was
+// decimated twice over — the "almost non-viewable while cropping" report. 6
+// keeps the render uniform while leaving the budget in charge of the cost.
+const CROP_PREVIEW_MAX_LEVEL = 6;
 
 // How long the filter preview waits after the last edit before re-masking.
 // Long enough that typing "12.5" is one mask pass rather than four, short
