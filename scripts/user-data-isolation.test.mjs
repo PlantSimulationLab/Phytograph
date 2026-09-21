@@ -43,11 +43,32 @@ describe('scripts/dev.mjs', () => {
     expect(devSrc).toMatch(/--user-data-dir=\$\{devUserDataDir\}/);
   });
 
-  it('derives that dir outside the packaged app profile, and stably', () => {
-    // tmpdir() matches the sibling choice already made for the octree cache;
-    // "stable" is what lets dev settings survive a restart.
-    expect(devSrc).toMatch(/devUserDataDir\s*=[\s\S]*?tmpdir\(\)/);
+  it('derives that dir outside the packaged app profile', () => {
+    expect(devSrc).toMatch(/devUserDataDir\s*=[\s\S]*?devStateRoot\(\)/);
     expect(devSrc).not.toMatch(/Application Support/);
+  });
+
+  // "Stable" must mean the DIRECTORY survives, not just that the path string is
+  // deterministic. This assertion used to accept tmpdir(), which satisfies the
+  // string reading and fails the real one: temp is reaped (macOS empties /tmp on
+  // boot and runs tmp_cleaner nightly; systemd-tmpfiles does the same), so the
+  // dev profile vanished and every UI-set preference silently reverted — the
+  // rivlib path most visibly, plus a "first time" splash on a machine that had
+  // run dev for months. Nothing errored, which is why it survived so long.
+  it('puts the dev profile somewhere durable, never under tmpdir()', () => {
+    expect(devSrc).not.toMatch(/tmpdir/);
+    expect(devSrc).toMatch(/function devStateRoot\(\)/);
+  });
+
+  // Durable is necessary but not sufficient: <userData>/Cache is Chromium's own
+  // HTTP cache and Chromium EMPTIES it on startup. On a case-insensitive volume
+  // a segment spelled "cache" is that directory. This is the exact trap
+  // src/main/octreeCacheRoot.ts documents, so the dev profile must sit beside
+  // the OS cache dir rather than inside a Chromium-managed one.
+  it('resolves per-platform to the OS cache dir, not the user-data dir', () => {
+    expect(devSrc).toMatch(/Library',\s*'Caches'/);
+    expect(devSrc).toMatch(/XDG_CACHE_HOME/);
+    expect(devSrc).toMatch(/LOCALAPPDATA/);
   });
 });
 

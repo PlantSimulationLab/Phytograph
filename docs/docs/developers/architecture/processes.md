@@ -181,10 +181,27 @@ deliberately opposite lifetimes:
 | | Directory | Why |
 | --- | --- | --- |
 | E2E (`launchApp.ts`) | fresh `mkdtemp` per launch, removed in `close()` | specs must not inherit each other's settings; the suite runs 2 workers |
-| Dev (`scripts/dev.mjs`) | stable `tmpdir()/phytograph-dev-userdata` | dev settings should survive a restart. Override with `PHYTOGRAPH_DEV_USER_DATA_DIR` |
+| Dev (`scripts/dev.mjs`) | stable `<OS cache dir>/Phytograph/dev/userdata` | dev settings should survive a restart. Override with `PHYTOGRAPH_DEV_USER_DATA_DIR` |
 
 A fresh profile makes every E2E launch a "first run" (`ipc.ts` probes for the
 store file), which only changes splash wording — no spec asserts on it.
+
+**"Stable" has to mean the directory survives, not just the path string.** The
+dev profile used to be `tmpdir()/phytograph-dev-userdata`, which reads as stable
+and is not: temp gets reaped (macOS empties `/tmp` on boot and runs
+`/usr/libexec/tmp_cleaner` nightly from a launchd daemon; `systemd-tmpfiles`
+does the same on Linux), and a developer who exports `TMPDIR=/tmp/$USER` has no
+per-user `/var/folders` protection at all. The profile therefore evaporated
+every day or two, taking `phytograph-store.json` with it.
+
+Nothing errored, which is why it lasted — the only symptoms were preferences
+that silently reverted (the RiVLib path most visibly, since it is re-entered by
+hand) and a splash reading *"starting for the first time"* on a machine that had
+run dev for months, because `isFirstRun` probes for the store file in exactly
+that directory. It now resolves under the **OS cache dir**, mirroring the
+platform conventions in `src/main/octreeCacheRoot.ts`: durable, per-user,
+outside the packaged app's profile, and never inside a directory Chromium
+manages (`<userData>/Cache` is Chromium's own, and it empties it on startup).
 
 `scripts/user-data-isolation.test.mjs` guards both at the source, because
 dropping either switch reopens the collision **silently**: E2E on the shared

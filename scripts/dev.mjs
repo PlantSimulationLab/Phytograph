@@ -13,13 +13,39 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import waitOn from 'wait-on';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
+
+// Durable per-user home for everything this dev session keeps between runs:
+// the Electron profile (settings) and the octree cache.
+//
+// Deliberately the OS CACHE dir rather than tmpdir(). Both are "outside the
+// packaged app's profile", which is the isolation property that matters, but
+// only this one actually persists: temp is reaped (macOS clears /tmp on boot
+// and runs /usr/libexec/tmp_cleaner nightly; systemd-tmpfiles does the same on
+// Linux), so a dev profile under tmpdir() quietly evaporates and takes the
+// developer's settings with it.
+//
+// Mirrors the platform conventions in src/main/octreeCacheRoot.ts — same
+// directories, one level up — so dev state sits beside the cache the app
+// already uses rather than inventing a fourth location. It is a sibling of,
+// never inside, anything Chromium manages.
+function devStateRoot() {
+  if (process.platform === 'darwin') {
+    return join(homedir(), 'Library', 'Caches', 'Phytograph', 'dev');
+  }
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+    return join(base, 'Phytograph', 'cache', 'dev');
+  }
+  const base = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
+  return join(base, 'Phytograph', 'dev');
+}
 
 // Give the dev session its own octree cache, separate from the default per-user
 // dir a packaged app (and E2E launches) use. The cache is content-addressed but
@@ -28,8 +54,11 @@ const root = join(__dirname, '..');
 // A STABLE (not per-run) path lets a dev restart reuse octrees it already built.
 // Both the backend (_octree_cache_root) and the Electron protocol handler
 // (octreeCacheRoot in src/main/octreeProtocol.ts) honor this env var.
+// Same durability reasoning as devUserDataDir below: a reaped octree cache is
+// only a slow rebuild rather than lost settings, but there is no reason to keep
+// paying for it either.
 const devOctreeCacheRoot =
-  process.env.PHYTOGRAPH_OCTREE_CACHE_ROOT || join(tmpdir(), 'phytograph-dev-octrees');
+  process.env.PHYTOGRAPH_OCTREE_CACHE_ROOT || join(devStateRoot(), 'octrees');
 
 // Give the dev session its own ELECTRON PROFILE too, for the same reason and
 // with more at stake. `electron .` derives userData from the app name — the SAME
@@ -46,8 +75,31 @@ const devOctreeCacheRoot =
 // choice from E2E (tests/e2e/helpers/launchApp.ts uses a fresh temp dir per
 // launch — specs must not inherit each other's settings). Override with
 // PHYTOGRAPH_DEV_USER_DATA_DIR to point dev at a specific profile.
+//
+// NOT under tmpdir(), and that distinction is the whole point. This lived at
+// `join(tmpdir(), 'phytograph-dev-userdata')`, which is stable only as a PATH —
+// the directory it names is reaped out from under you, so "survives a restart"
+// silently became "survives until something cleans temp". On macOS
+// /usr/libexec/tmp_cleaner runs from a launchd daemon at midnight
+// (com.apple.tmp_cleaner, StartCalendarInterval Hour 0) and /tmp is emptied on
+// boot; on Linux systemd-tmpfiles does the same. A developer who exports
+// TMPDIR=/tmp/$USER (common, and the case this was diagnosed on) gets a dev
+// profile inside /tmp with no per-user /var/folders protection at all.
+//
+// The user-visible symptom is NOT "the profile is missing" — it is that every
+// preference silently reverts. Settings set through the UI (rivlib path, theme,
+// point size, class palettes, synthetic-scan defaults) come back unset a day
+// later, and the splash reads "starting for the first time" on a machine that
+// has run dev for months, because `isFirstRun` in src/main/ipc.ts probes for
+// phytograph-store.json in exactly this directory. Nothing errors, so the only
+// signal is a developer re-entering the same setting over and over.
+//
+// The OS CACHE dir is the right home: durable across reboots and temp reaping,
+// per-user, outside the packaged app's profile, and never touched by Chromium's
+// own cache management. It is the same reasoning — and the same directory
+// family — that src/main/octreeCacheRoot.ts already settled on.
 const devUserDataDir =
-  process.env.PHYTOGRAPH_DEV_USER_DATA_DIR || join(tmpdir(), 'phytograph-dev-userdata');
+  process.env.PHYTOGRAPH_DEV_USER_DATA_DIR || join(devStateRoot(), 'userdata');
 
 // The Settings "Memory budget (MB)" value, as the env var the backend reads.
 //
