@@ -181,7 +181,8 @@ deliberately opposite lifetimes:
 | | Directory | Why |
 | --- | --- | --- |
 | E2E (`launchApp.ts`) | fresh `mkdtemp` per launch, removed in `close()` | specs must not inherit each other's settings; the suite runs 2 workers |
-| Dev (`scripts/dev.mjs`) | stable `<OS cache dir>/Phytograph/dev/userdata` | dev settings should survive a restart. Override with `PHYTOGRAPH_DEV_USER_DATA_DIR` |
+| Dev (`scripts/dev.mjs`) | stable `devStateRoot('userdata')` | dev settings should survive a restart. Override with `PHYTOGRAPH_DEV_USER_DATA_DIR` |
+| Docs capture (`capture-screenshots.mjs`) | stable `devStateRoot('screenshots')` | repeat captures reuse one profile; it also drives a visible window on the developer's own machine |
 
 A fresh profile makes every E2E launch a "first run" (`ipc.ts` probes for the
 store file), which only changes splash wording — no spec asserts on it.
@@ -202,6 +203,14 @@ that directory. It now resolves under the **OS cache dir**, mirroring the
 platform conventions in `src/main/octreeCacheRoot.ts`: durable, per-user,
 outside the packaged app's profile, and never inside a directory Chromium
 manages (`<userData>/Cache` is Chromium's own, and it empties it on startup).
+
+That resolver is `scripts/dev-state-root.mjs`, and it is **shared, not copied**.
+Both the dev session (profile + octree cache) and the docs screenshot capture
+use it, so there is exactly one per-OS definition to get right — a path computed
+twice and validated only on the OS where the two happen to agree is precisely
+what shipped the octree-cache divergence described above. The capture script had
+independently grown the same `tmpdir()` flaw, which is why its profile is pinned
+by the guard test too.
 
 `scripts/user-data-isolation.test.mjs` guards both at the source, because
 dropping either switch reopens the collision **silently**: E2E on the shared

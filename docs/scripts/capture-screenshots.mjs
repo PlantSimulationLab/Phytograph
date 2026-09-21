@@ -26,9 +26,9 @@
 
 import { _electron } from 'playwright';
 import { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { devStateRoot } from '../../scripts/dev-state-root.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, '..', '..');
@@ -86,9 +86,15 @@ async function main() {
   // this script would (a) trip the single-instance lock and exit windowless
   // whenever the user has the desktop app open, and (b) share that app's
   // profile — including `<userData>/Cache`, which Chromium EMPTIES on startup,
-  // wiping the running app's octree cache mid-session. A stable path (not
-  // mkdtemp) so repeat captures reuse one profile instead of littering tmp.
-  const userDataDir = join(tmpdir(), 'phytograph-screenshots-userdata');
+  // wiping the running app's octree cache mid-session.
+  //
+  // A stable path (not mkdtemp) so repeat captures reuse one profile, and
+  // `devStateRoot` rather than tmpdir() so "stable" means the DIRECTORY
+  // survives and not merely that the path string is deterministic — temp gets
+  // reaped. Lower stakes here than for the dev profile (a lost capture profile
+  // costs one cold start, not a developer's settings), but it is the same
+  // resolver precisely so it cannot drift back.
+  const userDataDir = devStateRoot('screenshots');
   const app = await _electron.launch({
     args: ['.', `--user-data-dir=${userDataDir}`],
     cwd: repoRoot,

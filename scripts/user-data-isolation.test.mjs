@@ -37,6 +37,12 @@ const devSrc = codeOnly(readFileSync(join(repoRoot, 'scripts', 'dev.mjs'), 'utf8
 const launchSrc = codeOnly(
   readFileSync(join(repoRoot, 'tests', 'e2e', 'helpers', 'launchApp.ts'), 'utf8'),
 );
+const stateRootSrc = codeOnly(
+  readFileSync(join(repoRoot, 'scripts', 'dev-state-root.mjs'), 'utf8'),
+);
+const shotSrc = codeOnly(
+  readFileSync(join(repoRoot, 'docs', 'scripts', 'capture-screenshots.mjs'), 'utf8'),
+);
 
 describe('scripts/dev.mjs', () => {
   it('spawns Electron with its own --user-data-dir', () => {
@@ -44,7 +50,7 @@ describe('scripts/dev.mjs', () => {
   });
 
   it('derives that dir outside the packaged app profile', () => {
-    expect(devSrc).toMatch(/devUserDataDir\s*=[\s\S]*?devStateRoot\(\)/);
+    expect(devSrc).toMatch(/devUserDataDir\s*=[\s\S]*?devStateRoot\(/);
     expect(devSrc).not.toMatch(/Application Support/);
   });
 
@@ -57,18 +63,66 @@ describe('scripts/dev.mjs', () => {
   // run dev for months. Nothing errored, which is why it survived so long.
   it('puts the dev profile somewhere durable, never under tmpdir()', () => {
     expect(devSrc).not.toMatch(/tmpdir/);
-    expect(devSrc).toMatch(/function devStateRoot\(\)/);
+    expect(devSrc).toMatch(/devStateRoot/);
+  });
+});
+
+// The capture script drives a real Electron window against the user's machine,
+// so it needs the same isolation dev does — and for a while it had the same
+// tmpdir() flaw, which is why it is pinned here rather than left to review.
+describe('docs/scripts/capture-screenshots.mjs', () => {
+  it('launches Electron with its own --user-data-dir', () => {
+    expect(shotSrc).toMatch(/--user-data-dir=\$\{userDataDir\}/);
+  });
+
+  it('uses the shared durable root, never tmpdir()', () => {
+    expect(shotSrc).not.toMatch(/tmpdir/);
+    expect(shotSrc).toMatch(/devStateRoot\(/);
+  });
+});
+
+// One definition, shared by dev.mjs and the capture script. A per-OS path
+// computed twice and validated on only the OS where the two happen to agree is
+// exactly what shipped the octree-cache divergence (see CLAUDE.md), so the
+// resolver is asserted on its BEHAVIOUR here rather than by grepping each
+// caller for platform strings.
+describe('scripts/dev-state-root.mjs', () => {
+  it('is the single definition — callers import it rather than re-deriving', () => {
+    for (const src of [devSrc, shotSrc]) {
+      expect(src).toMatch(/import \{ devStateRoot \}/);
+      // No caller may carry its own copy of the platform branches.
+      expect(src).not.toMatch(/XDG_CACHE_HOME/);
+      expect(src).not.toMatch(/LOCALAPPDATA/);
+    }
   });
 
   // Durable is necessary but not sufficient: <userData>/Cache is Chromium's own
   // HTTP cache and Chromium EMPTIES it on startup. On a case-insensitive volume
   // a segment spelled "cache" is that directory. This is the exact trap
-  // src/main/octreeCacheRoot.ts documents, so the dev profile must sit beside
-  // the OS cache dir rather than inside a Chromium-managed one.
-  it('resolves per-platform to the OS cache dir, not the user-data dir', () => {
-    expect(devSrc).toMatch(/Library',\s*'Caches'/);
-    expect(devSrc).toMatch(/XDG_CACHE_HOME/);
-    expect(devSrc).toMatch(/LOCALAPPDATA/);
+  // src/main/octreeCacheRoot.ts documents, so dev state must sit beside the OS
+  // cache dir rather than inside a Chromium-managed one.
+  it('covers every platform, each under that OS cache dir', () => {
+    expect(stateRootSrc).toMatch(/Library',\s*'Caches'/);
+    expect(stateRootSrc).toMatch(/XDG_CACHE_HOME/);
+    expect(stateRootSrc).toMatch(/LOCALAPPDATA/);
+    expect(stateRootSrc).not.toMatch(/tmpdir/);
+    expect(stateRootSrc).not.toMatch(/Application Support/);
+  });
+
+  it('resolves a real absolute path, and nests the subdir under one root', async () => {
+    const { devStateRoot } = await import(
+      join(repoRoot, 'scripts', 'dev-state-root.mjs')
+    );
+    const root = devStateRoot();
+    expect(root).toMatch(/^[/\\]|^[A-Za-z]:/);
+    // The two dev consumers and the capture share one parent, so a developer
+    // can find (or delete) all of it in one place.
+    for (const sub of ['userdata', 'octrees', 'screenshots']) {
+      expect(devStateRoot(sub).startsWith(root)).toBe(true);
+      expect(devStateRoot(sub)).not.toBe(root);
+    }
+    // Never inside a Chromium-managed profile directory.
+    expect(root).not.toMatch(/Application Support/);
   });
 });
 

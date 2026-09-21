@@ -13,39 +13,17 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import waitOn from 'wait-on';
+// Durable per-user home for everything this dev session keeps between runs:
+// the Electron profile (settings) and the octree cache. Shared with the docs
+// screenshot capture — see scripts/dev-state-root.mjs for why it is the OS
+// cache dir and not tmpdir().
+import { devStateRoot } from './dev-state-root.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
-
-// Durable per-user home for everything this dev session keeps between runs:
-// the Electron profile (settings) and the octree cache.
-//
-// Deliberately the OS CACHE dir rather than tmpdir(). Both are "outside the
-// packaged app's profile", which is the isolation property that matters, but
-// only this one actually persists: temp is reaped (macOS clears /tmp on boot
-// and runs /usr/libexec/tmp_cleaner nightly; systemd-tmpfiles does the same on
-// Linux), so a dev profile under tmpdir() quietly evaporates and takes the
-// developer's settings with it.
-//
-// Mirrors the platform conventions in src/main/octreeCacheRoot.ts — same
-// directories, one level up — so dev state sits beside the cache the app
-// already uses rather than inventing a fourth location. It is a sibling of,
-// never inside, anything Chromium manages.
-function devStateRoot() {
-  if (process.platform === 'darwin') {
-    return join(homedir(), 'Library', 'Caches', 'Phytograph', 'dev');
-  }
-  if (process.platform === 'win32') {
-    const base = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-    return join(base, 'Phytograph', 'cache', 'dev');
-  }
-  const base = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
-  return join(base, 'Phytograph', 'dev');
-}
 
 // Give the dev session its own octree cache, separate from the default per-user
 // dir a packaged app (and E2E launches) use. The cache is content-addressed but
@@ -58,7 +36,7 @@ function devStateRoot() {
 // only a slow rebuild rather than lost settings, but there is no reason to keep
 // paying for it either.
 const devOctreeCacheRoot =
-  process.env.PHYTOGRAPH_OCTREE_CACHE_ROOT || join(devStateRoot(), 'octrees');
+  process.env.PHYTOGRAPH_OCTREE_CACHE_ROOT || devStateRoot('octrees');
 
 // Give the dev session its own ELECTRON PROFILE too, for the same reason and
 // with more at stake. `electron .` derives userData from the app name — the SAME
@@ -99,7 +77,7 @@ const devOctreeCacheRoot =
 // own cache management. It is the same reasoning — and the same directory
 // family — that src/main/octreeCacheRoot.ts already settled on.
 const devUserDataDir =
-  process.env.PHYTOGRAPH_DEV_USER_DATA_DIR || join(devStateRoot(), 'userdata');
+  process.env.PHYTOGRAPH_DEV_USER_DATA_DIR || devStateRoot('userdata');
 
 // The Settings "Memory budget (MB)" value, as the env var the backend reads.
 //
