@@ -277,6 +277,7 @@ export function LADResultsPanel({
                     <div
                       data-testid="lad-wood-summary"
                       data-wood-gtheta={result.wood.gtheta ?? ''}
+                      data-wood-gtheta-source={result.wood.gthetaSource ?? ''}
                       className="rounded bg-neutral-900/60 border border-neutral-700/60 px-2 py-1.5"
                     >
                       <div className="text-[10px] text-neutral-300">
@@ -292,12 +293,16 @@ export function LADResultsPanel({
                         </div>
                       )}
                       <div className="text-[9px] text-neutral-500 mt-0.5">
-                        {/* G(theta) is ASSUMED, and says so. It is the
-                            randomly-oriented-cylinder value, not measured from
-                            this cloud — the panel must never let an assumption
-                            read as a measurement. */}
-                        {`Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} assumed `
-                          + '(randomly-oriented cylinders)'}
+                        {/* Measured or assumed, said plainly — the panel must
+                            never let an assumption read as a measurement (the
+                            same rule the occlusion block follows). 'mesh' means
+                            the branch axis was read off the triangulation. */}
+                        {result.wood.gthetaSource === 'mesh'
+                          ? `Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} measured `
+                            + `from ${(result.wood.axisTriangles ?? 0).toLocaleString()} `
+                            + 'branch surface triangles'
+                          : `Wood G(θ) ${result.wood.gtheta?.toFixed(3) ?? '—'} assumed `
+                            + '(randomly-oriented cylinders): no branch axis available'}
                       </div>
                       <div
                         className="text-[9px] text-amber-300/80 mt-1 cursor-help"

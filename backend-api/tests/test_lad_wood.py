@@ -386,19 +386,29 @@ class TestWoodSplitRealPath:
         assert (c["lad"] * 0.5 + c["wad"] * wood["wood_gtheta"]
                 == pytest.approx(b["lad"] * b["gtheta"], rel=1e-6))
 
-    def test_wood_gtheta_is_the_constant_and_is_echoed(self, tmp_path):
-        """G_wood is the randomly-oriented-cylinder constant, and the run reports
-        which value it used.
+    def test_wood_gtheta_reports_where_it_came_from(self, tmp_path):
+        """Every run must say whether G_wood was MEASURED or ASSUMED.
 
-        A branch-axis estimator was built and removed (see the `lad_wood` module
-        docstring for the measurements). This pins the decision: if per-cloud
-        estimation ever returns, this test is what says so, deliberately.
+        The randomly-labelled fixture has no coherent branch axis (its wood
+        labels are scattered over a leaf cube), so this exercises the honest
+        fallback rather than the measurement; the woodcube fixture below covers
+        the measured path.
         """
         pytest.importorskip("pyhelios")
         r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class")
-        assert r["wood_gtheta"] == pytest.approx(W.WOOD_G_DEFAULT)
-        # Echoed so a consumer can recompute wood area from the leaf figure.
+        assert r["wood_gtheta_source"] in ("mesh", "default")
         assert 0.0 < r["wood_gtheta"] <= 1.0
+        if r["wood_gtheta_source"] == "default":
+            assert r["wood_gtheta"] == pytest.approx(W.WOOD_G_DEFAULT)
+
+    def test_supplied_gtheta_path_has_no_mesh_so_assumes(self, tmp_path):
+        """A supplied-G(theta) run never triangulates, so there is no branch axis
+        to measure and the constant must be used -- and labelled as assumed."""
+        pytest.importorskip("pyhelios")
+        r = _run(_wood_labelled_fixture(tmp_path), "x y z is_miss wood_class",
+                 override=True)
+        assert r["wood_gtheta_source"] == "default"
+        assert r["wood_gtheta"] == pytest.approx(W.WOOD_G_DEFAULT)
 
 
 # ===========================================================================
@@ -529,7 +539,91 @@ class TestWoodCubeFixture:
         lad = r["cells"][0]["lad"]
         assert 0.3 * (_WC_LEAF_AREA / _WC_VOLUME) < lad < 1.5 * (_WC_LEAF_AREA / _WC_VOLUME)
 
-    def test_documents_what_the_constant_costs_on_pure_trunks(self):
+    def test_measures_G_wood_from_the_triangulation(self):
+        """THE feature: G_wood read off the branch axis the mesh already gives us.
+
+        The fixture's wood is all-vertical tubes, true G 0.3179 at this scan's
+        beams. The constant would read 0.2500 (-21.4%); the measurement must do
+        far better, and must SAY it measured.
+
+        Why this works even though a terrestrial mesh covers only the
+        scanner-facing half of a branch: the triangulation is an ORIENTATION
+        measurement, and a cylinder's axis is the direction its surface normals
+        avoid -- so the hidden half is redundant by symmetry. (Assuming the mesh
+        must supply an AREA is the standing misreading here.)
+        """
+        pytest.importorskip("pyhelios")
+        r = _run_woodcube()
+        assert r["wood_gtheta_source"] == "mesh", r.get("warnings")
+        assert r["wood_axis_triangles"] > 100
+        true_g = self._true_g_wood()
+        assert r["wood_gtheta"] == pytest.approx(true_g, rel=0.05)
+        # And decisively better than assuming.
+        assert abs(r["wood_gtheta"] - true_g) < 0.2 * abs(W.WOOD_G_DEFAULT - true_g)
+
+    def test_reused_mesh_also_measures_it(self):
+        """The REUSE path must measure G_wood too.
+
+        This is the path the UI normally takes: the LAD dialog's "run a new
+        triangulation" option runs Helios first, shows the mesh in the Meshes
+        pane, and then REUSES it for the inversion. An implementation that only
+        measured on the internal-triangulation path would therefore almost never
+        fire in practice while passing every direct-call test -- which is exactly
+        what happened, and is why this test exists.
+        """
+        pytest.importorskip("pyhelios")
+        import math as _math
+        from pyhelios import LiDARCloud
+
+        d = np.loadtxt(_WOODCUBE_XYZ)
+        xyz, miss = d[:, :3], d[:, 3]
+        origin = [-5.0, 0.0, 0.5]
+        cloud = LiDARCloud()
+        cloud.disableMessages()
+        cloud.addScan(origin=origin, Ntheta=1400, theta_range=(0, _math.pi),
+                      Nphi=2800, phi_range=(0, 2 * _math.pi),
+                      exit_diameter=0, beam_divergence=0)
+        rng_r = np.linalg.norm(xyz - origin, axis=1)
+        dirs = np.ascontiguousarray(np.stack([
+            rng_r,
+            np.arcsin((xyz[:, 2] - origin[2]) / rng_r),
+            np.arctan2(xyz[:, 0] - origin[0], xyz[:, 1] - origin[1])], axis=1),
+            dtype=np.float32)
+        cloud.addHitPointsWithData(0, xyz.astype(np.float32), dirs,
+                                   data_labels=["is_miss"],
+                                   data_values=miss[:, None])
+        cloud.addGrid(center=[0, 0, 0.5], size=[1, 1, 1], ndiv=[1, 1, 1])
+        cloud.triangulateHitPoints(0.06, 10)
+        flat, scan_ids = cloud.getTriangleVerticesAll()
+        tri = np.asarray(flat, dtype=np.float32).reshape(-1, 3, 3)
+        verts = tri.reshape(-1, 3)
+        idx = np.arange(len(verts), dtype=np.uint32).reshape(-1, 3)
+        del cloud
+
+        scan = main.HeliosScanEntry(
+            file_path=_WOODCUBE_XYZ, ascii_format="x y z is_miss wood_class",
+            origin=origin, n_theta=1400, n_phi=2800, theta_min=0, theta_max=180,
+            phi_min=0, phi_max=360, return_type="single")
+        grid = main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1)
+        r = main._do_lad_computation(
+            main.LADComputeRequest(scans=[scan], grid=grid, lmax=0.06,
+                                   max_aspect_ratio=10, min_voxel_hits=1),
+            reuse_mesh=(verts, idx, np.asarray(scan_ids, dtype=np.int32)))
+        assert r["success"] is True, r.get("error")
+        assert r["wood_gtheta_source"] == "mesh", r.get("warnings")
+        assert r["wood_gtheta"] == pytest.approx(self._true_g_wood(), rel=0.05)
+
+    @staticmethod
+    def _true_g_wood():
+        """Analytic G for the fixture's all-vertical wood over its own beams."""
+        d = np.loadtxt(_WOODCUBE_XYZ)
+        hits = d[d[:, 3] == 0]
+        wood = hits[hits[:, 4] == main.WOOD_CLASS_WOOD][:, :3]
+        dirs = main._directions_from_origin(wood, np.array([-5.0, 0.0, 0.5]))
+        zen = lad_gtheta.beam_zenith_from_spherical(dirs)
+        return float(W.cylinder_G(zen, np.array([0.0])).mean())
+
+    def test_documents_what_assuming_would_cost_on_pure_trunks(self):
         """The fixture's wood is ALL VERTICAL -- the axis population furthest from
         random, and so the worst case for a fixed G_wood.
 
@@ -549,9 +643,8 @@ class TestWoodCubeFixture:
         assert 0.30 < true_g < 0.33, true_g
         shortfall = (W.WOOD_G_DEFAULT - true_g) / true_g
         assert -0.25 < shortfall < -0.18, f"constant now off by {shortfall:.1%}"
-
-        r = _run_woodcube()
-        assert r["wood_gtheta"] == pytest.approx(W.WOOD_G_DEFAULT)
+        # Which is exactly why the mesh measurement above is worth having; this
+        # test records the size of what it recovers, not a shipped behaviour.
 
     def test_totals_and_summary_agree_on_the_fixture(self):
         """The reported totals must equal the per-voxel values, and the exported
@@ -573,3 +666,96 @@ class TestWoodCubeFixture:
                 for ln in txt.splitlines() if ln.split(" ")[0] in ("LAI", "WAI", "PAI")}
         assert vals["PAI"] == pytest.approx(vals["LAI"] + vals["WAI"], abs=1e-3)
         assert vals["WAI"] > 0
+
+
+class TestWoodAxisPerformance:
+    """The measurement rides the triangulation's EXISTING stream-and-drop sink,
+    and must stay bounded. Reading the mesh back whole (getTriangleVerticesAll)
+    would transfer 720 MB at 20 M triangles and undo the memory design that sink
+    exists for -- so these are correctness tests, not nice-to-haves."""
+
+    def test_reservoir_is_bounded_however_large_the_mesh(self):
+        """Ten million triangles must cost the same as fifty thousand."""
+        rng = np.random.default_rng(0)
+        pts = rng.uniform(0, 10, (200_000, 3)).astype(np.float32)
+        clf = main._WoodTriangleClassifier(pts, np.ones(len(pts)))
+        for _ in range(20):
+            tri = pts[rng.integers(0, len(pts), 500_000 * 3)].reshape(500_000, 3, 3)
+            clf.add_chunk(tri)
+        assert clf._seen == 10_000_000
+        assert clf._used <= main._WOOD_AXIS_TRIANGLE_CAP
+        # Constant memory: a 3x3 scatter matrix, whatever the mesh size.
+        assert clf._acc._scatter.nbytes == 72
+
+    def test_streaming_path_does_not_read_the_mesh_back(self):
+        """Source-level chokepoint: the sink branch must not call
+        getTriangleVerticesAll. That one edit silently reintroduces the whole-mesh
+        transfer this design exists to avoid, and no behavioural test would catch
+        it -- the answers would be identical, only the memory would blow up."""
+        import inspect
+        src = inspect.getsource(main._do_lad_computation)
+        sink_branch = src[src.index("setTriangulationSink"):]
+        head = sink_branch[:sink_branch.index("triangulateHitPoints")]
+        assert "getTriangleVerticesAll" not in head, (
+            "the streaming sink branch must not read the whole mesh back")
+
+    def test_accumulator_composes_across_chunks(self):
+        """The scatter matrix is additive, which is what lets it stream: feeding
+        one chunk of N must equal feeding k chunks summing to N."""
+        rng = np.random.default_rng(1)
+        tri = rng.normal(size=(4_000, 3, 3))
+        whole = W.WoodAxisAccumulator(); whole.add_triangles(tri)
+        split = W.WoodAxisAccumulator()
+        for i in range(0, len(tri), 500):
+            split.add_triangles(tri[i:i + 500])
+        assert whole.count == split.count
+        np.testing.assert_allclose(whole._scatter, split._scatter, rtol=1e-9)
+
+
+class TestWoodAxisGuard:
+    """Leaf contamination whose normals ALIGN with the branch axis flips the
+    estimate ~90 degrees rather than degrading it, so a low-confidence axis must
+    be REFUSED, not reported."""
+
+    @staticmethod
+    def _cylinder_tris(axis, n, rng):
+        a = np.asarray(axis, float); a /= np.linalg.norm(a)
+        t0 = np.array([1.0, 0, 0]) if abs(a[0]) < 0.9 else np.array([0, 1.0, 0])
+        u = np.cross(a, t0); u /= np.linalg.norm(u); v = np.cross(a, u)
+        ph = rng.uniform(0, 2 * np.pi, n); t = rng.uniform(-1, 1, n)
+        p = t[:, None] * a + 0.05 * (np.cos(ph)[:, None] * u + np.sin(ph)[:, None] * v)
+        e1 = np.cross(a, p - t[:, None] * a)
+        e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+        return np.stack([p, p + 1e-3 * e1, p + 1e-3 * a], axis=1)
+
+    def test_clean_cylinder_is_confident_and_correct(self):
+        rng = np.random.default_rng(0)
+        acc = W.WoodAxisAccumulator()
+        acc.add_triangles(self._cylinder_tris([0, 0, 1.0], 20_000, rng))
+        axis, conf = acc.axis()
+        assert conf > main._WOOD_AXIS_MIN_CONFIDENCE
+        assert abs(abs(float(axis[2])) - 1.0) < 1e-3
+
+    def test_heavy_contamination_loses_confidence(self):
+        """Isotropic junk normals destroy the 'normals avoid one direction'
+        signature, and confidence must register that."""
+        rng = np.random.default_rng(0)
+        acc = W.WoodAxisAccumulator()
+        acc.add_triangles(self._cylinder_tris([0, 0, 1.0], 5_000, rng))
+        acc.add_triangles(rng.normal(size=(40_000, 3, 3)))
+        _, conf = acc.axis()
+        assert conf < main._WOOD_AXIS_MIN_CONFIDENCE
+
+    def test_too_few_triangles_yields_no_axis(self):
+        acc = W.WoodAxisAccumulator()
+        assert acc.axis() == (None, 0.0)
+        acc.add_triangles(np.zeros((2, 3, 3)))   # degenerate, zero area
+        assert acc.axis() == (None, 0.0)
+
+    def test_degenerate_triangles_are_skipped(self):
+        """A zero-area triangle has no defined normal; computeGtheta skips them
+        for the same reason and so must this."""
+        acc = W.WoodAxisAccumulator()
+        flat = np.zeros((10, 3, 3))
+        assert acc.add_triangles(flat) == 0
+        assert acc.count == 0

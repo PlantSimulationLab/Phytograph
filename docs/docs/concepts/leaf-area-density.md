@@ -267,18 +267,25 @@ has no such doubling — its two-sided area *is* its surface area. Using each
 convention's own coefficient makes the two add up: **LAI + WAI = PAI**, and the
 summary export reports all three.
 
-The wood projection coefficient is **assumed**, not measured from the cloud:
-Phytograph uses the randomly-oriented-cylinder value (0.25) and says so in the
-result. That matters less than it might sound, because a cylinder is symmetric
-about its axis — across every achievable branch-angle distribution the
-coefficient spans only about ±13%, and on a realistically mixed canopy it is
-within a few percent.
+The wood projection coefficient is **measured from the triangulation**, the same
+mesh the leaf side uses. The result says which coefficient it applied and
+whether it was measured or assumed.
 
-An estimator that measured branch axes from the cloud was built and removed. On
-pure vertical trunks — the case furthest from random, where a fixed value costs
-most — it recovered only about half the available error while adding seconds to
-every run. The error that actually dominates such a cloud is the voxel-mixing
-one below, which is an order of magnitude larger.
+This works for a reason worth stating, because it is counter-intuitive: the
+triangulation is an **orientation** measurement, not an area one. A branch is a
+cylinder, and every point on a cylinder's surface has a normal *perpendicular to
+its axis* — so the axis is simply the direction those normals avoid. A
+terrestrial scan only ever triangulates the scanner-facing half of a branch, and
+that costs nothing here: a direction is not an area, and the hidden half is
+redundant by symmetry. Measured on a synthetic trunk, the visible half alone
+recovers the axis to a small fraction of a degree.
+
+Where no mesh exists (a supplied-G(θ) run, a moving platform) or the branch axis
+is not confident, Phytograph falls back to the randomly-oriented-cylinder value
+(0.25) and labels it assumed. That fallback is sound rather than desperate:
+because a cylinder is symmetric about its axis, the coefficient spans only about
+±13% across *every* achievable branch-angle distribution, and on a realistically
+mixed canopy it lands within a few percent.
 
 Both LAD and WAD are **absolute** areas, not just a ratio. A discrete-return
 scan records the first thing each beam hits, so leaf and wood compete as

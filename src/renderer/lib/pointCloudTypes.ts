@@ -937,14 +937,17 @@ export interface LADResultEntry {
   };
   // Leaf/wood split summary. Absent (or hasWood false) => the source cloud had
   // no wood/leaf classification and every voxel's wood field is undefined.
-  // `gtheta` is the wood projection coefficient applied: the
-  // randomly-oriented-cylinder constant, ASSUMED rather than measured from this
-  // cloud. Carried so the panel can say so and a reader can reproduce the wood
-  // area from the leaf one.
+  // `gtheta` is the wood projection coefficient applied and `gthetaSource` says
+  // whether it was MEASURED from the triangulation's branch axis ('mesh') or
+  // ASSUMED ('default'). The panel must never let an assumption read as a
+  // measurement, so both travel together. `axisTriangles` is the evidence
+  // behind a measured value.
   wood?: {
     hasWood: boolean;
     totalWoodArea?: number;    // m², measured voxels only
     gtheta?: number;
+    gthetaSource?: string;
+    axisTriangles?: number;
   };
   // ---- Export support ----------------------------------------------------
   // These exist so a result can be written out faithfully; nothing renders them.

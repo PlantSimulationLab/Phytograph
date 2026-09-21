@@ -1837,9 +1837,13 @@ export interface LADResponse {
   // Total woody surface area over MEASURED voxels only (never under-sampled,
   // never filled) — the same rule total_leaf_area follows.
   total_wood_area?: number | null;
-  // The wood projection coefficient applied: the randomly-oriented-cylinder
-  // constant (Cauchy S/4), assumed rather than measured from the cloud.
+  // The wood projection coefficient applied, and where it came from:
+  // 'mesh' (measured from the branch axis the triangulation supplies) or
+  // 'default' (the randomly-oriented-cylinder assumption — no mesh, or no
+  // confident axis). wood_axis_triangles is the evidence behind a 'mesh' value.
   wood_gtheta?: number | null;
+  wood_gtheta_source?: string | null;
+  wood_axis_triangles?: number | null;
   // What the inversion inferred from target_count for pulses whose returns are
   // no longer in the cloud (a crop to the grid). hidden_after were placed beyond
   // the grid and counted as transmitted; hidden_ambiguous could not be placed

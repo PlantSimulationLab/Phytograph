@@ -316,8 +316,10 @@ What appears once a result carries a split:
   and PAD. The colourbar rescales and its label follows, so the legend always
   names the quantity on screen.
 - A **Leaf and wood area** box reports both totals and states the wood G(θ) it
-  applied, marked *assumed* — it is the randomly-oriented-cylinder value, not a
-  measurement of your cloud, and the panel never lets it read as one.
+  applied, marked *measured* (read from the triangulation's branch axis, with
+  the number of surface triangles behind it) or *assumed* (the
+  randomly-oriented-cylinder value, used when there is no mesh or no confident
+  axis). The panel never lets an assumption read as a measurement.
 - The export variable list gains wood area density, wood area, plant area
   density, wood fraction and wood G(θ).
 - **Profile & LAI** reports **WAI** and **PAI** beside LAI, and the summary and

@@ -289,6 +289,125 @@ def gtheta_wood_from_density(axis_density, theta_axis, beam_zenith) -> float:
     return float(min(1.0, max(1e-4, float(per_beam.mean()))))
 
 
+class WoodAxisAccumulator:
+    """Streaming estimator of a cloud's dominant branch AXIS from mesh normals.
+
+    WHY THIS EXISTS AND WHY IT IS SHAPED LIKE THIS. G_wood needs the branch axis,
+    and the LAD triangulation already measures orientation (see the note at the
+    top of this module: its triangle areas are WEIGHTS for averaging normals, not
+    a measurement of surface). So the axis can be read off the mesh -- but the
+    mesh must never be retained: `_do_lad_computation` deliberately streams its
+    triangles to a sink and drops them, because a large scan triangulates to tens
+    of millions of triangles (720 MB of vertices at 20 M).
+
+    Both constraints are satisfied by accumulating a 3x3 SCATTER MATRIX:
+
+      * it is ADDITIVE, so chunks and scans compose by summation, and
+      * it retains 72 bytes no matter how big the mesh is.
+
+    The axis itself is the eigenvector of the SMALLEST eigenvalue, because every
+    point on a cylinder's surface has a normal PERPENDICULAR to the axis. That is
+    also why a half-covered mesh is enough: a terrestrial scan only triangulates
+    the scanner-facing side, but a direction is not an area and the hidden half is
+    redundant by symmetry (measured: the visible half alone recovers the axis to
+    0.0000 degrees).
+
+    Accuracy is not the binding constraint -- G tolerates a 20-degree axis error
+    for 2% (measured), while 50 k triangles already pin the axis to 0.07 degrees.
+    So callers SUBSAMPLE before feeding this; see `_WOOD_AXIS_TRIANGLE_CAP` in
+    main.py. The cost is then flat in mesh size.
+    """
+
+    __slots__ = ("_scatter", "_n")
+
+    def __init__(self):
+        self._scatter = np.zeros((3, 3), dtype=np.float64)
+        self._n = 0
+
+    def add_triangles(self, vertices: np.ndarray) -> int:
+        """Accumulate a chunk of triangles, given as (T, 3, 3) or (T, 9) vertices.
+
+        Degenerate triangles (zero area, i.e. collinear or coincident vertices)
+        are skipped -- their normal is undefined, and `computeGtheta` skips them
+        for the same reason. Returns how many triangles were actually used.
+        """
+        v = np.asarray(vertices, dtype=np.float64)
+        if v.size == 0:
+            return 0
+        if v.ndim == 2 and v.shape[1] == 9:
+            v = v.reshape(-1, 3, 3)
+        if v.ndim != 3 or v.shape[1:] != (3, 3):
+            raise ValueError("vertices must be (T, 3, 3) or (T, 9)")
+        cross = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+        norm = np.linalg.norm(cross, axis=1)
+        ok = norm > 0
+        if not np.any(ok):
+            return 0
+        unit = cross[ok] / norm[ok, None]
+        # AREA-WEIGHTED, so a large branch facet counts for more than a small
+        # one -- the same role areas play in computeGtheta. `norm/2` IS the
+        # triangle area; it is a weight here and is never summed as an area.
+        area = 0.5 * norm[ok]
+        self._scatter += (unit * area[:, None]).T @ unit
+        self._n += int(ok.sum())
+        return int(ok.sum())
+
+    @property
+    def count(self) -> int:
+        """Triangles accumulated so far."""
+        return self._n
+
+    def axis(self):
+        """(axis unit vector, confidence) from what has been accumulated, or
+        (None, 0.0) when there is not enough to be meaningful.
+
+        The axis is the eigenvector of the SMALLEST eigenvalue: a cylinder's
+        surface normals all lie perpendicular to its axis, so the axis is the one
+        direction they avoid. (Taking the LARGEST is the natural mistake and
+        gives a direction in the normals' plane instead.)
+
+        `confidence` is ``1 - lambda_min / lambda_mid``, which asks whether the
+        normals genuinely avoid ONE direction (a cylinder population) rather than
+        being spread over all three (a contaminated or non-cylindrical one). It
+        is the guard against the failure mode that matters: leaf normals that
+        happen to ALIGN with the branch axis pull the estimate, and past ~20%
+        contamination the axis FLIPS ~90 degrees rather than degrading -- so the
+        caller must be able to refuse a low-confidence answer instead of
+        reporting a confidently wrong one.
+        """
+        if self._n < 3:
+            return None, 0.0
+        w, vecs = np.linalg.eigh(self._scatter)     # ascending
+        lam_min, lam_mid = float(w[0]), float(w[1])
+        if not (lam_mid > 0) or not np.all(np.isfinite(w)):
+            return None, 0.0
+        confidence = float(max(0.0, 1.0 - lam_min / lam_mid))
+        return vecs[:, 0], confidence
+
+
+def gtheta_wood_from_axis(axis, beam_zenith) -> float:
+    """G_wood for a single dominant branch axis over the fired beams.
+
+    The axis comes from `WoodAxisAccumulator`; the result is in this module's
+    TOTAL-SURFACE convention by construction, because `cylinder_G` is. Nothing
+    here rescales the triangulation's own G(theta) -- that number is an average
+    over the triangles that exist (roughly half a cylinder) and there is no
+    constant to convert it by; see the module docstring.
+    """
+    a = np.asarray(axis, dtype=float).reshape(1, 3)
+    inc = axis_inclination(a)
+    if inc.size == 0:
+        return WOOD_G_DEFAULT
+    tb = np.asarray(beam_zenith, dtype=float)
+    tb = tb[np.isfinite(tb)]
+    if tb.size == 0:
+        return WOOD_G_DEFAULT
+    if tb.size > 20_000:
+        tb = np.random.default_rng(0).choice(tb, 20_000, replace=False)
+    val = float(cylinder_G(tb, inc).mean())
+    return float(min(1.0, max(1e-4, val)))
+
+
 def theta_axis_grid() -> np.ndarray:
     """Midpoint inclination grid over (0, pi/2) for prescribed-density work.
     Midpoints, not edges, so a density with an endpoint singularity stays finite

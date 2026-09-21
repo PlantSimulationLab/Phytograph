@@ -8722,11 +8722,16 @@ class LADComputeResponse(BaseModel):
     # Total woody SURFACE area over MEASURED voxels only -- never under-sampled,
     # never filled, matching `total_leaf_area`.
     total_wood_area: Optional[float] = None
-    # The wood projection coefficient applied: the randomly-oriented-cylinder
-    # value (Cauchy S/4), which is within ~13% across every achievable
-    # branch-angle distribution and within 0-3% on a realistic mixed canopy.
-    # Echoed so a consumer can reproduce the wood area from the leaf one.
+    # The wood projection coefficient applied, and where it came from:
+    # "mesh" (measured from the branch axis the triangulation supplies) or
+    # "default" (the randomly-oriented-cylinder assumption, used when no mesh
+    # was produced or the axis was not confident). The constant is within ~13%
+    # across every achievable branch-angle distribution and 0-3% on a
+    # realistically mixed canopy, so a "default" result is approximate rather
+    # than wrong -- but it IS an assumption and says so.
     wood_gtheta: Optional[float] = None
+    wood_gtheta_source: Optional[str] = None
+    wood_axis_triangles: Optional[int] = None
     # "kriging" | "layer_mean" | "none" — which path the fill actually took, since
     # kriging degrades to a layer mean when the donors can't support a variogram.
     fill_method_used: Optional[str] = None
@@ -11245,16 +11250,182 @@ def _lad_cropped_return_stats(cloud) -> "Optional[dict]":
     return {k: int(v) for k, v in dict(st).items()}
 
 
+# Triangles sampled per run to estimate the branch axis. G_wood needs only a
+# DIRECTION, and the axis converges far faster than G needs: measured, 50 k
+# triangles pin it to 0.07 deg while G tolerates 20 deg for 2% error. Capping
+# here is what makes the cost FLAT in mesh size (0.16 s at 1 M triangles,
+# 1.84 s at 20 M) instead of growing with it.
+_WOOD_AXIS_TRIANGLE_CAP = 50_000
+
+# Below this, the normals do not convincingly avoid a single direction and the
+# axis is not trustworthy. The failure being guarded is not gentle: leaf normals
+# that ALIGN with the branch axis flip the estimate ~90 deg past roughly 20%
+# contamination (measured -18.4% in G), so a low-confidence answer must be
+# REFUSED rather than reported. See lad_wood.WoodAxisAccumulator.axis.
+_WOOD_AXIS_MIN_CONFIDENCE = 0.55
+# A single-axis cylinder G is mathematically confined to (0, 1/pi] -- 1/pi is the
+# broadside view, 0 is end-on -- and `cylinder_G` produces that by construction,
+# so there is nothing useful to range-check. (An earlier version checked
+# 0.23-0.29 here and REJECTED the correct answer on the fixture: that band is the
+# spread of G averaged over axis DISTRIBUTIONS, which is much narrower than what
+# a single axis can legitimately reach. The distinction is easy to lose.)
+_WOOD_G_MAX = 1.0 / math.pi
+
+
+class _WoodTriangleClassifier:
+    """Labels streamed triangles wood/leaf by EXACT vertex match to the source
+    points, and accumulates the wood ones' branch axis.
+
+    Why exact matching rather than a spatial search: Helios triangulates the hit
+    points themselves, so a triangle vertex IS an input point -- verified on the
+    real fixture as identical bit-for-bit in float32, 100% of samples. Hashing
+    the three float32 bit patterns to a uint64 and `searchsorted` is therefore
+    exact, needs no tolerance, and avoids building a KD-tree over millions of
+    points.
+
+    The per-scan hash/sort (~0.4 s at 3 M points) happens lazily on the first
+    chunk, so an unclassified run pays nothing.
+    """
+
+    __slots__ = ("_keys_sorted", "_order", "_classes", "_acc", "_rng", "_seen", "_used")
+
+    def __init__(self, points, classes):
+        import numpy as np
+        import lad_wood
+        pts = np.ascontiguousarray(np.asarray(points, dtype=np.float32)[:, :3])
+        keys = self._hash(pts)
+        self._order = np.argsort(keys, kind="stable")
+        self._keys_sorted = keys[self._order]
+        self._classes = np.rint(np.asarray(classes)).astype(np.int8)
+        self._acc = lad_wood.WoodAxisAccumulator()
+        self._rng = np.random.default_rng(0)
+        self._seen = 0       # triangles offered
+        self._used = 0       # triangles sampled and classified
+
+    @staticmethod
+    def _hash(xyz):
+        """Exact 3-float32 -> uint64 key. Mixes the raw bit patterns, so it is a
+        content hash of the coordinate, not a quantisation."""
+        import numpy as np
+        u = np.ascontiguousarray(xyz).view(np.uint32).reshape(-1, 3).astype(np.uint64)
+        return (u[:, 0] * np.uint64(0x9E3779B97F4A7C15)
+                ^ u[:, 1] * np.uint64(0xC2B2AE3D27D4EB4F)
+                ^ u[:, 2] * np.uint64(0x165667B19E3779F9))
+
+    def add_chunk(self, vertices) -> None:
+        """One streamed chunk, (T, 9) or (T, 3, 3). SUBSAMPLES FIRST -- that is
+        the whole performance design; everything after costs the same whatever
+        the mesh size."""
+        import numpy as np
+        v = np.asarray(vertices)
+        if v.size == 0:
+            return
+        if v.ndim == 2 and v.shape[1] == 9:
+            v = v.reshape(-1, 3, 3)
+        self._seen += len(v)
+        remaining = _WOOD_AXIS_TRIANGLE_CAP - self._used
+        if remaining <= 0:
+            return
+        if len(v) > remaining:
+            v = v[self._rng.choice(len(v), remaining, replace=False)]
+
+        flat = np.ascontiguousarray(v.reshape(-1, 3), dtype=np.float32)
+        pos = np.searchsorted(self._keys_sorted, self._hash(flat))
+        np.clip(pos, 0, len(self._keys_sorted) - 1, out=pos)
+        lab = self._classes[self._order[pos]].reshape(-1, 3)
+        # Majority of the three vertices. A triangle whose vertices DISAGREE
+        # straddles a leaf/wood junction: its normal belongs to neither medium,
+        # so it is excluded rather than guessed into one.
+        wood = (lab == WOOD_CLASS_WOOD).sum(axis=1) >= 2
+        if np.any(wood):
+            self._used += self._acc.add_triangles(v[wood])
+
+    def resolve(self, beam_zenith):
+        """(g_wood, source, n_triangles). `source` is 'mesh' when the axis was
+        measured and passed both guards, else 'default'."""
+        import lad_wood
+        axis, confidence = self._acc.axis()
+        if axis is None or confidence < _WOOD_AXIS_MIN_CONFIDENCE:
+            return lad_wood.WOOD_G_DEFAULT, "default", self._acc.count
+        g = lad_wood.gtheta_wood_from_axis(axis, beam_zenith)
+        # Only a genuinely impossible value falls back here; see _WOOD_G_MAX.
+        if not (0.0 < g <= _WOOD_G_MAX + 1e-9):
+            return lad_wood.WOOD_G_DEFAULT, "default", self._acc.count
+        return g, "mesh", self._acc.count
+
+
+def _pooled_hit_beam_zeniths(scans_arrays):
+    """Beam zenith angles (radians) pooled over every scan, HITS ONLY, or None.
+
+    Two constraints, each of which has its own past bug, so they are factored
+    here rather than restated per caller:
+
+      * `_directions_from_origin` returns SPHERICAL [radius, elevation, azimuth],
+        so the zenith comes from the ELEVATION column. Feeding this array to the
+        Cartesian `beam_zenith_samples` divides an angle by a range in metres and
+        collapses every beam toward 90 degrees (~-29% G error on a planophile
+        canopy, and spherical G is 0.5 at every zenith so a spherical-only test
+        cannot reveal it).
+      * MISSES ARE EXCLUDED. A projection coefficient weights the kernel by the
+        zeniths of beams that actually met something; misses concentrate at the
+        angles that see sky, so pooling them tilts the distribution.
+    """
+    import numpy as np
+    import lad_gtheta
+    beam_dirs = []
+    for s in scans_arrays:
+        d = s.get("dirs")
+        if d is None or len(d) == 0:
+            continue
+        labels, vals = s.get("labels"), s.get("vals")
+        if (labels is not None and vals is not None and _MISS_SLUG in labels
+                and np.asarray(vals).shape[0] == len(d)):
+            hit = np.asarray(vals)[:, labels.index(_MISS_SLUG)] == 0
+            d = np.asarray(d)[hit]
+        if len(d) > 0:
+            beam_dirs.append(d)
+    if not beam_dirs:
+        return None
+    return lad_gtheta.beam_zenith_from_spherical(np.vstack(beam_dirs))
+
+
+def _make_wood_axis_classifier(scan_xyz_for_counts, scan_class_for_counts):
+    """A `_WoodTriangleClassifier` over every classified scan's points, or None
+    when the cloud carries no wood/leaf classification (in which case nothing is
+    built and the run pays nothing).
+
+    Scans are concatenated because the axis is pooled over the cloud: one
+    coefficient is applied to every voxel, so there is no reason to keep the
+    scans apart, and a triangle's vertex matches whichever scan contributed it.
+    """
+    import numpy as np
+    pts, cls = [], []
+    for xyz, c in zip(scan_xyz_for_counts, scan_class_for_counts):
+        if c is None or xyz is None:
+            continue
+        xyz = np.asarray(xyz)
+        c = np.asarray(c)
+        if xyz.size == 0 or c.shape[0] != xyz.shape[0]:
+            continue
+        pts.append(xyz[:, :3])
+        cls.append(c)
+    if not pts:
+        return None
+    return _WoodTriangleClassifier(np.vstack(pts), np.concatenate(cls))
+
+
 def _resolve_wood_split(scans_arrays, scan_xyz_for_counts, scan_class_for_counts,
                         cell_centers, cell_sizes, grid_rotation_rad,
-                        column_offsets, ndiv, warnings):
+                        column_offsets, ndiv, warnings, wood_axis=None):
     """Resolve the leaf/wood split for one LAD run, or None when the cloud
     carries no wood/leaf classification.
 
     Returns a dict with:
       wood_counts / leaf_counts  (n_cells,) int64 -- intercepted returns per class
       wood_fraction              (n_cells,) float -- wood share of interceptions
-      g_wood                     float  -- wood projection coefficient (constant)
+      g_wood                     float  -- wood projection coefficient
+      g_wood_source              'mesh' (measured from the branch axis) | 'default'
+      wood_axis_triangles        int    -- wood triangles behind a 'mesh' value
 
     WHY THE SPLIT IS BY INTERCEPTION COUNT. One transmission P per voxel cannot
     separate two media on its own -- it is one equation in two unknowns. The
@@ -11327,15 +11498,32 @@ def _resolve_wood_split(scans_arrays, scan_xyz_for_counts, scan_class_for_counts
     np.divide(wood_counts, classified, out=wood_fraction,
               where=classified > 0)
 
-    # G_wood is the randomly-oriented-cylinder value, not an estimate from the
-    # cloud. A branch-axis estimator was built, measured and REMOVED; see the
-    # note in `lad_wood` for the numbers. The short version: across every
-    # achievable branch-angle distribution this coefficient is within ~13%, and
-    # on a realistic mixed canopy within 0-3% -- while the error that actually
-    # dominates a trunk-heavy cloud is spatial segregation at -21% to -53%
-    # ([[project_wood_partition_by_count_bias]]). Chasing the smaller term with
-    # a multi-second neighbourhood PCA was the wrong trade.
-    g_wood = lad_wood.WOOD_G_DEFAULT
+    # G_wood from the branch AXIS the triangulation already measured, when there
+    # is one. The mesh is an ORIENTATION measurement (its areas are weights for
+    # averaging normals, never a surface total), and a cylinder's axis is the
+    # direction its surface normals avoid -- so the scanner-facing half is
+    # enough, and the axis converts analytically to this module's total-surface
+    # convention. Measured on the woodcube fixture: -0.02% against truth, where
+    # the constant is -21.4%.
+    #
+    # Falls back to the randomly-oriented-cylinder constant whenever the axis
+    # cannot be trusted or was never measured (supplied-G(theta) runs, a reused
+    # mesh, too few triangles, or low confidence). That constant is within ~13%
+    # across every achievable branch-angle distribution and 0-3% on a realistic
+    # mixed canopy, so the fallback is sound -- but it IS an assumption, and
+    # `g_wood_source` says which one the caller got.
+    g_wood, g_wood_source, n_axis_tri = lad_wood.WOOD_G_DEFAULT, "default", 0
+    if wood_axis is not None:
+        beam_zen = _pooled_hit_beam_zeniths(scans_arrays)
+        if beam_zen is not None and len(beam_zen):
+            g_wood, g_wood_source, n_axis_tri = wood_axis.resolve(beam_zen)
+    if g_wood_source == "default" and wood_axis is not None:
+        warnings.append(
+            "Wood area density used the assumed projection coefficient "
+            f"G={lad_wood.WOOD_G_DEFAULT} (randomly-oriented cylinders): the "
+            "triangulation did not yield a confident branch axis. Across every "
+            "achievable branch-angle distribution this coefficient is within "
+            "about 13%, so the wood area is approximate rather than wrong.")
 
     if int(wood_counts.sum()) == 0:
         warnings.append(
@@ -11348,6 +11536,8 @@ def _resolve_wood_split(scans_arrays, scan_xyz_for_counts, scan_class_for_counts
         "leaf_counts": leaf_counts,
         "wood_fraction": wood_fraction,
         "g_wood": float(g_wood),
+        "g_wood_source": g_wood_source,
+        "wood_axis_triangles": int(n_axis_tri),
     }
 
 
@@ -11364,10 +11554,30 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
     minutes-long) Delaunay recompute. It is invalid for moving-platform scans
     (which can't be triangulated) and is rejected there.
 
-    LAD is NOT a sum of triangle areas. The triangulation supplies the per-cell
-    G-function (the leaf-projection coefficient for Beer's law); Helios then
-    traces beam paths through the voxel grid and inverts Beer's law per voxel to
-    recover leaf area density. Unlike triangulation, the grid is required.
+    LAD is NOT a sum of triangle areas. The triangulation is an ORIENTATION
+    measurement, not an area measurement: it supplies the per-cell G-function
+    (the mean projection coefficient for Beer's law) because a triangle has a
+    NORMAL. Helios then traces beam paths through the voxel grid and inverts
+    Beer's law per voxel to recover area density. Unlike triangulation, the grid
+    is required.
+
+    Say that twice, because the area reading is the standing trap here and has
+    produced wrong conclusions more than once. Inside `computeGtheta` the
+    triangle areas appear only as WEIGHTS when averaging normals -- a large
+    surface should count for more than a small one -- and are never a measure of
+    how much surface exists. Two corollaries that follow from this and are easy
+    to miss:
+
+      * A mesh that covers only PART of an element is still a fine orientation
+        estimator. A terrestrial scan triangulates only the scanner-facing side,
+        so G(theta) as reported here is an average over roughly half a convex
+        element. That is a fact about this function's output convention, NOT a
+        limit on what the mesh can tell you: a direction is not an area.
+      * Whenever you want a coefficient in a DIFFERENT convention (e.g. wood's
+        total-surface G), take the mesh's NORMALS and convert analytically.
+        Do not try to rescale this function's G by a coverage factor -- for a
+        cylinder the visible fraction is ~1/2 but it varies with range, beam
+        divergence, occlusion and Lmax, so there is no constant to divide by.
 
     Point data is fed to Helios straight from the in-RAM session arrays via the
     bulk addHitPointsWithData FFI — no ASCII file, no disk round-trip — for both
@@ -11913,6 +12123,11 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         supplied_gtheta = None      # scalar, broadcast to every voxel
         gtheta_per_cell = None      # per-voxel list (vertical-profile override)
         gtheta_profile_out = None   # per z-level G(theta), echoed to the response
+        # Branch-axis accumulator for G_wood, set on every path that HAS a mesh:
+        # the fresh triangulation (via its streaming sink) and the reused mesh
+        # (from the soup it injects). A supplied-G(theta) run has no mesh at all
+        # and leaves this None, falling back to the constant.
+        wood_axis = None
         if use_supplied_gtheta:
             # A reused triangulation is meaningless when we invert from a supplied
             # G(theta) (no mesh is used). Reject loudly rather than silently ignore.
@@ -12013,6 +12228,17 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             verts, tri_idx, scan_ids = reuse_mesh
             soup = verts[tri_idx].reshape(-1).astype(np.float32, copy=False)
             cloud.setExternalTriangulation(soup, scan_ids)
+            # Measure the branch axis from the SAME mesh, for G_wood. This path
+            # is the one the UI normally takes (the dialog's "run a new
+            # triangulation" runs Helios first and then REUSES that mesh), so
+            # skipping it here would leave the measurement almost never firing.
+            # `soup` is already materialised for setExternalTriangulation, so
+            # reading it costs no extra transfer; the classifier subsamples to
+            # its cap, so the work is bounded regardless of mesh size.
+            wood_axis = _make_wood_axis_classifier(
+                scan_xyz_for_counts, scan_class_for_counts)
+            if wood_axis is not None:
+                wood_axis.add_chunk(np.asarray(soup, dtype=np.float32).reshape(-1, 9))
             if cloud.getTriangleCount() == 0:
                 return {
                     "success": False,
@@ -12025,22 +12251,44 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                 }
         else:
             _ckpt()
-            _report(0.55, "Triangulating hit points")
             # The inversion needs only the per-voxel leaf-angle sums, which the
             # cloud keeps with or without the mesh, and nothing below reads the
             # triangles. So stream each scan's triangles to a sink that counts and
             # drops them, instead of retaining the whole mesh through the inversion.
             triangles_streamed = [0]
             tri_streams = _lad_triangulation_streams()
+            # The same stream also measures the branch AXIS for G_wood, when the
+            # cloud carries a wood/leaf classification. It rides the existing
+            # sink deliberately: reading the mesh back with
+            # getTriangleVerticesAll() would retain and transfer the whole thing
+            # (720 MB of vertices at 20 M triangles), undoing the very design
+            # this sink exists for. The classifier subsamples to a fixed cap, so
+            # its cost is flat in mesh size and it retains a 3x3 matrix.
+            wood_axis = _make_wood_axis_classifier(
+                scan_xyz_for_counts, scan_class_for_counts)
+            _report(0.55, "Triangulating hit points")
             if tri_streams:
-                cloud.setTriangulationSink(
-                    lambda _scan_id, vertices, _ids: triangles_streamed.__setitem__(
-                        0, triangles_streamed[0] + int(len(vertices))))
+                def _tri_sink(_scan_id, vertices, _ids):
+                    triangles_streamed[0] += int(len(vertices))
+                    if wood_axis is not None:
+                        wood_axis.add_chunk(vertices)
+                cloud.setTriangulationSink(_tri_sink)
             try:
                 cloud.triangulateHitPoints(request.lmax, request.max_aspect_ratio)
             finally:
                 if tri_streams:
                     cloud.setTriangulationSink(None)
+            if wood_axis is not None and not tri_streams:
+                # Streaming disabled (PHYTOGRAPH_LAD_TRI_STREAM=0): the mesh is
+                # retained anyway on this path, so read it once rather than
+                # forgoing the measurement.
+                try:
+                    verts, _sids = cloud.getTriangleVerticesAll()
+                    wood_axis.add_chunk(
+                        np.asarray(verts, dtype=np.float32).reshape(-1, 9))
+                except Exception as exc:  # noqa: BLE001 - fall back to the constant
+                    print(f"[lad] wood axis unavailable without streaming: {exc}",
+                          flush=True)
             if (triangles_streamed[0] if tri_streams else cloud.getTriangleCount()) == 0:
                 return {
                     "success": False,
@@ -12108,7 +12356,7 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
         wood_split = _resolve_wood_split(
             scans_arrays, scan_xyz_for_counts, scan_class_for_counts,
             cell_centers, cell_sizes, grid_rotation_rad, column_offsets,
-            (grid_nx, grid_ny, grid_nz), warnings)
+            (grid_nx, grid_ny, grid_nz), warnings, wood_axis=wood_axis)
 
         _ckpt()
         _report(0.80, "Inverting Beer's law")
@@ -12505,6 +12753,13 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             "has_wood_classification": wood_split is not None,
             "total_wood_area": (total_wood_area if wood_split is not None else None),
             "wood_gtheta": (wood_split["g_wood"] if wood_split is not None else None),
+            # 'mesh' => measured from the branch axis the triangulation already
+            # gives us; 'default' => the randomly-oriented-cylinder assumption.
+            # A consumer must be able to tell a measurement from an assumption.
+            "wood_gtheta_source": (wood_split["g_wood_source"]
+                                   if wood_split is not None else None),
+            "wood_axis_triangles": (wood_split["wood_axis_triangles"]
+                                    if wood_split is not None else None),
             "occlusion_threshold_m": occlusion_threshold,
             "under_sampled_count": under_sampled_count,
             "filled_count": filled_count,

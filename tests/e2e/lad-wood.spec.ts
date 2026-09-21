@@ -79,16 +79,20 @@ test.afterAll(async () => {
   await ctx?.close();
 });
 
-test('reports leaf and wood area, and marks the wood G(theta) as assumed', async () => {
+test('reports leaf and wood area, and measures the wood G(theta) from the mesh', async () => {
   const { page } = ctx;
   const summary = page.getByTestId('lad-wood-summary');
   await expect(summary).toBeVisible();
 
-  // The coefficient must be stated, and stated as ASSUMED — it is the
-  // randomly-oriented-cylinder constant, not measured from this cloud.
+  // This fixture's wood is all-vertical tubes, so the branch axis IS measurable
+  // from the triangulation and the panel must say MEASURED, not assumed. Its
+  // true G is ~0.318; the randomly-oriented assumption would read 0.250.
+  const source = await summary.getAttribute('data-wood-gtheta-source');
+  expect(source).toBe('mesh');
   const g = parseFloat((await summary.getAttribute('data-wood-gtheta'))!);
-  expect(g).toBeCloseTo(0.25, 6);
-  expect((await summary.textContent()) ?? '').toContain('assumed');
+  expect(g).toBeGreaterThan(0.28);          // decisively above the 0.25 assumption
+  expect(g).toBeLessThanOrEqual(1 / Math.PI + 1e-6);  // a cylinder G cannot exceed 1/pi
+  expect((await summary.textContent()) ?? '').toContain('measured');
 
   // Both media present, stated in m^2. A split that collapsed to leaf-only
   // would render this box with a wood total of 0 and fail here.
