@@ -276,3 +276,213 @@ test('reports a bad expression without creating a field', async () => {
   await expect(page.locator('[data-testid="scalar-field-row"][data-slug="evil"]'))
     .toHaveCount(0);
 });
+
+// ── Several clouds at once ──────────────────────────────────────────────────
+//
+// The tool used to be a silent dead click with 2+ scans selected: the toolbar
+// button stayed enabled (`requires: 'cloud'` is satisfied by one selected
+// cloud) while the panel's mount gated on `selectedIds.size === 1`, so clicking
+// flipped the state and rendered nothing. It now acts on a SET of clouds it
+// picks itself.
+//
+// scalar-bands-b.xyz is deliberately DIFFERENT from scalar-bands.xyz so the
+// pooled numbers cannot coincidentally equal either cloud's own:
+//
+//     A (scalar-bands)    1000 pts, band 1..10, mean 5.5
+//     B (scalar-bands-b)   500 pts, band 1..5,  mean 3.0
+//     pooled              1500 pts,             mean 4.6667
+//
+// 4.6667 is reachable only by pooling. Returning A's stats (5.5), B's stats
+// (3.0), or the mean-of-means (4.25) all fail.
+
+const FIXTURE_B = join(repoRoot, 'tests', 'e2e', 'fixtures', 'scalar-bands-b.xyz');
+
+/** Import both fixtures and leave BOTH scan rows selected in the viewport. */
+async function importBoth(app: LaunchedApp['app'], page: LaunchedApp['page']) {
+  await importFixture(app, page);
+  await importFiles(app, page, 'import-point-cloud', FIXTURE_B);
+  await completeImportWizard(page);
+
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="scalar-bands"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="scalar-bands-b"]');
+  await expect(rowB).toBeVisible({ timeout: 20_000 });
+  expect(parseInt((await rowB.getAttribute('data-point-count')) ?? '0', 10)).toBe(500);
+
+  // Importing B auto-selects it; ctrl-click A to select both.
+  await rowA.click({ modifiers: ['ControlOrMeta'] });
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(rowB).toHaveAttribute('data-selected', 'true');
+  return { rowA, rowB };
+}
+
+/** The picker row for one cloud, matched EXACTLY.
+ *
+ * Not `hasText`: "scalar-bands" is a prefix of "scalar-bands-b", so a substring
+ * match resolves to both rows and unchecking picks whichever comes first. */
+function pickerRow(page: LaunchedApp['page'], name: string) {
+  return page.locator(`[data-testid="scalar-scan-row"][data-label="${name}"]`);
+}
+
+/** Uncheck one cloud in the panel's own picker (NOT the viewport selection). */
+async function uncheckCloud(page: LaunchedApp['page'], name: string) {
+  const row = pickerRow(page, name);
+  await expect(row).toHaveCount(1);
+  await row.locator('input[type="checkbox"]').uncheck();
+}
+
+async function checkCloud(page: LaunchedApp['page'], name: string) {
+  const row = pickerRow(page, name);
+  await expect(row).toHaveCount(1);
+  await row.locator('input[type="checkbox"]').check();
+}
+
+/** Open the Stats tab on `slug` and wait for the numbers to land. */
+async function readStats(page: LaunchedApp['page'], slug: string) {
+  await page.getByTestId('scalar-fields-tab-stats').click();
+  await page.getByTestId('scalar-stats-field').selectOption(slug);
+  await expect(page.getByTestId('scalar-stats')).toBeVisible({ timeout: 30_000 });
+}
+
+test('opens and works with two clouds selected', async () => {
+  const { app, page } = session;
+  await importBoth(app, page);
+
+  // The regression itself: the button must not be a dead click.
+  await openScalarPanel(page);
+  await expect(page.locator('[data-testid="scalar-field-row"][data-slug="band"]'))
+    .toBeVisible();
+
+  // Both clouds arrived in the picker, checked, seeded from the selection.
+  await expect(page.locator('[data-testid="scalar-scan-row"][data-checked="true"]'))
+    .toHaveCount(2);
+});
+
+test('pools statistics across the checked clouds', async () => {
+  const { app, page } = session;
+  const { rowA, rowB } = await importBoth(app, page);
+  await openScalarPanel(page);
+
+  await readStats(page, 'band');
+  // Only pooling produces these. A alone is 1000/5.5, B alone 500/3.0, and the
+  // mean of the two means is 4.25.
+  expect(await statValue(page, 'count')).toBe(1500);
+  expect(await statValue(page, 'mean')).toBeCloseTo(4.6667, 3);
+  expect(await statValue(page, 'min')).toBeCloseTo(1, 5);
+  expect(await statValue(page, 'max')).toBeCloseTo(10, 5);
+  await expect(page.getByTestId('scalar-stats-pooled'))
+    .toHaveAttribute('data-scan-count', '2');
+
+  // Unchecking B in the PICKER re-measures over A alone …
+  await uncheckCloud(page, 'scalar-bands-b');
+  await expect.poll(async () => statValue(page, 'count'), { timeout: 30_000 })
+    .toBe(1000);
+  expect(await statValue(page, 'mean')).toBeCloseTo(5.5, 4);
+
+  // … and does NOT touch the viewport selection. The picker is the tool's own
+  // input, not a second way to select things in the scene.
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(rowB).toHaveAttribute('data-selected', 'true');
+});
+
+test('computes a derived field on every checked cloud', async () => {
+  const { app, page } = session;
+  await importBoth(app, page);
+  await openScalarPanel(page);
+
+  await page.getByTestId('scalar-fields-tab-compute').click();
+  await page.getByTestId('scalar-compute-expression').fill('band * 2');
+  await page.getByTestId('scalar-compute-slug').fill('twice');
+  await page.getByTestId('scalar-compute-run').click();
+
+  // Lands on the pooled stats for the new field: band*2 over both clouds.
+  await expect(page.getByTestId('scalar-stats')).toBeVisible({ timeout: 90_000 });
+  await expect.poll(async () => statValue(page, 'count'), { timeout: 30_000 })
+    .toBe(1500);
+  expect(await statValue(page, 'mean')).toBeCloseTo(9.3333, 3);
+
+  // It really landed on BOTH, not just the first: read each cloud on its own
+  // through the picker rather than reaching into window state.
+  await uncheckCloud(page, 'scalar-bands-b');
+  await expect.poll(async () => statValue(page, 'count'), { timeout: 30_000 })
+    .toBe(1000);
+  expect(await statValue(page, 'mean')).toBeCloseTo(11, 4);
+
+  await checkCloud(page, 'scalar-bands-b');
+  await uncheckCloud(page, 'scalar-bands');
+  await expect.poll(async () => statValue(page, 'count'), { timeout: 30_000 })
+    .toBe(500);
+  expect(await statValue(page, 'mean')).toBeCloseTo(6, 4);
+});
+
+test('hides a field the other checked cloud does not carry', async () => {
+  const { app, page } = session;
+  await importBoth(app, page);
+  await openScalarPanel(page);
+
+  // Derive a field on A alone.
+  await uncheckCloud(page, 'scalar-bands-b');
+  await page.getByTestId('scalar-fields-tab-compute').click();
+  await page.getByTestId('scalar-compute-expression').fill('band + 1');
+  await page.getByTestId('scalar-compute-slug').fill('only_a');
+  await page.getByTestId('scalar-compute-run').click();
+  await expect(page.getByTestId('scalar-stats')).toBeVisible({ timeout: 90_000 });
+
+  await page.getByTestId('scalar-fields-tab-fields').click();
+  await expect(page.locator('[data-testid="scalar-field-row"][data-slug="only_a"]'))
+    .toHaveCount(1);
+
+  // Re-check B: the field is not on every checked cloud, so it is not offered —
+  // and the panel says how many it hid rather than leaving it a mystery.
+  await checkCloud(page, 'scalar-bands-b');
+  await expect(page.locator('[data-testid="scalar-field-row"][data-slug="only_a"]'))
+    .toHaveCount(0, { timeout: 30_000 });
+  const note = page.getByTestId('scalar-omitted-note').first();
+  await expect(note).toBeVisible();
+  await expect(note).toHaveAttribute('data-count', '1');
+});
+
+test('refuses to pool coordinates across clouds, but measures them on one', async () => {
+  const { app, page } = session;
+  await importBoth(app, page);
+  await openScalarPanel(page);
+
+  // Each cloud stores z in its own frame, so a pooled z would average
+  // positions that are not in the same frame.
+  const zRow = page.locator('[data-testid="scalar-field-row"][data-slug="z"]');
+  await expect(zRow).toHaveAttribute('data-blocked', 'true');
+
+  // On a single cloud it is an ordinary measurable field again.
+  await uncheckCloud(page, 'scalar-bands-b');
+  await expect(zRow).not.toHaveAttribute('data-blocked', 'true', { timeout: 30_000 });
+  await readStats(page, 'z');
+  expect(await statValue(page, 'count')).toBe(1000);
+});
+
+test('renames a field on every checked cloud', async () => {
+  const { app, page } = session;
+  await importBoth(app, page);
+  await openScalarPanel(page);
+
+  // `band` is imported on both clouds, so a rename must reach both or the two
+  // stop sharing a slug and the field drops out of the list entirely.
+  await page.locator('[data-testid="scalar-field-row"][data-slug="band"]').hover();
+  await page.getByTestId('scalar-field-menu-band').click();
+  await page.getByTestId('scalar-field-rename-band').click();
+  const nameInput = page.getByTestId('scalar-field-name-input-band');
+  await expect(nameInput).toBeVisible();
+  await nameInput.fill('level');
+  await page.getByTestId('scalar-field-name-apply-band').click();
+
+  const renamed = page.locator('[data-testid="scalar-field-row"][data-slug="level"]');
+  await expect(renamed).toHaveCount(1, { timeout: 60_000 });
+  // Still listed with BOTH clouds checked — which is only true if both were
+  // renamed. A half-applied rename would leave neither name in the list.
+  await expect(page.locator('[data-testid="scalar-scan-row"][data-checked="true"]'))
+    .toHaveCount(2);
+  await expect(page.locator('[data-testid="scalar-field-row"][data-slug="band"]'))
+    .toHaveCount(0);
+
+  await readStats(page, 'level');
+  expect(await statValue(page, 'count')).toBe(1500);
+  expect(await statValue(page, 'mean')).toBeCloseTo(4.6667, 3);
+});

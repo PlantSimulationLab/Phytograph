@@ -357,3 +357,209 @@ def test_derived_field_is_exportable(client, sess, tmp_path):
     # Spot-check one value survived the round trip.
     rows = [r for r in text.splitlines()[1:] if r.strip()]
     assert float(rows[0].split(",")[-1]) == pytest.approx(2.0)
+
+
+# ── Aggregate statistics across sessions ────────────────────────────────────
+
+
+@pytest.fixture
+def sess_b(monkeypatch):
+    """A SECOND session, deliberately different from `sess`, for pooling.
+
+    Same deliberate layout (hits / one deleted / one miss) so the mask has
+    something to exclude on both sides, but different values and a different
+    length — so a pooled statistic cannot coincidentally equal either session's
+    own, and a test asserting the pooled number fails against a backend that
+    returns just one of them.
+
+    Layout (5 points):
+
+        idx 0..2  hits, alive   intensity_col = 10, 20, 30
+        idx 3     hit, DELETED  intensity_col = 40
+        idx 4     MISS          intensity_col = 999
+    """
+    n = 5
+    positions = np.zeros((n, 3), dtype=np.float64)
+    positions[:, 2] = np.arange(n, dtype=np.float64)
+    positions[4] = [0.0, 0.0, 1000.0]
+
+    deleted = np.zeros(n, dtype=bool)
+    deleted[3] = True
+
+    is_miss = np.zeros(n, dtype=np.float32)
+    is_miss[4] = 1.0
+
+    extras = {
+        "intensity_col": np.array([10, 20, 30, 40, 999], dtype=np.float32),
+        "only_b": np.arange(n, dtype=np.float32),
+        main._MISS_SLUG: is_miss,
+    }
+    meta = [{"slug": "intensity_col", "label": "Reflectance [dB]"},
+            {"slug": "only_b", "label": "Only B"},
+            {"slug": main._MISS_SLUG, "label": "Miss"}]
+
+    s = main.CloudSession(
+        session_id="test-sf-b", source_path="", ascii_format=None,
+        column_plan=None, positions=positions, colors=None, intensity=None,
+        extras=extras, extra_dims_meta=meta, deleted=deleted,
+        deleted_history=[], octree_cache_id=None, created_at=0.0,
+    )
+    main._cloud_sessions[s.session_id] = s
+    yield s
+    main._cloud_sessions.pop(s.session_id, None)
+
+
+def agg(client, session_ids, slug, **kw):
+    body = {"session_ids": session_ids, "slug": slug}
+    body.update(kw)
+    return client.post("/api/cloud/scalar_fields/stats", json=body)
+
+
+def test_pooled_stats_equal_stats_over_the_concatenation(client, sess, sess_b):
+    """The defining property: pooling is describe() over the concatenation.
+
+    The expected array is built here by hand from the two fixtures rather than
+    read back from the endpoint, so this fails if the handler reorders,
+    re-masks, or (the classic) averages the two sessions' means.
+    """
+    import scalar_fields
+
+    a = sess.extras["intensity_col"][
+        main._session_editable_mask_locked(sess)].astype(np.float64)
+    b = sess_b.extras["intensity_col"][
+        main._session_editable_mask_locked(sess_b)].astype(np.float64)
+    expected = scalar_fields.describe(np.concatenate([a, b]))
+
+    res = agg(client, [sess.session_id, sess_b.session_id], "intensity_col")
+    assert res.status_code == 200, res.text
+    got = res.json()["stats"]
+
+    for key in ("count", "finite_count", "min", "max", "mean", "std",
+                "median", "p25", "p75"):
+        assert got[key] == pytest.approx(expected[key]), key
+
+    # And it is genuinely a POOL, not either input: 6 alive hits (1..6, sum 21)
+    # plus 3 alive hits (10, 20, 30, sum 60) = 9 values summing to 81, mean 9.0.
+    assert got["count"] == 9
+    assert got["mean"] == pytest.approx(9.0)
+    # Neither session alone produces that.
+    assert got["mean"] != pytest.approx(float(np.mean(a)))
+    assert got["mean"] != pytest.approx(float(np.mean(b)))
+    # Nor does the mean of the two means — the tempting wrong implementation.
+    assert got["mean"] != pytest.approx(
+        (float(np.mean(a)) + float(np.mean(b))) / 2.0)
+
+
+def test_pooled_stats_exclude_misses_and_deleted(client, sess, sess_b):
+    """Masking must happen per session BEFORE the concatenation.
+
+    Both fixtures park a miss at intensity_col=999 and delete one ordinary
+    point. If the handler concatenated raw columns and masked afterwards (or
+    not at all), 999 would set the maximum and the count would be 13.
+    """
+    res = agg(client, [sess.session_id, sess_b.session_id], "intensity_col")
+    assert res.status_code == 200, res.text
+    got = res.json()["stats"]
+
+    assert got["max"] == pytest.approx(30.0)      # not 999
+    assert got["count"] == 9                      # not 13 (8 + 5)
+
+    # The per-source counts add up to it, and each excludes its own miss +
+    # deleted point.
+    sources = res.json()["sources"]
+    assert [s["count"] for s in sources] == [6, 3]
+    assert sum(s["count"] for s in sources) == got["count"]
+
+
+def test_pooled_single_session_matches_the_single_session_route(client, sess):
+    """One id must give exactly what the per-session route gives.
+
+    Guards the two implementations against drifting apart.
+    """
+    one = client.get(
+        f"/api/cloud/session/{sess.session_id}/scalar_fields/intensity_col/stats")
+    assert one.status_code == 200, one.text
+    many = agg(client, [sess.session_id], "intensity_col")
+    assert many.status_code == 200, many.text
+    assert many.json()["stats"] == one.json()["stats"]
+
+
+@pytest.mark.parametrize("slug", ["x", "y", "z"])
+def test_pooled_coordinates_refused_across_sessions(client, sess, sess_b, slug):
+    """Coordinates live in each session's own frame, so pooling them is wrong.
+
+    Refused rather than warned about: the pooled mean of two clouds at
+    different global shifts looks like a perfectly ordinary number.
+    """
+    res = agg(client, [sess.session_id, sess_b.session_id], slug)
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert slug in detail and "frame" in detail.lower()
+
+
+@pytest.mark.parametrize("slug", ["x", "y", "z"])
+def test_pooled_coordinates_allowed_for_one_session(client, sess, slug):
+    """The refusal is about MIXING frames, so a single cloud is unaffected."""
+    res = agg(client, [sess.session_id], slug)
+    assert res.status_code == 200, res.text
+    assert res.json()["stats"]["count"] == 6
+
+
+def test_pooled_reports_sessions_missing_the_field(client, sess, sess_b):
+    """A field on only one cloud still measures, and says who lacked it.
+
+    200 rather than 400: the renderer only offers intersection fields, so
+    reaching here means a race (a sibling's field deleted between the listing
+    and this call), and degrading beats blanking the tab.
+    """
+    res = agg(client, [sess.session_id, sess_b.session_id], "only_b")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["missing_session_ids"] == [sess.session_id]
+    assert [s["session_id"] for s in body["sources"]] == [sess_b.session_id]
+    assert body["stats"]["count"] == 3
+
+
+def test_pooled_field_on_no_session_is_404(client, sess, sess_b):
+    res = agg(client, [sess.session_id, sess_b.session_id], "nonexistent")
+    assert res.status_code == 404, res.text
+
+
+def test_pooled_requires_at_least_one_session(client):
+    res = agg(client, [], "intensity_col")
+    assert res.status_code == 400, res.text
+
+
+def test_pooled_requires_a_slug(client, sess):
+    res = agg(client, [sess.session_id], "   ")
+    assert res.status_code == 400, res.text
+
+
+def test_pooled_unknown_session_is_404(client, sess):
+    res = agg(client, [sess.session_id, "no-such-session"], "intensity_col")
+    assert res.status_code == 404, res.text
+
+
+def test_pooled_duplicate_session_ids_counted_once(client, sess):
+    """A doubled id must not double that cloud's weight.
+
+    The mean survives duplication unchanged, which is exactly why this needs
+    its own test — the histogram and the counts do not.
+    """
+    res = agg(client, [sess.session_id, sess.session_id], "intensity_col")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["session_ids"] == [sess.session_id]
+    assert body["stats"]["count"] == 6
+    assert len(body["sources"]) == 1
+
+
+def test_pooled_label_comes_from_the_first_session_carrying_the_field(
+        client, sess, sess_b):
+    """Labels can disagree between clouds; one is chosen and both are reported."""
+    res = agg(client, [sess.session_id, sess_b.session_id], "intensity_col")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["label"] == "Intensity Col"          # sess's label, listed first
+    assert [s["label"] for s in body["sources"]] == [
+        "Intensity Col", "Reflectance [dB]"]

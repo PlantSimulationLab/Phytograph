@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { AlertTriangle, Calculator, Copy, Loader2, MoreVertical, Pencil, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, Calculator, ChevronDown, Copy, Loader2, MoreVertical, Pencil, Trash2, X } from 'lucide-react';
 import { InfoHint } from '../../InfoHint';
 import { ScalarHistogram } from '../ScalarHistogram';
 import {
@@ -16,10 +16,18 @@ import {
   type ExpressionVocabulary,
 } from '../../../lib/scalarFieldExpression';
 import type { ScalarFieldInfo } from '../../../utils/backendApi';
+import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
+import type { BlockedScalarField } from '../../../lib/scalarFieldTargets';
 
 // Presentational panel for the Scalar Fields tool. All state and every handler
 // live in PointCloudViewer; the parent gates rendering on
-// `showScalarFieldsPanel && selectedIds.size === 1`.
+// `showScalarFieldsPanel` alone.
+//
+// The tool acts on a SET of clouds, which this panel's own picker owns (seeded
+// from the viewport selection, never written back to it). Stats POOLS them into
+// one distribution; Compute and Fields fan the same action out over each cloud
+// in turn. The offered field list is therefore the intersection of what the
+// checked clouds carry — see `intersectScalarFields`.
 //
 // Three tabs over ONE field list, rather than three tools: picking a field,
 // reading its distribution and using it in a formula are the same activity a
@@ -32,7 +40,17 @@ export interface ScalarFieldsPanelProps {
   tab: ScalarFieldsTab;
   onTabChange: (tab: ScalarFieldsTab) => void;
 
+  /** Every cloud the picker offers; flat ones carry a `disabledReason`. */
+  scanItems: PickerItem[];
+  /** The clouds the tool acts on. Independent of the viewport selection. */
+  checkedIds: Set<string>;
+  onCheckedChange: (next: Set<string>) => void;
+
   fields: ScalarFieldInfo[];
+  /** Carried by every checked cloud but unmeasurable across them (coordinates). */
+  blockedFields: BlockedScalarField[];
+  /** Slugs only SOME checked clouds carry, so the list cannot offer them. */
+  omittedFieldSlugs: string[];
   vocabulary: ExpressionVocabulary;
   /** Alive AND a real return — what the statistics are measured over. */
   visibleCount: number;
@@ -43,6 +61,10 @@ export interface ScalarFieldsPanelProps {
 
   stats: ScalarStats | null;
   statsLoading: boolean;
+  /** Why the measurement was refused (e.g. pooling coordinates across frames). */
+  statsError: string | null;
+  /** A limitation worth stating beside the pooled numbers, never a refusal. */
+  poolingCaution: string | null;
   /** True when the selected field's values are whole numbers (a class id). */
   selectedIsInteger: boolean;
 
@@ -54,6 +76,10 @@ export interface ScalarFieldsPanelProps {
   slugTouched: boolean;
 
   inProgress: boolean;
+  /** "Computing band2 — scan-b (2/3)…" during a fan-out, else null. */
+  progress: string | null;
+  /** Per-cloud failures from the last fan-out. */
+  failures: Array<{ name: string; message: string }>;
   error: string | null;
   /** Column offset of the offending token, when the backend reported one. */
   errorCol: number | null;
@@ -76,12 +102,27 @@ const TABS: ReadonlyArray<{ id: ScalarFieldsTab; label: string }> = [
 
 export function ScalarFieldsPanel(props: ScalarFieldsPanelProps) {
   const {
-    tab, onTabChange, fields, vocabulary, visibleCount, pointCount,
-    selectedSlug, onSelectSlug, stats, statsLoading, selectedIsInteger,
+    tab, onTabChange, scanItems, checkedIds, onCheckedChange,
+    fields, blockedFields, omittedFieldSlugs, vocabulary, visibleCount, pointCount,
+    selectedSlug, onSelectSlug, stats, statsLoading, statsError,
+    poolingCaution, selectedIsInteger,
     expression, onExpressionChange, newSlug, onNewSlugChange, slugTouched,
-    inProgress, error, errorCol, costWarning,
+    inProgress, progress, failures, error, errorCol, costWarning,
     onCompute, onCancel, onRename, onDuplicate, onDelete, onColorBy, onClose,
   } = props;
+
+  // Collapsed when exactly one cloud is checked: the common case shouldn't grow
+  // a scrolling list inside a 288 px panel. Any other count is worth seeing,
+  // since it changes what every tab means.
+  //
+  // `pickerOpen` latches once the list has been shown, so narrowing a multi-
+  // cloud selection down to one does not yank the list away mid-edit — the
+  // user is plainly still working in it, and the next click would land on
+  // whatever reflowed into its place.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const multi = checkedIds.size !== 1;
+  useEffect(() => { if (multi) setPickerOpen(true); }, [multi]);
+  const showPicker = pickerOpen || multi;
 
   const [menuFor, setMenuFor] = useState<string | null>(null);
 
@@ -132,6 +173,44 @@ export function ScalarFieldsPanel(props: ScalarFieldsPanelProps) {
         </button>
       </div>
 
+      {/* Which clouds the tool acts on. Seeded from the viewport selection,
+          but checking here never changes what is selected in the scene. */}
+      <div className="mb-2" data-testid="scalar-scan-section">
+        <button
+          onClick={() => setPickerOpen(o => !o)}
+          data-testid="scalar-scan-toggle"
+          data-expanded={showPicker}
+          className="w-full flex items-center justify-between text-[10px] text-neutral-400 hover:text-neutral-200 py-0.5"
+        >
+          <span data-testid="scalar-scan-summary">
+            {checkedIds.size === 0
+              ? 'No clouds checked'
+              : `${checkedIds.size} cloud${checkedIds.size === 1 ? '' : 's'}`}
+          </span>
+          <ChevronDown className={`w-3 h-3 transition-transform ${showPicker ? '' : '-rotate-90'}`} />
+        </button>
+        {showPicker && (
+          <ObjectPicker
+            data-testid="scalar-scan-picker"
+            rowTestId="scalar-scan-row"
+            mode="multi"
+            label="Clouds"
+            items={scanItems}
+            selectedIds={checkedIds}
+            onChange={onCheckedChange}
+            emptyMessage="No imported clouds. Scalar fields live in a cloud's session."
+          />
+        )}
+      </div>
+
+      {checkedIds.size === 0 && (
+        <div className="text-[10px] text-neutral-500 py-4 text-center"
+             data-testid="scalar-no-clouds">
+          Check one or more clouds above to inspect their fields.
+        </div>
+      )}
+
+      {checkedIds.size > 0 && (<>
       {/* Tabs */}
       <div className="flex gap-1 mb-3 bg-neutral-900/60 rounded p-0.5">
         {TABS.map(t => (
@@ -154,6 +233,8 @@ export function ScalarFieldsPanel(props: ScalarFieldsPanelProps) {
       {tab === 'fields' && (
         <FieldsTab
           fields={fields}
+          blockedFields={blockedFields}
+          omittedFieldSlugs={omittedFieldSlugs}
           takenSlugs={takenSlugs}
           selectedSlug={selectedSlug}
           onSelectSlug={onSelectSlug}
@@ -170,6 +251,11 @@ export function ScalarFieldsPanel(props: ScalarFieldsPanelProps) {
       {tab === 'stats' && (
         <StatsTab
           fields={fields}
+          blockedFields={blockedFields}
+          omittedFieldSlugs={omittedFieldSlugs}
+          scanCount={checkedIds.size}
+          statsError={statsError}
+          poolingCaution={poolingCaution}
           selectedSlug={selectedSlug}
           onSelectSlug={onSelectSlug}
           stats={stats}
@@ -201,6 +287,15 @@ export function ScalarFieldsPanel(props: ScalarFieldsPanelProps) {
         />
       )}
 
+      </>)}
+
+      {progress && (
+        <div className="mt-2 flex items-center gap-2 text-[10px] text-neutral-400"
+             data-testid="scalar-fields-progress">
+          <Loader2 className="w-3 h-3 animate-spin" /> {progress}
+        </div>
+      )}
+
       {error && (
         <div
           data-testid="scalar-fields-error"
@@ -210,6 +305,31 @@ export function ScalarFieldsPanel(props: ScalarFieldsPanelProps) {
           {error}
         </div>
       )}
+
+      {/* Which clouds failed, named. A run that succeeded on 3 of 5 must say
+          which two didn't, or the user cannot tell what state they are in. */}
+      {failures.length > 0 && (
+        <div className="mt-1 space-y-0.5" data-testid="scalar-fields-failures">
+          {failures.map(f => (
+            <div key={f.name} data-testid="scalar-scan-failure" data-scan-name={f.name}
+                 className="text-[9px] text-red-300/80" title={f.message}>
+              {f.name}: {f.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Note naming the fields the intersection had to drop, and why. */
+function OmittedNote({ slugs }: { slugs: string[] }) {
+  if (slugs.length === 0) return null;
+  return (
+    <div className="mt-1 text-[9px] text-neutral-500" data-testid="scalar-omitted-note"
+         data-count={slugs.length} title={slugs.join(', ')}>
+      {slugs.length} field{slugs.length === 1 ? '' : 's'} hidden — not every
+      checked cloud carries {slugs.length === 1 ? 'it' : 'them'}.
     </div>
   );
 }
@@ -222,10 +342,13 @@ type PendingAction =
   | { kind: 'delete'; slug: string };
 
 function FieldsTab({
-  fields, takenSlugs, selectedSlug, onSelectSlug, menuFor, setMenuFor,
+  fields, blockedFields, omittedFieldSlugs, takenSlugs, selectedSlug,
+  onSelectSlug, menuFor, setMenuFor,
   onRename, onDuplicate, onDelete, onColorBy, busy,
 }: {
   fields: ScalarFieldInfo[];
+  blockedFields: BlockedScalarField[];
+  omittedFieldSlugs: string[];
   takenSlugs: string[];
   selectedSlug: string | null;
   onSelectSlug: (slug: string) => void;
@@ -245,9 +368,10 @@ function FieldsTab({
   // being deleted, rather than in a modal that has lost that context.
   const [pending, setPending] = useState<PendingAction | null>(null);
 
-  if (fields.length === 0) {
+  if (fields.length === 0 && blockedFields.length === 0) {
     return <div className="text-[10px] text-neutral-500 py-4 text-center">
-      This cloud carries no scalar fields.
+      No scalar fields shared by the checked clouds.
+      <OmittedNote slugs={omittedFieldSlugs} />
     </div>;
   }
 
@@ -387,6 +511,25 @@ function FieldsTab({
         </div>
         );
       })}
+
+      {/* Fields every checked cloud carries but which cannot be measured
+          ACROSS them. Shown disabled with the reason rather than silently
+          dropped — a field that simply vanished would read as a bug. */}
+      {blockedFields.map(({ field: f, reason }) => (
+        <div
+          key={f.slug}
+          data-testid="scalar-field-row"
+          data-slug={f.slug}
+          data-blocked="true"
+          title={reason}
+          className="flex items-center gap-1 px-2 py-1 rounded text-[11px] opacity-40 cursor-not-allowed"
+        >
+          <div className="flex-1 min-w-0 truncate text-neutral-300">{f.label}</div>
+          <span className="text-[9px] text-neutral-500 shrink-0">per cloud only</span>
+        </div>
+      ))}
+
+      <OmittedNote slugs={omittedFieldSlugs} />
     </div>
   );
 }
@@ -487,10 +630,16 @@ function MenuItem({ icon: Icon, label, onClick, testId, danger }: {
 // ── Stats tab ───────────────────────────────────────────────────────────────
 
 function StatsTab({
-  fields, selectedSlug, onSelectSlug, stats, loading, integer,
+  fields, blockedFields, omittedFieldSlugs, scanCount, statsError, poolingCaution,
+  selectedSlug, onSelectSlug, stats, loading, integer,
   visibleCount, pointCount, label,
 }: {
   fields: ScalarFieldInfo[];
+  blockedFields: BlockedScalarField[];
+  omittedFieldSlugs: string[];
+  scanCount: number;
+  statsError: string | null;
+  poolingCaution: string | null;
   selectedSlug: string | null;
   onSelectSlug: (slug: string) => void;
   stats: ScalarStats | null;
@@ -513,7 +662,23 @@ function StatsTab({
         {fields.map(f => (
           <option key={f.slug} value={f.slug}>{f.label}</option>
         ))}
+        {/* Present on every checked cloud but not measurable across them. Kept
+            visible and disabled so the absence is explained, not mysterious. */}
+        {blockedFields.map(({ field: f }) => (
+          <option key={f.slug} value={f.slug} disabled data-blocked="true">
+            {f.label} — per cloud only
+          </option>
+        ))}
       </select>
+
+      <OmittedNote slugs={omittedFieldSlugs} />
+
+      {statsError && (
+        <div data-testid="scalar-stats-error"
+             className="mt-2 p-2 bg-amber-900/25 border border-amber-600/40 rounded text-[10px] text-amber-200">
+          {statsError}
+        </div>
+      )}
 
       {loading && (
         <div className="flex items-center justify-center gap-2 py-6 text-[10px] text-neutral-400"
@@ -554,7 +719,24 @@ function StatsTab({
             </div>
           )}
 
-          {/* Why the count can differ from the cloud's point count. Stated
+          {/* Pooling is stated explicitly: the same histogram over 3 clouds and
+              over 1 means different things, and nothing else on screen says
+              which this is. */}
+          {scanCount > 1 && (
+            <div className="mt-1 text-[9px] text-neutral-400" data-testid="scalar-stats-pooled"
+                 data-scan-count={scanCount}>
+              Pooled across {scanCount} clouds as one distribution.
+            </div>
+          )}
+
+          {poolingCaution && (
+            <div className="mt-1 text-[9px] text-amber-300/80"
+                 data-testid="scalar-pooling-caution">
+              {poolingCaution}
+            </div>
+          )}
+
+          {/* Why the count can differ from the clouds' point count. Stated
               rather than left as a discrepancy the user has to puzzle out. */}
           {visibleCount < pointCount && (
             <div className="mt-1 text-[9px] text-neutral-500">

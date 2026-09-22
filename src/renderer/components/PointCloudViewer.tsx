@@ -10,7 +10,7 @@ import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ,
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStats, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -268,6 +268,8 @@ import { ComputeNormalsPanel, type NormalOrientation } from './viewer/panels/Com
 import { ScalarFieldsPanel, type ScalarFieldsTab } from './viewer/panels/ScalarFieldsPanel';
 import type { ScalarStats } from '../lib/scalarFieldStats';
 import { suggestSlug } from '../lib/scalarFieldExpression';
+import { intersectScalarFields, poolingCaution } from '../lib/scalarFieldTargets';
+import type { PickerItem } from './ObjectPicker';
 import { DEMPanel } from './viewer/panels/DEMPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
 import { TreeSegmentPanel } from './viewer/panels/TreeSegmentPanel';
@@ -1040,7 +1042,20 @@ export default function PointCloudViewer({
   // --- Scalar Fields ---------------------------------------------------------
   const [showScalarFieldsPanel, setShowScalarFieldsPanel] = useState(false);
   const [scalarTab, setScalarTab] = useState<ScalarFieldsTab>('fields');
-  const [scalarFieldList, setScalarFieldList] = useState<ScalarFieldListResult | null>(null);
+  // The clouds the tool acts on, owned by the panel's own picker. Seeded from
+  // the viewport selection (see the latch effect) but never written back to it,
+  // so narrowing the tool's targets doesn't disturb what's selected on screen.
+  const [scalarCheckedIds, setScalarCheckedIds] = useState<Set<string>>(new Set());
+  // One listing per checked cloud, by CLOUD id. The offered field list is their
+  // intersection — see `intersectScalarFields`.
+  const [scalarListings, setScalarListings] =
+    useState<Map<string, ScalarFieldListResult>>(new Map());
+  // "Computing band2 — scan-b (2/3)…" during a fan-out, else null.
+  const [scalarProgress, setScalarProgress] = useState<string | null>(null);
+  // Per-cloud failures from the last fan-out, so a run that succeeded on 3 of 5
+  // clouds says which two didn't rather than reporting a single opaque error.
+  const [scalarFailures, setScalarFailures] =
+    useState<Array<{ name: string; message: string }>>([]);
   const [scalarSelectedSlug, setScalarSelectedSlug] = useState<string | null>(null);
   const [scalarStats, setScalarStats] = useState<ScalarStats | null>(null);
   const [scalarStatsLoading, setScalarStatsLoading] = useState(false);
@@ -1052,6 +1067,9 @@ export default function PointCloudViewer({
   const [scalarSlugTouched, setScalarSlugTouched] = useState(false);
   const [scalarInProgress, setScalarInProgress] = useState(false);
   const [scalarError, setScalarError] = useState<string | null>(null);
+  // Kept apart from `scalarError` (which belongs to compute/manage): a refusal
+  // to MEASURE belongs beside the numbers it replaced, not under the formula.
+  const [scalarStatsError, setScalarStatsError] = useState<string | null>(null);
   const [scalarErrorCol, setScalarErrorCol] = useState<number | null>(null);
   const [scalarCostWarning, setScalarCostWarning] = useState<string | null>(null);
   const scalarAbortRef = useRef<AbortController | null>(null);
@@ -12412,64 +12430,172 @@ export default function PointCloudViewer({
 
   // --- Scalar Fields ---------------------------------------------------------
   //
-  // The session id of the single selected cloud, or null. Every scalar-field
-  // call needs one: the fields ARE the session's columns, so a flat or
-  // session-less cloud has nothing to list.
-  const scalarSessionId = useMemo(() => {
-    if (selectedIds.size !== 1) return null;
-    const id = Array.from(selectedIds)[0];
-    return clouds.find(c => c.id === id)?.data.octree?.sessionId ?? null;
-  }, [selectedIds, clouds]);
+  // The tool acts on a SET of clouds, which the panel's own picker owns. The
+  // fields ARE a session's columns, so only session-backed clouds can be
+  // targets; a flat cloud is still LISTED in the picker (disabled, with the
+  // reason) rather than silently absent.
+  const scalarTargets = useMemo(
+    () => Array.from(scalarCheckedIds)
+      .map(id => clouds.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c?.data.octree?.sessionId),
+    [scalarCheckedIds, clouds],
+  );
 
-  const refreshScalarFields = useCallback(async (sessionId: string) => {
-    try {
-      const listing = await listScalarFields(sessionId);
-      setScalarFieldList(listing);
-      // Keep the selection if it survived; otherwise fall back to the first
-      // field so the Stats tab is never staring at an empty picker.
-      setScalarSelectedSlug(prev =>
-        prev && listing.fields.some(f => f.slug === prev)
-          ? prev
-          : (listing.fields[0]?.slug ?? null));
-      return listing;
-    } catch (error) {
-      console.error('List scalar fields error:', error);
-      setScalarError(describeBackendError(error, 'List scalar fields').message);
-      return null;
+  /** Stable, order-insensitive key for "which sessions are we measuring". */
+  const scalarTargetKey = useMemo(
+    () => scalarTargets.map(c => c.data.octree!.sessionId!).sort().join('|'),
+    [scalarTargets],
+  );
+
+  // Seed the picker from the viewport selection, but only when that selection
+  // actually CHANGES. Re-seeding on every render of `selectedIds` would stomp
+  // the user's hand-picked set the moment they clicked anything in the scene;
+  // seeding only on open would leave the panel pointing at scans they have
+  // since replaced. The latch gives both: follow the selection, then leave it
+  // alone. Checking a box never writes back to `selectedIds`.
+  const scalarSeedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!showScalarFieldsPanel) { scalarSeedRef.current = null; return; }
+    const key = Array.from(selectedIds).sort().join('|');
+    if (scalarSeedRef.current === key) return;
+    scalarSeedRef.current = key;
+    setScalarCheckedIds(new Set(
+      Array.from(selectedIds).filter(
+        id => cloudsRef.current.find(c => c.id === id)?.data.octree?.sessionId)));
+  }, [showScalarFieldsPanel, selectedIds]);
+
+  // Drop checked ids whose cloud has left the scene. Returns `prev` untouched
+  // when nothing was removed: handing back a fresh Set on every `clouds` update
+  // would re-run every memo that reads it.
+  useEffect(() => {
+    setScalarCheckedIds(prev => {
+      const next = new Set(Array.from(prev).filter(id => clouds.some(c => c.id === id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [clouds]);
+
+  // Close the panel once it has nothing left to act on. It used to be gated on
+  // `selectedIds.size === 1`, so emptying the scene unmounted it as a side
+  // effect; now that it renders for any selection, a File → New would leave an
+  // empty panel open and the toolbar button toggled ON — so the next click
+  // CLOSES it rather than opening it, which reads as the tool being broken.
+  useEffect(() => {
+    if (clouds.length === 0) setShowScalarFieldsPanel(false);
+  }, [clouds.length]);
+
+  /** Re-list the given clouds' fields, merging the results into the map.
+   *
+   * `allSettled`, never `all`: one dead session must not blank the whole panel
+   * when the other clouds are perfectly readable. */
+  const refreshScalarFields = useCallback(async (cloudIds: string[]) => {
+    const targets = cloudIds
+      .map(id => cloudsRef.current.find(c => c.id === id))
+      .filter((c): c is PointCloudEntry => !!c?.data.octree?.sessionId);
+    if (targets.length === 0) return;
+    const settled = await Promise.allSettled(
+      targets.map(c => listScalarFields(c.data.octree!.sessionId!)));
+    const failed: unknown[] = [];
+    setScalarListings(prev => {
+      const next = new Map(prev);
+      settled.forEach((r, i) => {
+        if (r.status === 'fulfilled') next.set(targets[i].id, r.value);
+        else failed.push(r.reason);
+      });
+      return next;
+    });
+    if (failed.length > 0) {
+      console.error('List scalar fields error:', failed[0]);
+      setScalarError(describeBackendError(failed[0], 'List scalar fields').message);
     }
   }, []);
 
-  // Load the vocabulary when the panel opens or the selected cloud changes.
+  // Load the vocabulary when the panel opens or the checked clouds change.
+  // Keyed on the SESSION key rather than the array identity, so an unrelated
+  // re-render can't refire a round of listings.
   useEffect(() => {
-    if (!showScalarFieldsPanel || !scalarSessionId) {
-      setScalarFieldList(null);
+    if (!showScalarFieldsPanel || scalarTargets.length === 0) {
+      setScalarListings(new Map());
       return;
     }
-    void refreshScalarFields(scalarSessionId);
-  }, [showScalarFieldsPanel, scalarSessionId, refreshScalarFields]);
+    void refreshScalarFields(scalarTargets.map(c => c.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showScalarFieldsPanel, scalarTargetKey, refreshScalarFields]);
 
-  // Fetch statistics for the selected field. Keyed on the field list too, so a
-  // recompute of the SAME slug re-measures rather than showing stale numbers.
+  // Drop listings for clouds that are no longer checked, so the intersection
+  // never counts a cloud the user has unchecked.
+  useEffect(() => {
+    setScalarListings(prev => {
+      const keep = new Set(scalarTargets.map(c => c.id));
+      if (Array.from(prev.keys()).every(id => keep.has(id))) return prev;
+      return new Map(Array.from(prev).filter(([id]) => keep.has(id)));
+    });
+  }, [scalarTargets]);
+
+  /** Every cloud the picker offers. A flat cloud is LISTED but disabled, with
+   *  the reason, rather than missing — otherwise a user whose cloud isn't there
+   *  has nothing to go on. */
+  const scalarScanItems = useMemo<PickerItem[]>(
+    () => clouds.map(c => ({
+      id: c.id,
+      label: c.data.fileName ?? c.id,
+      color: c.color,
+      detail: `${(c.data.pointCount ?? 0).toLocaleString()} pts`,
+      disabledReason: c.data.octree?.sessionId
+        ? undefined
+        : 'Scalar fields live in an imported cloud’s session; this cloud has none.',
+    })),
+    [clouds],
+  );
+
+  /** The one field list every checked cloud can act on. */
+  const scalarIntersection = useMemo(
+    () => intersectScalarFields(
+      scalarTargets
+        .map(c => scalarListings.get(c.id))
+        .filter((l): l is ScalarFieldListResult => !!l),
+      scalarTargets.length),
+    [scalarTargets, scalarListings],
+  );
+
+  // Keep the chosen field inside the offered list. It can fall out when a cloud
+  // is checked that lacks it, when it is deleted, or when it is renamed.
+  useEffect(() => {
+    setScalarSelectedSlug(prev =>
+      prev && scalarIntersection.fields.some(f => f.slug === prev)
+        ? prev
+        : (scalarIntersection.fields[0]?.slug ?? null));
+  }, [scalarIntersection]);
+
+  // Fetch statistics for the selected field, POOLED over every checked cloud.
+  // Keyed on the listings too, so a recompute of the SAME slug re-measures
+  // rather than showing stale numbers.
   useEffect(() => {
     if (!showScalarFieldsPanel || scalarTab !== 'stats'
-        || !scalarSessionId || !scalarSelectedSlug) {
+        || scalarTargets.length === 0 || !scalarSelectedSlug) {
       return;
     }
+    const sessionIds = scalarTargets.map(c => c.data.octree!.sessionId!);
     let cancelled = false;
     const abort = new AbortController();
     setScalarStatsLoading(true);
     setScalarStats(null);
-    scalarFieldStats(scalarSessionId, scalarSelectedSlug, abort.signal)
+    setScalarStatsError(null);
+    scalarFieldStatsMulti(sessionIds, scalarSelectedSlug, abort.signal)
       .then(res => { if (!cancelled) setScalarStats(res.stats ?? null); })
       .catch(error => {
         if (abort.signal.aborted) return;
         console.error('Scalar field stats error:', error);
-        if (!cancelled) setScalarStats(null);
+        if (cancelled) return;
+        setScalarStats(null);
+        // The backend's 400s here explain themselves (the coordinate-frame
+        // refusal names why), so show the message rather than an empty panel.
+        setScalarStatsError(describeBackendError(error, 'Measure the field').message);
       })
       .finally(() => { if (!cancelled) setScalarStatsLoading(false); });
     return () => { cancelled = true; abort.abort(); };
-  }, [showScalarFieldsPanel, scalarTab, scalarSessionId, scalarSelectedSlug,
-      scalarFieldList]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showScalarFieldsPanel, scalarTab, scalarTargetKey, scalarSelectedSlug,
+      scalarListings]);
 
   // Whether the selected field holds whole numbers, so the readout prints `3`
   // rather than `3.00`. Read off the measured statistics rather than guessed
@@ -12482,25 +12608,36 @@ export default function PointCloudViewer({
       && (s.median === undefined || Number.isInteger(s.median));
   }, [scalarSelectedSlug, scalarStats]);
 
-  const scalarVocabulary = useMemo(() => ({
-    fields: scalarFieldList?.fields.map(f => f.slug) ?? [],
-    functions: scalarFieldList?.functions ?? [],
-    aggregates: scalarFieldList?.aggregates ?? [],
-    constants: scalarFieldList?.constants ?? [],
-  }), [scalarFieldList]);
+  // The INTERSECTED vocabulary, not the first cloud's. Otherwise a formula
+  // could reference a field a later cloud lacks, pass client-side validation,
+  // and 400 partway through the fan-out — leaving the run half applied.
+  const scalarVocabulary = scalarIntersection.vocabulary;
 
+  /** A limitation worth stating beside the pooled numbers (never a refusal). */
+  const scalarPoolingCaution = useMemo(
+    () => poolingCaution(scalarSelectedSlug ?? '', scalarStats, scalarTargets.length),
+    [scalarSelectedSlug, scalarStats, scalarTargets.length],
+  );
+
+  /**
+   * Evaluate the expression on EVERY checked cloud, one after another.
+   *
+   * Sequential rather than parallel: each call mutates its session's arrays and
+   * may rebuild an octree, and the backend's admission control would serialise
+   * the big ones anyway. Modelled on `handleDetectNoise` — the house shape for
+   * a multi-target run that has to survive a failure partway through.
+   */
   const handleComputeScalarField = useCallback(async () => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    const octreeInfo = cloud?.data.octree;
-    const sessionId = octreeInfo?.sessionId;
-    if (!cloud || !octreeInfo || !sessionId) {
-      setScalarError('Scalar field arithmetic needs an imported (session-backed) cloud.');
+    if (scalarInProgress) return;
+    const targets = scalarTargets;
+    if (targets.length === 0) {
+      setScalarError('Check at least one imported (session-backed) cloud.');
       return;
     }
 
-    const taken = scalarFieldList?.fields.map(f => f.slug) ?? [];
+    // One name for the whole run, resolved against the INTERSECTION so it can
+    // never collide on one cloud and not another.
+    const taken = scalarIntersection.fields.map(f => f.slug);
     const slug = scalarSlugTouched
       ? scalarNewSlug
       : (scalarNewSlug || suggestSlug(scalarExpression, taken));
@@ -12509,66 +12646,134 @@ export default function PointCloudViewer({
     setScalarInProgress(true);
     setScalarError(null);
     setScalarErrorCol(null);
+    setScalarFailures([]);
     const abort = new AbortController();
     scalarAbortRef.current = abort;
 
-    // Consume any pending "Compute Anyway", so a later run has to earn its own.
+    // Consume any pending "Compute Anyway" ONCE, for the whole run. Reading it
+    // per iteration would make the user acknowledge the cost on every cloud.
     const acknowledgeCost = scalarAckCostRef.current;
     scalarAckCostRef.current = false;
     setScalarCostWarning(null);
 
-    // Defer the rebuild on a big cloud, exactly as Compute Normals does: the
-    // column lands immediately (export, a further formula and every other tool
-    // can read it) while the COLOURING catches up on the refresh queue.
-    const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
+    const succeeded: string[] = [];
+    const failures: Array<{ name: string; message: string }> = [];
+    let nanTotal = 0;
+    let infTotal = 0;
+    let label = slug;
 
     try {
-      const result = await computeScalarField(sessionId, {
-        expression: scalarExpression,
-        slug,
-        // Re-running the same name is the normal edit-the-formula loop; the
-        // backend still refuses to overwrite an imported or tool-written column.
-        overwrite: true,
-        defer_octree: willDefer,
-        acknowledge_cost: acknowledgeCost,
-      }, abort.signal);
+      for (let i = 0; i < targets.length; i++) {
+        if (abort.signal.aborted) break;
+        // Re-read through the ref: iteration i's `onUpdateCloud` has already
+        // committed by now, so a closure-captured entry carries stale octree
+        // metadata and `buildSessionOctreeData` would rebuild from it.
+        const id = targets[i].id;
+        const cloud = cloudsRef.current.find(c => c.id === id);
+        const octreeInfo = cloud?.data.octree;
+        const sessionId = octreeInfo?.sessionId;
+        const name = cloud?.data.fileName ?? id;
+        if (!cloud || !octreeInfo || !sessionId) {
+          failures.push({ name, message: 'No longer a session-backed cloud.' });
+          continue;
+        }
 
-      const baseName = cloud.data.fileName ?? id;
-      if (!result.octree_deferred && result.cache_id) {
-        onUpdateCloud(id, buildSessionOctreeData(
-          result as unknown as OctreeMetadata, octreeInfo, baseName));
+        setScalarProgress(targets.length > 1
+          ? `Computing ${slug} — ${name} (${i + 1}/${targets.length})…`
+          : null);
+
+        // Per cloud: a 50 M-point scan and a 10 k one in the same run
+        // legitimately take different paths.
+        const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
+
+        try {
+          const result = await computeScalarField(sessionId, {
+            expression: scalarExpression,
+            slug,
+            // Re-running the same name is the normal edit-the-formula loop; the
+            // backend still refuses to overwrite an imported or tool-written column.
+            overwrite: true,
+            defer_octree: willDefer,
+            acknowledge_cost: acknowledgeCost,
+          }, abort.signal);
+
+          const baseName = cloud.data.fileName ?? id;
+          if (!result.octree_deferred && result.cache_id) {
+            onUpdateCloud(id, buildSessionOctreeData(
+              result as unknown as OctreeMetadata, octreeInfo, baseName));
+          }
+          // A derived field is a measurement, not a class list: register it
+          // continuous so it renders as a gradient with a numeric colorbar rather
+          // than having a categorical scheme invented for it from its value range.
+          registerContinuousSlug(result.slug);
+          setCloudColorMode(id, { mode: 'scalar', field: result.slug });
+
+          // The cloud's data changed, so this is a destructive boundary — the point
+          // arrays are never snapshotted into the undo stack (see sceneActions).
+          // Marked per cloud, as each call mutates one session: batching would
+          // leave the earlier clouds outside a boundary after their arrays moved.
+          scene.boundary([id]);
+
+          if (willDefer) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+
+          nanTotal += result.nan_count ?? 0;
+          infTotal += result.inf_count ?? 0;
+          label = result.label ?? label;
+          succeeded.push(id);
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') throw error;
+          // These two are properties of the RUN, not of one cloud, so they end
+          // it rather than being collected. The expression is the same text for
+          // every target, and the intersected vocabulary guarantees each target
+          // carries every field it references — so a parse failure here cannot
+          // become a success on a later cloud.
+          if (error instanceof CostWarningError || error instanceof ExpressionError) throw error;
+          console.error('Compute scalar field error:', error);
+          failures.push({
+            name,
+            message: describeBackendError(error, 'Compute the scalar field').message,
+          });
+        }
       }
-      // A derived field is a measurement, not a class list: register it
-      // continuous so it renders as a gradient with a numeric colorbar rather
-      // than having a categorical scheme invented for it from its value range.
-      registerContinuousSlug(result.slug);
-      setCloudColorMode(id, { mode: 'scalar', field: result.slug });
 
-      // The cloud's data changed, so this is a destructive boundary — the point
-      // arrays are never snapshotted into the undo stack (see sceneActions).
-      scene.boundary([id]);
-
-      if (willDefer) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
-
-      const listing = await refreshScalarFields(sessionId);
-      setScalarSelectedSlug(result.slug);
-      setScalarStats(result.stats ?? null);
-      setScalarTab('stats');
-      setScalarExpression('');
-      setScalarNewSlug('');
-      setScalarSlugTouched(false);
-      void listing;
+      if (succeeded.length > 0) {
+        await refreshScalarFields(succeeded);
+        setScalarSelectedSlug(slug);
+        // Deliberately NOT `result.stats` — that is one cloud's. Clearing it
+        // lets the Stats effect re-measure the POOL.
+        setScalarStats(null);
+        setScalarTab('stats');
+        setScalarExpression('');
+        setScalarNewSlug('');
+        setScalarSlugTouched(false);
+      }
 
       const oddities: string[] = [];
-      if (result.nan_count > 0) oddities.push(`${result.nan_count.toLocaleString()} NaN`);
-      if (result.inf_count > 0) oddities.push(`${result.inf_count.toLocaleString()} infinite`);
-      showToast({
-        type: oddities.length ? 'warning' : 'success',
-        title: 'Scalar Field Computed',
-        message: oddities.length
-          ? `${result.label} created, with ${oddities.join(' and ')} values.`
-          : `${result.label} created.`,
-      });
+      if (nanTotal > 0) oddities.push(`${nanTotal.toLocaleString()} NaN`);
+      if (infTotal > 0) oddities.push(`${infTotal.toLocaleString()} infinite`);
+      const scope = targets.length > 1 ? ` on ${succeeded.length} clouds` : '';
+
+      if (failures.length > 0) {
+        setScalarFailures(failures);
+        const names = failures.map(f => f.name).join(', ');
+        setScalarError(
+          `Failed on ${failures.length} of ${targets.length} clouds: ${names}`);
+        showToast({
+          type: 'error',
+          title: `Compute Failed on ${failures.length} of ${targets.length} Clouds`,
+          message: succeeded.length > 0
+            ? `${label} created${scope}. Not created on: ${names}.`
+            : `${label} was not created. Failed on: ${names}.`,
+        });
+      } else if (succeeded.length > 0) {
+        showToast({
+          type: oddities.length ? 'warning' : 'success',
+          title: 'Scalar Field Computed',
+          message: oddities.length
+            ? `${label} created${scope}, with ${oddities.join(' and ')} values.`
+            : `${label} created${scope}.`,
+        });
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (error instanceof CostWarningError) {
@@ -12587,11 +12792,12 @@ export default function PointCloudViewer({
       showToast({ type: 'error', title: 'Compute Failed', message });
     } finally {
       setScalarInProgress(false);
+      setScalarProgress(null);
       scalarAbortRef.current = null;
     }
-  }, [selectedIds, clouds, scalarExpression, scalarNewSlug, scalarSlugTouched,
-      scalarFieldList, onUpdateCloud, setCloudColorMode, scene, showToast,
-      refreshScalarFields]);
+  }, [scalarInProgress, scalarTargets, scalarIntersection, scalarExpression,
+      scalarNewSlug, scalarSlugTouched, onUpdateCloud, setCloudColorMode, scene,
+      showToast, refreshScalarFields]);
 
   const cancelComputeScalarField = useCallback(() => {
     scalarAbortRef.current?.abort();
@@ -12646,14 +12852,11 @@ export default function PointCloudViewer({
   const handleManageScalarField = useCallback(async (
     action: 'rename' | 'delete' | 'duplicate', slug: string, requestedSlug?: string,
   ) => {
-    if (selectedIds.size !== 1) return;
-    const id = Array.from(selectedIds)[0];
-    const cloud = clouds.find(c => c.id === id);
-    const octreeInfo = cloud?.data.octree;
-    const sessionId = octreeInfo?.sessionId;
-    if (!cloud || !octreeInfo || !sessionId) return;
+    if (scalarInProgress) return;
+    const targets = scalarTargets;
+    if (targets.length === 0) return;
 
-    const existing = scalarFieldList?.fields.find(f => f.slug === slug);
+    const existing = scalarIntersection.fields.find(f => f.slug === slug);
     let newSlug: string | undefined;
     let newLabel: string | undefined;
 
@@ -12667,55 +12870,120 @@ export default function PointCloudViewer({
 
     setScalarInProgress(true);
     setScalarError(null);
+    setScalarFailures([]);
     const abort = new AbortController();
     scalarAbortRef.current = abort;
-    const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
+
+    const succeeded: string[] = [];
+    const failures: Array<{ name: string; message: string }> = [];
+    let resultSlug = slug;
 
     try {
-      const result = await manageScalarField(sessionId, {
-        action, slug, new_slug: newSlug, new_label: newLabel,
-        defer_octree: willDefer,
-      }, abort.signal);
+      for (let i = 0; i < targets.length; i++) {
+        if (abort.signal.aborted) break;
+        // Re-read through the ref — see the compute loop.
+        const id = targets[i].id;
+        const cloud = cloudsRef.current.find(c => c.id === id);
+        const octreeInfo = cloud?.data.octree;
+        const sessionId = octreeInfo?.sessionId;
+        const name = cloud?.data.fileName ?? id;
+        if (!cloud || !octreeInfo || !sessionId) {
+          failures.push({ name, message: 'No longer a session-backed cloud.' });
+          continue;
+        }
 
-      const baseName = cloud.data.fileName ?? id;
-      if (!result.octree_deferred && result.cache_id) {
-        onUpdateCloud(id, buildSessionOctreeData(
-          result as unknown as OctreeMetadata, octreeInfo, baseName));
+        setScalarProgress(targets.length > 1
+          ? `${action === 'delete' ? 'Deleting' : action === 'rename' ? 'Renaming' : 'Duplicating'}`
+            + ` ${slug} — ${name} (${i + 1}/${targets.length})…`
+          : null);
+
+        const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
+        try {
+          const result = await manageScalarField(sessionId, {
+            action, slug, new_slug: newSlug, new_label: newLabel,
+            defer_octree: willDefer,
+          }, abort.signal);
+
+          const baseName = cloud.data.fileName ?? id;
+          if (!result.octree_deferred && result.cache_id) {
+            onUpdateCloud(id, buildSessionOctreeData(
+              result as unknown as OctreeMetadata, octreeInfo, baseName));
+          }
+          if (action === 'rename' && result.previous_slug) {
+            registerContinuousSlug(result.slug);
+            // Per cloud, because the colour mode and the filters are per cloud.
+            // Note `colorRanges` is keyed `scalar:<slug>` GLOBALLY, so only the
+            // first call actually moves that key and the rest no-op — which is
+            // correct, not a bug to "fix" into N-way duplication.
+            migrateScalarSlug(id, result.previous_slug, result.slug);
+          }
+          if (action === 'duplicate') registerContinuousSlug(result.slug);
+
+          scene.boundary([id]);
+          if (willDefer) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+          resultSlug = result.slug ?? resultSlug;
+          succeeded.push(id);
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') throw error;
+          console.error('Manage scalar field error:', error);
+          failures.push({
+            name,
+            message: describeBackendError(error, 'Update the scalar field').message,
+          });
+        }
       }
-      if (action === 'rename' && result.previous_slug) {
-        registerContinuousSlug(result.slug);
-        migrateScalarSlug(id, result.previous_slug, result.slug);
+
+      // Re-list EVERY target, not just the successes: after a partial run the
+      // clouds disagree about which names exist, and the field list has to show
+      // that truthfully rather than keeping a name half of them lost.
+      await refreshScalarFields(targets.map(t => t.id));
+      if (succeeded.length > 0) {
+        setScalarSelectedSlug(action === 'delete' ? null : resultSlug);
       }
-      if (action === 'duplicate') registerContinuousSlug(result.slug);
 
-      scene.boundary([id]);
-      if (willDefer) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
-
-      setScalarFieldList(prev => prev ? { ...prev, fields: result.fields } : prev);
-      setScalarSelectedSlug(action === 'delete'
-        ? (result.fields[0]?.slug ?? null)
-        : result.slug);
-
-      showToast({
-        type: 'success',
-        title: action === 'delete' ? 'Field Deleted'
-          : action === 'rename' ? 'Field Renamed' : 'Field Duplicated',
-        message: action === 'delete'
-          ? `${existing?.label ?? slug} removed.`
-          : `${result.label ?? result.slug} ready.`,
-      });
+      if (failures.length > 0) {
+        setScalarFailures(failures);
+        const names = failures.map(f => f.name).join(', ');
+        setScalarError(
+          `Failed on ${failures.length} of ${targets.length} clouds: ${names}`);
+        // A PARTIAL RENAME is the worst outcome this tool can produce: the
+        // clouds no longer share a slug, so BOTH names fall out of the
+        // intersection and the panel looks like it lost two fields. Say so,
+        // rather than leaving the user to work it out. No rollback — a
+        // compensating rename can fail too, and then the state is worse.
+        const split = action === 'rename' && succeeded.length > 0
+          ? ` "${resultSlug}" now exists only on the ${succeeded.length} cloud(s)`
+            + ' it succeeded on, so neither name is listed while they disagree.'
+          : '';
+        showToast({
+          type: 'error',
+          title: `Failed on ${failures.length} of ${targets.length} Clouds`,
+          message: `${names}.${split}`,
+        });
+      } else if (succeeded.length > 0) {
+        const scope = targets.length > 1 ? ` on ${succeeded.length} clouds` : '';
+        showToast({
+          type: 'success',
+          title: action === 'delete' ? 'Scalar Field Deleted'
+            : action === 'rename' ? 'Scalar Field Renamed' : 'Scalar Field Duplicated',
+          message: action === 'delete'
+            ? `${slug} removed${scope}.`
+            : `${slug} → ${resultSlug}${scope}.`,
+        });
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       console.error('Manage scalar field error:', error);
-      const message = describeBackendError(error, `${action} the scalar field`).message;
+      const message = describeBackendError(error, 'Update the scalar field').message;
       setScalarError(message);
       showToast({ type: 'error', title: 'Scalar Field Error', message });
     } finally {
       setScalarInProgress(false);
+      setScalarProgress(null);
       scalarAbortRef.current = null;
     }
-  }, [selectedIds, clouds, scalarFieldList, onUpdateCloud, scene, showToast,
-      migrateScalarSlug]);
+  }, [scalarInProgress, scalarTargets, scalarIntersection, onUpdateCloud, scene,
+      showToast, migrateScalarSlug, refreshScalarFields]);
 
 
   const handleGroundSegment = useCallback(async () => {
@@ -24125,18 +24393,29 @@ export default function PointCloudViewer({
           onCancel={cancelComputeNormals}
         />
       )}
-      {showScalarFieldsPanel && selectedIds.size === 1 && (
+      {/* No selection-size gate: the panel owns its own cloud picker, so it is
+          correct for any number of checked clouds — including none, where it
+          says so. Gating it here while the toolbar button stayed enabled is
+          exactly what made the tool a silent dead click with 2+ selected. */}
+      {showScalarFieldsPanel && (
         <ScalarFieldsPanel
           tab={scalarTab}
           onTabChange={setScalarTab}
-          fields={scalarFieldList?.fields ?? []}
+          scanItems={scalarScanItems}
+          checkedIds={scalarCheckedIds}
+          onCheckedChange={setScalarCheckedIds}
+          fields={scalarIntersection.fields}
+          blockedFields={scalarIntersection.blocked}
+          omittedFieldSlugs={scalarIntersection.omitted}
           vocabulary={scalarVocabulary}
-          visibleCount={scalarFieldList?.visible_count ?? 0}
-          pointCount={scalarFieldList?.point_count ?? 0}
+          visibleCount={scalarIntersection.visibleCount}
+          pointCount={scalarIntersection.pointCount}
           selectedSlug={scalarSelectedSlug}
           onSelectSlug={setScalarSelectedSlug}
           stats={scalarStats}
           statsLoading={scalarStatsLoading}
+          statsError={scalarStatsError}
+          poolingCaution={scalarPoolingCaution}
           selectedIsInteger={scalarSelectedIsInteger}
           expression={scalarExpression}
           onExpressionChange={setScalarExpression}
@@ -24144,6 +24423,8 @@ export default function PointCloudViewer({
           onNewSlugChange={(v) => { setScalarNewSlug(v); setScalarSlugTouched(true); }}
           slugTouched={scalarSlugTouched}
           inProgress={scalarInProgress}
+          progress={scalarProgress}
+          failures={scalarFailures}
           error={scalarError}
           errorCol={scalarErrorCol}
           costWarning={scalarCostWarning}
@@ -24153,8 +24434,12 @@ export default function PointCloudViewer({
           onDuplicate={(slug, newSlug) => { void handleManageScalarField('duplicate', slug, newSlug); }}
           onDelete={(slug) => { void handleManageScalarField('delete', slug); }}
           onColorBy={(slug) => {
-            const id = Array.from(selectedIds)[0];
-            if (id) setCloudColorMode(id, { mode: 'scalar', field: slug });
+            // Every checked cloud: the list only offers fields they ALL carry,
+            // so colouring just the first would be arbitrary.
+            registerContinuousSlug(slug);
+            for (const c of scalarTargets) {
+              setCloudColorMode(c.id, { mode: 'scalar', field: slug });
+            }
           }}
           onClose={() => setShowScalarFieldsPanel(false)}
         />

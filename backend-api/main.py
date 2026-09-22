@@ -250,7 +250,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.90.0"
+BACKEND_VERSION = "0.91.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -38195,6 +38195,110 @@ def session_scalar_field_stats(session_id: str, slug: str,
     stats = scalar_fields.describe(values, bins=bins)
     return {"session_id": session_id, "slug": slug, "label": label,
             "stats": stats}
+
+
+# Coordinates are stored in each session's OWN frame (`world_shift` already
+# subtracted — see `_session_scalar_columns_locked`), so the same slug means a
+# different origin on every cloud. Pooling them across sessions is arithmetic
+# over mixed frames: not merely uninformative, wrong. Refused rather than
+# warned about, because the number would look perfectly ordinary.
+_UNPOOLABLE_SCALAR_SLUGS = ("x", "y", "z")
+
+
+class ScalarFieldAggregateStatsRequest(BaseModel):
+    """Pooled statistics for ONE field across several sessions."""
+    session_ids: List[str]
+    slug: str
+    bins: Optional[int] = None
+
+
+@app.post("/api/cloud/scalar_fields/stats")
+def scalar_fields_aggregate_stats(request: ScalarFieldAggregateStatsRequest):
+    """Summary statistics + histogram for one field, pooled across sessions.
+
+    ONE distribution over the concatenation, not N side-by-side summaries: the
+    question the panel answers is "what does this field look like over the plot",
+    and N histograms answer a different one.
+
+    Deliberately NOT nested under `/api/cloud/session/{id}/…` — there is no
+    single session here, and nesting it under one would misdescribe what it
+    measures. It sits beside `POST /api/cloud/session/merge`, the other
+    multi-session route.
+
+    Each session is masked by its OWN `_session_editable_mask_locked` BEFORE the
+    concatenation. That ordering is the whole correctness of the endpoint: pool
+    the raw columns instead and every scan's sky/miss points (~1 km out along
+    the beam) land in the pool, which sets the percentiles and the histogram
+    domain by itself.
+    """
+    # De-dup, preserving order. A slug counted twice would double that scan's
+    # weight — the mean survives it, the histogram does not.
+    ids = list(dict.fromkeys(request.session_ids or []))
+    if not ids:
+        raise HTTPException(status_code=400,
+                            detail="stats requires at least one session id.")
+    slug = (request.slug or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="stats requires a field name.")
+    if len(ids) > 1 and slug in _UNPOOLABLE_SCALAR_SLUGS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{slug!r} is a coordinate, and every cloud stores its "
+                    "coordinates in its own frame (each cloud's global shift is "
+                    "subtracted at import). Pooling them across clouds would "
+                    "average positions that are not in the same frame. Check a "
+                    "single cloud to measure its coordinates."))
+
+    sessions = [_get_cloud_session(sid) for sid in ids]  # 404 propagates per id
+
+    # Sizing read only, outside the lock — see `session_merge` for why an
+    # unlocked count is fine here (a concurrent delete moves the ESTIMATE by a
+    # rounding error) and why admission must not be held under the session lock.
+    n_est = sum(int(_session_editable_mask_locked(s).sum()) for s in sessions)
+
+    parts: "List[np.ndarray]" = []
+    sources: "List[dict]" = []
+    missing: "List[str]" = []
+    label = slug
+
+    # Each source column is sliced out and then concatenated, so the slices and
+    # the pooled copy are live at the same time.
+    with _ADMISSION.admit(n_est * 8 * 2,
+                          f"pool {slug!r} over {len(ids)} sessions "
+                          f"({n_est:,} pts)"):
+        for sid, sess in zip(ids, sessions):
+            # Taken and released ONCE PER SESSION: never held across the
+            # concatenate or describe() below, so a big pool can't stall
+            # /health behind one long critical section.
+            with _cloud_session_lock:
+                cols = _session_scalar_columns_locked(sess)
+                if slug not in cols:
+                    missing.append(sid)
+                    continue
+                mask = _session_editable_mask_locked(sess)
+                # Copy under the lock: describe() sorts for percentiles, and the
+                # session array may be a memmap another request is about to
+                # rewrite.
+                values = np.asarray(cols[slug])[mask].astype(np.float64, copy=True)
+                own_label = _scalar_field_label_locked(sess, slug)
+            if not parts:
+                # First session that CARRIES the field names it. A label is a
+                # display string, not a contract; the renderer surfaces the
+                # disagreement from `sources` rather than merging the strings.
+                label = own_label
+            parts.append(values)
+            sources.append({"session_id": sid, "count": int(values.size),
+                            "label": own_label})
+
+        if not parts:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No scalar field named {slug!r} on any of these clouds.")
+        pooled = np.concatenate(parts) if len(parts) > 1 else parts[0]
+        stats = scalar_fields.describe(pooled, bins=request.bins)
+
+    return {"session_ids": ids, "slug": slug, "label": label, "stats": stats,
+            "sources": sources, "missing_session_ids": missing}
 
 
 @app.post("/api/cloud/session/{session_id}/scalar_fields/compute")

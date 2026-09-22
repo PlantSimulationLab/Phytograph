@@ -15,10 +15,44 @@ A field you create here is an ordinary scalar field. It appears in the **Color
 by** dropdown, in the [Filter](clean-point-cloud.md#filter) panel's field list,
 and in the export column picker, exactly like one that came from the file.
 
+## Work on several clouds at once
+
+The panel has its own **cloud list** at the top. It starts out matching whatever
+you have selected in the scene, but from then on it is the tool's own input:
+checking and unchecking there changes what the tool measures and writes to,
+without disturbing your selection in the viewer.
+
+With more than one cloud checked:
+
+- **Stats** pools them into **one** distribution — the clouds' points are
+  measured together, not side by side.
+- **Compute** runs your formula on each checked cloud in turn, so each ends up
+  with its own copy of the new field.
+- **Rename**, **duplicate** and **delete** likewise apply to every checked cloud.
+
+The field list shows only the fields **every** checked cloud carries. If one
+cloud has a field the others lack, it is not offered, and a note under the list
+says how many fields were hidden and why — acting on a field only some clouds
+have would half-apply and leave them out of step.
+
+!!! warning "Coordinates are measured one cloud at a time"
+
+    `x`, `y` and `z` cannot be pooled. Each cloud stores its coordinates in its
+    own frame — a large global offset is subtracted when the cloud is imported,
+    so two clouds imported at different offsets hold coordinate numbers that do
+    not share an origin. A pooled mean or percentile over them would be
+    arithmetic across two different frames, and the result looks like a perfectly
+    ordinary number, so Phytograph declines it rather than warning about it. The
+    rows stay visible, marked *per cloud only*. Check a single cloud to measure
+    its coordinates.
+
+If something fails on one cloud partway through, the others still finish, and
+the panel names the clouds that failed rather than reporting one opaque error.
+
 ## Inspect a field
 
-Select a cloud, open the tool, and go to the **Stats** tab. Pick a field and
-Phytograph reports its distribution:
+Check one or more clouds, open the tool, and go to the **Stats** tab. Pick a
+field and Phytograph reports its distribution:
 
 | | |
 |---|---|
@@ -40,6 +74,18 @@ count.
     histogram meaningless.
 
     The panel says so under the table whenever the two counts differ.
+
+    With several clouds checked, each cloud's own hidden and sky/miss points are
+    excluded **before** the clouds are pooled, and the caption says how many
+    clouds the distribution covers.
+
+!!! tip "Class columns pool differently from measurements"
+
+    A pooled histogram of a class column (`wood_class`, `tree_instance`) is
+    useful — it shows the class mix across the plot. A pooled *mean* or
+    *percentile* over one is not: class ids are labels, and `tree_instance`
+    numbers objects per cloud, so the same id means a different tree on each.
+    The panel flags this beside the numbers; read the histogram instead.
 
 The histogram is binned over the 1st–99th percentile rather than the full range,
 so a single spike cannot squash every real value into the first bar. Points
@@ -65,8 +111,14 @@ degrees(acos(nz))
 A formula may also be a bare constant (`0`, `pi * 2`), which fills every point
 with the same value — useful for seeding a column you then edit by hand.
 
-Refer to any field by its name. **Show available names** lists everything this
-cloud offers, including `x`, `y` and `z`.
+Refer to any field by its name. **Show available names** lists everything the
+checked clouds offer, including `x`, `y` and `z`.
+
+With several clouds checked the formula runs on each in turn, and the names you
+may use are the ones **all** of them carry — otherwise the formula would work on
+the first cloud and fail partway down the list. Coordinates stay available here
+even when they are unavailable in **Stats**: each cloud is computed on its own,
+so `z - height_above_ground` never mixes frames.
 
 ### Operators and functions
 

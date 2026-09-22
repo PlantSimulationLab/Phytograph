@@ -95,6 +95,10 @@ result is an ordinary scalar field: it appears in this dropdown, in the Filter
 panel and in the export column picker, and can feed another formula. The same
 tool reports each field's statistics and histogram.
 
+Run it with several clouds checked and each one gets its own copy of the new
+column, and each is set to colour by it — the field belongs to every cloud it
+was computed on, not to a shared result.
+
 ### Scalar fields on imported clouds
 
 Any extra numeric columns in an imported XYZ/TXT/CSV file — beyond the

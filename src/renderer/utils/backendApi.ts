@@ -5327,6 +5327,48 @@ export async function listScalarFields(
   return await response.json();
 }
 
+/** Pooled statistics for one field across several clouds.
+
+ *  ONE distribution over the concatenation, not N side-by-side summaries. Each
+ *  cloud is masked by its own alive-and-real-return rule BEFORE the pooling, so
+ *  sky/miss points can never set the percentiles.
+ *
+ *  Coordinates (`x`/`y`/`z`) are refused with a 400 when more than one cloud is
+ *  passed: every cloud stores them in its own frame, so pooling them would
+ *  average positions that are not in the same frame. */
+export interface ScalarFieldAggregateStatsResult {
+  session_ids: string[];
+  slug: string;
+  /** The label of the first cloud that carries the field. */
+  label: string;
+  stats: ScalarFieldStats;
+  /** Per-cloud surviving count and that cloud's own label for the field. */
+  sources: Array<{ session_id: string; count: number; label: string }>;
+  /** Clouds that turned out not to carry the field at all. */
+  missing_session_ids: string[];
+}
+
+export async function scalarFieldStatsMulti(
+  sessionIds: string[],
+  slug: string,
+  signal?: AbortSignal,
+): Promise<ScalarFieldAggregateStatsResult> {
+  const response = await fetch(`${getBackendUrl()}/api/cloud/scalar_fields/stats`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_ids: sessionIds, slug }),
+    signal,
+  });
+  if (!response.ok) {
+    // The 400s here are explanatory (the coordinate-frame refusal names why),
+    // so surface the detail rather than a bare status line.
+    let detail = '';
+    try { detail = (await response.json())?.detail ?? ''; } catch { /* non-JSON body */ }
+    throw new Error(detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return await response.json();
+}
+
 /** Statistics + histogram for one field. */
 export async function scalarFieldStats(
   sessionId: string,

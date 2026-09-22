@@ -46,7 +46,7 @@ by the four stages of a typical processing pipeline.
 
 - :material-vector-line: **[Compute normals](compute-normals.md)** — estimate surface direction, curvature and verticality.
 
-- :material-calculator-variant: **[Work with scalar fields](scalar-fields.md)** — statistics, histograms, and new fields from a formula.
+- :material-calculator-variant: **[Work with scalar fields](scalar-fields.md)** — statistics, histograms, and new fields from a formula, over one cloud or several at once.
 
 - :phytograph-backfill: **[Backfill misses](backfill-misses.md)** — recover the sky/miss rays that LAD needs from a scan that dropped them.
 
