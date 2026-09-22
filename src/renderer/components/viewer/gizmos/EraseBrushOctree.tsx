@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
-import { rayForNdc, worldPerPixelAt } from '../../../lib/cameraRay';
+import { pickPixelForNdc, rayForNdc, worldPerPixelAt } from '../../../lib/cameraRay';
 
 // Frozen camera + the painted square stamps for one erase session, in the
 // exact shape crop_octree's `squares_union` region wants on Apply. `centers`
@@ -137,6 +137,12 @@ export function EraseBrushOctree({
         try {
           const hit = octree.pick(gl, camera, ray, {
             pickWindowSize: 17, pickOutsideClipRegion: true,
+            // Erase mode runs under the ortho override for its whole session,
+            // and potree derives its pick window from the ray DIRECTION — which
+            // every parallel ray shares, so the window would sit on the view
+            // centre and the preview box would take its depth from whatever is
+            // in the middle of the screen. See `pickPixelForNdc`.
+            pixelPosition: pickPixelForNdc(gl, mouseNdc),
           });
           if (hit?.position) {
             return new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);

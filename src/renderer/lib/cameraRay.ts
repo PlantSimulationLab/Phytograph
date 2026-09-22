@@ -43,6 +43,10 @@ export function isOrthographicProjection(elements: ArrayLike<number>): boolean {
   return projectionKindOf(elements) === 'orthographic';
 }
 
+// Scratch for the eye position, so the perspective branch allocates nothing on
+// a path that runs once per mousemove.
+const _eye = new THREE.Vector3();
+
 /**
  * Build the pick ray through a normalized-device-coordinate point.
  *
@@ -52,15 +56,30 @@ export function isOrthographicProjection(elements: ArrayLike<number>): boolean {
  * perspective ray math (all rays through the eye) to an orthographic matrix and
  * every pick collapses toward the view center.
  *
- * Construction, straight from the (possibly overridden) matrices:
- *   origin    = unproject (ndc.x, ndc.y, -1) through projectionMatrixInverse
- *               then the camera world matrix — the near-plane point under the
- *               cursor.
- *   direction = the camera's forward (-Z) in world space.
+ * Construction, straight from the (possibly overridden) matrices. The near-plane
+ * point under the cursor — unproject (ndc.x, ndc.y, -1) through
+ * `projectionMatrixInverse` then the camera world matrix — anchors both cases;
+ * what differs is the DIRECTION, and it differs by projection:
  *
- * Under ortho this is the correct parallel ray. Under a genuine perspective
- * matrix it still picks correctly: the origin lands on the near plane under the
- * cursor and the direction points into the scene.
+ *   orthographic — parallel rays, so direction = the camera's forward (-Z) and
+ *                  the near-plane point IS the origin. The lateral offset of
+ *                  that origin is what puts the ray under the cursor.
+ *   perspective  — every ray passes through the EYE, so direction =
+ *                  (near-plane point − eye), and the origin is the eye itself
+ *                  (matching `setFromCamera`'s convention, so distances along
+ *                  the ray mean the same thing here as everywhere else).
+ *
+ * This function used to return the camera forward under BOTH projections, on
+ * the reasoning that the offset near-plane origin was "good enough for picking"
+ * under perspective. It is not, and the error is not subtle: the near plane sits
+ * ~0.001-0.1 world units from the eye, so the whole screen maps to origins
+ * within a fraction of a millimetre of each other, all travelling dead ahead.
+ * Every pick therefore reported the surface at the CENTRE of the viewport no
+ * matter where the pointer was — measured on a 14.8 M-point cloud as the exact
+ * same anchor, to 1e-7, across five widely separated cursor positions. The label
+ * brush's sphere sat frozen mid-scene while the mouse moved around it, and
+ * potree's own picker (which derives its pick pixel from `camera.position +
+ * ray.direction`) was handed the view centre every time.
  *
  * NOTE `projectionMatrixInverse` must be current. `OrthoProjectionOverride`
  * updates it alongside `projectionMatrix` for exactly this reason; a new
@@ -76,8 +95,46 @@ export function rayForNdc(
     .set(ndc.x, ndc.y, -1)
     .applyMatrix4(camera.projectionMatrixInverse)
     .applyMatrix4(camera.matrixWorld);
-  ray.direction.set(0, 0, -1).transformDirection(camera.matrixWorld).normalize();
+  if (isOrthographicProjection(camera.projectionMatrix.elements)) {
+    ray.direction.set(0, 0, -1).transformDirection(camera.matrixWorld).normalize();
+    return ray;
+  }
+  _eye.setFromMatrixPosition(camera.matrixWorld);
+  ray.direction.copy(ray.origin).sub(_eye).normalize();
+  ray.origin.copy(_eye);
   return ray;
+}
+
+/**
+ * The pixel potree's picker should sample, for a cursor at `ndc`.
+ *
+ * potree-core reads `pickWindowSize` pixels around a point it derives ITSELF,
+ * as `project(camera.position + ray.direction)` — i.e. from the ray's direction
+ * alone. That is right for a perspective ray and wrong for a parallel one: under
+ * an orthographic projection every ray shares the camera's forward direction, so
+ * the derived point is always view-space (0, 0, -1) and the pick window always
+ * lands on the CENTRE of the viewport, whatever the cursor is doing. The
+ * cross-section's ortho override puts the label brush in exactly that case, and
+ * the erase brush lives there permanently.
+ *
+ * Passing this as `pixelPosition` skips that derivation entirely, so the window
+ * follows the cursor under both projections. Device pixels (canvas CSS size ×
+ * pixel ratio), y measured UP from the bottom — the GL convention potree's own
+ * NDC→pixel conversion produces, and what `readRenderTargetPixels` expects.
+ */
+export function pickPixelForNdc(
+  renderer: { domElement: HTMLCanvasElement; getPixelRatio: () => number },
+  ndc: { x: number; y: number },
+  target?: THREE.Vector3,
+): THREE.Vector3 {
+  const ratio = renderer.getPixelRatio();
+  const width = Math.ceil(renderer.domElement.clientWidth * ratio);
+  const height = Math.ceil(renderer.domElement.clientHeight * ratio);
+  return (target ?? new THREE.Vector3()).set(
+    (ndc.x + 1) * width * 0.5,
+    (ndc.y + 1) * height * 0.5,
+    0,
+  );
 }
 
 /**

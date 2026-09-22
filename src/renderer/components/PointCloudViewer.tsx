@@ -21643,8 +21643,13 @@ export default function PointCloudViewer({
                 // anchor depends on a GPU/CPU pick against streamed geometry,
                 // so a spec that paints before the octree has tiles gets a
                 // correct refusal that looks like a broken brush.
+                // The CENTRE rides along because "the brush is anchored" and
+                // "the brush is anchored WHERE THE POINTER IS" are different
+                // claims, and only the second one was ever false: a pick that
+                // ignored the cursor still reported ok, so a spec could only
+                // have caught the frozen sphere by watching this move.
                 (globalThis as any).__labelBrushCursor = c
-                  ? { ok: true, r: c.radius }
+                  ? { ok: true, r: c.radius, c: [c.center.x, c.center.y, c.center.z] }
                   : { ok: false };
               }}
               onPaintingChange={setLabelBrushPainting}

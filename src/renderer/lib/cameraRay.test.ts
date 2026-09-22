@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import {
   projectionKindOf,
   isOrthographicProjection,
+  pickPixelForNdc,
   rayForNdc,
   worldPerPixelAt,
 } from './cameraRay';
@@ -74,7 +75,7 @@ describe('projectionKindOf', () => {
 });
 
 describe('rayForNdc', () => {
-  it('points along the camera forward axis', () => {
+  it('points along the camera forward axis at the view centre', () => {
     const ray = rayForNdc(perspectiveCamera(), { x: 0, y: 0 });
     expect(ray.direction.x).toBeCloseTo(0, 6);
     expect(ray.direction.y).toBeCloseTo(0, 6);
@@ -96,18 +97,44 @@ describe('rayForNdc', () => {
     expect(corner.origin.y).toBeGreaterThan(center.origin.y + 1);
   });
 
-  it('offsets the near-plane origin under perspective too', () => {
-    // Documented contract: the direction is ALWAYS the camera forward axis,
-    // under both projections. That is exact for ortho and "good enough for
-    // picking" under perspective, where the origin lands on the near plane
-    // beneath the cursor. This test pins the origin behaviour so a future
-    // change to true per-pixel perspective directions is a deliberate one.
+  it('DIVERGES through the eye under perspective', () => {
+    // The bug this replaces: the direction used to be the camera forward under
+    // BOTH projections, with the offset near-plane origin expected to carry the
+    // cursor position. It cannot — the near plane is 0.1 units from the eye
+    // here, so an off-centre origin is ~0.07 units off-axis on a ray travelling
+    // hundreds of units dead ahead. Every pick landed on whatever sat at the
+    // CENTRE of the viewport, which froze the label brush's sphere mid-scene.
     const cam = perspectiveCamera();
     const center = rayForNdc(cam, { x: 0, y: 0 });
     const corner = rayForNdc(cam, { x: 0.8, y: 0.8 });
-    expect(corner.origin.x).toBeGreaterThan(center.origin.x);
-    expect(corner.origin.y).toBeGreaterThan(center.origin.y);
-    expect(corner.direction.z).toBeCloseTo(-1, 6);
+    // Rays through the eye all share one origin...
+    expect(corner.origin.distanceTo(cam.position)).toBeCloseTo(0, 6);
+    expect(center.origin.distanceTo(cam.position)).toBeCloseTo(0, 6);
+    // ...and it is the DIRECTION that carries the cursor. Unmissably so: the
+    // corner ray leans up and to the right, not straight ahead.
+    expect(corner.direction.x).toBeGreaterThan(0.2);
+    expect(corner.direction.y).toBeGreaterThan(0.2);
+    expect(center.direction.z).toBeCloseTo(-1, 6);
+  });
+
+  it('a perspective ray hits the world point that is actually under the cursor', () => {
+    // The end-to-end property, stated as geometry rather than as component
+    // parts: project a known world point to NDC, build the ray for that NDC,
+    // and it must pass through the point. The old forward-axis ray misses this
+    // by the point's whole lateral offset (2 world units here).
+    const cam = perspectiveCamera();
+    const target = new THREE.Vector3(2, 1.5, 0);
+    const ndc = target.clone().project(cam);
+    const ray = rayForNdc(cam, { x: ndc.x, y: ndc.y });
+    expect(ray.distanceToPoint(target)).toBeCloseTo(0, 6);
+  });
+
+  it('an ortho ray hits the world point that is actually under the cursor', () => {
+    const cam = overriddenCamera();
+    const target = new THREE.Vector3(2, 1.5, 0);
+    const ndc = target.clone().project(cam);
+    const ray = rayForNdc(cam, { x: ndc.x, y: ndc.y });
+    expect(ray.distanceToPoint(target)).toBeCloseTo(0, 6);
   });
 
   it('an ortho ray through an off-center NDC passes through the expected world x', () => {
@@ -153,5 +180,37 @@ describe('worldPerPixelAt', () => {
   it('returns zeros for a zero-sized canvas', () => {
     const cam = perspectiveCamera();
     expect(worldPerPixelAt(cam, new THREE.Vector3(), 0, 0)).toEqual({ x: 0, y: 0 });
+  });
+});
+
+describe('pickPixelForNdc', () => {
+  // A stand-in for the renderer: potree sizes its pick buffer from
+  // clientWidth/Height x pixelRatio, so this helper must agree exactly.
+  const renderer = (w: number, h: number, ratio: number) => ({
+    domElement: { clientWidth: w, clientHeight: h } as HTMLCanvasElement,
+    getPixelRatio: () => ratio,
+  });
+
+  it('maps NDC to device pixels, y UP from the bottom', () => {
+    const gl = renderer(800, 600, 1);
+    expect(pickPixelForNdc(gl, { x: 0, y: 0 })).toMatchObject({ x: 400, y: 300 });
+    // NDC y = +1 is the TOP of the screen, which in GL pixel space is the
+    // HIGHEST y — the opposite of a clientY. Getting this backwards would put
+    // the pick window in the mirror image of the cursor's half of the canvas.
+    expect(pickPixelForNdc(gl, { x: -1, y: -1 })).toMatchObject({ x: 0, y: 0 });
+    expect(pickPixelForNdc(gl, { x: 1, y: 1 })).toMatchObject({ x: 800, y: 600 });
+  });
+
+  it('scales by the device pixel ratio', () => {
+    // A retina canvas renders (and reads back) twice as many pixels, so a
+    // ratio-blind pixel would sample the lower-left quarter of the viewport.
+    expect(pickPixelForNdc(renderer(800, 600, 2), { x: 0, y: 0 }))
+      .toMatchObject({ x: 800, y: 600 });
+  });
+
+  it('writes into the supplied target rather than allocating', () => {
+    const target = new THREE.Vector3();
+    const out = pickPixelForNdc(renderer(800, 600, 1), { x: 0, y: 0 }, target);
+    expect(out).toBe(target);
   });
 });

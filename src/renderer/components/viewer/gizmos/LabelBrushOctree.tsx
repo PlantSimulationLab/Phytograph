@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
-import { useThree } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
-import { rayForNdc, worldPerPixelAt } from '../../../lib/cameraRay';
+import { pickPixelForNdc, rayForNdc, worldPerPixelAt } from '../../../lib/cameraRay';
 import { isSceneOverlay } from '../../../lib/sceneOverlay';
 
 // Same bound DepthProbe uses: above this the CPU raycast is too slow, and a
@@ -117,6 +117,21 @@ export function LabelBrushOctree({
   const strokeRef = useRef<BrushSphereStroke>({ centers: [], radii: [] });
   const lastStampRef = useRef<THREE.Vector3 | null>(null);
 
+  // The anchor the cursor sphere is currently sitting on, plus a closure that
+  // re-emits it at the CURRENT radius. The sphere's world radius is a function
+  // of the pixel radius AND the camera (a fixed pixel size is a fixed angle
+  // under perspective), and both change without the pointer moving: the wheel
+  // resizes the brush, Alt+wheel zooms. Recomputing only inside the mousemove
+  // handler meant neither reached the geometry until the user happened to jiggle
+  // the mouse — the readout in the panel changed and the sphere on screen did
+  // not, which reads as the wheel binding being broken.
+  //
+  // Only the RADIUS is recomputed here, never the anchor: re-picking would cost
+  // a GPU readback per frame, and the anchor is a world point that stays valid
+  // where it is until the pointer actually moves.
+  const anchorRef = useRef<THREE.Vector3 | null>(null);
+  const reemitRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     const myGeneration = ++brushGeneration;
     const owns = () => brushGeneration === myGeneration;
@@ -156,6 +171,10 @@ export function LabelBrushOctree({
         try {
           const hit = oct.pick(gl, camera, ray, {
             pickWindowSize: 17, pickOutsideClipRegion: true,
+            // The pick window, given rather than left to potree to derive from
+            // the ray — its derivation collapses to the view centre under the
+            // cross-section's ortho override. See `pickPixelForNdc`.
+            pixelPosition: pickPixelForNdc(gl, ndc),
           });
           if (hit?.position) {
             return new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
@@ -233,6 +252,27 @@ export function LabelBrushOctree({
       return Math.max(wpp.x, wpp.y) * radiusPxRef.current;
     };
 
+    // Re-publish the cursor at whatever the radius works out to NOW. Set here
+    // rather than at module scope so it closes over this registration's camera
+    // and canvas; the newest effect run overwrites it, exactly like the listeners.
+    reemitRef.current = () => {
+      const a = anchorRef.current;
+      if (!a) return;
+      onCursorRef.current({ center: a.clone(), radius: worldRadiusAt(a) });
+    };
+
+    /** Publish the cursor sphere (or clear it), and report the world radius. */
+    const setCursor = (world: THREE.Vector3 | null): number => {
+      anchorRef.current = world;
+      if (!world) {
+        onCursorRef.current(null);
+        return 0;
+      }
+      const radius = worldRadiusAt(world);
+      onCursorRef.current({ center: world, radius });
+      return radius;
+    };
+
     const stamp = (world: THREE.Vector3, radius: number) => {
       strokeRef.current.centers.push([world.x, world.y, world.z]);
       strokeRef.current.radii.push(radius);
@@ -248,7 +288,7 @@ export function LabelBrushOctree({
       );
       const world = anchorAt(ndc);
       if (!world) return;
-      onCursorRef.current({ center: world, radius: worldRadiusAt(world) });
+      setCursor(world);
     };
 
     const onMove = (e: MouseEvent) => {
@@ -259,11 +299,10 @@ export function LabelBrushOctree({
         // Nothing under the cursor: hide the indicator rather than parking it
         // at a guessed depth, and stamp nothing.
         //
-        onCursorRef.current(null);
+        setCursor(null);
         return;
       }
-      const radius = worldRadiusAt(world);
-      onCursorRef.current({ center: world, radius });
+      const radius = setCursor(world);
 
       if (!paintingRef.current) return;
       // Space the stamps along the drag. Without this a slow drag emits one
@@ -311,7 +350,7 @@ export function LabelBrushOctree({
       // to restore it: the brush sat dead with a valid octree under the cursor.
       const to = e.relatedTarget as Node | null;
       if (to && el.contains(to)) return;
-      onCursorRef.current(null);
+      setCursor(null);
       onUp();   // a drag that leaves the canvas still commits what it painted
     };
 
@@ -345,6 +384,37 @@ export function LabelBrushOctree({
       // parent stops rendering the indicator with it.
     };
   }, [camera, gl, scene]);
+
+  // Keep the drawn sphere honest while the pointer is still.
+  //
+  // The wheel resizes the brush and Alt+wheel zooms; both change the world
+  // radius the same pixel radius corresponds to. A per-frame check of the two
+  // inputs (the pixel radius, and the camera pose + projection) costs a couple
+  // of float compares and re-emits only when one of them actually moved — no
+  // pick, no allocation on the steady-state path.
+  const lastRadiusPx = useRef(-1);
+  // Projection scale + w-divide term, then the camera's world position: between
+  // them these move for every zoom, dolly, orbit and ortho override, and for
+  // nothing else. Compared as raw numbers rather than assembled into a key, so
+  // the steady-state frame allocates nothing at all.
+  const lastCamera = useRef<[number, number, number, number, number, number]>(
+    [NaN, NaN, NaN, NaN, NaN, NaN],
+  );
+  useFrame(() => {
+    if (!anchorRef.current) return;
+    const p = camera.projectionMatrix.elements;
+    const m = camera.matrixWorld.elements;
+    const now = lastCamera.current;
+    if (
+      brushRadiusPx === lastRadiusPx.current
+      && p[0] === now[0] && p[5] === now[1] && p[11] === now[2]
+      && m[12] === now[3] && m[13] === now[4] && m[14] === now[5]
+    ) return;
+    lastRadiusPx.current = brushRadiusPx;
+    now[0] = p[0]; now[1] = p[5]; now[2] = p[11];
+    now[3] = m[12]; now[4] = m[13]; now[5] = m[14];
+    reemitRef.current?.();
+  });
 
   return null;
 }

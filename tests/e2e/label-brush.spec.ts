@@ -163,6 +163,69 @@ async function dragAcross(page: LaunchedApp['page'], steps = 6) {
   await page.mouse.up();
 }
 
+/** The brush's world-space anchor right now, once it has resolved one. */
+async function cursorAt(page: LaunchedApp['page'], x: number, y: number) {
+  await page.mouse.move(x, y);
+  await expect.poll(
+    () => page.evaluate(() => (globalThis as any).__labelBrushCursor?.ok ?? false),
+    { timeout: 10_000, message: `brush found no surface at ${x},${y}` },
+  ).toBe(true);
+  return page.evaluate(() => (globalThis as any).__labelBrushCursor as
+    { ok: boolean; r: number; c: [number, number, number] });
+}
+
+test('the cursor follows the pointer, and the wheel resizes it in place', async () => {
+  // The two halves of "the brush tracks the mouse", and both were broken at
+  // once by causes that look nothing alike.
+  //
+  // FOLLOWING: `rayForNdc` returned the camera's forward axis as the direction
+  // under perspective as well as ortho, so every pick ray was the same ray —
+  // the one through the middle of the screen. The anchor was therefore whatever
+  // sat at the view centre, identical to 1e-7 across the whole canvas, and the
+  // sphere hung motionless in the scene while the pointer moved around it.
+  // Nothing already here could see it: every other assertion in this file is
+  // satisfied by a stroke that paints SOMETHING, and a centre-anchored stroke
+  // on a centred fixture does.
+  //
+  // RESIZING: the world radius was only ever recomputed inside the mousemove
+  // handler, so a wheel notch moved the number in the panel and left the sphere
+  // on screen at its old size until the pointer happened to move. The wheel is
+  // the primary size control and it does not emit a mousemove, so in practice
+  // that was "scrolling does nothing".
+  const { page } = await openBrush();
+  const canvas = page.locator('canvas[data-engine]').first();
+  const b = (await canvas.boundingBox())!;
+  const cy = b.y + b.height / 2;
+
+  // Both samples stay in the LEFT half: the label panel floats over the right
+  // of the viewport, and a pointer parked on it is off the canvas (the brush
+  // correctly reports no anchor there).
+  const left = await cursorAt(page, b.x + b.width * 0.40, cy);
+  const right = await cursorAt(page, b.x + b.width * 0.52, cy);
+  const moved = Math.hypot(
+    left.c[0] - right.c[0], left.c[1] - right.c[1], left.c[2] - right.c[2],
+  );
+  // The fixture spans 2 world units across a viewport it fills, so 16% of the
+  // canvas is a good fraction of a unit. The bug gives EXACTLY zero, so the
+  // threshold only has to be clear of pick jitter between adjacent points.
+  expect(moved).toBeGreaterThan(0.2);
+
+  // Now hold the pointer still and scroll. No mouse.move between the readings —
+  // that is the whole point.
+  const sizeEl = page.getByTestId('label-brush-size');
+  const beforePx = Number(await sizeEl.getAttribute('data-brush-px'));
+  const before = (await page.evaluate(() => (globalThis as any).__labelBrushCursor)).r;
+  for (let i = 0; i < 6; i++) await page.mouse.wheel(0, -100);
+  await expect.poll(async () => Number(await sizeEl.getAttribute('data-brush-px')),
+    { timeout: 10_000 }).toBeGreaterThan(beforePx);
+  // The SPHERE, not just the readout: the radius the viewer is drawing has to
+  // track the pixel size it was told about.
+  await expect.poll(
+    () => page.evaluate(() => (globalThis as any).__labelBrushCursor?.r ?? 0),
+    { timeout: 10_000, message: 'the drawn radius never followed the wheel' },
+  ).toBeGreaterThan(before * 1.2);
+});
+
 test('a drag paints, and does not sweep the whole cloud', async () => {
   const { page, panel } = await openBrush();
   await dragAcross(page);
