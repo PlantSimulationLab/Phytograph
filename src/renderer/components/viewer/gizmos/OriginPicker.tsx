@@ -1,27 +1,35 @@
 import { useEffect } from 'react';
 import { useThree, ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
-import type { PointCloudOctree } from 'potree-core';
+import { Potree, type PointCloudOctree } from 'potree-core';
 import { SCENE_OVERLAY } from '../../../lib/sceneOverlay';
+import { OCTREE_PICK_WINDOW_PX, makeInflatePickSplat } from '../../../lib/octreePickSplat';
 
 // Click target for placing the scene origin (the CloudCompare-style pivot).
 // While mounted (origin place-mode armed), a left-click prefers a SURFACE hit on
-// the selected octree cloud (potree-core `octree.pick`, so the origin snaps to a
-// real point like CloudCompare's point-pick), falling back to a ground-plane
-// intersection when the ray misses the cloud. The hit is converted from DISPLAY
-// space (the scene renders at world − displayOffset; the octree is attached to
-// the scene root at that offset, so picks come back in display coords) to WORLD
-// and reported via onPick. Only mounted while placing — otherwise it would
-// intercept every click.
+// the nearest visible octree cloud (potree-core `Potree.pick`, so the origin
+// snaps to a real point like CloudCompare's point-pick), falling back to a
+// ground-plane intersection when the ray misses every cloud. The hit is
+// converted from DISPLAY space (the scene renders at world − displayOffset; the
+// octrees are attached to the scene root at that offset, so picks come back in
+// display coords) to WORLD and reported via onPick. Only mounted while placing —
+// otherwise it would intercept every click.
+//
+// The origin is scene-wide, so this picks across every visible cloud rather
+// than only the selected one. Scoping it to the selection meant that with
+// nothing selected there was no surface to snap to AND no floor to fall back
+// on, so every click landed on z = 0 — tens of metres below a georeferenced
+// scan whose ground sits at +60 m.
 export function OriginPicker({
-  octree,
+  octrees,
   groundZ,
   displayOffset,
   onPick,
 }: {
-  // Live PointCloudOctree of the selected cloud (from OctreePointCloud's
-  // onOctreeReady handoff), or null for a flat cloud / none.
-  octree: PointCloudOctree | null;
+  // Live octrees of the visible clouds. Projected-miss octrees are never
+  // registered, so a sky point ~1 km out can't win the pick. Flat clouds have
+  // no octree and are reached only through the ground plane.
+  octrees: PointCloudOctree[];
   // Ground-plane Z in DISPLAY space (fallback when no surface is hit).
   groundZ: number;
   displayOffset: { x: number; y: number; z: number };
@@ -36,12 +44,17 @@ export function OriginPicker({
   }, [gl]);
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
-    // Surface snap first: pick against the octree along the event ray.
-    if (octree) {
+    // Surface snap first: pick against the octrees along the event ray.
+    if (octrees.length > 0) {
       try {
-        const hit = octree.pick(gl, camera, e.ray, { pickWindowSize: 17, pickOutsideClipRegion: true }) as
-          | { position?: { x: number; y: number; z: number } }
-          | null;
+        const hit = Potree.pick(octrees, gl, camera, e.ray, {
+          pickWindowSize: OCTREE_PICK_WINDOW_PX,
+          pickOutsideClipRegion: true,
+          // Without this a point is only pickable where its 1-px splat covered
+          // a pixel, so density rather than aim decided whether the click
+          // snapped. See lib/octreePickSplat.
+          onBeforePickRender: makeInflatePickSplat(gl.getPixelRatio()),
+        }) as { position?: { x: number; y: number; z: number } } | null;
         if (hit?.position) {
           e.stopPropagation();
           onPick([

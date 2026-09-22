@@ -2578,9 +2578,9 @@ export default function PointCloudViewer({
   // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
   // handed up by OctreePointCloud (which also reports null on unmount).
   //
-  // The erase brush and the scene-origin picker only ever want the SELECTED
-  // cloud — see selectedOctree() below — but the point picker has to pick
-  // across every visible cloud, which is why this is a registry rather than the
+  // The erase brush only ever wants the SELECTED cloud — see selectedOctree()
+  // below — but the point and scene-origin pickers pick across every visible
+  // cloud, which is why this is a registry rather than the
   // single slot it used to be. The projected-miss octrees are never registered,
   // which is what keeps sky/miss points unpickable for free.
   const octreeRegistryRef = useRef<Map<string, PointCloudOctree>>(new Map());
@@ -21077,16 +21077,21 @@ export default function PointCloudViewer({
         )}
 
         {/* Scene-origin click-to-place target. Armed from the Scene Origin panel;
-            surface-snaps to the octree, else drops on the selected cloud's ground
-            plane. Auto-disarms on a successful pick. */}
+            surface-snaps to the nearest VISIBLE cloud (selected or not — the
+            origin is scene-wide), else drops on the scene's ground plane.
+            Auto-disarms on a successful pick. */}
         {originPlaceMode && (
           <OriginPicker
-            octree={selectedOctree()}
-            // Robust floor when the cloud has one, else its raw minimum — a
-            // single sub-terrain noise point must not drop the pick plane.
-            groundZ={(firstSelectedCloud?.data.groundZ
-              ?? firstSelectedCloud?.data.bounds.min.z
-              ?? 0) - displayOffset.z}
+            octrees={clouds.flatMap((c) => {
+              if (!c.visible) return [];
+              const oct = octreeRegistryRef.current.get(c.id);
+              return oct ? [oct] : [];
+            })}
+            // The scene's robust floor (lowest per-cloud floor, tracking any
+            // live translation) — never a hardcoded 0, which put every
+            // ground-plane pick on a georeferenced scan tens of metres below
+            // its terrain.
+            groundZ={combinedBounds.groundZ - displayOffset.z}
             displayOffset={displayOffset}
             onPick={(world) => { setSceneOriginOverride(world); setOriginPlaceMode(false); }}
           />

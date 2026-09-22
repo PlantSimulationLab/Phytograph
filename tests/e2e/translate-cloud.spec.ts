@@ -838,6 +838,49 @@ test.describe('translate cloud', () => {
     expect(dist(camBefore.target, camAfter.target)).toBeLessThan(1e-3);
   });
 
+  // Regression: on a cloud whose ground is far above z = 0 (a georeferenced
+  // scan, here +60 m) with NOTHING selected, click-to-place always produced
+  // Z = 0. The picker only surface-snapped to the SELECTED cloud and its
+  // ground-plane fallback was a hardcoded 0 when there was no selection. Both
+  // paths are checked: a click on the cloud (surface snap) and a click on
+  // empty viewport (ground plane), and each must land at the cloud's height.
+  test('Set Scene Origin — click-to-place uses the cloud height with nothing selected', async () => {
+    const { app, page } = session;
+    await importFiles(app, page, 'import-auto',
+      join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-elevated.xyz'));
+    await completeImportWizard(page);
+    const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny-elevated"]');
+    await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+    await expect(cloudRow).toHaveAttribute('data-octree', 'true');
+    await page.waitForFunction(() => {
+      const reg = (window as any).__octreePositions;
+      return reg && Object.keys(reg).length === 1;
+    }, { timeout: 20_000 });
+    // Deselect: a plain click on the sole selection toggles it off.
+    await cloudRow.click();
+    await expect(cloudRow).toHaveAttribute('data-selected', 'false');
+
+    // Surface snap: click the middle of the cylinder. Any point on it has
+    // z in [60, 61.5].
+    const panel = await openSceneOriginPanel();
+    const onCloud = await worldToScreen([0, 0, 60.75]);
+    await page.mouse.click(onCloud.x, onCloud.y);
+    await expect(panel).toHaveAttribute('data-has-origin', 'true');
+    let [, , z] = await readOriginFields();
+    expect(z).toBeGreaterThan(59.9);
+    expect(z).toBeLessThan(61.6);
+
+    // Ground-plane fallback: a click on empty space lands on the cloud's
+    // floor (z = 60), not on z = 0.
+    await page.getByTestId('scene-origin-pick').click();
+    await expect(panel).toHaveAttribute('data-place-mode', 'true');
+    const empty = await emptyViewportPoint();
+    await page.mouse.click(empty.x, empty.y);
+    await expect(panel).toHaveAttribute('data-place-mode', 'false');
+    [, , z] = await readOriginFields();
+    expect(z).toBeCloseTo(60, 1);
+  });
+
   // Open the Scene Origin panel. Opening AUTO-ARMS click-to-place (placing the
   // pivot by clicking is the common reason to open it), which mounts a
   // full-viewport picker plane that swallows every canvas click and makes the
