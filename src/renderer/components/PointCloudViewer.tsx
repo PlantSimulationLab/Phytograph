@@ -4,7 +4,7 @@ import { Canvas } from '@react-three/fiber';
 import { createNoWheelPointerEvents } from '../lib/canvasEvents';
 import { BakeQueue } from '../lib/pendingBakes';
 import { shouldDeferOctreeRebuild } from '../lib/deferOctreeRebuild';
-import { OctreeRefreshQueue, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
+import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner } from '../lib/octreeRefreshQueue';
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
@@ -117,7 +117,7 @@ import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOver
 import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
   makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
-  labelableColumnsFor, derivePaletteForColumn, makeEmptyPalette,
+  labelableColumnsFor, withPendingLabelColumn, derivePaletteForColumn, makeEmptyPalette,
   type ClassPalette, type LabelableColumn, type PalettePreset,
 } from '../lib/classPalettes';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
@@ -2575,6 +2575,42 @@ export default function PointCloudViewer({
   const [labelClassCounts, setLabelClassCounts] = useState<Record<number, number>>({});
   const [labelDirty, setLabelDirty] = useState(false);
   const [labelBusy, setLabelBusy] = useState(false);
+  /**
+   * Strokes that have been COMMITTED but whose octree rebuild has not landed.
+   *
+   * Commit is a display rebuild and nothing else — the backend has carried the
+   * labels since the stroke itself (`label_cloud_region` writes the session
+   * arrays, which is what export and every compute path read), so the only
+   * thing a commit changes is that octree.bin starts carrying the column and
+   * the client-side overlay can stop drawing it. That job is a PotreeConverter
+   * run, so it goes to the background refresh queue like a crop's does.
+   *
+   * Which leaves one thing that MUST NOT be dropped in the meantime: the
+   * overlay. `labelStrokes` is cleared at commit (the tool is free again — new
+   * column, different cloud, close the panel), so without somewhere else to
+   * keep them the painted points would revert to their old colours the instant
+   * the user clicked Save, and stay reverted for the length of the rebuild.
+   * Held here instead, keyed by cloud so the paint survives closing the tool or
+   * moving to another scan, and dropped only by the rebuild that carries it.
+   *
+   * `seq` identifies the commit. A second commit while the first is still
+   * converting bumps it, so the older run — whose snapshot predates the newer
+   * strokes — knows to leave the hold alone rather than retire strokes its
+   * octree does not contain.
+   */
+  const [labelCommitHolds, setLabelCommitHolds] =
+    useState<Map<string, {
+      palette: ClassPalette; strokes: LabelStroke[]; seq: number;
+      /**
+       * The rebuild failed. The hold STAYS — the labels are in the session and
+       * the overlay is the only thing drawing them — and this is what re-arms
+       * the Commit button so the user has a way to ask again. Without it a
+       * failed background bake would leave the tool reporting nothing to save
+       * and no way to retry.
+       */
+      failed?: boolean;
+    }>>(() => new Map());
+  const labelCommitSeqRef = useRef(0);
   // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
   // handed up by OctreePointCloud (which also reports null on unmount).
   //
@@ -3712,7 +3748,8 @@ export default function PointCloudViewer({
   const octreeRefreshQueueRef = useRef<OctreeRefreshQueue | null>(null);
   if (octreeRefreshQueueRef.current === null) {
     octreeRefreshQueueRef.current = new OctreeRefreshQueue(
-      (cloudId, sessionId) => octreeRefreshRunnerRef.current(cloudId, sessionId),
+      (cloudId, sessionId, reason) =>
+        octreeRefreshRunnerRef.current(cloudId, sessionId, reason),
       {
         onChange: (ids) => setOctreeRefreshIds(ids),
         // A failed rebuild is not a data problem: the per-tile mask is still
@@ -3813,11 +3850,46 @@ export default function PointCloudViewer({
    * these two setState calls even from an async context — so the points never
    * flash back between the rebuilt octree arriving and its clauses being retired.
    */
-  const refreshCloudOctree = useCallback(async (cloudId: string, sessionId: string) => {
+  const refreshCloudOctree = useCallback(async (
+    cloudId: string, sessionId: string, reason: OctreeRefreshReason = {},
+  ) => {
     const cloud = cloudsRef.current.find(c => c.id === cloudId);
     const octreeInfo = cloud?.data.octree;
     // Deleted (or replaced) while the rebuild was queued — nothing to install.
     if (!cloud || !octreeInfo) return;
+
+    // A label commit first, because a plain refresh CANNOT do it. Label edits
+    // deliberately leave `octree_cache_id` current (the octree is behind, not
+    // wrong — the renderer's overlay covers the gap), and the bake below takes
+    // its no-rebuild fast path on a current cache id, so asking for a refresh
+    // alone would convert nothing and the labels would never reach octree.bin.
+    //
+    // It also SUBSUMES the refresh: `_session_rebuild` writes the whole session
+    // (survivors and every column), so the bake that follows costs a metadata
+    // read rather than a second converter run — while still doing the
+    // delete-stack bookkeeping below, which commit_labels knows nothing about.
+    if (reason.labelSlug) {
+      try {
+        await commitCloudLabels(sessionId, reason.labelSlug);
+      } catch (err) {
+        // Flag the hold rather than dropping it: the strokes are still the only
+        // painted copy on screen, and the user needs the Commit button back.
+        setLabelCommitHolds((prev) => {
+          const hold = prev.get(cloudId);
+          if (!hold || hold.seq !== reason.labelSeq) return prev;
+          const next = new Map(prev);
+          next.set(cloudId, { ...hold, failed: true });
+          return next;
+        });
+        showToast({
+          title: describeBackendError(err, 'Commit labels').message,
+          message: 'The labels are still on the cloud — commit again to bake them in.',
+          type: 'error',
+        });
+        throw err;
+      }
+    }
+
     const abort = new AbortController();
     octreeRefreshAbortRef.current = abort;
     octreeRefreshRunIdRef.current = null;
@@ -3839,9 +3911,28 @@ export default function PointCloudViewer({
       }
     }
     if (!cloudsRef.current.some(c => c.id === cloudId)) return;
+    // Re-read the cloud: this rebuild may have been queued minutes ago, and the
+    // commit that queued it has since written the palette binding onto the
+    // octree metadata. Building from the stale capture would drop it.
+    const current = cloudsRef.current.find(c => c.id === cloudId)?.data.octree ?? octreeInfo;
     onUpdateCloud(cloudId, buildSessionOctreeData(
-      baked, octreeInfo, cloud.data.fileName ?? cloudId, undefined, { diverged: true },
+      baked, current, cloud.data.fileName ?? cloudId, undefined, { diverged: true },
     ));
+    if (reason.labelSlug) {
+      // The octree now carries the column, so colour by it — the step that used
+      // to happen inline at the end of a blocking commit.
+      setCloudColorMode(cloudId, { mode: 'scalar', field: reason.labelSlug });
+      setLabelCommitHolds((prev) => {
+        const hold = prev.get(cloudId);
+        // Only retire the commit this run was for. A newer commit (bigger seq)
+        // has strokes this octree was built before seeing, and dropping them
+        // here would blank them until its own rebuild landed.
+        if (!hold || hold.seq !== reason.labelSeq) return prev;
+        const next = new Map(prev);
+        next.delete(cloudId);
+        return next;
+      });
+    }
     setEditStates(prev => {
       const cur = prev.get(cloudId);
       if (!cur) return prev;
@@ -3874,7 +3965,7 @@ export default function PointCloudViewer({
       });
       return next;
     });
-  }, [onUpdateCloud, buildSessionOctreeData, setEditStates]);
+  }, [onUpdateCloud, buildSessionOctreeData, setEditStates, setCloudColorMode, showToast]);
   octreeRefreshRunnerRef.current = refreshCloudOctree;
 
   /**
@@ -4991,7 +5082,7 @@ export default function PointCloudViewer({
   const labelColumns = useMemo<LabelableColumn[]>(() => {
     const oct = labelTargetCloud?.data.octree;
     if (!oct) return [];
-    return labelableColumnsFor({
+    const columns = labelableColumnsFor({
       columnOptions: octreeScalarFieldOptions(oct.attributeRanges, oct.attributeLabels),
       attributeRanges: oct.attributeRanges,
       observedClasses: oct.observedClasses,
@@ -4999,7 +5090,19 @@ export default function PointCloudViewer({
       manualSlug: MANUAL_CLASS_ATTRIBUTE,
       isCategorical: isCategoricalAttribute,
     });
-  }, [labelTargetCloud?.data.octree]);
+    // A column committed but not yet baked is real everywhere except the octree
+    // metadata this list is built from, so add it — otherwise a user who
+    // creates a classification and saves it watches their own column stay
+    // missing from the picker for the length of a converter run. The palette's
+    // class list stands in for `observed` until the backend reports which
+    // classes actually own points.
+    const hold = labelTargetCloud ? labelCommitHolds.get(labelTargetCloud.id) : null;
+    return withPendingLabelColumn(columns, hold ? {
+      slug: hold.palette.slug,
+      label: hold.palette.name,
+      observed: hold.palette.classes.map((c) => c.value),
+    } : null);
+  }, [labelTargetCloud, labelCommitHolds]);
 
   // Wire the undo/redo backend sync declared near handleUndo. Runs AFTER the
   // reducer has applied the inverse, so the store's post-undo state is the
@@ -5780,12 +5883,12 @@ export default function PointCloudViewer({
   // Strokes carry a class VALUE, but the overlay paints a dense palette INDEX:
   // potree bakes its step gradient into 64 texels, so a palette living at
   // 64..255 would blend into one colour on screen.
-  const labelOverlayRef = useRef<LabelOverlayState | null>(null);
-  const labelOverlayState = useMemo<LabelOverlayState | null>(() => {
-    if (!labelTargetCloud || !labelPalette) return null;
-    const { valueToIndex } = paletteIndexMaps(labelPalette);
+  const buildLabelOverlayState = useCallback((
+    palette: ClassPalette, strokeList: LabelStroke[],
+  ): LabelOverlayState => {
+    const { valueToIndex } = paletteIndexMaps(palette);
     const unlabeledIndex = valueToIndex.get(UNCLASSIFIED_VALUE) ?? 0;
-    const strokes = labelStrokes.map((s) => {
+    const strokes = strokeList.map((s) => {
       const regionTest = buildRegionPredicate(s.region);
       // AND the slab into the preview predicate. Without this the overlay would
       // paint the points behind the section that the backend correctly refuses,
@@ -5812,20 +5915,111 @@ export default function PointCloudViewer({
       strokes,
       // Changes whenever the stroke list does, which is what re-triggers the
       // per-tile replay. Stroke ids are unique and ordered, so this is enough.
-      key: `${labelPalette.id}|${labelStrokes.map((s) => s.strokeId).join(',')}`,
+      key: `${palette.id}|${strokeList.map((s) => s.strokeId).join(',')}`,
       unlabeledIndex,
     };
-  }, [labelTargetCloud, labelPalette, labelStrokes]);
-  // Render-time: the per-frame overlay pass reads this ref, so an effect-delayed
-  // update costs a frame of stale preview after every stroke.
-  labelOverlayRef.current = labelOverlayState;
+  }, [buildRegionPredicate]);
 
-  // The categorical scheme the overlay's INDEX values colour through, so the
-  // legend and the points agree while previewing.
-  const labelIndexScheme = useMemo(
-    () => (labelPalette ? paletteToIndexScheme(labelPalette) : null),
-    [labelPalette],
-  );
+  /**
+   * The overlay each cloud needs drawn, keyed by cloud id.
+   *
+   * A map rather than the single slot this used to be, because the two things
+   * that need overlaying no longer coincide. The TOOL's pending strokes belong
+   * to the cloud the panel is open on; a COMMITTED hold belongs to whichever
+   * cloud is waiting for its rebuild, which may be one the user has since
+   * navigated away from or closed the tool on. Both have to keep painting.
+   *
+   * When a hold and the live tool are on the same cloud they concatenate — held
+   * first, so later strokes win the same way they do on the backend. A hold for
+   * a DIFFERENT column than the one the tool is now painting is dropped from the
+   * render instead: the overlay aliases a single attribute into the intensity
+   * slot, so only one column can be shown at a time, and the one the user is
+   * looking at is the one they picked.
+   */
+  const labelOverlayByCloud = useMemo(() => {
+    const out = new Map<string, {
+      state: LabelOverlayState;
+      scheme: ReturnType<typeof paletteToIndexScheme>;
+      slug: string;
+    }>();
+    for (const [cloudId, hold] of labelCommitHolds) {
+      if (labelTargetCloud?.id === cloudId) continue;   // merged below
+      out.set(cloudId, {
+        state: buildLabelOverlayState(hold.palette, hold.strokes),
+        scheme: paletteToIndexScheme(hold.palette),
+        slug: hold.palette.slug,
+      });
+    }
+    if (labelTargetCloud && labelPalette) {
+      const hold = labelCommitHolds.get(labelTargetCloud.id);
+      const held = hold && hold.palette.slug === labelPalette.slug ? hold.strokes : [];
+      out.set(labelTargetCloud.id, {
+        state: buildLabelOverlayState(labelPalette, [...held, ...labelStrokes]),
+        scheme: paletteToIndexScheme(labelPalette),
+        slug: labelPalette.slug,
+      });
+    }
+    return out;
+  }, [labelCommitHolds, labelTargetCloud, labelPalette, labelStrokes, buildLabelOverlayState]);
+
+  /**
+   * Stable per-cloud ref boxes for the overlay the renderer reads each frame.
+   *
+   * `OctreePointCloud` captures this ref object into its frame state, so it has
+   * to keep its identity across renders — handing it a fresh object per render
+   * would leave the captured one frozen at whatever it held when the frame
+   * state was last rebuilt. One box per cloud, mutated in place.
+   *
+   * Written during RENDER, like the single ref it replaces: the overlay pass
+   * runs per frame, so an effect-delayed update costs a frame of stale preview
+   * after every stroke.
+   */
+  const labelOverlayBoxesRef = useRef<Map<string, { current: LabelOverlayState | null }>>(new Map());
+  {
+    const boxes = labelOverlayBoxesRef.current;
+    for (const [cloudId, entry] of labelOverlayByCloud) {
+      const box = boxes.get(cloudId) ?? { current: null };
+      box.current = entry.state;
+      boxes.set(cloudId, box);
+    }
+    for (const [cloudId, box] of boxes) {
+      // Blank a box the map no longer owns before dropping it: the renderer may
+      // still be holding this exact object in its captured frame state.
+      if (!labelOverlayByCloud.has(cloudId)) { box.current = null; boxes.delete(cloudId); }
+    }
+  }
+
+  // Drop holds for clouds that no longer exist (File > New, a scan removed, a
+  // split replacing its parent). The overlay box map is rebuilt from
+  // `labelOverlayByCloud` every render and so cleans itself, but the hold is
+  // state: left behind it would keep a deleted cloud's id in the map, and the
+  // pill's "a label bake is outstanding" test reads that map.
+  useEffect(() => {
+    setLabelCommitHolds((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(clouds.map((c) => c.id));
+      if ([...prev.keys()].every((id) => live.has(id))) return prev;
+      const next = new Map(prev);
+      for (const id of [...next.keys()]) if (!live.has(id)) next.delete(id);
+      return next;
+    });
+  }, [clouds]);
+
+  /**
+   * How the column the panel is showing stands with its background bake.
+   *
+   * `baking` — committed, converter still running. Commit stays disabled: the
+   * strokes are already on the backend, so asking again would only buy a second
+   * identical converter run.
+   * `failed` — the bake did not land. The labels are still in the session and
+   * still on screen, so this re-arms Commit rather than reporting a data loss
+   * that has not happened.
+   */
+  const labelHold = useMemo(() => {
+    const hold = labelTargetCloud ? labelCommitHolds.get(labelTargetCloud.id) : null;
+    const mine = hold && labelPalette && hold.palette.slug === labelPalette.slug ? hold : null;
+    return { baking: !!mine && !mine.failed, failed: !!mine?.failed };
+  }, [labelTargetCloud, labelPalette, labelCommitHolds]);
 
   /** Undo the most recent stroke, keeping renderer and backend in lock-step. */
   const handleLabelUndo = useCallback(async () => {
@@ -5854,53 +6048,77 @@ export default function PointCloudViewer({
 
   /**
    * Commit: bake the label column into the octree so it colours without the
-   * client-side overlay. The slow step (one PotreeConverter run).
+   * client-side overlay.
    *
-   * The strokes are NOT cleared until the new octree is mounted. Clearing them
-   * here would drop the overlay while the OLD octree — which does not carry the
-   * labels yet — is still on screen, and every painted point would visibly
-   * revert. Same discipline pendingDeletes follows for its clip preview.
+   * Returns immediately. The bake is one PotreeConverter run — tens of seconds
+   * on a real scan, minutes on a big one — and it is the ONLY thing a commit
+   * does: the labels have been in the session since the stroke that painted
+   * them (`label_cloud_region` writes the in-RAM arrays), so export, filter,
+   * split and every compute path have been reading them all along. Nothing the
+   * user might do next needs to wait for a render cache to catch up, so the run
+   * goes to the same background queue a crop's rebuild uses, and the tool is
+   * free again on the next frame.
+   *
+   * What must NOT be dropped in the meantime is the overlay, and this is where
+   * that used to be enforced by simply not returning until the rebuild landed.
+   * The strokes move to `labelCommitHolds` instead, which keeps painting them
+   * — across closing the tool, switching cloud, everything — until the rebuild
+   * that carries them installs its octree. Clearing them here with nothing else
+   * drawing them would revert every painted point the instant the user clicked
+   * Save, which is the exact failure the old blocking version existed to avoid.
    */
-  const handleLabelCommit = useCallback(async () => {
+  const handleLabelCommit = useCallback(() => {
     const cloud = labelTargetCloud;
     const octreeInfo = cloud?.data.octree;
     const sessionId = octreeInfo?.sessionId;
-    if (!cloud || !octreeInfo || !sessionId) return;
-    setLabelBusy(true);
-    try {
-      const res = await commitCloudLabels(sessionId, labelPaletteRef.current?.slug);
-      const palette = labelPaletteRef.current;
-      const newData = buildSessionOctreeData(
-        res, octreeInfo, cloud.data.fileName ?? cloud.id,
-      );
-      if (newData.octree && palette) {
-        newData.octree.classPalettes = {
-          ...(octreeInfo.classPalettes ?? {}),
-          [res.slug]: palette,
-        };
-        newData.octree.categoricalAttributes = Array.from(
-          new Set([...(octreeInfo.categoricalAttributes ?? []), res.slug]),
-        );
-        // Same reason as handleSavePalette: the per-cloud list is not the
-        // process-wide registry the by-name resolvers consult.
-        registerCategoricalSlug(res.slug);
-      }
-      onUpdateCloud(cloud.id, newData);
-      setCloudColorMode(cloud.id, { mode: 'scalar', field: res.slug });
-      // Now the octree carries the labels — safe to drop the overlay.
-      setLabelStrokes([]);
-      setLabelDirty(false);
-      labelCountsSeqRef.current++;
-      setLabelClassCounts(
-        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
-      );
-      showToast({ title: 'Labels saved to the point cloud', type: 'success' });
-    } catch (err) {
-      showToast({ title: describeBackendError(err, 'Commit labels').message, type: 'error' });
-    } finally {
-      setLabelBusy(false);
-    }
-  }, [labelTargetCloud, buildSessionOctreeData, onUpdateCloud, setCloudColorMode, showToast]);
+    const palette = labelPaletteRef.current;
+    if (!cloud || !octreeInfo || !sessionId || !palette) return;
+    const seq = ++labelCommitSeqRef.current;
+    setLabelCommitHolds((prev) => {
+      const next = new Map(prev);
+      const existing = prev.get(cloud.id);
+      // A re-commit while the first is still converting: keep both sets of
+      // strokes on screen under the NEW seq, so the older run leaves them be.
+      const strokes = existing && existing.palette.slug === palette.slug
+        ? [...existing.strokes, ...labelStrokes]
+        : labelStrokes;
+      next.set(cloud.id, { palette, strokes, seq });
+      return next;
+    });
+    // The tool is free again: no pending strokes, nothing to undo, and the
+    // column/cloud guards stop blocking. The strokes are no longer undoable
+    // because they are no longer PENDING — undo across a commit has always
+    // needed a fresh commit to become visible.
+    setLabelStrokes([]);
+    setLabelDirty(false);
+    // The per-cloud palette binding and the categorical registration describe
+    // the COLUMN, which the session already has; only octree.bin is behind. Do
+    // them now so the picker, the legend and the by-name resolvers are right
+    // immediately rather than after the converter.
+    registerCategoricalSlug(palette.slug);
+    onUpdateCloud(cloud.id, {
+      ...cloud.data,
+      octree: {
+        ...octreeInfo,
+        classPalettes: { ...(octreeInfo.classPalettes ?? {}), [palette.slug]: palette },
+        categoricalAttributes: Array.from(
+          new Set([...(octreeInfo.categoricalAttributes ?? []), palette.slug]),
+        ),
+      },
+    });
+    octreeRefreshQueueRef.current?.enqueue(cloud.id, sessionId, {
+      labelSlug: palette.slug, labelSeq: seq,
+    });
+    // The one moment worth a word, and a transient one: it confirms the save
+    // and quietly accounts for the cloud re-streaming a little later when the
+    // rebuilt octree is swapped in. Nothing persistent follows it — see the
+    // pill below and LabelPanel's `baking`.
+    showToast({
+      title: 'Labels saved to the point cloud',
+      message: 'The display finishes rebuilding in the background.',
+      type: 'success',
+    });
+  }, [labelTargetCloud, labelStrokes, onUpdateCloud, showToast]);
 
   // Permanently apply (bake) a session cloud's pending deletions: rebuild the
   // octree from the survivors and clear the in-session mask + the accumulated
@@ -20481,14 +20699,18 @@ export default function PointCloudViewer({
                   // meanwhile is ANDed with it inside the renderer.
                   committedFilters={getEditState(cloud.id).committedFilters ?? null}
                   // Live labelling preview — only for the cloud being labelled.
-                  labelOverlayRef={
-                    labelTargetCloud?.id === cloud.id ? labelOverlayRef : null
+                  // Live labelling preview. Per CLOUD, not "the cloud the panel
+                  // is open on": a committed-but-unbaked hold keeps painting
+                  // after the tool has been closed or moved to another scan,
+                  // which is what stops the labels reverting the moment the
+                  // user hits Save. See `labelOverlayByCloud`.
+                  labelOverlayRef={labelOverlayBoxesRef.current.get(cloud.id) ?? null}
+                  labelCommittedSlug={
+                    labelOverlayByCloud.get(cloud.id)?.slug
+                    ?? labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE
                   }
-                  labelCommittedSlug={labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE}
                   slabBoxMatrix={sectionTargetCloud?.id === cloud.id ? slabBoxMatrix : null}
-                  labelIndexScheme={
-                    labelTargetCloud?.id === cloud.id ? labelIndexScheme : null
-                  }
+                  labelIndexScheme={labelOverlayByCloud.get(cloud.id)?.scheme ?? null}
                   // GPU clip-volume union (CLIP_INSIDE) combining:
                   //  - committed but unbaked deletes for THIS cloud (the
                   //    persistent instant-delete preview — points stay hidden
@@ -22222,8 +22444,22 @@ export default function PointCloudViewer({
           unapplied, whereas the crop is already applied and already on screen
           through its per-tile mask — cancelling only leaves the deleted points
           occupying space in an octree nobody draws them from. */}
-      {(refreshingOctreeIds.length + octreeRefreshIds.length) > 0 && (() => {
-        const n = refreshingOctreeIds.length + octreeRefreshIds.length;
+      {(() => {
+        // A label bake shows NOTHING. The pill earns its place on a crop
+        // refresh by offering a Cancel — an action, on work the user can weigh
+        // up (the crop is already drawn through its mask, so abandoning the
+        // rebuild costs only wasted space in an octree nobody looks through).
+        // A label bake offers no such choice: cancelling it would quietly undo
+        // a save the user was just told had happened, so the button cannot be
+        // there — and a progress indicator with nothing to decide and nothing
+        // to wait for only asks the user to wait. The toast has already told
+        // them the labels are saved; the rebuild is the app's business.
+        const displayIds = octreeRefreshIds.filter((id) => {
+          const hold = labelCommitHolds.get(id);
+          return !hold || hold.failed;
+        });
+        const n = refreshingOctreeIds.length + displayIds.length;
+        if (n === 0) return null;
         const blocking = refreshingOctreeIds.length > 0;
         return (
           <StatusPill
@@ -24336,7 +24572,9 @@ export default function PointCloudViewer({
           visibleClasses={labelVisibleClasses}
           fromClasses={labelFromClasses}
           pendingStrokes={labelStrokes.length}
-          dirty={labelDirty}
+          dirty={labelDirty || labelHold.failed}
+          baking={labelHold.baking}
+          bakeFailed={labelHold.failed}
           busy={labelBusy}
           onSelectClass={setLabelActiveClass}
           onToggleVisible={(v) => setLabelVisibleClasses(prev => {

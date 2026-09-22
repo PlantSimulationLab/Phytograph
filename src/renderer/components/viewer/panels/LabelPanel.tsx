@@ -44,6 +44,23 @@ export interface LabelPanelProps {
   pendingStrokes: number;
   /** True when the octree is behind the label column. */
   dirty: boolean;
+  /**
+   * A commit for this column is baking in the background.
+   *
+   * Exposed as a data attribute for E2E and NOT drawn: the commit toast has
+   * already said the labels are saved, and a second, persistent "still
+   * working" line is what turns an unblocking change back into a wait. The
+   * user has nothing to decide and nothing to do.
+   */
+  baking?: boolean;
+  /**
+   * The background bake failed. Actionable, unlike `baking`, and therefore
+   * shown: the labels are still on the cloud but the display index does not
+   * carry them, and the only way to ask again is the Commit button — which,
+   * with no strokes pending, would otherwise sit disabled with nothing
+   * explaining why it matters.
+   */
+  bakeFailed?: boolean;
   /** True while the lasso is armed (clicks place vertices, view is frozen). */
   drawing: boolean;
   onToggleDrawing: () => void;
@@ -105,6 +122,8 @@ export function LabelPanel({
   onToggleDrawing,
   sectionActive = false,
   onClearSection,
+  baking = false,
+  bakeFailed = false,
   busy,
   onSelectClass,
   onToggleVisible,
@@ -143,6 +162,7 @@ export function LabelPanel({
       data-active-class={activeClass}
       data-pending-strokes={pendingStrokes}
       data-label-dirty={dirty ? 'true' : 'false'}
+      data-label-baking={baking ? 'true' : 'false'}
       data-label-drawing={drawing ? 'true' : 'false'}
       data-section-active={sectionActive ? 'true' : 'false'}
       data-labelled-count={labelled}
@@ -442,6 +462,10 @@ export function LabelPanel({
         <button
           data-testid="label-commit"
           onClick={onCommit}
+          // Deliberately NOT disabled while a bake is running. Strokes painted
+          // during one are new work, and the queue gives them their own run —
+          // blocking the button until the previous rebuild lands would put the
+          // wait back, one step later and with no way to see it ending.
           disabled={!dirty || busy}
           title="Bake the labels into the point cloud"
           className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
@@ -454,6 +478,12 @@ export function LabelPanel({
       {pendingStrokes > 0 && (
         <div data-testid="label-pending-hint" className="mt-2 text-[10px] text-amber-400">
           {pendingStrokes} unsaved {pendingStrokes === 1 ? 'stroke' : 'strokes'} — commit to keep them.
+        </div>
+      )}
+
+      {bakeFailed && (
+        <div data-testid="label-bake-failed-hint" className="mt-2 text-[10px] text-amber-400">
+          The labels are saved but the display could not be rebuilt — commit again.
         </div>
       )}
     </div>

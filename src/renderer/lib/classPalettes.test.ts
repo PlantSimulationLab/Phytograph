@@ -4,7 +4,8 @@ import {
   paletteToScheme, paletteToIndexScheme, paletteIndexMaps,
   makePreset, makeEmptyPalette, parsePalette, parsePaletteList, defaultSlugForPreset,
   ASPRS_CLASSES, UNCLASSIFIED_VALUE, USER_CLASS_MIN,
-  PALETTE_SOFT_MAX, type ClassPalette,
+  PALETTE_SOFT_MAX, withPendingLabelColumn,
+  type ClassPalette, type LabelableColumn,
 } from './classPalettes';
 import { buildCategoricalGradientStops, categoricalSchemeForCloud } from './classification';
 
@@ -594,5 +595,56 @@ describe('nextFreeClassValue with a start hint', () => {
       NOW, categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues,
     );
     expect(parsePalette(JSON.parse(JSON.stringify(p)))?.derived).toBe(true);
+  });
+});
+
+describe('withPendingLabelColumn', () => {
+  const base = (): LabelableColumn[] => ([
+    { slug: 'manual_class', label: 'Hand labels', kind: 'manual', missing: true },
+    { slug: 'tree_instance', label: 'Tree instance', kind: 'categorical', missing: false },
+  ]);
+
+  it('adds a column the octree has never heard of', () => {
+    // The window this exists for: the user creates a classification, paints it,
+    // and commits. The column is real on the backend from the first stroke, but
+    // the picker is built from OCTREE metadata, which only learns about it when
+    // the background rebuild lands — a converter run later.
+    const out = withPendingLabelColumn(base(), {
+      slug: 'row_qc', label: 'Row QC', observed: [2, 0, 1],
+    });
+    const added = out.find((c) => c.slug === 'row_qc');
+    expect(added).toBeTruthy();
+    expect(added!.kind).toBe('categorical');
+    expect(added!.missing).toBe(false);
+    expect(added!.observed).toEqual([0, 1, 2]);   // sorted
+    expect(added!.range).toEqual([0, 2]);
+  });
+
+  it('fills in a column the picker was showing as MISSING', () => {
+    // `manual_class` is always offered, flagged missing until the cloud has it.
+    // A commit is exactly what stops it being missing, so this must patch the
+    // existing entry rather than list the slug twice.
+    const out = withPendingLabelColumn(base(), {
+      slug: 'manual_class', label: 'Hand labels', observed: [0, 1],
+    });
+    expect(out.filter((c) => c.slug === 'manual_class')).toHaveLength(1);
+    expect(out.find((c) => c.slug === 'manual_class')!.missing).toBe(false);
+    // The kind is the picker's own classification of the column and is kept.
+    expect(out.find((c) => c.slug === 'manual_class')!.kind).toBe('manual');
+  });
+
+  it('defers to the octree once it carries the column', () => {
+    const out = withPendingLabelColumn(base(), {
+      slug: 'tree_instance', label: 'Something else', observed: [9],
+    });
+    expect(out).toEqual(base());
+  });
+
+  it('is a no-op without a pending column, and refuses an invalid slug', () => {
+    expect(withPendingLabelColumn(base(), null)).toEqual(base());
+    // A slug the backend would refuse must never reach the picker — an entry
+    // that 400s on the first stroke is worse than one that is not there.
+    expect(withPendingLabelColumn(base(), { slug: 'classification', label: 'x' }))
+      .toEqual(base());
   });
 });

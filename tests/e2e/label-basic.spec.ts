@@ -357,14 +357,123 @@ test('commit bakes the labels into the cloud and clears the dirty flag', async (
 
   await page.getByTestId('label-commit').click();
 
-  // Commit runs PotreeConverter, so allow real time.
-  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 90_000 });
+  // The tool comes straight back: the bake is a display rebuild handed to the
+  // background queue, and the labels have been on the backend since the stroke
+  // itself. (This fixture is 60 points, so the timeout is a regression guard,
+  // not the proof — the wait this replaced was minutes on a real scan.)
+  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
   await expect(panel).toHaveAttribute('data-pending-strokes', '0');
+
+  // THE PAINT MUST NEVER DISAPPEAR. Between the click and the rebuild landing
+  // the octree still does not carry the column, so the only thing drawing the
+  // labels is the client-side overlay — which the commit clears the pending
+  // strokes out from under. Poll it continuously rather than checking the end
+  // state: a hold dropped one step too early shows up as a window where the
+  // overlay paints nothing, and by the time the rebuild lands the evidence is
+  // gone. Once it HAS landed the overlay reads the committed column back out of
+  // the octree as its baseline, so 60 stays 60 either side of the swap.
+  const painted = () => page.evaluate(
+    () => (globalThis as any).__labelOverlay?.painted ?? -1);
+  const pill = page.getByTestId('octree-refresh-running');
+  const deadline = Date.now() + 90_000;
+  let sawBaking = false;
+  for (;;) {
+    expect(await painted()).toBe(60);
+    // ...and nothing on screen asks the user to wait for it. A progress
+    // indicator here would offer no decision and no action — the labels are
+    // saved and the tool is free — so it would only re-create the wait this
+    // change removed. Asserted inside the loop, so the baking window is
+    // actually observed rather than checked once it has already closed.
+    expect(await pill.count()).toBe(0);
+    const baking = await panel.getAttribute('data-label-baking');
+    if (baking === 'true') sawBaking = true;
+    if (sawBaking && baking === 'false') break;
+    if (Date.now() > deadline) throw new Error('the background bake never finished');
+    await page.waitForTimeout(100);
+  }
 
   // The labels survived the rebuild as real data, and the cloud kept its points.
   await expect(panel).toHaveAttribute('data-labelled-count', '60');
   const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toHaveAttribute('data-point-count', '60');
+});
+
+test('you can keep painting and commit again while a bake is still running', async () => {
+  // The instinct this guards against is the one that made Commit blocking in
+  // the first place: treating the background rebuild as something the user
+  // owes a wait to. Strokes painted during a bake are new work, and the queue
+  // gives them their own run — so the button must stay live. Disabling it
+  // "until the last one finishes" would put the wait back one step later, in
+  // the one place the user cannot see it ending.
+  const { page, panel } = await openLabelTool();
+  const first = Number(await panel.getAttribute('data-active-class'));
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+
+  await page.getByTestId('label-commit').click();
+  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
+
+  // Straight back in: a different class over the same region, committed again
+  // without waiting for anything.
+  const rows = page.getByTestId('label-class-list').locator('[data-testid^="label-class-"]');
+  const n = await rows.count();
+  let second = -1;
+  for (let i = 0; i < n; i++) {
+    const v = Number((await rows.nth(i).getAttribute('data-testid'))!.replace('label-class-', ''));
+    if (v > 0 && v !== first) { second = v; break; }
+  }
+  expect(second).toBeGreaterThan(0);
+  await page.getByTestId(`label-class-${second}`).click();
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-label-dirty', 'true', { timeout: 15_000 });
+  await expect(page.getByTestId('label-commit')).toBeEnabled();
+  await page.getByTestId('label-commit').click();
+  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
+
+  // Both bakes land, and the SECOND one wins — the repaint moved every point
+  // to the new class rather than the older rebuild resurrecting the first.
+  await expect(panel).toHaveAttribute('data-label-baking', 'false', { timeout: 90_000 });
+  const c = await counts(panel);
+  expect(c[String(second)]).toBe(60);
+  expect(c[String(first)] ?? 0).toBe(0);
+  expect(await page.evaluate(() => (globalThis as any).__labelOverlay?.painted ?? -1)).toBe(60);
+});
+
+test('the labels stay on screen when the tool is closed mid-bake', async () => {
+  // The case that makes the background bake load-bearing rather than a tidy-up.
+  // "Save and close" is the obvious thing to do with a finished classification,
+  // and the overlay that draws the labels used to belong to the OPEN tool — so
+  // closing the panel before the rebuild landed would have left the user
+  // looking at a cloud with their work apparently undone, for the length of a
+  // PotreeConverter run.
+  const { page, panel } = await openLabelTool();
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+
+  await page.getByTestId('label-commit').click();
+  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+
+  // With the panel gone there is no `data-label-baking` to watch, so the
+  // invariant is stated over the two things that can legitimately be drawing
+  // the labels: the overlay (still painting 60) BEFORE the swap, and the
+  // rebuilt octree coloured by the column AFTER it. Neither being true is the
+  // failure — that is the window where the work looks lost.
+  const legend = page.getByTestId('scalar-overlay');
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    const state = await page.evaluate(() => ({
+      painted: (globalThis as any).__labelOverlay?.painted ?? -1,
+      scalar: document.querySelector('[data-testid="scalar-overlay"]')
+        ?.getAttribute('data-active-scalar') ?? '',
+    }));
+    expect(state.painted === 60 || state.scalar === 'manual_class').toBe(true);
+    if (state.scalar === 'manual_class') break;
+    if (Date.now() > deadline) throw new Error('the background bake never landed');
+    await page.waitForTimeout(100);
+  }
+  await expect(legend).toHaveAttribute('data-active-scalar', 'manual_class');
 });
 
 test('the lasso can be disarmed to orbit, by button and by L', async () => {

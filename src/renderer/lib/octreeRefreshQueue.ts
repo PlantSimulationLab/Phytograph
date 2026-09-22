@@ -42,14 +42,41 @@
  * discarded.
  */
 
+/**
+ * Why a cloud is queued, beyond "its session changed".
+ *
+ * A plain display refresh can take the backend's no-rebuild fast path, because
+ * a deletion already cleared `octree_cache_id` and a current cache id means
+ * there is nothing to do. A LABEL commit cannot: label edits deliberately leave
+ * `octree_cache_id` alone (the octree is BEHIND, not WRONG — see
+ * `label_cloud_region` in main.py), so a refresh asked for without this flag
+ * would look at a perfectly current cache id and return without converting
+ * anything. The labels would then never reach octree.bin and the overlay would
+ * stay up forever.
+ */
+export interface OctreeRefreshReason {
+  /** Column to bake in via `commit_labels`, when a label commit is outstanding. */
+  labelSlug?: string;
+  /**
+   * Which commit asked for it. The renderer keeps the painted strokes on screen
+   * until the rebuild that carries them lands, and uses this to tell "the run I
+   * was waiting for" from "an older run that started before my strokes existed"
+   * — dropping the overlay on the latter would make the newest strokes vanish
+   * until the next rebuild.
+   */
+  labelSeq?: number;
+}
+
 /** A cloud waiting for its display index to be rebuilt. */
-interface PendingRefresh {
+interface PendingRefresh extends OctreeRefreshReason {
   sessionId: string;
   /** Resolvers for anything awaiting this cloud specifically. */
   waiters: Array<() => void>;
 }
 
-export type OctreeRefreshRunner = (cloudId: string, sessionId: string) => Promise<void>;
+export type OctreeRefreshRunner = (
+  cloudId: string, sessionId: string, reason: OctreeRefreshReason,
+) => Promise<void>;
 
 export interface OctreeRefreshQueueEvents {
   /** Fired whenever the set of outstanding cloud ids changes (drives the pill). */
@@ -90,12 +117,18 @@ export class OctreeRefreshQueue {
    * the session's current state, so the latest request subsumes the earlier one.
    * The session id is refreshed in case an edit re-homed the cloud.
    */
-  enqueue(cloudId: string, sessionId: string): void {
+  enqueue(cloudId: string, sessionId: string, reason: OctreeRefreshReason = {}): void {
     const existing = this.pending.get(cloudId);
     if (existing) {
       existing.sessionId = sessionId;
+      // Reasons UNION rather than replace. A crop queued behind a label commit
+      // must not drop the label slug on its way past — one converter run
+      // satisfies both (the rebuild reads the whole session), but only if it
+      // knows a label commit is among the things it is satisfying.
+      if (reason.labelSlug) existing.labelSlug = reason.labelSlug;
+      if (reason.labelSeq !== undefined) existing.labelSeq = reason.labelSeq;
     } else {
-      this.pending.set(cloudId, { sessionId, waiters: [] });
+      this.pending.set(cloudId, { sessionId, waiters: [], ...reason });
     }
     this.emitChange();
     // Drain on a later microtask, not synchronously: `drain()` runs straight to
@@ -165,7 +198,9 @@ export class OctreeRefreshQueue {
         this.running = { cloudId, entry };
         this.emitChange();
         try {
-          await this.runner(cloudId, entry.sessionId);
+          await this.runner(cloudId, entry.sessionId, {
+            labelSlug: entry.labelSlug, labelSeq: entry.labelSeq,
+          });
         } catch (err) {
           // Swallowed on purpose. A failed rebuild is recoverable — the mask is
           // still hiding the deleted points, so the cloud keeps rendering

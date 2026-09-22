@@ -479,6 +479,50 @@ export function labelableColumnsFor(args: {
 }
 
 /**
+ * Add a column the SESSION already carries but the octree does not yet list.
+ *
+ * `labelableColumnsFor` reads the OCTREE's attribute metadata, which is the
+ * right source for everything except the window between committing a label
+ * column and the background rebuild landing. In that window the column is real
+ * — the backend created it on the first stroke and export, filter and every
+ * compute path can already read it — while the octree, which is rebuilt lazily,
+ * has never heard of it. Without this a user who creates a classification and
+ * commits it watches their own column stay missing from the picker for the
+ * length of a PotreeConverter run.
+ *
+ * Idempotent: a slug the octree already lists wins, since its metadata is
+ * authoritative once it exists.
+ */
+export function withPendingLabelColumn(
+  columns: LabelableColumn[],
+  pending: { slug: string; label: string; observed?: number[] } | null,
+): LabelableColumn[] {
+  if (!pending || !isValidLabelSlug(pending.slug)) return columns;
+  if (columns.some((c) => c.slug === pending.slug && !c.missing)) return columns;
+  const observed = pending.observed && pending.observed.length > 0
+    ? [...pending.observed].sort((a, b) => a - b)
+    : undefined;
+  const entry: LabelableColumn = {
+    slug: pending.slug,
+    label: pending.label || humaniseSlug(pending.slug),
+    kind: 'categorical',
+    missing: false,
+    ...(observed ? { observed } : {}),
+    ...(observed ? { range: [observed[0], observed[observed.length - 1]] as [number, number] } : {}),
+  };
+  // Replace a `missing` placeholder in place (the hand-label column is always
+  // offered, flagged missing until the cloud actually has it) rather than
+  // listing the slug twice.
+  const at = columns.findIndex((c) => c.slug === pending.slug);
+  if (at >= 0) {
+    const next = [...columns];
+    next[at] = { ...entry, kind: columns[at].kind };
+    return next;
+  }
+  return [...columns, entry];
+}
+
+/**
  * Ensure class 0 exists, prepending it when it does not.
  *
  * Class 0 is required in every palette and this is load-bearing rather than

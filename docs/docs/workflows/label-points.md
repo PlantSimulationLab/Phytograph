@@ -27,6 +27,14 @@ label anything you like.
 Each class row shows how many points currently carry it, so you can see the
 counts move as you work.
 
+!!! tip "Commit does not make you wait"
+    **Commit** returns immediately. Rebuilding the cloud's display index takes
+    a while on a large scan, so it finishes in the background with nothing for
+    you to watch — carry on painting, commit again, switch column, or close the
+    tool. The labels stay on screen throughout, and every other tool (export,
+    filters, the compute tools) can read them the moment you paint them, not
+    when the rebuild finishes.
+
 !!! tip "Press `L` to look around"
     While the lasso is armed every viewport click places a corner, so you can't
     orbit. Press `L` — or click **Drawing — view frozen** — to disarm it, move
