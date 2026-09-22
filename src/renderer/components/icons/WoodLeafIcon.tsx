@@ -40,30 +40,43 @@ import { createLucideIcon } from 'lucide-react';
 // — same props, 24x24 viewBox, `currentColor`, width 2, round caps/joins. The
 // blade overrides `fill`/`stroke` on its own path only.
 //
-// Geometry (24-unit lucide grid, y pointing down):
-//   - woody limb:  stem (5.5,21.5) -> (5.5,8.5), lower fork to (2,10.5),
-//                  upper fork to (9,8) — asymmetric, so it reads as a branch
-//                  rather than a tuning fork or the letter Y
-//   - dashed cut:  x=12, three 3-unit dashes at y=3, 10.5, 18
-//   - leaf blade:  a filled cubic almond, tip (21.4,5) -> base (15,19), half
-//                  width 3.4 at 22%/70% along the axis (asymmetric, so it is
-//                  widest below centre like a real blade, not an oval)
+// Sized to fill the grid. The first version drew both organs small and hung a
+// full-height three-dash cut between them; at the 14-16 px the toolbar actually
+// renders, neither organ was identifiable. Both were enlarged toward lucide's
+// 2-unit safe margin and the cut was cut to TWO dashes — the divider does not
+// need to span the grid to read as a divider, and the height it gives back is
+// what lets the blade grow (blade axis 15.4 -> 18.3 units, half width 3.4 ->
+// 3.8, limb height 13 -> 14.2).
 //
-// Ink spans x in [2,21.86], y in [5,21.5] (the blade's true curve extrema, not
-// its control points, which reach x=23.08) — inside lucide's 2-unit safe
-// margin. If the blade endpoints ever move, recompute those extrema rather than
-// trusting the control points, or the mark will silently overflow the grid.
+// Geometry (24-unit lucide grid, y pointing down):
+//   - woody limb:  stem (5.6,21) -> (5.6,6.8), lower fork to (2.8,11.2),
+//                  upper fork to (9,7) — asymmetric, so it reads as a branch
+//                  rather than a tuning fork or the letter Y
+//   - dashed cut:  x=12, two 4-unit dashes at y=5.5 and 14.5
+//   - leaf blade:  a filled cubic almond, tip (21.2,3.4) -> base (14.4,20.4),
+//                  half width 3.8 at 22%/70% along the axis (asymmetric, so it
+//                  is widest below centre like a real blade, not an oval)
+//
+// Two clearances are load-bearing and must be re-measured if any endpoint
+// moves, because both fail silently — the mark just looks wrong at small sizes:
+//   - Ink spans x in [1.8,21.81], y in [3.4,22] once the 2-unit stroke's round
+//     CAPS are included (they extend a full unit past each endpoint, which is
+//     what decides the bound here — the stem ends at y=21, not 22). The blade's
+//     extrema are its true CURVE extrema, x in [14.04,21.81]; its control
+//     points reach x=23.23 and must never be used for this.
+//   - The blade's widest flank clears the cut's stroke (which occupies x in
+//     [11,13]) by 1.04 units. An earlier candidate left 0.40, which is a third
+//     of a pixel at 14 px — the blade and the dash merged into one blob.
 export const WoodLeafIcon = createLucideIcon('WoodLeaf', [
-  ['path', { d: 'M5.5 21.5V8.5', key: 'stem' }],
-  ['path', { d: 'M5.5 14 2 10.5', key: 'fork-lower' }],
-  ['path', { d: 'M5.5 11.5 9 8', key: 'fork-upper' }],
-  ['path', { d: 'M12 3v3', key: 'cut-top' }],
-  ['path', { d: 'M12 10.5v3', key: 'cut-mid' }],
-  ['path', { d: 'M12 18v3', key: 'cut-bottom' }],
+  ['path', { d: 'M5.6 21V6.8', key: 'stem' }],
+  ['path', { d: 'M5.6 14 2.8 11.2', key: 'fork-lower' }],
+  ['path', { d: 'M5.6 10.4 9 7', key: 'fork-upper' }],
+  ['path', { d: 'M12 5.5v4', key: 'cut-top' }],
+  ['path', { d: 'M12 14.5v4', key: 'cut-bottom' }],
   [
     'path',
     {
-      d: 'M21.4 5C16.9 6.67 13.83 13.39 15 19C20.01 16.21 23.08 9.49 21.4 5z',
+      d: 'M21.2 3.4C16.18 5.73 12.91 13.89 14.4 20.4C19.97 16.71 23.23 8.55 21.2 3.4z',
       fill: 'currentColor',
       stroke: 'none',
       key: 'leaf-blade',
