@@ -269,6 +269,7 @@ import { ScalarFieldsPanel, type ScalarFieldsTab } from './viewer/panels/ScalarF
 import type { ScalarStats } from '../lib/scalarFieldStats';
 import { suggestSlug } from '../lib/scalarFieldExpression';
 import { intersectScalarFields, poolingCaution } from '../lib/scalarFieldTargets';
+import { renameSlugInOctreeRef, dropSlugFromOctreeRef } from '../lib/scalarFieldRename';
 import type { PickerItem } from './ObjectPicker';
 import { DEMPanel } from './viewer/panels/DEMPanel';
 import { WoodSegmentPanel, type WoodSegmentMode, type WoodMultiMode, type WoodMethod } from './viewer/panels/WoodSegmentPanel';
@@ -13068,7 +13069,8 @@ export default function PointCloudViewer({
    * small inline form, so this is a pure apply step.
    */
   const handleManageScalarField = useCallback(async (
-    action: 'rename' | 'delete' | 'duplicate', slug: string, requestedSlug?: string,
+    action: 'rename' | 'delete' | 'duplicate', slug: string,
+    requestedSlug?: string, requestedLabel?: string,
   ) => {
     if (scalarInProgress) return;
     const targets = scalarTargets;
@@ -13080,10 +13082,14 @@ export default function PointCloudViewer({
 
     if (action === 'rename' || action === 'duplicate') {
       newSlug = (requestedSlug ?? '').trim();
-      if (!newSlug || newSlug === slug) return;
-      // Carry the display label across a rename only when it was just the slug;
-      // a hand-set label ("Reflectance [dB]") is the user's and should survive.
-      newLabel = existing && existing.label !== slug ? existing.label : newSlug;
+      // The panel collects the name the user SEES and resolves it to a slug +
+      // label (`resolveFieldName`). The label is always the typed name: it is
+      // what the Fields list, the Color-by picker and the Scans panel show, and
+      // keeping the old one — as this once did for any imported field — made a
+      // rename change nothing visible. Same slug is a label-only rename.
+      newLabel = (requestedLabel ?? '').trim() || newSlug;
+      if (!newSlug) return;
+      if (newSlug === slug && (action === 'duplicate' || newLabel === existing?.label)) return;
     }
 
     setScalarInProgress(true);
@@ -13123,22 +13129,49 @@ export default function PointCloudViewer({
           }, abort.signal);
 
           const baseName = cloud.data.fileName ?? id;
+          // The cloud's own per-slug lists (categorical / forced-continuous /
+          // bound palette) are carried verbatim by `buildSessionOctreeData`, so
+          // they have to follow the field here or a renamed class column comes
+          // back as a gradient with its palette orphaned.
+          const renamed = action === 'rename' && result.previous_slug
+            && result.previous_slug !== result.slug ? result.previous_slug : null;
+          const wasCategorical = isCategoricalAttribute(slug);
+          let nextInfo = octreeInfo;
+          if (renamed) nextInfo = renameSlugInOctreeRef(octreeInfo, renamed, result.slug);
+          else if (action === 'delete') nextInfo = dropSlugFromOctreeRef(octreeInfo, slug);
+          else if (action === 'duplicate' && octreeInfo.categoricalAttributes?.includes(slug)) {
+            nextInfo = { ...octreeInfo,
+              categoricalAttributes: [...octreeInfo.categoricalAttributes, result.slug] };
+          }
+
+          // A rename or delete normally RELABELS the octree (`octree_relabeled`),
+          // which is instant, so there is nothing to defer. Only a duplicate, or
+          // a stale/posed octree the backend could not relabel, defers.
           if (!result.octree_deferred && result.cache_id) {
             onUpdateCloud(id, buildSessionOctreeData(
-              result as unknown as OctreeMetadata, octreeInfo, baseName));
+              result as unknown as OctreeMetadata, nextInfo, baseName));
+          } else if (nextInfo !== octreeInfo) {
+            // Deferred: the octree is swapped later by the refresh queue, which
+            // carries these lists from the cloud as it finds it — so land them now.
+            onUpdateCloud(id, { ...cloud.data, octree: nextInfo });
           }
-          if (action === 'rename' && result.previous_slug) {
-            registerContinuousSlug(result.slug);
+          if (renamed || action === 'duplicate') {
+            // A field keeps its kind across a rename or a copy. Registering every
+            // result as continuous (as this once did) turned a renamed class
+            // column into a gradient.
+            if (wasCategorical) registerCategoricalSlug(result.slug);
+            else registerContinuousSlug(result.slug);
+          }
+          if (renamed) {
             // Per cloud, because the colour mode and the filters are per cloud.
             // Note `colorRanges` is keyed `scalar:<slug>` GLOBALLY, so only the
             // first call actually moves that key and the rest no-op — which is
             // correct, not a bug to "fix" into N-way duplication.
-            migrateScalarSlug(id, result.previous_slug, result.slug);
+            migrateScalarSlug(id, renamed, result.slug);
           }
-          if (action === 'duplicate') registerContinuousSlug(result.slug);
 
           scene.boundary([id]);
-          if (willDefer) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
+          if (result.octree_deferred) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
           resultSlug = result.slug ?? resultSlug;
           succeeded.push(id);
         } catch (error) {
@@ -13180,13 +13213,14 @@ export default function PointCloudViewer({
         });
       } else if (succeeded.length > 0) {
         const scope = targets.length > 1 ? ` on ${succeeded.length} clouds` : '';
+        const oldName = existing?.label ?? slug;
         showToast({
           type: 'success',
           title: action === 'delete' ? 'Scalar Field Deleted'
             : action === 'rename' ? 'Scalar Field Renamed' : 'Scalar Field Duplicated',
           message: action === 'delete'
-            ? `${slug} removed${scope}.`
-            : `${slug} → ${resultSlug}${scope}.`,
+            ? `${oldName} removed${scope}.`
+            : `${oldName} → ${newLabel ?? resultSlug}${scope}.`,
         });
       }
     } catch (error) {
@@ -24678,8 +24712,8 @@ export default function PointCloudViewer({
           costWarning={scalarCostWarning}
           onCompute={handleComputeScalarField}
           onCancel={cancelComputeScalarField}
-          onRename={(slug, newSlug) => { void handleManageScalarField('rename', slug, newSlug); }}
-          onDuplicate={(slug, newSlug) => { void handleManageScalarField('duplicate', slug, newSlug); }}
+          onRename={(slug, newSlug, newLabel) => { void handleManageScalarField('rename', slug, newSlug, newLabel); }}
+          onDuplicate={(slug, newSlug, newLabel) => { void handleManageScalarField('duplicate', slug, newSlug, newLabel); }}
           onDelete={(slug) => { void handleManageScalarField('delete', slug); }}
           onColorBy={(slug) => {
             // Every checked cloud: the list only offers fields they ALL carry,

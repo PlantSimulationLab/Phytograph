@@ -5479,11 +5479,15 @@ export interface ScalarFieldManageResult {
   deleted?: boolean;
   fields: ScalarFieldInfo[];
   octree_deferred?: boolean;
+  /** A rename/delete relabeled the existing octree instead of reconverting it,
+   *  so `cache_id` is ready now even when `defer_octree` was requested. */
+  octree_relabeled?: boolean;
   cache_id?: string;
   cache_dir?: string;
 }
 
-/** Rename, delete or duplicate a scalar field, then rebuild the octree.
+/** Rename, delete or duplicate a scalar field. A rename/delete relabels the
+ *  octree in place (instant); a duplicate rebuilds it, or defers when asked.
  *  Refuses the reserved columns other tools read by name. */
 export async function manageScalarField(
   sessionId: string,

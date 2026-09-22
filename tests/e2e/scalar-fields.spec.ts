@@ -209,6 +209,80 @@ test('renames a derived field and keeps the viewer colouring by it', async () =>
   await expect(colorMode).toHaveValue('scalar:renamed_field', { timeout: 30_000 });
 });
 
+test('renames the NAME THE USER SEES, everywhere it is shown', async () => {
+  // THE BUG THIS PINS: a field has a slug (identifier) and a label (display
+  // name), and every place a user reads a field name shows the label. Rename
+  // changed the slug and deliberately KEPT any label that differed from it —
+  // which every imported field's does — so a rename changed nothing visible in
+  // the Fields list, the Color-by picker or the Scans panel. The test above
+  // renames a formula field, whose label IS its slug, and so never saw it.
+  //
+  // Give `band` a display name at import that is not a legal slug, the way a
+  // user naming a column "Band Level [m]" in the wizard would.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await page.getByTestId('import-wizard-name').first().fill('Band Level [m]');
+  await completeImportWizard(page);
+  const scanRow = page.locator('[data-testid="scan-row"][data-scan-name="scalar-bands"]');
+  await expect(scanRow).toBeVisible({ timeout: 20_000 });
+  await openScalarPanel(page);
+
+  const oldRow = page.locator('[data-testid="scalar-field-row"]', { hasText: 'Band Level [m]' });
+  await expect(oldRow).toHaveCount(1, { timeout: 15_000 });
+  const oldSlug = (await oldRow.getAttribute('data-slug'))!;
+  expect(oldSlug).not.toBe('Band Level [m]');   // precondition: label ≠ slug
+
+  await oldRow.hover();
+  await page.getByTestId(`scalar-field-menu-${oldSlug}`).click();
+  await page.getByTestId(`scalar-field-rename-${oldSlug}`).click();
+  const nameInput = page.getByTestId(`scalar-field-name-input-${oldSlug}`);
+  // The box starts from the name the user sees, not the hidden slug.
+  await expect(nameInput).toHaveValue('Band Level [m]');
+  await nameInput.fill('Strata');
+  await page.getByTestId(`scalar-field-name-apply-${oldSlug}`).click();
+
+  // 1. The Fields list.
+  const newRow = page.locator('[data-testid="scalar-field-row"][data-slug="Strata"]');
+  await expect(newRow).toHaveCount(1, { timeout: 60_000 });
+  await expect(newRow).toContainText('Strata');
+  await expect(page.locator('[data-testid="scalar-field-row"]', { hasText: 'Band Level [m]' }))
+    .toHaveCount(0);
+
+  // 2. The Display Color-by picker.
+  await page.getByRole('button', { name: 'Display' }).click();
+  const colorMode = page.getByTestId('display-color-mode');
+  await expect(colorMode.locator('option[value="scalar:Strata"]')).toHaveText('Strata', { timeout: 30_000 });
+  await expect(colorMode.locator(`option[value="scalar:${oldSlug}"]`)).toHaveCount(0);
+  await expect(colorMode.locator('option', { hasText: 'Band Level [m]' })).toHaveCount(0);
+
+  // 3. The Scans panel's field list.
+  const scanId = (await scanRow.getAttribute('data-scan-id'))!;
+  await page.getByTestId(`scan-expand-${scanId}`).click();
+  const cols = page.getByTestId(`scan-columns-${scanId}`).locator('[data-columns]');
+  await expect(cols).toBeVisible();
+  const listed = ((await cols.getAttribute('data-columns')) ?? '').split(',');
+  expect(listed).toContain('Strata');
+  expect(listed).not.toContain('Band Level [m]');
+
+  // The data came along: it is the same column under a new name.
+  await readStats(page, 'Strata');
+  expect(await statValue(page, 'count')).toBe(1000);
+  expect(await statValue(page, 'mean')).toBeCloseTo(5.5, 5);
+
+  // A label-only rename: the name is not an identifier but maps onto the same
+  // slug, so it must be accepted (not refused as "already on this cloud") and
+  // must still reach the pickers.
+  await page.getByTestId('scalar-fields-tab-fields').click();
+  await newRow.hover();
+  await page.getByTestId('scalar-field-menu-Strata').click();
+  await page.getByTestId('scalar-field-rename-Strata').click();
+  await page.getByTestId('scalar-field-name-input-Strata').fill('Strata!');
+  await expect(page.getByTestId('scalar-field-name-problem-Strata')).toHaveCount(0);
+  await page.getByTestId('scalar-field-name-apply-Strata').click();
+  await expect(newRow).toContainText('Strata!', { timeout: 60_000 });
+  await expect(colorMode.locator('option[value="scalar:Strata"]')).toHaveText('Strata!', { timeout: 30_000 });
+});
+
 test('refuses to delete a field other tools read by name, and deletes an ordinary one', async () => {
   const { app, page } = session;
   await importFixture(app, page);

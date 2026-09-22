@@ -15,6 +15,7 @@ import {
   suggestSlug,
   type ExpressionVocabulary,
 } from '../../../lib/scalarFieldExpression';
+import { resolveFieldName } from '../../../lib/scalarFieldRename';
 import type { ScalarFieldInfo } from '../../../utils/backendApi';
 import { ObjectPicker, type PickerItem } from '../../ObjectPicker';
 import type { BlockedScalarField } from '../../../lib/scalarFieldTargets';
@@ -87,8 +88,8 @@ export interface ScalarFieldsPanelProps {
 
   onCompute: () => void;
   onCancel: () => void;
-  onRename: (slug: string, newSlug: string) => void;
-  onDuplicate: (slug: string, newSlug: string) => void;
+  onRename: (slug: string, newSlug: string, newLabel: string) => void;
+  onDuplicate: (slug: string, newSlug: string, newLabel: string) => void;
   onDelete: (slug: string) => void;
   onColorBy: (slug: string) => void;
   onClose: () => void;
@@ -354,8 +355,8 @@ function FieldsTab({
   onSelectSlug: (slug: string) => void;
   menuFor: string | null;
   setMenuFor: (slug: string | null) => void;
-  onRename: (slug: string, newSlug: string) => void;
-  onDuplicate: (slug: string, newSlug: string) => void;
+  onRename: (slug: string, newSlug: string, newLabel: string) => void;
+  onDuplicate: (slug: string, newSlug: string, newLabel: string) => void;
   onDelete: (slug: string) => void;
   onColorBy: (slug: string) => void;
   busy: boolean;
@@ -375,13 +376,16 @@ function FieldsTab({
     </div>;
   }
 
-  const startRename = (slug: string) => {
+  // Both start from the name the user SEES (the label), not the slug: the row,
+  // the Color-by picker and the Scans panel all show the label, so that is the
+  // name a user means to change. See `resolveFieldName`.
+  const startRename = (f: ScalarFieldInfo) => {
     setMenuFor(null);
-    setPending({ kind: 'rename', slug, draft: slug });
+    setPending({ kind: 'rename', slug: f.slug, draft: f.label });
   };
-  const startDuplicate = (slug: string) => {
+  const startDuplicate = (f: ScalarFieldInfo) => {
     setMenuFor(null);
-    setPending({ kind: 'duplicate', slug, draft: suggestSlug(`${slug}_copy`, takenSlugs) });
+    setPending({ kind: 'duplicate', slug: f.slug, draft: `${f.label} copy` });
   };
   const startDelete = (slug: string) => {
     setMenuFor(null);
@@ -440,9 +444,9 @@ function FieldsTab({
               {menuFor === f.slug && (
                 <div className="absolute right-0 top-5 z-30 bg-neutral-900 border border-neutral-700 rounded shadow-lg py-0.5 w-32">
                   <MenuItem icon={Pencil} label="Rename…" testId={`scalar-field-rename-${f.slug}`}
-                            onClick={() => startRename(f.slug)} />
+                            onClick={() => startRename(f)} />
                   <MenuItem icon={Copy} label="Duplicate…" testId={`scalar-field-duplicate-${f.slug}`}
-                            onClick={() => startDuplicate(f.slug)} />
+                            onClick={() => startDuplicate(f)} />
                   <MenuItem icon={Trash2} label="Delete" danger testId={`scalar-field-delete-${f.slug}`}
                             onClick={() => startDelete(f.slug)} />
                 </div>
@@ -463,6 +467,7 @@ function FieldsTab({
           <NameForm
             action={active.kind}
             slug={active.slug}
+            current={active.kind === 'rename' ? f : undefined}
             draft={active.draft}
             // The field being RENAMED keeps its own name available; a duplicate
             // must not collide with it.
@@ -472,10 +477,10 @@ function FieldsTab({
             busy={busy}
             onDraftChange={(draft) => setPending({ ...active, draft })}
             onCancel={() => setPending(null)}
-            onSubmit={(name) => {
+            onSubmit={(newSlug, newLabel) => {
               setPending(null);
-              if (active.kind === 'rename') onRename(active.slug, name);
-              else onDuplicate(active.slug, name);
+              if (active.kind === 'rename') onRename(active.slug, newSlug, newLabel);
+              else onDuplicate(active.slug, newSlug, newLabel);
             }}
           />
         )}
@@ -536,23 +541,27 @@ function FieldsTab({
 
 /** Inline name entry for a rename or a duplicate. */
 function NameForm({
-  action, slug, draft, taken, busy, onDraftChange, onCancel, onSubmit,
+  action, slug, current, draft, taken, busy, onDraftChange, onCancel, onSubmit,
 }: {
   action: 'rename' | 'duplicate';
   slug: string;
+  /** The field being renamed; absent for a duplicate. */
+  current?: { slug: string; label: string };
   draft: string;
   taken: string[];
   busy: boolean;
   onDraftChange: (v: string) => void;
   onCancel: () => void;
-  onSubmit: (name: string) => void;
+  onSubmit: (newSlug: string, newLabel: string) => void;
 }) {
-  const trimmed = draft.trim();
-  const problem = checkSlug(trimmed, taken);
+  const target = resolveFieldName(draft, taken, current);
+  const { problem, unchanged } = target;
   // A rename to the same name is a no-op rather than an error, so it is simply
   // not submittable.
-  const unchanged = action === 'rename' && trimmed === slug;
   const canSubmit = !problem && !unchanged && !busy;
+  // Formulas refer to a field by its slug, so say what that will be whenever it
+  // is not simply the name as typed.
+  const showSlug = !problem && !unchanged && target.slug !== target.label;
 
   return (
     <div
@@ -573,11 +582,17 @@ function NameForm({
         // user expects in a name field their obvious meanings.
         onKeyDown={(e) => {
           e.stopPropagation();
-          if (e.key === 'Enter' && canSubmit) onSubmit(trimmed);
+          if (e.key === 'Enter' && canSubmit) onSubmit(target.slug, target.label);
           if (e.key === 'Escape') onCancel();
         }}
-        className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600 font-mono"
+        className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
       />
+      {showSlug && (
+        <div className="mt-1 text-[9px] text-neutral-500"
+             data-testid={`scalar-field-name-slug-${slug}`}>
+          In formulas: <span className="font-mono">{target.slug}</span>
+        </div>
+      )}
       {problem && !unchanged && (
         <div className="mt-1 text-[9px] text-amber-300"
              data-testid={`scalar-field-name-problem-${slug}`}>
@@ -595,7 +610,7 @@ function NameForm({
         <button
           data-testid={`scalar-field-name-apply-${slug}`}
           disabled={!canSubmit}
-          onClick={() => onSubmit(trimmed)}
+          onClick={() => onSubmit(target.slug, target.label)}
           className="flex-1 px-2 py-1 text-[10px] rounded bg-green-600 hover:bg-green-500 text-white disabled:bg-neutral-600 disabled:text-neutral-400"
         >
           {action === 'rename' ? 'Rename' : 'Duplicate'}

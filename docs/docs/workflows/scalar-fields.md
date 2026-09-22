@@ -163,6 +163,10 @@ so those points render at the end of the ramp.
 The **Fields** tab lists every field on the cloud. Hover a row for its menu:
 
 - **Rename** — the field keeps its values, and the viewer keeps colouring by it.
+  Type the name you want to see; it appears as typed in this list, the
+  **Color by** picker and the Scans panel. Formulas need a plain identifier, so
+  a name like `Height [m]` is used in formulas as `Height_m`, and the box shows
+  that before you confirm.
 - **Duplicate** — an independent copy, useful before an edit you may want to undo.
 - **Delete** — removes the column from the cloud.
 
@@ -202,3 +206,9 @@ On a cloud over about 5 million points the new column is written immediately but
 the display catches up in the background: the field is usable for export, for
 another formula and for every other tool right away, while the recolouring
 finishes shortly after.
+
+Rename and delete are instant at any size: they change only the field's name in
+the display data, not the points. Duplicate adds a column, so it catches up in the
+background like a new field. The exception is a cloud that already has a display
+refresh pending (for example after an erase you haven't applied yet); there,
+rename and delete wait for that refresh too.

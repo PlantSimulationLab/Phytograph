@@ -29206,6 +29206,11 @@ def _read_octree_metadata(octree_dir: _Path) -> dict:
         if not name or name in seen_attrs:
             continue
         seen_attrs.add(name)
+        # A deleted scalar field's bytes, kept until the next rebuild — see
+        # _OCTREE_HIDDEN_ATTRIBUTE_PREFIX. Offering it would list a field the
+        # cloud no longer has.
+        if name.startswith(_OCTREE_HIDDEN_ATTRIBUTE_PREFIX):
+            continue
         # Preserve per-attribute min/max when present. The renderer needs
         # these for the intensity / height shaders' uniform ranges
         # (intensityRange, heightMin/Max) — without them the shader maps
@@ -38070,6 +38075,138 @@ def _translate_octree_in_place(cache_id: Optional[str],
     return cache_key, cache_dir, _read_octree_metadata_and_mark_used(cache_dir)
 
 
+# An attribute whose column was DELETED from the session but whose bytes are
+# still in the octree, because a delete relabels instead of reconverting (see
+# `_relabel_octree_attribute`). The point record layout is fixed by the attribute
+# list, so the entry cannot be removed without re-encoding every point — it is
+# renamed under this prefix and `_read_octree_metadata` leaves it out, so no
+# picker offers a field the cloud no longer has. The bytes go at the next real
+# rebuild.
+_OCTREE_HIDDEN_ATTRIBUTE_PREFIX = "__deleted__"
+
+
+def _relabel_octree_attribute(
+    cache_id: Optional[str], slug: str, new_slug: Optional[str],
+    new_label: Optional[str],
+) -> Optional[Tuple[str, _Path, dict]]:
+    """Rename (or, with `new_slug=None`, hide) one attribute of a built octree
+    WITHOUT reconverting it.
+
+    A scalar-field rename changes no point data: `octree.bin` and
+    `hierarchy.bin` are byte-identical before and after, and only the attribute's
+    `name` in `metadata.json` plus its entry in the label sidecar move. It used
+    to run a full PotreeConverter rebuild anyway — minutes on a large cloud, for
+    what is a few hundred bytes of JSON. The name still has to change in the
+    octree rather than being aliased in the renderer, because it is the key the
+    renderer looks the GPU buffer up by.
+
+    The octree cache is content-addressed and shared, so the edit goes into a NEW
+    entry keyed on the source entry plus the edit, never into the source in
+    place. The two binaries are HARD-LINKED into it (a copy only where the
+    filesystem refuses a link): cache entries are never written after install, so
+    sharing the bytes is safe, and eviction of either entry leaves the other's
+    data intact. Installed with the same staging-dir + atomic-rename discipline
+    as `_build_octree_from_las`.
+
+    `metadata.json` is edited as TEXT, never round-tripped through `json`:
+    PotreeConverter writes bare `inf`/`nan` literals that standard JSON rejects
+    (see `_read_octree_metadata`), and re-serialising would have to invent a
+    spelling for them.
+
+    Returns (cache_key, cache_dir, meta), or None to mean "caller must fall back
+    to a full rebuild" — no cached octree, a cache miss, or an attribute list
+    that does not name `slug` exactly once. Never raises for those.
+    """
+    if not cache_id:
+        return None
+    src_dir = _octree_cache_root() / cache_id
+    meta_src = src_dir / "metadata.json"
+    if not meta_src.is_file():
+        return None
+    try:
+        text = meta_src.read_text()
+    except OSError:
+        return None
+
+    # Only the attribute list is searched: the file's top-level `name` (e.g.
+    # "octree_hits") must never be mistaken for a column.
+    at = text.find('"attributes"')
+    if at < 0:
+        return None
+    head, tail = text[:at], text[at:]
+    pattern = re.compile(r'("name"\s*:\s*)"' + re.escape(slug) + r'"')
+    if len(pattern.findall(tail)) != 1:
+        return None
+
+    if new_slug is None:
+        # Hidden, not removed — see _OCTREE_HIDDEN_ATTRIBUTE_PREFIX. Suffixed on
+        # a clash so a second delete of a re-created field cannot produce two
+        # attributes with one name.
+        target = _OCTREE_HIDDEN_ATTRIBUTE_PREFIX + slug
+        n = 2
+        while re.search(r'"name"\s*:\s*"' + re.escape(target) + r'"', tail):
+            target = f"{_OCTREE_HIDDEN_ATTRIBUTE_PREFIX}{slug}_{n}"
+            n += 1
+    else:
+        target = new_slug
+        # A column already named `new_slug` would make the buffer key ambiguous.
+        # (`target == slug` is a label-only rename; the one match is itself.)
+        if target != slug and re.search(
+                r'"name"\s*:\s*"' + re.escape(target) + r'"', tail):
+            return None
+    patched = head + pattern.sub(lambda m: m.group(1) + json.dumps(target), tail)
+
+    labels_path = src_dir / _OCTREE_LABELS_FILENAME
+    labels: dict = {}
+    if labels_path.is_file():
+        try:
+            loaded = json.loads(labels_path.read_text())
+            if isinstance(loaded, dict):
+                labels = loaded
+        except (json.JSONDecodeError, OSError):
+            labels = {}
+    labels.pop(slug, None)
+    if new_slug is not None:
+        labels[new_slug] = (new_label or "").strip() or new_slug
+
+    edit = f"{cache_id}|relabel|{slug}|{target}|{labels.get(target, '')}"
+    cache_key = _hashlib.sha1(edit.encode("utf-8")).hexdigest()
+    cache_dir = _octree_cache_root() / cache_key
+
+    with _octree_build_lock(cache_key):
+        if not (cache_dir / "metadata.json").is_file():
+            staging_dir = cache_dir.parent / (cache_key + ".staging")
+            if staging_dir.exists():
+                _shutil.rmtree(staging_dir)
+            try:
+                staging_dir.mkdir(parents=True)
+                for child in src_dir.iterdir():
+                    if not child.is_file() or child.name in (
+                            "metadata.json", _OCTREE_LABELS_FILENAME):
+                        continue
+                    dst = staging_dir / child.name
+                    try:
+                        os.link(child, dst)
+                    except OSError:
+                        _shutil.copy2(child, dst)
+                if labels:
+                    (staging_dir / _OCTREE_LABELS_FILENAME).write_text(json.dumps(labels))
+                # metadata.json LAST: its presence is what marks an entry
+                # complete (see `_install_octree_dir`).
+                (staging_dir / "metadata.json").write_text(patched)
+                _install_octree_dir(staging_dir, cache_dir)
+            except Exception:
+                try:
+                    _shutil.rmtree(staging_dir)
+                except (FileNotFoundError, OSError):
+                    pass
+                logger.info("Octree relabel unavailable for %s; rebuilding.",
+                            cache_id, exc_info=True)
+                return None
+
+    return cache_key, cache_dir, _read_octree_metadata_and_mark_used(cache_dir)
+
+
 # ── Scalar fields: arithmetic, statistics, management ────────────────────────
 #
 # The tool's endpoints. The maths and the naming vocabulary live in
@@ -38495,7 +38632,13 @@ class ScalarFieldManageRequest(BaseModel):
 @app.post("/api/cloud/session/{session_id}/scalar_fields/manage")
 def session_scalar_field_manage(session_id: str,
                                 request: ScalarFieldManageRequest):
-    """Rename / delete / duplicate a scalar field, then rebuild the octree.
+    """Rename / delete / duplicate a scalar field, then bring the octree along.
+
+    A rename or delete RELABELS the current octree (`octree_relabeled: true`,
+    milliseconds at any size) rather than reconverting it; a duplicate adds a
+    column and so rebuilds, or defers the rebuild when asked. A rename or delete
+    falls back to that same rebuild/defer only when the octree cannot be
+    relabeled — it is stale or posed (see the comment at the call).
 
     Only a non-reserved `extras` column may be touched. The reserved set is not
     bureaucratic: deleting `is_miss` would silently break LAD's transmission
@@ -38529,13 +38672,18 @@ def session_scalar_field_manage(session_id: str,
             result = {"slug": slug, "deleted": True}
         else:
             new_slug = (request.new_slug or "").strip()
+            # A rename that keeps the slug changes only the display label
+            # ("Reflectance [dB]" → "Reflectance dB"). The field's own slug is
+            # of course "already on this cloud", so it skips that check.
+            label_only = request.action == "rename" and new_slug == slug
             try:
-                scalar_fields.validate_slug(
-                    new_slug,
-                    existing=set(_session_scalar_columns_locked(sess)),
-                    reserved=reserved,
-                    aliases=_CANONICAL_ALIAS_TO_SLUG.keys(),
-                )
+                if not label_only:
+                    scalar_fields.validate_slug(
+                        new_slug,
+                        existing=set(_session_scalar_columns_locked(sess)),
+                        reserved=reserved,
+                        aliases=_CANONICAL_ALIAS_TO_SLUG.keys(),
+                    )
             except scalar_fields.SlugError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             label = (request.new_label or "").strip() or new_slug
@@ -38565,12 +38713,47 @@ def session_scalar_field_manage(session_id: str,
                     sess.derived_fields[new_slug] = sess.derived_fields[slug]
                 result = {"slug": new_slug, "duplicated_from": slug, "label": label}
 
-        if request.defer_octree:
+        # A rename or delete changes no point data, so the current octree stays
+        # right except for one attribute's name — relabel it instead of
+        # reconverting (see `_relabel_octree_attribute`). Only from a CURRENT,
+        # UNPOSED octree: a stale one (unbaked deletions, a deferred compute)
+        # still needs its rebuild, and a posed one is drawn through a renderer
+        # pose that applies only while the cache id is unchanged.
+        relabel_from = (sess.octree_cache_id
+                        if request.action in ("rename", "delete")
+                        and sess.octree_pose is None else None)
+        if relabel_from is None and request.defer_octree:
             _mark_octree_stale_locked(sess)
         fields = _scalar_fields_listing_locked(sess)
 
     common = {"session_id": session_id, "action": request.action,
               "fields": fields, **result}
+    if relabel_from is not None:
+        relabeled = _relabel_octree_attribute(
+            relabel_from, slug,
+            result.get("slug") if request.action == "rename" else None,
+            result.get("label"))
+        if relabeled is not None:
+            cache_key, cache_dir, oct_meta = relabeled
+            with _cloud_session_lock:
+                # A rebuild that landed meanwhile already reflects the edit, and
+                # is newer; don't point the session back at a relabel of the
+                # octree it replaced.
+                if sess.octree_cache_id == relabel_from:
+                    sess.octree_cache_id = cache_key
+                    oct_meta = {
+                        **oct_meta,
+                        "observed_classes": _session_observed_classes_locked(sess),
+                        **_session_robust_color_stats_locked(sess),
+                    }
+                else:
+                    relabeled = None
+            if relabeled is not None:
+                return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir),
+                        "octree_relabeled": True, **oct_meta}
+        if request.defer_octree:
+            with _cloud_session_lock:
+                _mark_octree_stale_locked(sess)
     if request.defer_octree:
         return {**common, "octree_deferred": True}
     cache_key, cache_dir, oct_meta = _session_rebuild(sess)
