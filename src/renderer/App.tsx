@@ -7,9 +7,19 @@ import { BulkImportProgress, type BulkImportProgressState } from "./components/B
 import PointCloudViewer, { type PointCloudData, type ImportRefs } from "./components/PointCloudViewer";
 import { scanDisplayName, type Scan, type ScanRegistration, createScanColorAllocator } from "./lib/scan";
 import { scanParametersFromFile, applyTrajectoryToParams, type ScanParameters } from "./lib/scanParameters";
-import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
+import { parsePointCloud, parsePointCloudsFromPath, parseMesh, parseSkeleton, isMeshFile, isSkeletonFile, plyHasFaces, POINT_CLOUD_FORMATS, MESH_FORMATS, SKELETON_FORMATS, OCTREE_PATH_EXTENSIONS, buildPointCloudFromOctree, type ImportProgressOptions } from "./lib/pointCloudParsers";
 import { importTexturedMesh, importQSMCsv, type MeshImportResult, isBackendUnreachable, deleteCloudSession, deletePlantSession, sessionMerge, createCloudSession, cancelRun, ScanCancelledError, extractRieglProject, describeBackendError, type RieglScanPosition } from "./utils/backendApi";
 import { isQsmCsvFile } from "./lib/qsmImport";
+
+// OCTREE_PATH_EXTENSIONS (imported above) decides whether a dropped file routes
+// to the import wizard + backend Potree octree, or falls back to the in-renderer
+// flat-array parsers. It is the SAME Set the parser uses — derived there from
+// POINT_CLOUD_FORMATS — rather than the hand-kept copy this file used to hold.
+// That copy had to "stay in step" and twice didn't: 'ptx' was added there and not
+// here, and later '.ascii' was in neither. Both times the import silently fell
+// through to the flat parser instead of opening the wizard — which on a multi-GB
+// scan surfaces as the bogus "No data found in file", because that parser decodes
+// the whole file into one string and V8 caps a string at ~512 MB.
 
 // A user cancel is not a failure: it must never land in the per-file `errors[]`
 // list or raise an error toast. Covers all three shapes the abort can take — the
@@ -37,16 +47,6 @@ import { getSettings } from "./lib/store";
 import { isRieglProjectPath, parseRieglProgress } from "./lib/rieglProject";
 import type { FeedbackMode } from "./lib/feedback";
 
-// Extensions that go through the backend's Potree 2.0 octree pipeline when
-// we have a disk path. Every supported point-cloud format is here; only inputs
-// without an on-disk path (Blob/test fixtures) fall back to the in-renderer
-// flat-array parsers.
-// Mirrors OCTREE_PATH_EXTENSIONS in pointCloudParsers.ts — these two must stay
-// in step. This set decides whether an import routes to the wizard + backend
-// octree at all, so an extension missing here never reaches the parser's list:
-// 'ptx' was added there and not here, and PTX imports silently fell through to
-// the flat in-renderer parser instead of opening the wizard.
-const OCTREE_DROP_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57', 'ptx']);
 import logoImage from "./assets/logo.png";
 
 type ImportType = 'auto' | 'pointcloud' | 'mesh' | 'skeleton' | 'scanxml' | 'qsm';
@@ -787,11 +787,11 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         const ext = file.name.toLowerCase().split('.').pop() ?? '';
         // Octree-eligible drop with no resolvable OS path → stage to a temp file
         // so it still takes the octree import instead of the flat fallback.
-        if (!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext)) {
+        if (!sourcePath && OCTREE_PATH_EXTENSIONS.has(ext)) {
           setImportProgress({ current: 1, total: 1, label: `Preparing ${file.name}…` });
           sourcePath = await materializeDroppedFile(file);
         }
-        if (sourcePath && OCTREE_DROP_EXTENSIONS.has(ext)) {
+        if (sourcePath && OCTREE_PATH_EXTENSIONS.has(ext)) {
           // Path-backed: walk the user through the import wizard (preview +
           // column mapping), then run the real import with their choices. Clear
           // the progress modal first so it doesn't sit behind the wizard.
@@ -851,7 +851,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           // resolution AND temp-file staging failed — the cloud loaded, but as a
           // flat (no-LOD) cloud that will be slow on large scans. Say so instead
           // of failing silently; suggest File → Import as the reliable route.
-          if (OCTREE_DROP_EXTENSIONS.has(ext)) {
+          if (OCTREE_PATH_EXTENSIONS.has(ext)) {
             showToast({
               title: `Loaded ${data.pointCount.toLocaleString()} points from ${file.name} without LOD — ` +
                 `couldn't access the file on disk, so large-scan tools (crop, filter) may be slow. ` +
@@ -1073,10 +1073,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           const ext = file.name.toLowerCase().split('.').pop() ?? '';
           // Octree-eligible drop with no resolvable OS path → stage to a temp
           // file so it still takes the octree import instead of the flat fallback.
-          if (!sourcePath && OCTREE_DROP_EXTENSIONS.has(ext)) {
+          if (!sourcePath && OCTREE_PATH_EXTENSIONS.has(ext)) {
             sourcePath = await materializeDroppedFile(file);
           }
-          if (sourcePath && OCTREE_DROP_EXTENSIONS.has(ext)) {
+          if (sourcePath && OCTREE_PATH_EXTENSIONS.has(ext)) {
             wizardFiles.push({ path: sourcePath, fileName: file.name });
           } else {
             const data = await parsePointCloud(file);
@@ -1091,7 +1091,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             // Octree-eligible but neither path resolution nor temp staging worked:
             // it loaded flat (no LOD), which is slow on large scans. Don't fail
             // silently — flag it and point at File → Import.
-            if (OCTREE_DROP_EXTENSIONS.has(ext)) {
+            if (OCTREE_PATH_EXTENSIONS.has(ext)) {
               showToast({
                 title: `Loaded ${file.name} without LOD — couldn't access it on disk, so large-scan ` +
                   `tools (crop, filter) may be slow. Use File → Import to load it with full performance.`,

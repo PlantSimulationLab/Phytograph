@@ -22,9 +22,13 @@ import {
   parseXYZ,
   looksLikeAsciiPointCloud,
   POINT_CLOUD_FORMATS,
+  OCTREE_PATH_EXTENSIONS,
   SKELETON_FORMATS,
   SUPPORTED_FORMATS,
 } from './pointCloudParsers';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { IMPORTABLE_EXTENSIONS } from '@shared/constants';
 
 // Helper to wrap text content in a File object that the parsers accept.
 function textFile(content: string, name: string): File {
@@ -83,6 +87,27 @@ describe('parseXYZ', () => {
   it('rejects an empty file', async () => {
     const file = textFile('', 'empty.xyz');
     await expect(parseXYZ(file)).rejects.toThrow(/No data found/);
+  });
+
+  // A file past V8's ~512 MB max string length used to decode to nothing and
+  // fail as "No data found in file", which names neither the size nor the real
+  // limit — the misleading symptom a 1.25 GB .ascii scan actually produced.
+  // The size is faked: allocating 600 MB in a unit test would be absurd, and
+  // the guard reads `file.size` before touching the bytes.
+  it('rejects a file too large for the in-renderer parser, naming the cause', async () => {
+    const file = textFile('0 0 0\n', 'huge.xyz');
+    Object.defineProperty(file, 'size', { value: 600 * 1024 * 1024 });
+    await expect(parseXYZ(file)).rejects.toThrow(/too large to read in the viewer/);
+    await expect(parseXYZ(file)).rejects.toThrow(/File → Import/);
+    // Explicitly NOT the old misleading message.
+    await expect(parseXYZ(file)).rejects.not.toThrow(/No data found/);
+  });
+
+  it('parses a file just under the in-renderer size limit', async () => {
+    const file = textFile('0 0 0\n1 1 1\n', 'ok.xyz');
+    Object.defineProperty(file, 'size', { value: 399 * 1024 * 1024 });
+    const data = await parseXYZ(file);
+    expect(data.pointCount).toBe(2);
   });
 
   it('rejects a file with lines but no parseable coordinates', async () => {
@@ -933,8 +958,54 @@ describe('parsePointCloud (auto-detect)', () => {
     await expect(parsePointCloud(file)).rejects.toThrow(/PTX structured scan.*read from disk/s);
   });
 
-  it('lists PTX among the supported formats', () => {
-    expect(POINT_CLOUD_FORMATS.map(f => f.ext)).toContain('.ptx');
+  // Structural, not a spot check. This replaced `toContain('.ptx')`, which was
+  // itself the residue of the LAST time these lists drifted — and which could
+  // not have caught the next one ('.ascii', missing from all eight places, so a
+  // 1.25 GB RiSCAN scan fell through to the flat parser and reported itself as
+  // "No data found in file"). Assert the relationship, not one member.
+  it('routes every supported point-cloud format through the octree pipeline', () => {
+    const exts = POINT_CLOUD_FORMATS.map(f => f.ext.slice(1));
+    expect([...OCTREE_PATH_EXTENSIONS].sort()).toEqual([...exts].sort());
+  });
+
+  it('declares every supported format to the OS file-association list', () => {
+    const missing = POINT_CLOUD_FORMATS
+      .map(f => f.ext.slice(1))
+      .filter(e => !(IMPORTABLE_EXTENSIONS as readonly string[]).includes(e));
+    expect(missing).toEqual([]);
+  });
+
+  it("registers every supported format in package.json's fileAssociations", () => {
+    const pkg = JSON.parse(
+      readFileSync(join(__dirname, '..', '..', '..', 'package.json'), 'utf-8'),
+    ) as { build: { fileAssociations: { ext: string }[] } };
+    const declared = new Set(pkg.build.fileAssociations.map(a => a.ext));
+    const missing = POINT_CLOUD_FORMATS
+      .map(f => f.ext.slice(1))
+      .filter(e => !declared.has(e));
+    expect(missing).toEqual([]);
+  });
+
+  // Source-level chokepoint, in the spirit of missExclusionChokepoint.test.ts:
+  // the renderer can gate an ASCII format that the backend's pandas reader then
+  // refuses, which surfaces as a 200 with `warning="Unsupported extension for
+  // preview"` and an empty column list rather than as an error.
+  it('agrees with the backend _PANDAS_EXTENSIONS on the ASCII family', () => {
+    const src = readFileSync(
+      join(__dirname, '..', '..', '..', 'backend-api', 'main.py'),
+      'utf-8',
+    );
+    const m = /^_PANDAS_EXTENSIONS = \{([^}]*)\}/m.exec(src);
+    expect(m, 'could not find _PANDAS_EXTENSIONS in backend-api/main.py').toBeTruthy();
+    const backend = new Set(
+      m![1].split(',').map(t => t.trim().replace(/^'|'$/g, '')).filter(Boolean),
+    );
+    // Every extension the backend parses with pandas must be a format the
+    // renderer actually offers, and vice versa for the ASCII ones.
+    for (const e of backend) {
+      expect(POINT_CLOUD_FORMATS.map(f => f.ext.slice(1))).toContain(e);
+    }
+    expect(backend.has('ascii')).toBe(true);
   });
 
   it('names the other scanner formats it cannot read', async () => {

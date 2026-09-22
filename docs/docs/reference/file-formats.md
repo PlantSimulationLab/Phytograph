@@ -16,6 +16,7 @@
 | `.csv` | ✅ | ✅ | Comma-separated. First non-numeric row treated as header. |
 | `.pts` | ✅ | ✅ | Leica/Cyclone PTS. A leading line holding the **point count**, then `x y z intensity r g b` — intensity *before* colour. The order is **fixed** (a reader decodes these columns positionally), so PTS export shows no field picker; export to `.txt`/`.csv`/`.ply`/`.las` if you need to choose fields or carry other scalars. |
 | `.asc` | ✅ | ✅ | ASCII point cloud, treated like `.xyz`. The delimiter is sniffed from the contents (RIEGL's ASCII export, for instance, is comma-separated with a header row), and a header line is read if present. Not to be confused with the DEM **ASC grid** raster export (see [DEM rasters](#dem-rasters)) — that `.asc` is an elevation *grid*, this one is a point list. |
+| `.ascii` | ✅ | — | RiSCAN PRO's ASCII scan export, treated like `.xyz`. The delimiter is sniffed from the contents and a header line is read if present, so the common headerless `x y z gps_time reflectance` layout auto-detects as *x, y, z, timestamp, intensity* — check the mapping in the import wizard and adjust it there if your export differs. **Import only**: export the cleaned cloud to `.xyz`/`.txt`/`.csv`/`.las` instead. |
 | `.obj` | — | — | **Not a point-cloud format in Phytograph** — it is a *mesh* format (see [Meshes](#meshes)). A vertex-only `.obj` cannot be imported as a cloud: `.obj` always loads as a mesh, so a cloud written to `.obj` would come back as a face-less mesh rather than a point cloud. Use `.ply` to carry points into Blender or MeshLab, or `.xyz` for a plain column file. |
 
 ### ASCII format details
@@ -43,7 +44,7 @@ When a point cloud is loaded by path (dragged into the viewer, or attached
 via Helios XML bulk import), it is converted to a streaming **octree** in the
 Python backend and rendered tile-by-tile, so files far larger than the
 browser's ~512 MB string limit load without exhausting memory. This applies
-to every supported point-cloud format: ASCII (`.xyz`/`.txt`/`.csv`/`.pts`/`.asc`)
+to every supported point-cloud format: ASCII (`.xyz`/`.txt`/`.csv`/`.pts`/`.asc`/`.ascii`)
 via pandas, `.ply` (parsed directly, scalar fields preserved — see below),
 `.pcd` (via open3d, position + color only), and `.las`/`.laz` (passed straight
 through). If the source XML provides an `<ASCII_format>` tag
@@ -174,7 +175,7 @@ asked:
 | **RIEGL** `.rxp` / `.riproject` | Fixed by the format | Always metres (scanner-local) |
 | **PTX** | No | Defaults to metres; change it in the wizard |
 | **PLY / PCD** | No | Defaults to metres; change it in the wizard |
-| **ASCII** (`.xyz`, `.csv`, `.txt`, `.pts`, `.asc`) | No | Defaults to metres; change it in the wizard |
+| **ASCII** (`.xyz`, `.csv`, `.txt`, `.pts`, `.asc`, `.ascii`) | No | Defaults to metres; change it in the wizard |
 
 A LAS/LAZ **without** a CRS carries no unit either, and is treated like the
 formats that cannot declare one. Two further cases are also treated as

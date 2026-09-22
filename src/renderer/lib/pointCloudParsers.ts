@@ -57,8 +57,33 @@ function findColumnIndex(headers: string[], patterns: RegExp[]): number {
   return -1;
 }
 
+// V8 caps a single string at ~512 MB (536,870,888 bytes on 64-bit). The
+// in-renderer parsers below all decode the WHOLE file into one string, so past
+// that ceiling `file.text()` yields nothing usable and the parse fails as
+// "No data found in file" — a message that names neither the file's size nor
+// the real limit. A 1.25 GB RiSCAN `.ascii` scan reached `parseXYZ` exactly
+// this way and reported itself as empty.
+//
+// Path-backed files never get here: they route to the backend via
+// OCTREE_PATH_EXTENSIONS. This guard is the backstop for the cases that can't —
+// a Blob, a drag from a non-file source, or a format not yet in that list.
+// 400 MB rather than 512 leaves headroom: the cap is on the DECODED string, and
+// the guard should fire before the allocation rather than at it.
+const MAX_INLINE_PARSE_BYTES = 400 * 1024 * 1024;
+
+function assertParsableInRenderer(file: File): void {
+  if (file.size <= MAX_INLINE_PARSE_BYTES) return;
+  const gb = (file.size / 1e9).toFixed(2);
+  throw new Error(
+    `"${file.name}" is ${gb} GB — too large to read in the viewer, which can ` +
+    `only hold about 0.4 GB of text at once. Use File → Import to load it ` +
+    `through the backend, which streams the file instead.`,
+  );
+}
+
 // Parse XYZ/CSV/TXT format (simple space/comma/tab delimited)
 export async function parseXYZ(file: File): Promise<PointCloudData> {
+  assertParsableInRenderer(file);
   const text = await file.text();
   const lines = text.trim().split('\n');
 
@@ -311,6 +336,7 @@ export async function parseXYZ(file: File): Promise<PointCloudData> {
 
 // Parse PLY (Stanford Polygon) format
 export async function parsePLY(file: File): Promise<PointCloudData> {
+  assertParsableInRenderer(file);
   const buffer = await file.arrayBuffer();
   const text = new TextDecoder().decode(buffer);
 
@@ -409,6 +435,7 @@ export async function parsePLY(file: File): Promise<PointCloudData> {
 
 // Parse PCD (Point Cloud Data) format
 export async function parsePCD(file: File): Promise<PointCloudData> {
+  assertParsableInRenderer(file);
   const text = await file.text();
   const lines = text.split('\n');
 
@@ -746,6 +773,43 @@ export async function parseLAZ(file: File): Promise<PointCloudData> {
   }
 }
 
+// ==================== SUPPORTED FORMATS ====================
+//
+// The single source of truth for which point-cloud formats Phytograph imports.
+// `OCTREE_PATH_EXTENSIONS` below is DERIVED from this list, and a unit test
+// asserts it also agrees with `IMPORTABLE_EXTENSIONS` (src/shared/constants.ts),
+// package.json's `build.fileAssociations`, and the backend's
+// `_PANDAS_EXTENSIONS`. Add a format here and those checks tell you what else
+// needs it — the lists used to be hand-copied and drifted twice ('ptx', then
+// '.ascii', each silently falling through to the flat in-renderer parser).
+export const POINT_CLOUD_FORMATS = [
+  { ext: '.las', name: 'LAS', desc: 'LiDAR Data Exchange' },
+  { ext: '.laz', name: 'LAZ', desc: 'Compressed LiDAR' },
+  { ext: '.e57', name: 'E57', desc: 'Structured scan (recovers sky/miss)' },
+  { ext: '.ptx', name: 'PTX', desc: 'Structured scan (recovers sky/miss)' },
+  { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (ASCII)' },
+  { ext: '.pcd', name: 'PCD', desc: 'Point Cloud Data (ASCII)' },
+  { ext: '.xyz', name: 'XYZ', desc: 'X Y Z coordinates' },
+  { ext: '.txt', name: 'TXT', desc: 'Text coordinates' },
+  { ext: '.csv', name: 'CSV', desc: 'Comma-separated' },
+  { ext: '.pts', name: 'PTS', desc: 'Points format' },
+  { ext: '.asc', name: 'ASC', desc: 'ASCII point cloud' },
+  { ext: '.ascii', name: 'ASCII', desc: "RiSCAN PRO's ASCII export, treated like .xyz" },
+];
+
+export const MESH_FORMATS = [
+  { ext: '.obj', name: 'OBJ', desc: 'Wavefront mesh' },
+  { ext: '.stl', name: 'STL', desc: 'Stereolithography (ASCII + binary)' },
+  { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (mesh)' },
+];
+
+export const SKELETON_FORMATS = [
+  { ext: '.json', name: 'JSON', desc: 'Skeleton data' },
+];
+
+// Combined list for backward compatibility
+export const SUPPORTED_FORMATS = [...POINT_CLOUD_FORMATS, ...MESH_FORMATS, ...SKELETON_FORMATS];
+
 // Extensions that the renderer parses via the path-based backend endpoint
 // instead of reading into memory. The TS parsers (parseXYZ, parsePLY,
 // parsePCD) all materialise the file as a JS string and throw RangeError
@@ -757,7 +821,7 @@ export async function parseLAZ(file: File): Promise<PointCloudData> {
 // binary chunks).
 const BACKEND_PATH_EXTENSIONS = new Set([
   // ASCII delimited (pandas, honours Helios <ASCII_format>)
-  'xyz', 'txt', 'csv', 'pts', 'asc',
+  'xyz', 'txt', 'csv', 'pts', 'asc', 'ascii',
   // PLY / PCD (open3d — handles ASCII and binary variants both)
   'ply', 'pcd',
 ]);
@@ -779,7 +843,10 @@ const BACKEND_PATH_EXTENSIONS = new Set([
 // flat fallback for Blob/no-path inputs that can't be octree'd. E57 is
 // octree-only (binary structured scan format; converted via pye57, recovering
 // sky/miss points) with no flat fallback.
-const OCTREE_PATH_EXTENSIONS = new Set(['xyz', 'txt', 'csv', 'pts', 'asc', 'ply', 'pcd', 'las', 'laz', 'e57', 'ptx']);
+// DERIVED from POINT_CLOUD_FORMATS — never re-list these by hand. App.tsx's
+// drop handler imports this very set, so an added format reaches the wizard
+// and the backend octree together or not at all.
+export const OCTREE_PATH_EXTENSIONS = new Set(POINT_CLOUD_FORMATS.map(f => f.ext.slice(1)));
 
 export async function parsePointCloudFromPath(
   path: string,
@@ -1344,32 +1411,6 @@ export async function parsePointCloud(file: File): Promise<PointCloudData> {
 }
 
 // Export supported formats for UI - organized by type
-export const POINT_CLOUD_FORMATS = [
-  { ext: '.las', name: 'LAS', desc: 'LiDAR Data Exchange' },
-  { ext: '.laz', name: 'LAZ', desc: 'Compressed LiDAR' },
-  { ext: '.e57', name: 'E57', desc: 'Structured scan (recovers sky/miss)' },
-  { ext: '.ptx', name: 'PTX', desc: 'Structured scan (recovers sky/miss)' },
-  { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (ASCII)' },
-  { ext: '.pcd', name: 'PCD', desc: 'Point Cloud Data (ASCII)' },
-  { ext: '.xyz', name: 'XYZ', desc: 'X Y Z coordinates' },
-  { ext: '.txt', name: 'TXT', desc: 'Text coordinates' },
-  { ext: '.csv', name: 'CSV', desc: 'Comma-separated' },
-  { ext: '.pts', name: 'PTS', desc: 'Points format' },
-  { ext: '.asc', name: 'ASC', desc: 'ASCII point cloud' },
-];
-
-export const MESH_FORMATS = [
-  { ext: '.obj', name: 'OBJ', desc: 'Wavefront mesh' },
-  { ext: '.stl', name: 'STL', desc: 'Stereolithography (ASCII + binary)' },
-  { ext: '.ply', name: 'PLY', desc: 'Stanford Polygon (mesh)' },
-];
-
-export const SKELETON_FORMATS = [
-  { ext: '.json', name: 'JSON', desc: 'Skeleton data' },
-];
-
-// Combined list for backward compatibility
-export const SUPPORTED_FORMATS = [...POINT_CLOUD_FORMATS, ...MESH_FORMATS, ...SKELETON_FORMATS];
 
 // ==================== MESH PARSING ====================
 

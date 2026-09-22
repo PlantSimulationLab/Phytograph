@@ -320,7 +320,7 @@ inversion.
 Large scans (anything past a few hundred megabytes — typical for a TLS
 campaign) are parsed by the Python backend rather than in the browser,
 so multi-gigabyte files load without hitting browser memory limits.
-This covers `.xyz`/`.txt`/`.csv`/`.pts`/`.asc` (via pandas) and
+This covers `.xyz`/`.txt`/`.csv`/`.pts`/`.asc`/`.ascii` (via pandas) and
 `.ply`/`.pcd` (via open3d, ASCII or binary). If the `<scan>` also
 includes an `<ASCII_format>` tag (for example
 `x y z r255 g255 b255 reflectance`), Phytograph forwards that hint to

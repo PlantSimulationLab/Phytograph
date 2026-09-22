@@ -2,7 +2,7 @@
 
 Let's load a scan and look at it in 3D. You'll need a point cloud
 file — any `.las`, `.laz`, `.ply`, `.pcd`, `.xyz`, `.txt`, `.csv`,
-`.pts`, or `.asc` will do. A small scan from a single tripod position
+`.pts`, `.asc`, or `.ascii` will do. A small scan from a single tripod position
 is the easiest way to see how the app works before moving on to large
 multi-position datasets.
 
@@ -11,7 +11,7 @@ multi-position datasets.
 When you launch Phytograph you land directly in the **3D viewer**. With
 nothing loaded yet, the empty viewport shows a hint with the file
 extensions you can drop here: `.las`, `.laz`, `.ply`, `.pcd`, `.xyz`,
-`.txt`, `.csv`, `.pts`, `.asc`, `.obj`, `.stl`, `.json`.
+`.txt`, `.csv`, `.pts`, `.asc`, `.ascii`, `.obj`, `.stl`, `.json`.
 
 ![Empty Phytograph viewer](../assets/screenshots/01-empty-viewer.png){ width="900" }
 

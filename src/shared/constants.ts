@@ -24,15 +24,18 @@ export const DOCS_URL = 'https://plantsimulationlab.github.io/Phytograph/';
 // Destination for the "Continue without a GitHub account" feedback path.
 export const FEEDBACK_EMAIL = 'baileylabshared@gmail.com';
 
-// Lowercase, dot-less extensions Phytograph can import. Single source of truth
-// shared by: the OS file-association registration (package.json build.fileAssociations),
-// the main-process "Open With" guard (src/main/main.ts isImportablePath), and any
-// renderer filtering. Keep in sync with package.json's fileAssociations and the
-// POINT_CLOUD_FORMATS / MESH_FORMATS / SKELETON_FORMATS lists in
-// src/renderer/lib/pointCloudParsers.ts (plus Helios scan 'xml').
+// Lowercase, dot-less extensions Phytograph can import. Shared by: the OS
+// file-association registration (package.json build.fileAssociations), the
+// main-process "Open With" guard (src/main/main.ts isImportablePath), and any
+// renderer filtering.
+//
+// Must agree with package.json's fileAssociations and with POINT_CLOUD_FORMATS
+// in src/renderer/lib/pointCloudParsers.ts (plus Helios scan 'xml'). That is no
+// longer a promise in prose: pointCloudParsers.test.ts ASSERTS it, because
+// keeping these in step by hand failed twice — 'ptx', then '.ascii'.
 export const IMPORTABLE_EXTENSIONS = [
   // point clouds
-  'las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc',
+  'las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc', 'ascii',
   // meshes (ply already listed)
   'obj', 'stl',
   // skeletons

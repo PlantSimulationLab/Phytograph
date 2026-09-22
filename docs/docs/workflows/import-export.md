@@ -89,7 +89,7 @@ dropdowns in; you correct anything that's wrong before importing:
   so assigning one to a column removes it from whichever column previously held
   it (that column drops to **Skip**).
 
-    For ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`) every column is
+    For ASCII formats (`.xyz`, `.txt`, `.csv`, `.pts`, `.asc`, `.ascii`) every column is
     freely assignable, including X / Y / Z.
 
     For formats that carry named scalar fields (`.las`, `.laz`, RIEGL projects)

@@ -29,9 +29,14 @@ import { resetToFreshScene } from './helpers/resetApp';
 // showed up here as an intermittent miss on the 20 s row-visibility wait.
 const FIXTURES = join(repoRoot, 'tests', 'e2e', 'fixtures');
 
-// The auto-name is the file's STEM, extension trimmed — so all four cases
+// The auto-name is the file's STEM, extension trimmed — so every case
 // import as "tiny". They never collide: each test runs on a fresh scene.
-const CASES = ['tiny.ply', 'tiny.pcd', 'tiny.las', 'tiny.laz']
+// tiny.ascii is headerless with 5 space-delimited columns
+// (x y z gps_time reflectance), mirroring a RiSCAN PRO export. `.ascii` was
+// absent from every extension allowlist, so such a file skipped the wizard
+// and fell through to the flat in-renderer parser — which on a real 1.25 GB
+// scan reported the bogus "No data found in file".
+const CASES = ['tiny.ply', 'tiny.pcd', 'tiny.las', 'tiny.laz', 'tiny.ascii']
   .map(file => ({ file, name: file.replace(/\.[^.]+$/, '') }));
 
 let session: LaunchedApp;

@@ -24028,7 +24028,7 @@ _POINTCLOUD_BIN_MAGIC = b'PHX1'
 
 # Extensions dispatched to the pandas-based ASCII path. Anything in this set
 # may be accompanied by a Helios `ascii_format` hint; PLY/PCD ignore it.
-_PANDAS_EXTENSIONS = {'xyz', 'txt', 'csv', 'pts', 'asc'}
+_PANDAS_EXTENSIONS = {'xyz', 'txt', 'csv', 'pts', 'asc', 'ascii'}
 _OPEN3D_EXTENSIONS = {'ply', 'pcd'}
 # LAS/LAZ via laspy — served by the binary import_by_path path (was previously
 # only reachable through the slow multipart /api/pointcloud/import JSON endpoint).

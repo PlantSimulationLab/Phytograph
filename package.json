@@ -123,6 +123,12 @@
         "icon": "build/icon"
       },
       {
+        "ext": "ascii",
+        "name": "ASCII Point Cloud",
+        "role": "Viewer",
+        "icon": "build/icon"
+      },
+      {
         "ext": "pcd",
         "name": "PCD Point Cloud",
         "role": "Viewer",
