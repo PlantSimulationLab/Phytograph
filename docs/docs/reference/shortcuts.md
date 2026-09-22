@@ -74,7 +74,10 @@ apply to them.)
 | <kbd>Esc</kbd> | Cancel the lasso in progress |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo the last stroke |
 
-## Crop polygon (while drawing)
+## Crop polygon
+
+The view is locked for as long as a closed polygon is set, so the outline
+stays over the points it selected. Redraw or <kbd>Esc</kbd> releases it.
 
 | Shortcut | Action |
 |---|---|
@@ -83,7 +86,9 @@ apply to them.)
 | <kbd>Backspace</kbd> | Remove the last vertex |
 | Double-click | Close the polygon |
 | <kbd>Enter</kbd> | Close the polygon |
-| <kbd>Esc</kbd> | Cancel the polygon |
+| <kbd>Esc</kbd> | Discard the vertices placed so far |
+| <kbd>Esc</kbd> | Clear a closed polygon, leaving Polygon ready for another |
+| <kbd>Esc</kbd> | Exit Crop (with nothing drawn) |
 
 ## Crop rect
 

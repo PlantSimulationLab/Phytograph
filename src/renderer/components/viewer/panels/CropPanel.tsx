@@ -43,9 +43,10 @@ interface CropPanelProps {
   cropBoxMinStr: string;
   cropBoxMaxStr: string;
   cropProjectionKind: 'orthographic' | 'perspective' | '';
-  // True while a committed Rect region is holding the camera still. The region
-  // is frozen in draw-time pixels, so any camera move would slide the points
-  // out from under the outline — see `rectRegionLive` in PointCloudViewer.
+  // True while a committed screen-space region (Rect OR polygon lasso) is
+  // holding the camera still. The region is frozen in draw-time pixels, so any
+  // camera move would slide the points out from under the outline — see
+  // `screenRegionLive` in PointCloudViewer.
   cameraLocked: boolean;
   onClose: () => void;
   onSelectShape: (mode: CropMode) => void;
@@ -309,6 +310,16 @@ export function CropPanel({
             <>
               <div className="font-medium text-neutral-200 mb-1">Polygon ({cropPolygonPointCount} vertices)</div>
               Preview shown above. Press Enter to apply, or click below to redraw.
+              {/* Same lock, same reason, as the rectangle below: the committed
+                  lasso is redrawn at its draw-time pixels, so a moving view
+                  would slide the points out from under it. Saying so matters
+                  more here — a traced outline looks like a promise about which
+                  points it caught. */}
+              <div data-testid="crop-polygon-lock-hint" className="mt-2 text-amber-400/90 leading-tight">
+                🔒 View locked while the polygon is set — it&apos;s pinned to
+                the angle you drew it from. Redraw or press Esc to move the
+                view again.
+              </div>
               <button
                 onClick={onRedrawPolygon}
                 className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
@@ -320,6 +331,7 @@ export function CropPanel({
             <>
               No polygon yet.
               <button
+                data-testid="crop-start-polygon"
                 onClick={onStartPolygon}
                 className="mt-2 w-full px-2 py-1.5 text-xs bg-neutral-700 hover:bg-neutral-600 rounded text-neutral-200"
               >

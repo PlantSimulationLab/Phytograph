@@ -273,7 +273,8 @@ Polygon mode is a **screen-space lasso** — useful when the region you
 want isn't a tidy box.
 
 1. Pick **Polygon** in the panel; the camera locks so the lasso stays
-   anchored to the view.
+   anchored to the view. (It stays locked once the polygon is closed,
+   too — see below.)
 2. Click in the viewport to add vertices. Right-click or
    <kbd>Backspace</kbd> removes the last vertex.
 3. **Double-click** the last vertex, or press <kbd>Enter</kbd>, to close
@@ -282,12 +283,18 @@ want isn't a tidy box.
    redraws with the cropped-away points hidden — so you see the actual
    result before committing to it.
 4. Click **Apply** in the panel, or use **Redraw polygon** to start over.
+   <kbd>Esc</kbd> clears the polygon and leaves Crop open, ready for
+   another one; a second <kbd>Esc</kbd> (with nothing drawn) exits Crop.
 
 Because the polygon lives in screen space, the in/out test uses the
-camera as it was when you closed the polygon — orbiting afterwards is
-fine and doesn't change the result. The preview stays pinned to the
-points the crop will remove, so orbiting to inspect it from another
-angle won't shift the selection.
+camera as it was when you closed the polygon. The view stays locked for
+as long as a closed polygon is set, exactly as in Rect mode, and for the
+same reason: the outline is drawn in the pixels you clicked, so a view
+that moved underneath it would show the lasso in one place and the points
+it selected in another. The selection itself never shifts — it is fixed
+at the moment you closed the polygon — but the drawing would stop
+describing it. Redraw or <kbd>Esc</kbd> to release the lock and move the
+view again.
 
 Unlike Box mode, the polygon and rectangle previews keep the cloud at full
 detail — only the points the crop removes disappear. If the rest of the
