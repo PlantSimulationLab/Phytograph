@@ -170,6 +170,11 @@ transformed by the same amount relative to its own starting position, so their
 relative sizes and spacing are preserved. Undo covers the first object in the
 selection.
 
+The selection **survives** the gesture, including when you finish it by
+clicking rather than pressing <kbd>Enter</kbd>. So you can translate, then
+rotate, then scale the same group straight through, without re-picking the
+objects in between. Click empty space when you are done to deselect.
+
 For a **point cloud**, this gesture only sets the pending position in the
 Transform panel — it does not apply the move. Click **OK** in the panel to
 apply it (or **Cancel** to discard). See
