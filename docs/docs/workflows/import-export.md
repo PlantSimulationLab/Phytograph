@@ -123,12 +123,15 @@ dropdowns in; you correct anything that's wrong before importing:
 - **Scalar vs Label** — a **Scalar** column is a continuous measurement
   (intensity, height, timestamp) and colors as a smooth gradient; a
   **Label** column holds class ids (tree id, segment, classification) and
-  colors as discrete classes with a legend. The wizard flags columns whose
-  values look like class labels with a one-click *"use Label?"* suggestion.
-  The flag reads only the values (small non-negative integers), so it is a
-  hint, not a verdict — ID columns always trip it. A **Deviation** column is
-  never flagged: RIEGL's pulse-shape deviation is a small integer but a
-  continuous measurement.
+  colors as discrete classes with a legend. Phytograph's own class columns —
+  `tree_instance`, `wood_class`, `ground_class`, `noise_class`,
+  `manual_class`, `las_classification` — arrive as **Label** already, so a
+  file this app exported re-imports colored the way it left. For any other
+  column the wizard flags values that look like class labels with a one-click
+  *"use Label?"* suggestion. That flag reads only the values (small
+  non-negative integers), so it is a hint, not a verdict — ID columns always
+  trip it. A **Deviation** column is never flagged: RIEGL's pulse-shape
+  deviation is a small integer but a continuous measurement.
 - **Timestamp / Target Index / Target Count** — the per-pulse multi-return
   fields: each return's acquisition time, its index within its laser pulse
   (1st / 2nd / … return), and the pulse's total return count. Mapping all three

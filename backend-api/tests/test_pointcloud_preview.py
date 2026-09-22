@@ -631,3 +631,93 @@ def test_cache_key_stable_for_none_plan(tmp_path: Path):
     k1 = main._octree_cache_key(str(f), "x y z", None)
     k2 = main._octree_cache_key(str(f), "x y z")
     assert k1 == k2
+
+
+# --------------------------------------------------------------------------- #
+# Class columns round-trip as LABELS, not as continuous scalars
+# --------------------------------------------------------------------------- #
+
+def test_exported_class_column_previews_as_a_label(client, tmp_path: Path, make_file_session):
+    """The whole round trip, through our own exporter: a cloud carrying the tree
+    segmentation's `tree_instance` column is written to LAZ and previewed again.
+
+    It has to come back as a LABEL. The wizard's role is not cosmetic — 'Scalar'
+    calls `registerContinuousSlug` in the renderer, which suppresses the slug's
+    categorical scheme PROCESS-WIDE (every cloud in the session, until restart),
+    so a file Phytograph itself wrote used to re-import as a grey gradient and
+    take Wood/Leaf colouring down with it.
+
+    Written by `_export_session_to_las` rather than by hand, because the thing
+    under test is that the name the EXPORTER chooses is the name the PREVIEW
+    recognises; two hand-written spellings would agree with each other and with
+    nothing else.
+    """
+    src = tmp_path / "cloud.xyz"
+    src.write_text("0 0 0\n1 0 0\n2 0 0\n")
+    sess = main._cloud_sessions[make_file_session(src)]
+    sess.extras["tree_instance"] = np.array([1, 2, 1], dtype=np.float32)
+    # A real measurement alongside it, as a control: this one IS a gradient.
+    sess.extras["height_above_ground"] = np.array([0.5, 1.5, 2.5], dtype=np.float32)
+    sess.extra_dims_meta = [
+        {"col": "extra:tree_instance", "slug": "tree_instance",
+         "label": "Tree instance", "categorical": True},
+        {"col": "extra:height_above_ground", "slug": "height_above_ground",
+         "label": "Height above ground", "categorical": False},
+    ]
+
+    dest = tmp_path / "out.laz"
+    main._export_session_to_las(sess, dest, fmt="laz", columns=None, translation=None)
+
+    res = client.post("/api/pointcloud/preview", json={"file_path": str(dest)})
+    assert res.status_code == 200, res.text
+    cols = {c["header_name"]: c for c in res.json()["columns"]}
+    assert cols["tree_instance"]["detected_role"] == "label"
+    assert cols["tree_instance"]["type_hint"] == "categorical"
+    # ...and the control stays a scalar. The fix is by NAME, so a rule that
+    # over-reached (e.g. "any small-integer column") would fail here.
+    assert cols["height_above_ground"]["detected_role"] == "extra"
+
+
+def test_class_column_previews_as_a_label_in_ascii_and_ply(client, tmp_path: Path):
+    """The same recognition on the text formats we also export to, since a round
+    trip through CSV/XYZ or PLY has to behave like the LAZ one."""
+    xyz = tmp_path / "seg.xyz"
+    xyz.write_text(
+        "x,y,z,tree_instance,reflectance\n"
+        "0 0 0 1 -12.5\n"
+        "1 0 0 2 -11.0\n"
+    )
+    cols = {c["header_name"]: c
+            for c in client.post("/api/pointcloud/preview",
+                                 json={"file_path": str(xyz)}).json()["columns"]}
+    assert cols["tree_instance"]["detected_role"] == "label"
+    assert cols["reflectance"]["detected_role"] != "label"
+
+    ply = tmp_path / "seg.ply"
+    ply.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 2\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property float wood_class\nproperty float curvature\n"
+        "end_header\n"
+        "0 0 0 1 0.25\n"
+        "1 0 0 2 0.75\n"
+    )
+    cols = {c["header_name"]: c
+            for c in client.post("/api/pointcloud/preview",
+                                 json={"file_path": str(ply)}).json()["columns"]}
+    assert cols["wood_class"]["detected_role"] == "label"
+    assert cols["wood_class"]["type_hint"] == "categorical"
+    assert cols["curvature"]["detected_role"] != "label"
+
+
+def test_class_field_name_matching_is_tolerant_of_spelling():
+    """Case, separators and CloudCompare's `scalar_` prefix all survive a round
+    trip through other tools; the underlying measurement columns must not be
+    swept up with them."""
+    for name in ("tree_instance", "Tree Instance", "TREE_INSTANCE",
+                 "scalar_wood_class", "ground_class", "noise_class",
+                 "manual_class", "las_classification"):
+        assert main._is_class_field_name(name), name
+    for name in ("height_above_ground", "reflectance", "curvature",
+                 "intensity", "col_4", "", None):
+        assert not main._is_class_field_name(name), name

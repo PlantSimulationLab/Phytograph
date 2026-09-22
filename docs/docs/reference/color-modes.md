@@ -191,6 +191,10 @@ each hit is labelled with the organ it struck — **Leaf**, **Petiole**,
 organ and a legend. Hits on imported (non-plant) geometry carry no organ data
 and read as **Unknown** (grey).
 
+All of the class columns above are recognised **by name** when a file carrying
+them is imported, so a cloud exported from Phytograph and read back keeps its
+discrete colouring rather than arriving as a gradient.
+
 You can also **mark a column as categorical yourself** in the
 [import wizard](../workflows/import-export.md#the-import-wizard) — set its role
 to **Label** (rather than **Scalar**) for a column that holds class labels (a

@@ -29676,6 +29676,45 @@ def _column_type_hint(values: List[str], name: Optional[str] = None) -> str:
     return 'float' if all_float else 'categorical'
 
 
+# Columns whose VALUES are class ids rather than measurements, recognised by
+# name. These are the class fields Phytograph's own tools write — tree
+# segmentation, wood/leaf, ground, denoise, the manual labelling tool — and an
+# export puts each of them in the file under exactly this name, so a re-import
+# has to come back as a LABEL (categorical), not as a continuous scalar.
+#
+# It is not cosmetic. The wizard's role decides two things in the renderer: how
+# the field is COLOURED, and — for a slug that owns a registered scheme
+# (wood_class, ground_class, noise_class, las_classification) — whether
+# `registerContinuousSlug` SUPPRESSES that scheme, which it does process-wide
+# and for every cloud in the session, not just the re-imported one. Defaulting
+# these to "Scalar" therefore meant a round trip through our own exporter
+# turned Wood/Leaf into a grey gradient everywhere until the app was restarted.
+#
+# Mirrors SCHEMES + the dynamic categoricals in src/renderer/lib/
+# classification.ts — keep the two in sync. `height_above_ground` is
+# deliberately absent: it is a real measurement and belongs on a gradient.
+def _class_field_slugs() -> "set[str]":
+    return {
+        TREE_INSTANCE_SLUG, MANUAL_CLASS_SLUG, WOOD_CLASS_SLUG,
+        GROUND_CLASS_SLUG, denoise.NOISE_CLASS_SLUG, "las_classification",
+    }
+
+
+def _is_class_field_name(name: Optional[str]) -> bool:
+    """True when `name` spells one of the class columns above.
+
+    Matched on a normalised key rather than the exact slug so the spellings a
+    round trip actually produces still land: case and separators vary by
+    format, and CloudCompare prefixes every imported scalar with `scalar_`.
+    """
+    if not name:
+        return False
+    key = re.sub(r'[^a-z0-9]+', '_', str(name).strip().lower()).strip('_')
+    if key.startswith('scalar_'):
+        key = key[len('scalar_'):]
+    return key in _class_field_slugs()
+
+
 def _preview_ascii(file_path: str, ascii_format: Optional[str],
                    max_rows: int) -> PointCloudPreviewResponse:
     header_names = _read_ascii_header_names(file_path)
@@ -29759,6 +29798,10 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             if header_names is not None and i < len(header_names) and header_names[i]:
                 suggested_label = _humanize_extra_dim_label(header_names[i])
                 suggested_slug = _sanitize_extra_dim_name(header_names[i])
+                # One of our own class columns coming back in: default it to
+                # 'Label', not 'Scalar' (see `_is_class_field_name`).
+                if _is_class_field_name(header_names[i]):
+                    detected_role = 'label'
             elif role != 'skip':
                 # No file header, but the role token is a passed-through
                 # <ASCII_format> legend word — label/slug the column from it so
@@ -29775,10 +29818,10 @@ def _preview_ascii(file_path: str, ascii_format: Optional[str],
             detected_role=detected_role,
             suggested_label=suggested_label,
             suggested_slug=suggested_slug,
-            type_hint=_column_type_hint(
+            type_hint=('categorical' if detected_role == 'label' else _column_type_hint(
                 col_values,
                 header_names[i] if header_names is not None and i < len(header_names) else role,
-            ),
+            )),
             remappable=True,
         ))
 
@@ -29874,12 +29917,18 @@ def _preview_ply(file_path: str) -> PointCloudPreviewResponse:
             continue
         role = _ply_role_for(name)
         is_extra = role == 'extra'
+        # One of our own class columns coming back in: default it to 'Label',
+        # not 'Scalar' (see `_is_class_field_name`).
+        is_class = is_extra and _is_class_field_name(name)
+        if is_class:
+            role = 'label'
         col_values = [r[i] for r in sample_rows if i < len(r)]
         columns.append(PreviewColumn(
             index=i, header_name=name, detected_role=role,
             suggested_label=_humanize_extra_dim_label(name) if is_extra else name,
             suggested_slug=_sanitize_extra_dim_name(name) if is_extra else '',
-            type_hint=_column_type_hint(col_values, name) if sample_rows else ('float' if is_extra else 'float'),
+            type_hint='categorical' if is_class else (
+                _column_type_hint(col_values, name) if sample_rows else 'float'),
             remappable=False,
         ))
     warning = None if is_ascii else "Binary PLY: preview rows unavailable (fields shown from header)."
@@ -29981,10 +30030,17 @@ def _preview_las(file_path: str, max_rows: int) -> PointCloudPreviewResponse:
                 continue
             role = role_for(n)
             is_extra = n in extra_names or role == 'extra'
+            # One of our own class columns coming back in: default it to
+            # 'Label', not 'Scalar' (see `_is_class_field_name`). Decided AFTER
+            # `is_extra`, which must stay keyed to the file's own layout — the
+            # suggested slug hangs off it.
+            is_class = is_extra and _is_class_field_name(n)
+            if is_class:
+                role = 'label'
             columns.append(PreviewColumn(
                 index=i, header_name=n, detected_role=role,
                 suggested_label=n, suggested_slug=n if is_extra else '',
-                type_hint='categorical' if n.lower() == 'classification' else 'float',
+                type_hint='categorical' if (is_class or n.lower() == 'classification') else 'float',
                 remappable=False,
                 # Scalars can be reassigned; geometry cannot. An ExtraBytes name
                 # is a vendor string we may not recognise, so the user needs a
