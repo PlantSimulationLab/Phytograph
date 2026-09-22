@@ -1441,6 +1441,10 @@ export interface TreeSegmentationResponse {
   // Set (with success=false and no error) when the run needs confirmation.
   // Re-send with `acknowledge_cost: true` to proceed.
   cost_warning?: TreeCostWarning;
+  // Set on a SUCCESSFUL run when an instance holds several trunks, i.e. trees
+  // were probably fused into one. The only signal that an otherwise plausible
+  // tree count is wrong — surface it, don't swallow it.
+  fusion_warning?: string | null;
   error?: string;
 }
 
@@ -4427,6 +4431,10 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   // Tree segmentation only: number of distinct trees found (max tree id; 0 =
   // ground/miss). Drives the "split into one cloud per tree" fan-out.
   num_trees?: number;
+  // Tree segmentation only: set when an instance holds several trunks, i.e.
+  // trees were probably fused into one and `num_trees` is too low. Surfaced as
+  // a warning toast — it is the only signal that a plausible count is wrong.
+  fusion_warning?: string | null;
   // /bake only: how many delete snapshots survived the bake. Normally 0 — bake
   // clears the undo history — but a delete that lands after the compaction
   // starts a fresh one. The renderer's `pendingDeletes` stack indexes that same

@@ -127,6 +127,19 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
 - If neighbouring trees still merge into one, lower **Separate trees beyond**
   first — that is the knob for this — then **Max intra-tree gap**, or add trunk
   **seeds**.
+- **If several trees come back as one instance each — for example an orchard
+  returning one instance per row — re-run the tool.** This is a known defect in
+  the underlying graph-cut solver, which occasionally fails to divide the cloud
+  at all; the tool detects the common case and retries automatically, but the
+  result can still come back fused. It depends on the exact number of points, so
+  simply running it again on a slightly cropped or downsampled cloud usually
+  clears it. Changing **1D/2D reg. strength** does *not* help here — those knobs
+  have no effect when this happens. Trunk **seeds** are the reliable workaround,
+  since they pin one instance per tree.
+- Phytograph warns you when an instance contains **more than one trunk**, which
+  is the signature of several trees having been merged. Trust that warning over
+  the tree count: a fused result looks perfectly plausible otherwise, and every
+  per-tree measurement taken from it will be wrong.
 - If one tree is split into several, raise **2D reg. strength** or **Merge** the
   pieces afterward.
 - Segmentation runs in the background, so the rest of the app stays responsive

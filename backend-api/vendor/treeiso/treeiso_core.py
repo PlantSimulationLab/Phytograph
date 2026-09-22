@@ -21,6 +21,7 @@ fallback.
 
 from __future__ import annotations
 
+import threading as _threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -39,6 +40,100 @@ except ImportError:  # pragma: no cover
     from cut_pursuit_L0 import perform_cut_pursuit
 
     USE_CPP = False
+
+
+class CutPursuitDegenerate(RuntimeError):
+    """Stage-1 cut-pursuit returned ONE segment for the whole cloud, and the
+    result could not be salvaged.
+
+    Raised by `main._treeiso_segment_retrying_degenerate` only after retries, not
+    by this module — see `stage1_collapsed()` for why detection and policy are
+    separated.
+
+    ## The failure
+
+    Stage 1 is supposed to over-segment into supervoxel-like pieces that stages
+    2-3 then group into trees. When it yields a single segment, those stages have
+    no segment structure left to reason about and can only subdivide that one
+    blob geometrically. On a row-planted orchard that produces one instance per
+    ROW: the reported case is a 5-tree almond plot (14.8 x 14.1 m, 14.8 M points)
+    returning exactly 2 instances, whose labels are a clean coarsening of the
+    correct 5 — trees {A,B,C} fused into one, {D,E} into the other, with 232 of
+    14.8 M points misassigned. Nothing in the output looks broken; it is simply
+    wrong, which is why it must not pass silently.
+
+    ## Why it is the solver, not the data
+
+    A pure PERMUTATION of the identical node set flips the outcome: the natural
+    (voxel-grid) order of a 17,443-node decimation collapses to 1 segment, while
+    a shuffle of the very same rows, coordinates and edges yields 302. Node order
+    carries no information about the problem, so nothing about the problem can
+    explain the difference.
+
+    Ruled out by measurement, each a plausible-sounding cause that is not:
+      - Over-regularisation — `reg_strength1` is INERT when this fires: lambda1
+        swept 0.05 -> 100 returns exactly 1 segment at every value.
+      - Numerical conditioning — scaling all coordinates by 10x or 0.1x, snapping
+        them to the voxel lattice, or rounding to 3 dp all leave it in place.
+      - A duplicate/self-edge artefact of the k-NN graph — failing and succeeding
+        inputs carry the same ~2 duplicate edges per node, and deduplicating the
+        edge list does not lift it.
+
+    It is neither rare nor confined to coarse voxels: 10 of 16 stage-1 voxel sizes
+    swept on that plot collapse, including 0.06-0.09 m, which straddles the
+    paper's own 0.05 m default. How often it fires depends on cloud STRUCTURE,
+    not just size — Gaussian synthetic blobs collapse at nearly every resolution
+    tested up to 160 k nodes, while the real almond cloud alternates.
+
+    ## Why the node order is not "fixed"
+
+    Re-solving under a different node order does escape the collapse, and the
+    first version of this fix did exactly that — wrongly. Reordering is not a
+    free knob: EVERY reordering tried (random shuffle, sort by x, sort by z,
+    lexsort, reverse) drives the solver to the OPPOSITE degenerate extreme,
+    shattering the cloud into ~1.3-2.1 nodes per segment with >90% singletons —
+    including at resolutions where the natural order succeeds perfectly
+    (res=0.05: 1138 healthy segments natural, 158,382 shards shuffled). That
+    would have swapped a visible wrong answer for an invisible one and degraded
+    the cases that currently work. Upstream's node order is load-bearing and is
+    left exactly as it is.
+    """
+
+
+# Whether the most recent `_process_point_cloud` saw its stage-1 cut-pursuit
+# collapse. Thread-local because the backend runs endpoints in anyio's worker
+# threadpool (see the `def`-not-`async def` rule in CLAUDE.md), so two
+# segmentations can genuinely be in flight at once and a module-level flag would
+# let one run read the other's verdict.
+_stage1_state = _threading.local()
+
+
+def _record_stage1_collapse(collapsed: bool) -> None:
+    """Record whether stage 1 degenerated, for `stage1_collapsed()` to read."""
+    _stage1_state.collapsed = bool(collapsed)
+
+
+def stage1_collapsed() -> bool:
+    """Did the last `segment_trees`/`_process_point_cloud` call on THIS thread hit
+    the stage-1 cut-pursuit collapse described in `CutPursuitDegenerate`?
+
+    Reported rather than raised, because a collapse is not reliably fatal and
+    this module cannot tell the difference. When trees are separated by more than
+    `max_outlier_gap`, `_split_across_gaps` still recovers them geometrically
+    from the collapsed blob — measured: three blobs 10 m apart come back as a
+    correct 3 trees even though stage 1 returned 1 segment. When crowns touch,
+    the same collapse silently fuses them, which is the orchard failure. Only the
+    caller's policy (retry at a different voxel size, then refuse) can act on
+    that, so detection lives here and the decision lives in
+    `main._treeiso_segment_retrying_degenerate`.
+
+    Detection is exact and has no false positives: a legitimately single-tree
+    cloud still over-segments in stage 1 by a wide margin — measured 17-68
+    segments for a featureless ball of 2 k-100 k points, 232 for one real tree cut
+    out of the TreeIso demo cloud, 783 for the whole demo cloud. "Exactly one
+    segment" is only ever this defect.
+    """
+    return bool(getattr(_stage1_state, "collapsed", False))
 
 
 @dataclass
@@ -487,11 +582,27 @@ def isolate_gaps(pcd, max_gap, search_K=20):
 # --------------------------------------------------------------------------- #
 def _process_point_cloud(pcd, p: TreeIsoParams):
     """Run the three stages on an (N, 3) array; return labels + decimation maps."""
+    # Clear first, so a caller that reads `stage1_collapsed()` after this run
+    # can never be answered by a PREVIOUS run on the same thread — the retry
+    # loop in main.py calls this repeatedly on one thread and would otherwise
+    # see a stale True and keep retrying a run that had already succeeded.
+    _record_stage1_collapse(False)
+
     pcd = pcd - np.mean(pcd, axis=0)
 
     dec_idx_uidx, dec_inverse_idx = decimate_pcd(pcd, p.decimate_res1)
     pcd_dec = pcd[dec_idx_uidx]
     init_labels = init_segs(pcd_dec, p)
+
+    # Stage 1 must over-segment. Exactly one segment is the solver's degenerate
+    # collapse (see `CutPursuitDegenerate`) — recorded rather than raised,
+    # because it is not always fatal: when trees are separated by more than
+    # `max_outlier_gap`, `_split_across_gaps` still recovers them geometrically
+    # from the collapsed blob. It IS fatal when crowns touch, which is the
+    # orchard case. Only the caller knows which, so the signal is surfaced and
+    # the policy lives in `main._treeiso_segment_retrying_degenerate`.
+    init_labels = np.asarray(init_labels)
+    _record_stage1_collapse(len(np.unique(init_labels)) < 2 and len(pcd_dec) > 1)
 
     dec_idx_uidx2, dec_inverse_idx2 = decimate_pcd(pcd, p.decimate_res2)
     pcd_dec2 = pcd[dec_idx_uidx2]

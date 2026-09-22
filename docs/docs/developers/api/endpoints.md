@@ -131,7 +131,7 @@ Both routes run the compute in the killable `seg_worker` subprocess
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/segment/trees` | `main.py` | Segment individual trees with **TreeIso** (cut-pursuit graph method, CPU-only). Takes inline `points` or a `source` descriptor (full resolution; labels align 1:1) and optional `seed_points` (trunk seeds for human-in-the-loop — each seed yields one tree). Returns per-point `labels` (`0` = unassigned, `1..N` = trees), `num_trees`, and a `ground_warning` flag. Used for flat clouds; session clouds use `/api/cloud/session/{id}/segment_trees` instead |
+| POST | `/api/segment/trees` | `main.py` | Segment individual trees with **TreeIso** (cut-pursuit graph method, CPU-only). Takes inline `points` or a `source` descriptor (full resolution; labels align 1:1) and optional `seed_points` (trunk seeds for human-in-the-loop — each seed yields one tree). Returns per-point `labels` (`0` = unassigned, `1..N` = trees), `num_trees`, a `ground_warning` flag, and `fusion_warning` — set when an instance holds several trunks, i.e. trees were probably merged and `num_trees` is too low (see `_treeiso_row_fusion_warning`). Used for flat clouds; session clouds use `/api/cloud/session/{id}/segment_trees` instead |
 
 TreeIso is vendored (MIT) under `backend-api/vendor/treeiso/`; its graph-cut
 backend `cut_pursuit_py` is bundled via `collectAll` in

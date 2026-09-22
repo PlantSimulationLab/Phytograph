@@ -73,3 +73,34 @@ DEFAULT here, where upstream leaves it opt-in.
   (1.0 reabsorbs the neighbouring tree). For outside corroboration, treeX (2025)
   uses a 0.5 m maximum crown region-growing radius for the same decision — the
   same order of magnitude, and measurably a shade too tight here.
+
+## Divergence: stage-1 cut-pursuit collapse guard (2026-09-21)
+
+`_process_point_cloud` records whether stage-1 cut-pursuit returned a single
+segment, exposed as `stage1_collapsed()`. Upstream has no such check.
+
+`cut_pursuit_py` 1.0.12 (the latest release) has an order-dependent failure mode:
+on some inputs it saturates at iteration 1 without splitting and returns ONE
+segment for the whole graph. Stages 2-3 then have no segment structure to group
+and can only subdivide that blob geometrically, which on a row-planted orchard
+yields one instance per ROW — the reported case is a 5-tree almond plot returning
+2 instances that are a clean coarsening of the correct 5.
+
+It is the solver, not the data: a pure permutation of the identical node set
+flips the outcome (17,443 nodes, natural order -> 1 segment, shuffled -> 302).
+`reg_strength1` is inert when it fires (swept 0.05-100, always 1 segment), and
+coordinate scaling, lattice snapping and edge deduplication all leave it in
+place. See the `CutPursuitDegenerate` docstring in `treeiso_core.py` for the full
+measurement set.
+
+The vendored layer only REPORTS it, and the algorithm is otherwise untouched —
+in particular upstream's node ordering is preserved, because every reordering
+tried drives the solver to the opposite degenerate extreme (>90% singleton
+segments), including at resolutions where the natural order works. Policy lives
+in Phytograph's `main.py`: `_treeiso_segment_retrying_degenerate` retries at a
+nudged `decimate_res1` when the collapse fused everything into one instance, and
+`_treeiso_row_fusion_warning` flags instances holding several trunks so a
+plausible-looking-but-fused count reaches the user.
+
+Not reported upstream as a patch because the defect is in the compiled
+`cut_pursuit_py` extension, which is a PyPI dependency rather than vendored code.

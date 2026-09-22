@@ -856,3 +856,192 @@ def test_split_gap_is_floored_at_point_spacing():
             f"a sub-spacing gap of {gap} m collapsed two separate bodies into "
             f"{len(np.unique(labels))} instance(s)"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Stage-1 cut-pursuit collapse (solver defect) — see `CutPursuitDegenerate` in
+# vendor/treeiso/treeiso_core.py for the measurements behind these.
+# --------------------------------------------------------------------------- #
+
+def _five_trees_two_rows(per_tree=400, trunk_frac=0.10, seed=0):
+    """Five trunk+crown trees in two rows, orchard-spaced — the shape of the
+    reported almond failure. Spacing is ~4.2 m within a row and ~6.6 m between
+    rows, matching the measured almond plot (4.2-4.9 m and 6.6-6.9 m).
+
+    The DEFAULTS are calibrated to trip the stage-1 solver collapse: 400 crown
+    points + a 10% trunk per tree (2,200 total) collapses at decimate_res1
+    0.08/0.10/0.12 m while segmenting normally at 0.05 m. Those numbers are not
+    arbitrary and are not a "small cloud" effect — the collapse depends on the
+    exact decimated node count in a way nothing in the data predicts, so it is
+    genuinely sensitive to them: the same fixture at trunk_frac 0.0, 0.17 or 0.30
+    does NOT collapse at any of those resolutions, nor does it at per_tree 1000+.
+    Change either default and these tests silently stop exercising the bug, which
+    is why `test_stage1_collapse_is_detected_not_silent` asserts the collapse
+    happens before asserting anything about handling it.
+    """
+    rng = np.random.default_rng(seed)
+    clouds = []
+    for cx, cy in [(0.0, 0.0), (4.2, 0.0), (8.4, 0.0), (0.0, 6.6), (4.2, 6.6)]:
+        crown = np.c_[cx + rng.normal(0, 1.0, per_tree),
+                      cy + rng.normal(0, 1.0, per_tree),
+                      3.0 + rng.normal(0, 0.8, per_tree)]
+        stem = int(per_tree * trunk_frac)
+        trunk = np.c_[cx + rng.normal(0, 0.05, stem),
+                      cy + rng.normal(0, 0.05, stem),
+                      rng.uniform(0.0, 3.0, stem)]
+        clouds.append(np.vstack([trunk, crown]))
+    return np.vstack(clouds).astype(np.float64)
+
+
+# The stage-1 voxel size this fixture collapses at (see `_five_trees_two_rows`).
+_COLLAPSING_RES1 = 0.10
+
+
+@requires_treeiso
+def test_stage1_collapse_is_detected_not_silent():
+    """The solver's single-segment collapse must be REPORTED, not swallowed.
+
+    This is the whole bug: stage 1 returns one segment for the entire cloud, and
+    with no signal the pipeline goes on to emit confident, wrong instances (the
+    reported 5-tree orchard came back as 2, one per row). `stage1_collapsed()` is
+    what makes that visible; without it nothing downstream can tell a fused
+    result from a correct one.
+
+    Runs the real engine on a cloud that genuinely collapses, so deleting the
+    detection makes the flag read False and this fails.
+    """
+    from treeiso import treeiso_core as tc
+
+    points = _five_trees_two_rows()
+    params = tc.TreeIsoParams(decimate_res1=_COLLAPSING_RES1,
+                              decimate_res2=2 * _COLLAPSING_RES1)
+    tc.segment_trees(points, params)
+    assert tc.stage1_collapsed(), (
+        f"this fixture is supposed to trip the stage-1 solver collapse at "
+        f"decimate_res1={_COLLAPSING_RES1}; if cut_pursuit_py was fixed or "
+        f"upgraded, re-derive the fixture (see CutPursuitDegenerate) rather than "
+        f"deleting this test"
+    )
+
+
+@requires_treeiso
+def test_stage1_collapse_flag_is_not_stale_across_runs():
+    """The flag describes THIS run, not a previous one.
+
+    `_process_point_cloud` clears it on entry. Without that, the retry loop in
+    `main._treeiso_segment_retrying_degenerate` reads a stale True after a run
+    that actually succeeded, so it would report a healthy segmentation as
+    collapsed. Order matters: collapse first, then a clean run.
+    """
+    from treeiso import treeiso_core as tc
+
+    collapsing = _five_trees_two_rows()
+    tc.segment_trees(collapsing, tc.TreeIsoParams(
+        decimate_res1=_COLLAPSING_RES1, decimate_res2=2 * _COLLAPSING_RES1))
+    assert tc.stage1_collapsed()
+
+    # The same fixture at 0.05 m does NOT collapse (see `_five_trees_two_rows`).
+    tc.segment_trees(collapsing, tc.TreeIsoParams())
+    assert not tc.stage1_collapsed(), (
+        "stage1_collapsed() still True after a healthy run — the flag is stale, "
+        "so every later run inherits the previous verdict"
+    )
+
+
+@requires_treeiso
+def test_collapse_is_retried_at_a_nudged_resolution():
+    """A collapse that fuses everything into ONE instance is retried, not served.
+
+    `main.segment_trees` is the chokepoint both endpoints and the killable worker
+    go through, so the retry is asserted there rather than on a helper. The
+    retried run must both escape the collapse and keep the caller's resolution
+    roughly intact — a large jump would answer a different question.
+    """
+    from treeiso import treeiso_core as tc
+
+    points = _five_trees_two_rows()
+    params = tc.TreeIsoParams(decimate_res1=_COLLAPSING_RES1,
+                              decimate_res2=2 * _COLLAPSING_RES1)
+    labels = main.segment_trees(points, params)
+
+    assert len(labels) == len(points)
+    # Either the gap split salvaged it or a nudged resolution did; what must NOT
+    # happen is the whole orchard coming back as one instance.
+    assert len(np.unique(labels)) > 1, (
+        "five well-separated trees came back as a single instance"
+    )
+    assert abs(params.decimate_res1 - _COLLAPSING_RES1) <= 0.5 * _COLLAPSING_RES1, (
+        f"retry wandered too far from the requested voxel size: "
+        f"{params.decimate_res1} vs {_COLLAPSING_RES1}"
+    )
+
+
+@requires_treeiso
+def test_multi_trunk_instances_are_flagged():
+    """A fused instance is caught by counting TRUNKS, not by guessing counts.
+
+    The reported failure is the subtle shape: a plausible-looking number of
+    instances, each secretly holding several trees. `_treeiso_row_fusion_warning`
+    detects it locally — one real tree has one basal stem — so it needs no prior
+    knowledge of how many trees the scene holds (which is the question the tool
+    is being asked).
+
+    Built from the KNOWN-correct partition and a deliberately fused one, so it
+    tests the detector rather than the segmentation.
+    """
+    # Denser than the collapse fixture: this tests the DETECTOR against a known
+    # partition, so the trunks want enough points to cluster reliably. The
+    # collapse behaviour is irrelevant here.
+    per_tree = 4000
+    trunk_frac = 0.15
+    points = _five_trees_two_rows(per_tree=per_tree, trunk_frac=trunk_frac)
+    # Ground truth: the fixture emits trunk+crown per tree, five trees in order.
+    per = int(per_tree * trunk_frac) + per_tree
+    truth = np.repeat(np.arange(1, 6), per)
+    assert len(truth) == len(points)
+
+    assert main._treeiso_row_fusion_warning(points, truth) is None, (
+        "the correct 5-tree partition must NOT be flagged — every instance has "
+        "exactly one trunk"
+    )
+
+    # Fuse by row, exactly as the solver collapse did: {1,2,3} and {4,5}.
+    fused = np.where(truth <= 3, 1, 2)
+    msg = main._treeiso_row_fusion_warning(points, fused)
+    assert msg is not None, "row-fused instances were not flagged"
+    # It must recover the real count (3 trunks + 2 trunks = 5), and say so.
+    assert "5 trees" in msg, msg
+    assert "3 trunks" in msg and "2 trunks" in msg, msg
+
+
+@requires_treeiso
+def test_single_tree_is_not_flagged_as_fused():
+    """One tree, one instance, no warning — the detector's false-positive guard.
+
+    A count-based heuristic ("this extent should hold N trees") would fire here
+    and rewrite an honest answer. Counting basal stems does not.
+    """
+    rng = np.random.default_rng(5)
+    crown = np.c_[rng.normal(0, 1.2, 6000), rng.normal(0, 1.2, 6000),
+                  3.0 + rng.normal(0, 0.9, 6000)]
+    trunk = np.c_[rng.normal(0, 0.05, 900), rng.normal(0, 0.05, 900),
+                  rng.uniform(0.0, 3.0, 900)]
+    points = np.vstack([trunk, crown]).astype(np.float64)
+    labels = np.ones(len(points), dtype=np.int64)
+    assert main._treeiso_row_fusion_warning(points, labels) is None
+
+
+@requires_treeiso
+def test_endpoint_reports_fusion_warning(client):
+    """The advisory reaches the API, since a warning nobody sees is no fix.
+
+    The reference demo cloud segments cleanly, so its `fusion_warning` must be
+    absent — this pins the field's presence and its quiet default in one call.
+    """
+    points, _ = _load_fixture()
+    res = client.post("/api/segment/trees", json={"points": points.tolist()})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    assert "fusion_warning" in body, "endpoint must expose the advisory field"
+    assert body["fusion_warning"] is None, body["fusion_warning"]

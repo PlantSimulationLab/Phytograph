@@ -13824,12 +13824,21 @@ export default function PointCloudViewer({
           if (childEntries.length > 0) onHideScan(id);
         }
 
+        // Multi-trunk advisory: several trees were probably fused into one
+        // instance, so the count the user is about to trust is too low. Not a
+        // failure (the labels are applied and the split already ran), but it is
+        // the ONLY signal that a plausible-looking result is wrong — this is the
+        // path the reported 5-trees-as-2 almond run took.
+        const fusionWarning = meta.fusion_warning;
         showToast({
-          type: 'success',
+          type: fusionWarning ? 'error' : 'success',
           title: 'Tree Segmentation Complete',
-          message: treeSplitClouds && splitCount > 0
-            ? `Segmented ${meta.point_count.toLocaleString()} points into ${splitCount} tree cloud${splitCount === 1 ? '' : 's'}.`
-            : `Segmented ${meta.point_count.toLocaleString()} points into individual trees.`,
+          message: [
+            treeSplitClouds && splitCount > 0
+              ? `Segmented ${meta.point_count.toLocaleString()} points into ${splitCount} tree cloud${splitCount === 1 ? '' : 's'}.`
+              : `Segmented ${meta.point_count.toLocaleString()} points into individual trees.`,
+            fusionWarning,
+          ].filter(Boolean).join(' '),
         });
         return;
       }
@@ -13936,12 +13945,18 @@ export default function PointCloudViewer({
         if (splitChildren > 0) onHideScan(id);
       }
 
+      // A fusion warning outranks the ground advisory: it says the tree COUNT
+      // is wrong, which makes every downstream per-tree number wrong too,
+      // whereas un-removed ground is a quality hint. Neither is a failure — the
+      // labels are applied either way.
       showToast({
-        type: response.ground_warning ? 'error' : 'success',
+        type: (response.ground_warning || response.fusion_warning) ? 'error' : 'success',
         title: 'Tree Segmentation Complete',
-        message: response.ground_warning
-          ? `Found ${response.num_trees} trees, but ground looks present — run Ground Segmentation first for best results.`
-          : `Segmented ${response.num_trees} trees.`,
+        message: response.fusion_warning
+          ? `Segmented ${response.num_trees} trees. ${response.fusion_warning}`
+          : response.ground_warning
+            ? `Found ${response.num_trees} trees, but ground looks present — run Ground Segmentation first for best results.`
+            : `Segmented ${response.num_trees} trees.`,
       });
     } catch (error) {
       // User cancelled (Cancel button aborted the fetch, or the split pill's

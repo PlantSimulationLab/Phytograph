@@ -7731,6 +7731,11 @@ class TreeSegmentationResponse(BaseModel):
     # a confirmation prompt, not a refusal — re-send with `acknowledge_cost` to
     # run it.
     cost_warning: Optional[Dict[str, Any]] = None
+    # Set when an instance holds several trunks, i.e. trees were probably fused
+    # (see `_treeiso_row_fusion_warning`). The run SUCCEEDED and the labels are
+    # returned — this is the only signal that an otherwise plausible-looking
+    # tree count is wrong, so it must reach the user.
+    fusion_warning: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -8009,6 +8014,209 @@ def _looks_like_ground_present(points: np.ndarray) -> bool:
     return bool(frac > 0.12 and wide)
 
 
+# --- Multi-trunk (row-fusion) advisory -------------------------------------- #
+#
+# Height of the basal slab, above each instance's own lowest point, that the
+# trunk count is measured in. Deep enough to hold stem rather than only the
+# ground-contact ring, shallow enough to stay below the first scaffold branches
+# of an orchard tree (almond/walnut break at ~1-1.5 m).
+_TRUNK_BAND_M = 0.8
+# Single-linkage distance that separates one stem from the next. Well above a
+# trunk's own diameter (~0.3 m) and well below orchard spacing (4-5 m measured on
+# the almond plot), so it cannot split one stem in two nor merge two neighbours.
+_TRUNK_LINK_M = 1.0
+# A basal cluster must hold this share of the sampled slab to count as a stem,
+# so understory litter and a few stray returns do not read as extra trunks.
+_TRUNK_MIN_SHARE = 0.02
+# Points sampled from the slab before linkage. O(n^2) in the linkage, so this
+# caps the cost; 4 k is ample to resolve clusters metres apart.
+_TRUNK_SAMPLE = 4000
+
+
+def _instance_trunk_count(pts: np.ndarray) -> int:
+    """Number of distinct basal stems in one tree instance.
+
+    Clusters the instance's lowest `_TRUNK_BAND_M` in XY by single linkage: one
+    real tree has exactly one stem there, while an instance that fused several
+    trees has one per tree it swallowed. Returns 1 for anything too small or too
+    sparse to measure, so the advisory stays silent rather than guessing.
+    """
+    from scipy.cluster.hierarchy import fcluster, linkage
+
+    pts = np.asarray(pts, dtype=np.float64)
+    if len(pts) < 200:
+        return 1
+    z = pts[:, 2]
+    base = pts[z <= float(np.min(z)) + _TRUNK_BAND_M]
+    if len(base) < 50:
+        return 1
+    sample = base
+    if len(base) > _TRUNK_SAMPLE:
+        idx = np.random.default_rng(0).choice(len(base), _TRUNK_SAMPLE, replace=False)
+        sample = base[idx]
+    groups = fcluster(linkage(sample[:, :2], "single"), _TRUNK_LINK_M, "distance")
+    sizes = np.bincount(groups)[1:]
+    floor = max(_TRUNK_MIN_SHARE * len(sample), 20)
+    return int(max(1, (sizes >= floor).sum()))
+
+
+def _treeiso_row_fusion_warning(points: np.ndarray, labels: np.ndarray) -> Optional[str]:
+    """Advisory: does any instance contain SEVERAL basal stems, i.e. did several
+    trees get fused into one?
+
+    This is the user-facing half of the stage-1 collapse (see
+    `CutPursuitDegenerate`). The retry in
+    `_treeiso_segment_retrying_degenerate` only fires when the collapse fuses
+    EVERYTHING into one instance; the reported almond failure is the subtler
+    shape — 5 trees returned as 2, one per orchard ROW — where the count looks
+    plausible and nothing in the output says otherwise. A user who does not
+    already know the scene holds 5 trees has no way to tell.
+
+    Counting stems rather than comparing tree counts is what makes this
+    trustworthy: the correct tree count is the question being asked, so any
+    guess at it (trees per unit extent, expected crown width) would overwrite
+    honest answers on a hedgerow, a coppice or a single specimen. "How many
+    trunks are in this instance" is instead a local, checkable fact. Measured on
+    the almond plot: the two fused instances report 3 and 2 stems (3 + 2 = the 5
+    real trees), while all five instances of the correct segmentation report
+    exactly 1.
+
+    Returns a message naming the instances and the implied tree count, or None
+    when every instance looks single-stemmed.
+    """
+    labels = np.asarray(labels)
+    multi: List[Tuple[int, int]] = []
+    for tree_id in np.unique(labels):
+        if tree_id <= 0:
+            continue
+        stems = _instance_trunk_count(points[labels == tree_id])
+        if stems > 1:
+            multi.append((int(tree_id), stems))
+    if not multi:
+        return None
+    implied = int(sum(s for _, s in multi)
+                  + len([t for t in np.unique(labels) if t > 0])
+                  - len(multi))
+    listed = ", ".join(f"{tid} ({stems} trunks)" for tid, stems in multi[:5])
+    more = "" if len(multi) <= 5 else f" and {len(multi) - 5} more"
+    return (
+        f"{len(multi)} instance(s) contain more than one trunk — {listed}{more}. "
+        f"Several trees were probably merged into one instance (this scene looks "
+        f"like about {implied} trees, not {len([t for t in np.unique(labels) if t > 0])}). "
+        f"Re-run with a different stage-1 voxel size, or use trunk seeds to pin "
+        f"one instance per tree."
+    )
+
+
+# Stage-1 voxel sizes to try, as multipliers on the caller's `decimate_res1`,
+# when the solver hits its degenerate single-segment collapse (see
+# `CutPursuitDegenerate` in the vendored treeiso_core).
+#
+# The collapse depends on the exact decimated node count in a way nothing in the
+# data predicts — 10 of 16 voxel sizes swept on the almond plot trip it, and the
+# good/bad pattern alternates (0.10 ok, 0.12 bad, 0.13 ok, 0.15 bad, 0.18 ok,
+# 0.20 bad). So the escape is simply to land on a different node count, and a
+# small nudge suffices: every collapse measured on that plot cleared within the
+# first two steps below.
+#
+# Deliberately SMALL and mostly downward. Stage-1 decimation is an
+# over-segmentation step feeding stages 2-3, so a few percent of voxel size
+# changes the supervoxel granularity slightly and the final tree count not at
+# all — whereas a large jump would silently answer a different question (the
+# reason the vendored layer refuses instead of coarsening on its own). Finer
+# first, because finer costs more nodes but never loses structure; the two
+# coarser fallbacks exist only so a cloud that collapses at every finer step
+# still has somewhere to go.
+_TREEISO_DEGENERATE_RETRY_FACTORS = (0.9, 1.11, 0.8, 1.25, 0.72)
+
+
+def _treeiso_segment_retrying_degenerate(segment_fn, points: np.ndarray, params):
+    """Run TreeIso, retrying at a nudged `decimate_res1` when stage-1 cut-pursuit
+    collapses to a single segment AND the collapse actually damaged the result.
+
+    The vendored engine REPORTS the collapse (`stage1_collapsed()`) instead of
+    raising, because it is not reliably fatal: `_split_across_gaps` can still
+    recover trees that stand more than `max_outlier_gap` apart, and for those the
+    labels are correct despite the collapse. Re-running them would burn a minute
+    to arrive at the same answer. So the trigger here is the collapse AND a
+    suspicious partition — see `CutPursuitDegenerate` for the defect itself and
+    why neither reordering nodes nor raising `reg_strength1` can fix it.
+
+    "Suspicious" is deliberately just `<= 1 tree`, not a guess at how many trees
+    the cloud should hold. Nothing here knows that — it is the very question the
+    tool is being asked — and a heuristic that assumed, say, one tree per 5 m of
+    extent would rewrite honest answers on a hedgerow or a single specimen. A
+    collapsed stage 1 that still yields several instances is left alone: it was
+    either genuinely salvaged by the gap split, or it is the orchard case, and
+    those are indistinguishable from here without knowing the truth.
+
+    The orchard failure the report came from is therefore caught by the retry
+    only when it fuses everything into one instance; the 5-trees-to-2 case is
+    caught by `_treeiso_row_fusion_warning`, which flags it for the user rather
+    than silently guessing. Recovery lives on this side because `decimate_res1`
+    is the caller's parameter and only this layer knows it came from
+    `_auto_treeiso_decimation`/the UI seed rather than from a user who typed it.
+    """
+    from treeiso import treeiso_core as _tc
+
+    labels = segment_fn(points, params)
+    if not _tc.stage1_collapsed():
+        return labels
+    n_trees = int(len(np.unique(np.asarray(labels))))
+    if n_trees > 1:
+        logger.warning(
+            "TreeIso stage-1 cut-pursuit collapsed at decimate_res1=%g m but the "
+            "gap split still produced %d instances; keeping them. Verify the "
+            "count against the scene (see CutPursuitDegenerate).",
+            getattr(params, "decimate_res1", float("nan")), n_trees,
+        )
+        return labels
+    if params is None or not getattr(params, "decimate_res1", 0):
+        return labels
+
+    base = float(params.decimate_res1)
+    base_res2 = float(getattr(params, "decimate_res2", base * 2.0) or base * 2.0)
+    for factor in _TREEISO_DEGENERATE_RETRY_FACTORS:
+        retry_res = round(base * factor, 4)
+        if retry_res <= 0:
+            continue
+        # Mutate the caller's params: it is built per request
+        # (`_treeiso_params_from_dict`) and never shared, and the resolved value
+        # is what the run actually used, so leaving it in place keeps the params
+        # honest for anything that inspects them afterwards.
+        params.decimate_res1 = retry_res
+        # Keep the paper's 2:1 stage-2 ratio, as `_auto_treeiso_decimation` does.
+        # Stage 2 groups stage-1 SEGMENTS, so a res2 pinned to a res1 that no
+        # longer exists mismatches the granularity it is grouping.
+        params.decimate_res2 = round(retry_res * 2.0, 4)
+        retry_labels = segment_fn(points, params)
+        if _tc.stage1_collapsed():
+            continue
+        logger.warning(
+            "TreeIso stage-1 cut-pursuit collapsed at decimate_res1=%g m; "
+            "recovered at %g m with %d instances (solver defect, see "
+            "CutPursuitDegenerate).",
+            base, retry_res, int(len(np.unique(np.asarray(retry_labels)))),
+        )
+        return retry_labels
+
+    # Every nudge collapsed too. Restore what the caller asked for and return the
+    # original labels rather than raising: a single instance is a legitimate
+    # answer for a single-tree cloud, and this layer cannot tell that apart from
+    # a fused orchard. The log is the signal; `_treeiso_row_fusion_warning`
+    # carries the user-facing one.
+    params.decimate_res1 = base
+    params.decimate_res2 = base_res2
+    logger.warning(
+        "TreeIso stage-1 cut-pursuit collapsed at decimate_res1=%g m and at every "
+        "retry resolution; returning a single instance. If the cloud holds more "
+        "than one tree, change decimate_res1 by more than 30%% (solver defect, "
+        "see CutPursuitDegenerate).",
+        base,
+    )
+    return labels
+
+
 def segment_trees(
     points: np.ndarray,
     params=None,
@@ -8021,7 +8229,7 @@ def segment_trees(
     are returned, aligned 1:1 to the input order."""
     from treeiso.treeiso_core import segment_trees as _ti_segment
 
-    labels = _ti_segment(points, params)
+    labels = _treeiso_segment_retrying_degenerate(_ti_segment, points, params)
     if seeds is None or len(seeds) == 0:
         return labels.astype(np.int64)
 
@@ -8165,12 +8373,18 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
         labels = np.zeros(n_full, dtype=np.int64)
         labels[eligible] = np.asarray(sub_labels)
         num_trees = int(len(np.unique(labels[labels > 0])))
+        # Multi-trunk advisory on the points TreeIso actually saw, so the basal
+        # slab is measured on the same geometry that was segmented.
+        fusion_warning = await run_in_threadpool(
+            _treeiso_row_fusion_warning, pts, np.asarray(sub_labels),
+        )
         return TreeSegmentationResponse(
             success=True,
             labels=[int(x) for x in labels],
             num_trees=num_trees,
             num_points=n_full,
             ground_warning=ground_warning,
+            fusion_warning=fusion_warning,
         )
     except HTTPException:
         raise
@@ -37715,6 +37929,13 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # Scatter the plant tree ids back onto all survivors; ground stays 0.
     labels = np.zeros(len(pts), dtype=np.int64)
     labels[plant_mask] = np.asarray(plant_labels)
+    # Multi-trunk advisory, on the points TreeIso saw (see
+    # `_treeiso_row_fusion_warning`). This is the path the Segment Trees panel
+    # uses, and the reported 5-trees-as-2 failure surfaced here with nothing to
+    # tell the user the count was wrong.
+    fusion_warning = await run_in_threadpool(
+        _treeiso_row_fusion_warning, plant_pts, np.asarray(plant_labels),
+    )
     with _cloud_session_lock:
         _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
     cache_key, cache_dir, meta = await run_in_threadpool(_session_rebuild, sess)
@@ -37722,7 +37943,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # uses this to iterate ids 1..num_trees when "split into one cloud per tree"
     # is enabled, extracting each into its own child session.
     num_trees = int(labels.max()) if labels.size else 0
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, **meta}
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": fusion_warning, **meta}
 
 
 def _translate_octree_in_place(cache_id: Optional[str],
