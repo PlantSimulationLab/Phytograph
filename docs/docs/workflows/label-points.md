@@ -69,9 +69,59 @@ The lasso remains the better tool for covering a large region in one go — and,
 paired with a [cross-section](#work-in-a-cross-section), for classifying a cloud
 systematically.
 
+## Choose what you are labelling
+
+The **Column** dropdown at the top of the panel picks which classification your
+strokes write to. Every classification the cloud carries is listed, so a
+classification that came out wrong can be fixed by hand rather than only
+recomputed.
+
+- **Labelling** — the hand-labelling column, where your own classes live. It is
+  offered even on a cloud that has none yet; it is created the first time you
+  paint.
+- **Classifications** — the class columns the cloud already has: a
+  `tree_instance` from [Separate trees](segment-trees.md), a `ground_class` from
+  [Segment ground points](segment-ground.md), a classification byte carried in
+  from a LAS file, or any column you marked **Label** in the import wizard.
+- **Other columns** — continuous measurements. These are offered because
+  Phytograph cannot always tell a class column from a measurement, but painting
+  one **replaces the measured values**, so the panel warns before you do.
+- **+ New classification…** — start your own column; see
+  [Create a new classification](#create-a-new-classification).
+
+When you open the tool on a cloud that carries exactly one classification, it
+opens on that column with its real classes and counts already listed.
+
+!!! example "Fixing a tree segmentation by hand"
+    [Separate trees](segment-trees.md) sometimes merges two trees into one, or
+    splits one across two ids. Select the cloud, open **Label Points**, and it
+    opens on **Tree instance** showing the trees the segmentation actually
+    found. Pick the tree you want a region to belong to, lasso the points that
+    were assigned wrongly, and **Commit**. To split a merged tree, use **Edit →
+    Add class** first: on a classification the cloud already carries, a new
+    class continues that column's own numbering (Tree 3 after Tree 2) rather
+    than starting a separate custom range.
+
+!!! note "Class 0 is always available"
+    Every column offers **Unclassified** (class 0), even when the data has no
+    zeros in it — a tree segmentation numbers its trees from 1. It is how you
+    take a classification *away* from points that should not have had one, and
+    it reads 0 points until you use it.
+
+!!! warning "Commit before switching columns"
+    Uncommitted strokes belong to the column you painted them in, so the
+    dropdown refuses to move while any are pending. **Commit** them or
+    **Undo** them first.
+
 ## Class sets
 
-Use **Preset** in the panel to switch between the built-in sets:
+A class set is a vocabulary for the column you are painting. **Preset** in the
+panel switches between the built-in sets that describe **that column** — it
+never moves you to a different one. A column with no built-in vocabulary (a tree
+segmentation's instance ids, or a classification of your own) has no presets,
+and the button is greyed out; its classes come from the data itself.
+
+The built-in sets are:
 
 - **Wood / leaf** (the default) — matches what
   [Separate leaf and wood](segment-wood.md) writes, so you can correct its
@@ -86,14 +136,11 @@ Use **Preset** in the panel to switch between the built-in sets:
 
 Every set includes **Unclassified** (class 0), which is what points start as.
 
-!!! note "A class set also names the column it reads"
-    Each set describes a different **attribute** on the cloud, not just a list of
-    names. Ground / non-ground reads what the ground-segmentation tool wrote;
-    ASPRS reads an imported LAS classification byte; wood/leaf and organs read
-    the hand-labelling column. So switching sets changes both the class names
-    *and* which existing classification you are looking at — a cloud that has
-    been ground-segmented shows its real counts under **Ground / non-ground**
-    and zeros under the others until you paint something.
+Each set belongs to a column: ground / non-ground describes what the
+ground-segmentation tool writes, ASPRS describes an imported LAS classification
+byte, and wood/leaf and organs describe the hand-labelling column. Pick the
+column first, in the **Column** dropdown, and the presets that apply to it
+follow.
 
 ### Define your own classes
 
@@ -103,9 +150,12 @@ the result as a palette of your own.
 
 - **Add class** appends a new class in the 64–255 band, which LAS reserves for
   user-defined codes — so your classes never collide with the ASPRS standard
-  ones. (Labels currently export as their own `manual_class` column rather than
-  the LAS classification byte; keeping custom classes in 64–255 means the
-  numbers stay valid when writing that byte becomes an option.)
+  ones. (Labels export as their own column rather than the LAS classification
+  byte; keeping custom classes in 64–255 means the numbers stay valid when
+  writing that byte becomes an option.) On a classification the cloud already
+  carries, a new class instead continues **that column's** numbering — Tree 3
+  after Tree 2 — because those ids are data the segmentation wrote, not a
+  vocabulary you chose.
 - **Save palette** applies it, binds it to the cloud (so it is still there when
   you reopen the tool), and adds it to your saved palettes.
 - **Export / Import** move palettes between projects or collaborators as a JSON
@@ -115,11 +165,28 @@ Two rules the editor enforces, both to protect points you have already painted:
 
 - **Unclassified (class 0) cannot be removed or renumbered.** Points from an
   unlabelled or merged cloud arrive as 0, so 0 has to mean "unclassified"
-  everywhere.
+  everywhere. You can rename it — a tree segmentation's class 0 reads
+  "Unassigned" — because only the *number* is the contract.
 - **A class that already has points keeps its value.** The class *number* is
   what gets stored in the file, so repointing a class that is in use would leave
   those points holding a number the palette no longer describes. Renaming and
   recolouring stay available — only the number is fixed.
+
+#### Create a new classification
+
+**+ New classification…** in the Column dropdown makes a column of your own,
+alongside the ones the cloud already has, rather than mixing your classes into
+the hand-labelling column. Give it a name — "Row QC" — and the editor shows the
+name it will carry in the data (`row_qc`) beneath it.
+
+A name is refused if it collides with a standard LAS dimension name or with a
+column this cloud already has; **Create classification** stays disabled until it
+is usable, so a name that could not be written is caught before you paint rather
+than after.
+
+Once you paint and **Commit**, it is a real column like any other: it appears in
+**Color by**, in the scalar filter, in split-by-class, and in an
+[export](import-export.md).
 
 ## Only repaint certain classes
 
@@ -151,9 +218,10 @@ it while you work on the rest.
 
 ## What happens to the labels
 
-Hand labels are stored on the cloud as a `manual_class` attribute (the
-ground/non-ground and ASPRS sets edit their own existing columns instead — see
-the note above). Once committed they behave like any other scalar:
+Labels are stored in whichever column you picked: the hand-labelling column
+(`manual_class`) by default, the cloud's own classification when you chose one,
+or a column you created. Either way, once committed they behave like any other
+scalar:
 
 - colour the cloud by them (they appear in the colour-by list with your class
   names and colours),

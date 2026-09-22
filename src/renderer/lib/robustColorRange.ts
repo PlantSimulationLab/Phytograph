@@ -1,4 +1,4 @@
-import { categoricalSchemeForRange } from './classification';
+import { categoricalSchemeForCloud } from './classification';
 import type { PointCloudData } from './pointCloudTypes';
 
 /**
@@ -51,20 +51,14 @@ export function robustScalarRange(
   // list. A scheme here means the field is a label, and a percentile must not
   // touch it.
   //
-  // `categoricalSchemeForRange` is the right resolver because its NULLNESS — the
-  // only thing this gate reads — does not depend on `observed`: that argument
-  // only chooses which builder produces the scheme, and both return one. So this
-  // can never disagree with OctreePointCloud.tsx, which calls it without
-  // `observed`.
-  //
-  // NOTE for whoever wires up `categoricalSchemeForCloud` (per-cloud user
-  // palettes, currently unreferenced in production): it resolves palettes this
-  // function does not, so it must be consulted HERE too, or a palette-bound slug
-  // that isn't also in DYNAMIC_CATEGORICAL would be trimmed like a measurement.
-  // Today every palette save/commit registers its slug as categorical, so the
-  // gate catches them — that coupling is what makes this safe, not luck.
+  // Resolved through `categoricalSchemeForCloud` so a slug carrying a USER
+  // PALETTE is recognised as a label here even if it never reached
+  // DYNAMIC_CATEGORICAL — otherwise a hand-labelled column would be percentile-
+  // trimmed like a measurement, dropping its rarest class off the colour ramp.
+  // The palette path only ADDS resolutions; the nullness this gate reads is
+  // otherwise identical, so this cannot disagree with the renderers.
   const observed = data.octree?.observedClasses?.[field];
-  if (categoricalSchemeForRange(field, raw, observed)) return raw;
+  if (categoricalSchemeForCloud(field, raw, data.octree?.classPalettes, observed)) return raw;
 
   const [lo, hi] = robust;
   if (!isFinite(lo) || !isFinite(hi) || !(hi > lo)) return raw;

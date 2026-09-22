@@ -3,7 +3,7 @@ import { useThree } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
-import { categoricalSchemeForRange, buildCategoricalGradientStops } from '../../../lib/classification';
+import { categoricalSchemeForCloud, buildCategoricalGradientStops } from '../../../lib/classification';
 import type { CloudFilters, PointCloudData } from '../../../lib/pointCloudTypes';
 import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC } from '../../../lib/octreeFilterSpec';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
@@ -851,8 +851,18 @@ export function OctreePointCloud({
       const bandRange = labelScheme
         ? [0, Math.max(0, labelScheme.classes.length - 1)] as [number, number]
         : effectiveRange ?? (scalarRange ? [scalarRange.min[0], scalarRange.max[0]] : null);
+      // Resolved per-cloud so a user palette bound to this column supplies the
+      // class colours once the labels are COMMITTED — while the tool is open
+      // `labelScheme` already wins, so without this the cloud would visibly
+      // change colour at commit, from the user's palette back to the by-name
+      // default.
       const categorical = labelScheme ?? (scalarActive && scalarRange
-        ? categoricalSchemeForRange(selectedScalarField, [scalarRange.min[0], scalarRange.max[0]])
+        ? categoricalSchemeForCloud(
+            selectedScalarField,
+            [scalarRange.min[0], scalarRange.max[0]],
+            data.octree?.classPalettes,
+            data.octree?.observedClasses?.[selectedScalarField ?? ''],
+          )
         : null);
       if (categorical && bandRange) {
         const stops = buildCategoricalGradientStops(categorical, [bandRange[0], bandRange[1]]);

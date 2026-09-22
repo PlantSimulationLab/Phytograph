@@ -89,6 +89,20 @@ async function counts(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
   return JSON.parse(raw ?? '{}') as Record<string, number>;
 }
 
+test('a cloud with no classification of its own still opens on the hand-labelling column', async () => {
+  // The no-regression guard for the column picker. `manual_class` does not
+  // exist on a freshly imported cloud — the backend creates it on the first
+  // stroke — so it has to be offered anyway. Dropping that made the picker
+  // empty on every plain import, which every other label spec depends on.
+  const { page, panel } = await openLabelTool();
+
+  await expect(panel).toHaveAttribute('data-label-slug', 'manual_class');
+  await expect(page.getByTestId('label-column-select')).toHaveValue('manual_class');
+  // And it is seeded with a vocabulary to paint, not a bare "Unclassified".
+  await expect(panel).toContainText('Wood');
+  await expect(panel).toContainText('Leaf');
+});
+
 test('painting a lasso labels the enclosed points with the active class', async () => {
   const { page, panel } = await openLabelTool();
 

@@ -88,7 +88,7 @@ import { prettifyQSMError } from '../lib/qsmErrors';
 import { stopClickAfterTextSelection } from '../lib/textSelection';
 import { computeGridFloor } from '../lib/gridFloor';
 import { type Scan, type ScanRegistration, hasData, hasParams, scanDisplayName, duplicateScanName, derivedScanName, allocateScanColor, createScanColorAllocator, isBackfillEligible, detectedReturnMode, missingMultiReturnColumns, scanHasKnownOrigin, scanOriginOf, meanScanOrigin, composeRegistration, invertRigid4x4, registeredScans, referenceScanIds } from '../lib/scan';
-import { parsePointCloudFromPath, buildPointCloudFromOctree } from '../lib/pointCloudParsers';
+import { parsePointCloudFromPath, buildPointCloudFromOctree, POINT_CLOUD_FORMATS } from '../lib/pointCloudParsers';
 import { resolveAttachedScanFile } from '../lib/scanFileResolver';
 import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
@@ -117,7 +117,8 @@ import { SectionProjectionOverride } from './viewer/gizmos/SectionProjectionOver
 import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
   makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
-  type ClassPalette,
+  labelableColumnsFor, derivePaletteForColumn, makeEmptyPalette,
+  type ClassPalette, type LabelableColumn, type PalettePreset,
 } from '../lib/classPalettes';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
 import { LabelPanel } from './viewer/panels/LabelPanel';
@@ -170,6 +171,7 @@ import {
 import { applyTriangleFilter, computeTriangleMetrics, triangleFilterCounts } from '../lib/triangleFilter';
 import type { TriangleFilterEstimate } from '../lib/triangleFilter';
 import { LegendStack } from './viewer/LegendStack';
+import { LEGEND_MAX_CLASSES } from '../lib/colorChannel';
 import {
   buildLegendEntries,
   cssColorToRgb,
@@ -178,7 +180,7 @@ import {
   type ChannelDescriptor,
   type LegendEntry,
 } from '../lib/colorChannel';
-import { categoricalSchemeForRange, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE, NORMAL_ATTRIBUTES, CURVATURE_ATTRIBUTE } from '../lib/classification';
+import { categoricalSchemeForCloud, categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues, isCategoricalAttribute, registerCategoricalSlug, registerContinuousSlug, classColorHex, GROUND_CLASS_ATTRIBUTE, HEIGHT_ABOVE_GROUND_ATTRIBUTE, WOOD_CLASS_ATTRIBUTE, TREE_INSTANCE_ATTRIBUTE, MISS_ATTRIBUTE, NOISE_CLASS_ATTRIBUTE, NOISE_CLEAN, NOISE_NOISE, NORMAL_ATTRIBUTES, CURVATURE_ATTRIBUTE } from '../lib/classification';
 import { robustScalarRange } from '../lib/robustColorRange';
 import { buildNoiseParams, formatFlaggedSummary, formatMultiScanSummary, noiseRemovalConfirmMessage, noiseRemovalNeedsConfirmation } from '../lib/noiseFilter';
 import { exportScanXml, type ScanExportEntry } from '../utils/backendApi';
@@ -1320,6 +1322,15 @@ export default function PointCloudViewer({
   // deselect (onPointerMissed, whose native event carries no R3F drag `delta`)
   // can tell a click from a camera-orbit drag that happened to end on nothing.
   const viewportPointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  // Set when the t/s/r modal transform is ENDED by a mouse press (the
+  // Blender-style "click to place"). That same press goes on to produce a
+  // `click`, which is what R3F turns into onPointerMissed when it hit nothing
+  // — so without this the placing click would immediately clear the very
+  // selection that was just transformed, forcing the user to re-pick all N
+  // objects before nudging them again. A ref, not state: commitModal() flips
+  // gizmoDragging off synchronously and React re-renders before the click
+  // lands, so meshSelectionEnabled is already true again by then.
+  const suppressNextPointerMissedRef = useRef(false);
   const lastSelectedQSMIdRef = useRef<string | null>(null);
 
   // Copy confirmation flash state
@@ -2523,6 +2534,19 @@ export default function PointCloudViewer({
   // the tool opens, else from the wood/leaf preset (the common correction case).
   const [labelPalette, setLabelPalette] = useState<ClassPalette | null>(null);
   const [showPaletteEditor, setShowPaletteEditor] = useState(false);
+  /**
+   * Draft for a brand-new classification column, non-null only while the editor
+   * is open in "new column" mode. Kept apart from `labelPalette` so an
+   * abandoned draft never becomes the live palette.
+   */
+  const [newColumnDraft, setNewColumnDraft] = useState<ClassPalette | null>(null);
+  /**
+   * The COLUMN being labelled. Tracked separately from `labelPalette.slug`
+   * because it must survive a palette edit, and because it is what the picker
+   * binds to. Remembered per cloud in `labelColumnByCloudRef` so re-opening the
+   * tool returns to the column the user was working in.
+   */
+  const labelColumnByCloudRef = useRef<Map<string, string>>(new Map());
   /** The app-level saved-palette library, loaded on demand. */
   const [paletteLibrary, setPaletteLibrary] = useState<ClassPalette[]>([]);
   const [labelActiveClass, setLabelActiveClass] = useState(0);
@@ -4937,6 +4961,28 @@ export default function PointCloudViewer({
     return cloud?.data.octree?.sessionId ? cloud : null;
   }, [showLabelPanel, selectedIds, clouds]);
 
+  /**
+   * The columns of the labelled cloud the tool can paint into.
+   *
+   * Enumerated from the SAME `octreeScalarFieldOptions` the Color-by and Filter
+   * pickers use, so the three cannot disagree about which columns a cloud has.
+   * Before this the tool could only reach four columns named by its presets,
+   * which made a cloud's own classification (a `tree_instance` from a failed
+   * tree segmentation) impossible to correct by hand.
+   */
+  const labelColumns = useMemo<LabelableColumn[]>(() => {
+    const oct = labelTargetCloud?.data.octree;
+    if (!oct) return [];
+    return labelableColumnsFor({
+      columnOptions: octreeScalarFieldOptions(oct.attributeRanges, oct.attributeLabels),
+      attributeRanges: oct.attributeRanges,
+      observedClasses: oct.observedClasses,
+      classPalettes: oct.classPalettes,
+      manualSlug: MANUAL_CLASS_ATTRIBUTE,
+      isCategorical: isCategoricalAttribute,
+    });
+  }, [labelTargetCloud?.data.octree]);
+
   // Wire the undo/redo backend sync declared near handleUndo. Runs AFTER the
   // reducer has applied the inverse, so the store's post-undo state is the
   // target the session must be rolled to.
@@ -5237,6 +5283,112 @@ export default function PointCloudViewer({
     if (sid) void refreshLabelCounts(sid, next.slug);
   }, [refreshLabelCounts, labelTargetCloud]);
 
+  /**
+   * The palette to open a column with, when the cloud has none bound.
+   *
+   * Derived from the column's own values when it HAS any — that is what shows a
+   * failed tree segmentation its real Tree 1 / Tree 2. An EMPTY column has
+   * nothing to derive from, so the hand-labelling column falls back to the
+   * wood/leaf preset (this app's common correction) rather than to a palette
+   * holding only "Unclassified", which would give the user nothing to paint.
+   */
+  const paletteForColumn = useCallback((
+    column: LabelableColumn | undefined, slug: string,
+  ): ClassPalette => {
+    const hasValues = (column?.observed?.length ?? 0) > 0;
+    if (column && hasValues) {
+      return derivePaletteForColumn(
+        column, Date.now(), categoricalSchemeForRange,
+        buildGenericCategoricalSchemeFromValues,
+      );
+    }
+    if (slug === MANUAL_CLASS_ATTRIBUTE) {
+      return makePreset('wood_leaf', MANUAL_CLASS_ATTRIBUTE, Date.now());
+    }
+    // A preset that describes this column, when one does (ground_class,
+    // las_classification) — its domain names beat a bare Unclassified.
+    const preset = (['ground', 'asprs', 'organ', 'wood_leaf'] as const)
+      .find(p => defaultSlugForPreset(p, MANUAL_CLASS_ATTRIBUTE) === slug);
+    if (preset) return makePreset(preset, slug, Date.now());
+    return column
+      ? derivePaletteForColumn(
+          column, Date.now(), categoricalSchemeForRange,
+          buildGenericCategoricalSchemeFromValues,
+        )
+      : makeEmptyPalette(slug, Date.now(), `derived-${slug}`);
+  }, []);
+
+  /**
+   * Start a brand-new classification: open the editor with an empty palette
+   * whose column the user is about to name.
+   *
+   * The slug is blank on purpose — the editor's column field fills it, and
+   * `validatePalette` already refuses to save a palette with no valid column,
+   * so an unnamed draft can never be applied.
+   */
+  const handleNewLabelColumn = useCallback(() => {
+    if (labelDirty || labelStrokes.length > 0) {
+      showToast({
+        title: 'Commit or undo first',
+        message: 'Uncommitted strokes belong to the current column. Commit them '
+          + 'or undo them before starting a new classification.',
+        type: 'error',
+      });
+      return;
+    }
+    setNewColumnDraft(makeEmptyPalette('', Date.now(), `custom-${Date.now().toString(36)}`));
+    setShowPaletteEditor(true);
+  }, [labelDirty, labelStrokes.length, showToast]);
+
+  /**
+   * The stock vocabularies that describe the column currently being labelled.
+   *
+   * A preset names a class list AND the column it applies to, so only some of
+   * them are meaningful for a given column: ASPRS describes an imported LAS
+   * classification byte, ground/non-ground describes what the segmentation
+   * wrote, and wood-leaf/organs are hand-labelling vocabularies. A column with
+   * none (a `tree_instance`, a user's own) simply has no presets, and the
+   * button is disabled rather than cycling the user somewhere else.
+   */
+  const labelPresetsForColumn = useMemo<PalettePreset[]>(() => {
+    const slug = labelPalette?.slug;
+    if (!slug) return [];
+    const all: PalettePreset[] = ['wood_leaf', 'organ', 'ground', 'asprs'];
+    return all.filter(p => defaultSlugForPreset(p, MANUAL_CLASS_ATTRIBUTE) === slug);
+  }, [labelPalette?.slug]);
+
+  /**
+   * Switch which COLUMN the tool paints into.
+   *
+   * Blocked while there are uncommitted strokes, and that is a correctness
+   * guard rather than tidiness: the backend keys `label_history` per slug but
+   * the renderer holds ONE `labelStrokes` list, so switching mid-stroke would
+   * make Undo issue `reset_label_edits` against the new column carrying the old
+   * column's stroke ids — a silent no-op that loses the undo rather than
+   * erroring. Committing or undoing first empties the list and removes the
+   * ambiguity entirely.
+   */
+  const handleSelectLabelColumn = useCallback((slug: string) => {
+    if (!labelTargetCloud) return;
+    if (slug === labelPalette?.slug) return;
+    if (labelDirty || labelStrokes.length > 0) {
+      showToast({
+        title: 'Commit or undo first',
+        message: 'Uncommitted strokes belong to the current column. Commit them '
+          + 'or undo them before switching to another one.',
+        type: 'error',
+      });
+      return;
+    }
+    const column = labelColumns.find(c => c.slug === slug);
+    if (!column) return;
+    const bound = labelTargetCloud.data.octree?.classPalettes?.[slug];
+    const next = bound ?? paletteForColumn(column, slug);
+    labelColumnByCloudRef.current.set(labelTargetCloud.id, slug);
+    applyLabelPalette(next);
+  }, [labelTargetCloud, labelPalette?.slug, labelDirty, labelStrokes.length,
+      labelColumns, applyLabelPalette, paletteForColumn, showToast]);
+
   // Load the saved-palette library when the editor opens. On demand rather than
   // at mount: it is a disk read that only this panel needs.
   useEffect(() => {
@@ -5258,9 +5410,17 @@ export default function PointCloudViewer({
    * classes on the next cloud, or shared with a collaborator.
    */
   const handleSavePalette = useCallback(async (next: ClassPalette) => {
+    setNewColumnDraft(null);
     applyLabelPalette(next);
+    // A brand-new column exists only in this palette until the first stroke, so
+    // nothing else has told the process-wide registry it is a CLASS column.
+    // Without this it renders as a continuous gradient everywhere outside the
+    // labelling tool, and `robustScalarRange` would percentile-trim it — which
+    // drops its rarest class off the colour ramp.
+    registerCategoricalSlug(next.slug);
     const cloud = labelTargetCloud;
     const octreeInfo = cloud?.data.octree;
+    if (cloud) labelColumnByCloudRef.current.set(cloud.id, next.slug);
     if (cloud && octreeInfo) {
       onUpdateCloud(cloud.id, {
         ...cloud.data,
@@ -5326,8 +5486,37 @@ export default function PointCloudViewer({
   // preset — the common correction case for this app's data.
   useEffect(() => {
     if (!labelTargetCloud) return;
-    const bound = labelTargetCloud.data.octree?.classPalettes?.[MANUAL_CLASS_ATTRIBUTE];
-    const palette = bound ?? makePreset('wood_leaf', MANUAL_CLASS_ATTRIBUTE, Date.now());
+    const oct = labelTargetCloud.data.octree;
+    const palettes = oct?.classPalettes;
+
+    // Which column to open on. The order runs from the most explicit statement
+    // of the user's intent to the least.
+    //
+    //   1. A column they already bound a palette to — resume their own work.
+    //      Only when there is EXACTLY one: two bound palettes (reachable today
+    //      by cycling presets) give no basis to choose, and guessing wrong
+    //      paints the wrong column silently.
+    //   2. The hand-labelling column, when the cloud already has one.
+    //   3. The cloud's own classification, when it carries exactly one worth
+    //      editing. THIS is what opens a failed tree segmentation on
+    //      `tree_instance` instead of on an empty wood/leaf vocabulary.
+    //   4. The hand-labelling column, which the backend creates on first paint.
+    const remembered = labelColumnByCloudRef.current.get(labelTargetCloud.id);
+    const bound = palettes ? Object.keys(palettes) : [];
+    const ownClassifications = labelColumns.filter(
+      c => c.kind === 'categorical' && (c.observed?.length ?? 0) > 1,
+    );
+    const slug =
+      (remembered && labelColumns.some(c => c.slug === remembered) ? remembered : null)
+      ?? (bound.length === 1 ? bound[0] : null)
+      ?? (labelColumns.find(c => c.slug === MANUAL_CLASS_ATTRIBUTE && !c.missing)?.slug ?? null)
+      ?? (ownClassifications.length === 1 ? ownClassifications[0].slug : null)
+      ?? MANUAL_CLASS_ATTRIBUTE;
+
+    const column = labelColumns.find(c => c.slug === slug);
+    const palette = palettes?.[slug] ?? paletteForColumn(column, slug);
+
+    labelColumnByCloudRef.current.set(labelTargetCloud.id, palette.slug);
     setLabelPalette(palette);
     setLabelVisibleClasses(new Set(palette.classes.map(c => c.value)));
     // Start on the first non-Unclassified class: painting "Unclassified" by
@@ -5414,7 +5603,10 @@ export default function PointCloudViewer({
         ...(stroke.fromClasses ? { from_classes: stroke.fromClasses } : {}),
         ...(stroke.slab ? { slab: stroke.slab as unknown as CropOctreeRegion } : {}),
         stroke_id: strokeId,
-      }], palette.slug);
+        // `label` names the column in extra_dims_meta when the backend CREATES
+        // it. Without it every hand-made column exported as "Manual Class",
+        // whatever the user called it.
+      }], palette.slug, palette.name);
 
       const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
       labelCountsSeqRef.current++;   // any in-flight summary read is now stale
@@ -5671,6 +5863,9 @@ export default function PointCloudViewer({
         newData.octree.categoricalAttributes = Array.from(
           new Set([...(octreeInfo.categoricalAttributes ?? []), res.slug]),
         );
+        // Same reason as handleSavePalette: the per-cloud list is not the
+        // process-wide registry the by-name resolvers consult.
+        registerCategoricalSlug(res.slug);
       }
       onUpdateCloud(cloud.id, newData);
       setCloudColorMode(cloud.id, { mode: 'scalar', field: res.slug });
@@ -6126,9 +6321,10 @@ export default function PointCloudViewer({
     if (!field.value.startsWith('scalar:')) return undefined;
     const slug = field.value.substring(7);
     if (!isCategoricalAttribute(slug)) return undefined;
-    const scheme = categoricalSchemeForRange(
+    const scheme = categoricalSchemeForCloud(
       slug,
       [field.bounds.min, field.bounds.max],
+      cloud.data.octree?.classPalettes,
       cloud.data.octree?.observedClasses?.[slug],
     );
     return scheme?.classes.length;
@@ -6874,6 +7070,24 @@ export default function PointCloudViewer({
       if (e.key === 'Escape' && editMode !== 'none') {
         e.preventDefault();
         if ((editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
+          // Vertices down → discard them but stay ARMED, so a mis-traced lasso
+          // costs one keystroke rather than the tool. Exactly the rect branch's
+          // rule one shape over.
+          if (polygonInProgress.length > 0) {
+            setPolygonInProgress([]);
+            setCropDrawState('drawing-polygon');
+            return;
+          }
+          // Nothing drawn: drop to idle, which is Polygon's resting state (the
+          // panel then offers "Start drawing"). NOT a tool close — selecting
+          // the Polygon shape arms drawing immediately, so an armed-and-empty
+          // lasso is where the user legitimately sits while deciding, and
+          // closing Crop out from under that first Escape would be a surprise.
+          // The blocked-zone spec pins exactly this.
+          //
+          // A committed region never reaches here: clearing one drops Polygon
+          // to this same 'idle' resting state (see the clear-region case
+          // below), so the NEXT Escape falls through to close the tool.
           setPolygonInProgress([]);
           setCropDrawState('idle');
           return;
@@ -6905,11 +7119,29 @@ export default function PointCloudViewer({
           setCropDrawState('idle');
           return;
         }
-        // A committed rect locks the camera (see `rectRegionLive`), so Escape
-        // clears the region and hands the view back rather than closing the
-        // tool — innermost first, as above. Without this the only way out of
-        // the lock would be Redraw/Apply or leaving Crop entirely, and Escape
-        // would skip straight past the thing it most obviously ought to undo.
+        // A committed screen-space region locks the camera (see
+        // `screenRegionLive`), so Escape clears the region and hands the view
+        // back rather than closing the tool — innermost first, as above.
+        // Without this the only way out of the lock would be Redraw/Apply or
+        // leaving Crop entirely, and Escape would skip straight past the thing
+        // it most obviously ought to undo.
+        //
+        // Each shape rearms into its own RESTING state, which differs because
+        // the two tools arm differently. Rect returns to 'drawing-rect': a drag
+        // is the only way to draw one, and Rect+idle is the dead state
+        // commitRectDrag documents. Polygon returns to 'idle', which is where
+        // selecting the shape effectively leaves you anyway once nothing is
+        // being traced — the panel offers "Start drawing" there — and, because
+        // idle is not swallowed by the drawing-polygon branch above, it also
+        // leaves the NEXT Escape free to close the tool. (Polygon has no drag
+        // refs to clear; its vertex list is already empty once a region
+        // committed, but it is reset so this path cannot depend on that.)
+        if (editMode === 'crop' && cropMode === 'polygon' && cropPolygon) {
+          setCropPolygon(null);
+          setPolygonInProgress([]);
+          setCropDrawState('idle');
+          return;
+        }
         if (editMode === 'crop' && cropMode === 'rect' && cropPolygon) {
           setCropPolygon(null);
           setRectDragStart(null);
@@ -7819,7 +8051,25 @@ export default function PointCloudViewer({
   // is free while the user frames the shot, free again the moment they Redraw,
   // Apply, switch shape or close the tool. Esc clears the region (see the key
   // handler), which is the explicit way out.
-  const rectRegionLive = editMode === 'crop' && cropMode === 'rect' && !!cropPolygon;
+  //
+  // BOTH screen-space shapes, not just Rect. The polygon lasso is the identical
+  // mechanism — `closePolygonFrom` freezes the same draw-time projection/view
+  // into the same `cropPolygon` state, and the overlay redraws the committed
+  // ring at its fixed draw-time pixels (see the `closedPoints` branch) exactly
+  // as the rectangle does. So every word of the reasoning above transfers, and
+  // the lasso is if anything the worse case: an n-gon traced around a specific
+  // branch reads far more like a promise about WHICH points were caught than a
+  // rectangle does, so seeing it slide off them is more alarming. Only the
+  // projection differs (polygon stays perspective, deliberately — a freeform
+  // lasso's honest interpretation is the cone it sweeps), and the projection is
+  // not what this lock is about.
+  //
+  // `cropPolygon` is only ever set by the two screen-space shapes, but the
+  // cropMode test stays explicit: Box must never lock (its wireframe is real
+  // world-space geometry that tracks the camera correctly), and relying on
+  // "Box leaves cropPolygon null" would be an invisible coupling.
+  const screenRegionLive =
+    editMode === 'crop' && (cropMode === 'rect' || cropMode === 'polygon') && !!cropPolygon;
   // Every reason the camera is currently frozen by a CROP/LABEL draw, in one
   // place — and every one of them gated on the owning tool still being open.
   //
@@ -7834,8 +8084,8 @@ export default function PointCloudViewer({
   const cropDrawFreezesCamera =
     (editMode === 'crop' || editMode === 'label') &&
     (cropDrawState === 'drawing-polygon' || cropDrawState === 'drawing-rect');
-  // `boxDrawing` and `rectRegionLive` carry their own editMode gate.
-  const cameraFrozenByCropDraw = cropDrawFreezesCamera || boxDrawing || rectRegionLive;
+  // `boxDrawing` and `screenRegionLive` carry their own editMode gate.
+  const cameraFrozenByCropDraw = cropDrawFreezesCamera || boxDrawing || screenRegionLive;
   // Keep the ref the raycaster's onPick reads in step with the state. See the
   // declaration for why that handler cannot read `cropDrawState` directly.
   boxDrawStateRef.current = boxDrawing
@@ -8010,7 +8260,14 @@ export default function PointCloudViewer({
         world,
         local,
         hasShift: hasNonZeroShift(worldShift),
-        attributes: buildAttributeRows(values, { labels: octree?.attributeLabels, ranges }),
+        // Palettes + observed classes so a picked point reads back the class
+        // name the USER gave it, not the by-name default.
+        attributes: buildAttributeRows(values, {
+          labels: octree?.attributeLabels,
+          ranges,
+          palettes: octree?.classPalettes,
+          observed: octree?.observedClasses,
+        }),
         sourceIndex: hit.sourceIndex,
       },
     ]);
@@ -16653,6 +16910,11 @@ export default function PointCloudViewer({
       if (!transformModalRef.current) return;
       e.preventDefault();
       e.stopPropagation();
+      // This press ends the gesture, and the browser will still deliver the
+      // matching `click` to the canvas. Mark it so the empty-space deselect
+      // ignores it and the transformed objects stay selected for the next
+      // t/s/r without re-picking them.
+      suppressNextPointerMissedRef.current = true;
       if (e.button === 2) cancelModal();
       else commitModal();
     };
@@ -19466,6 +19728,33 @@ export default function PointCloudViewer({
       // No mapped range ⇒ rgb / per-scan / single: nothing to put on a scale.
       if (!range) continue;
       const scan = scans.find(s => s.id === cloud.id);
+      // Resolve the class list against THIS cloud, so a user-defined palette
+      // bound to the column wins over the by-name default. Without it a user
+      // who renames "Tree 1" to "North row" in the labelling tool sees their
+      // name in that panel while the legend still says "Tree 1" — the palette
+      // is per-cloud, and the by-name resolvers are process-wide and cannot
+      // express it. A caller-supplied scheme is authoritative in
+      // buildLegendEntries, which is the same seam the mesh branch below uses.
+      //
+      // Only when the user has BOUND a palette to the column. The by-name
+      // suppression in `colorChannel` stands otherwise: tree_instance ids are
+      // arbitrary nominal labels and a plot routinely holds 100+ trees, so the
+      // default stays "colour the points, draw no legend". A palette is an
+      // explicit statement that these classes have meaning the user authored,
+      // and it is the only thing that can carry their names — which is the
+      // whole point of being able to rename Tree 1 to "North row".
+      const oct = cloud.data.octree;
+      const bound = mode === 'scalar' && field
+        ? oct?.classPalettes?.[field.toLowerCase()]
+        : undefined;
+      const resolved = bound && field
+        ? categoricalSchemeForCloud(
+            field, [range.min, range.max], oct?.classPalettes, oct?.observedClasses?.[field],
+          )
+        : null;
+      const cloudScheme = resolved && resolved.classes.length <= LEGEND_MAX_CLASSES
+        ? resolved
+        : null;
       out.push({
         objectId: cloud.id,
         objectName: scan ? scanDisplayName(scan) : (cloud.data.fileName ?? 'Scan'),
@@ -19478,6 +19767,7 @@ export default function PointCloudViewer({
           range: rangeForCloud(cloud) ?? undefined,
         },
         dataRange: range,
+        ...(cloudScheme ? { scheme: cloudScheme } : {}),
         selected: selectedIds.has(cloud.id),
         origin: 'cloud',
       });
@@ -19649,7 +19939,14 @@ export default function PointCloudViewer({
       data-origin-marker-visible={showOriginMarker && sceneHasContent ? 'true' : 'false'}
       // Record the press location so onPointerMissed can reject orbit-drags
       // (native event has no R3F `delta`). Bubbles up from the canvas.
-      onPointerDown={(e) => { viewportPointerDownRef.current = { x: e.clientX, y: e.clientY }; }}
+      onPointerDown={(e) => {
+        viewportPointerDownRef.current = { x: e.clientX, y: e.clientY };
+        // A press that is NOT ending a transform can't be the one to suppress.
+        // Clearing here keeps a flag set by a commit-click that happened to
+        // land ON an object (so no onPointerMissed ever fired to consume it)
+        // from eating a later, unrelated empty-space deselect.
+        if (!transformModalRef.current) suppressNextPointerMissedRef.current = false;
+      }}
     >
       {/* 3D Canvas */}
       <Canvas
@@ -19669,6 +19966,14 @@ export default function PointCloudViewer({
         // can't deselect it mid-interaction. A drag guard (vs. the press
         // position) keeps a camera orbit that ends on nothing from deselecting.
         onPointerMissed={(e) => {
+          // The press that placed a t/s/r transform also produces this click.
+          // Consume it once: the gesture already had its meaning, and letting
+          // it fall through would drop the selection the user is still
+          // working with.
+          if (suppressNextPointerMissedRef.current) {
+            suppressNextPointerMissedRef.current = false;
+            return;
+          }
           if (e.button !== 0) return;
           const down = viewportPointerDownRef.current;
           if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
@@ -22292,7 +22597,7 @@ export default function PointCloudViewer({
                             e.stopPropagation();
                             const picked = await window.electronAPI.dialog.open({
                               title: 'Attach point cloud data',
-                              filters: [{ name: 'Point cloud', extensions: ['las', 'laz', 'e57', 'ptx', 'ply', 'pcd', 'xyz', 'txt', 'csv', 'pts', 'asc'] }],
+                              filters: [{ name: 'Point cloud', extensions: POINT_CLOUD_FORMATS.map(f => f.ext.slice(1)) }],
                             });
                             if (!picked) return;
                             const path = Array.isArray(picked) ? picked[0] : picked;
@@ -23173,7 +23478,7 @@ export default function PointCloudViewer({
             cropBoxMinStr={cropBoxMinStr}
             cropBoxMaxStr={cropBoxMaxStr}
             cropProjectionKind={cropProjectionKind}
-            cameraLocked={rectRegionLive}
+            cameraLocked={screenRegionLive}
             onClose={closeCropPanel}
             onSelectShape={(mode) => {
               setCropMode(mode);
@@ -23478,9 +23783,10 @@ export default function PointCloudViewer({
             // Same observed-values source as the panel's own scheme below —
             // seeding from a wider list would pre-tick classes the panel never
             // renders, so "keep everything" and the visible boxes would disagree.
-            const scheme = categoricalSchemeForRange(
+            const scheme = categoricalSchemeForCloud(
               slug,
               [field.bounds.min, field.bounds.max],
+              data.octree?.classPalettes,
               data.octree?.observedClasses?.[slug],
             );
             if (scheme) {
@@ -23525,9 +23831,10 @@ export default function PointCloudViewer({
           ? data.octree?.observedClasses?.[selectedSlug]
           : undefined;
         const categoricalScheme = selectedSlug && selectedField && isCategoricalAttribute(selectedSlug)
-          ? categoricalSchemeForRange(
+          ? categoricalSchemeForCloud(
               selectedSlug,
               [selectedField.bounds.min, selectedField.bounds.max],
+              data.octree?.classPalettes,
               observedForSlug,
             )
           : null;
@@ -23701,16 +24008,29 @@ export default function PointCloudViewer({
         <ClassPaletteEditor
           // Remount on a palette switch so the draft reseeds — otherwise the
           // editor would keep showing the previous palette's classes.
-          key={labelPalette.id}
-          palette={labelPalette}
-          classCounts={labelClassCounts}
+          key={newColumnDraft?.id ?? labelPalette.id}
+          palette={newColumnDraft ?? labelPalette}
+          // Counts belong to the column being EDITED. A new column has none, so
+          // passing the current column's would value-lock classes that hold no
+          // points and mislabel the editor's "already painted" warnings.
+          classCounts={newColumnDraft ? {} : labelClassCounts}
+          newColumn={newColumnDraft
+            ? { takenSlugs: labelColumns.map(c => c.slug) }
+            : undefined}
           library={paletteLibrary}
           onSave={(next) => { void handleSavePalette(next); setShowPaletteEditor(false); }}
-          onLoad={(p) => { applyLabelPalette(p); setShowPaletteEditor(false); }}
+          onLoad={(p) => {
+            // Loading a library palette keeps ITS column, which may differ from
+            // the one on screen — so remember it like any other column switch.
+            setNewColumnDraft(null);
+            if (labelTargetCloud) labelColumnByCloudRef.current.set(labelTargetCloud.id, p.slug);
+            applyLabelPalette(p);
+            setShowPaletteEditor(false);
+          }}
           onDelete={(id) => { void deleteClassPalette(id).then(setPaletteLibrary); }}
           onExport={() => { void handleExportPalettes(); }}
           onImport={() => { void handleImportPalettes(); }}
-          onClose={() => setShowPaletteEditor(false)}
+          onClose={() => { setNewColumnDraft(null); setShowPaletteEditor(false); }}
         />
       )}
 
@@ -23742,28 +24062,22 @@ export default function PointCloudViewer({
           onCommit={handleLabelCommit}
           // Two distinct controls: cycle through the built-in preset
           // vocabularies, or open the editor to build one of your own.
+          columns={labelColumns}
+          activeSlug={labelPalette.slug}
+          onSelectColumn={handleSelectLabelColumn}
+          onNewColumn={handleNewLabelColumn}
+          presetCount={labelPresetsForColumn.length}
           onCyclePreset={() => {
-            const order: Array<'wood_leaf' | 'organ' | 'ground' | 'asprs'> =
-              ['wood_leaf', 'organ', 'ground', 'asprs'];
-            const i = order.indexOf((labelPalette.preset ?? 'wood_leaf') as typeof order[number]);
-            const preset = order[(i + 1) % order.length];
-            // Each preset names its own COLUMN, not just a vocabulary: ASPRS
-            // describes an imported LAS classification byte, the others describe
-            // the hand-labelling column. Binding them all to manual_class made
-            // ASPRS read an empty column and report every class as 0.
-            const next = makePreset(
-              preset, defaultSlugForPreset(preset, MANUAL_CLASS_ATTRIBUTE), Date.now(),
+            // Scoped to the CURRENT column. A preset names a vocabulary AND a
+            // column, so cycling used to repoint the tool at another column —
+            // which, once the user can choose a column, silently undoes their
+            // choice. Only presets that describe this column are offered.
+            if (labelPresetsForColumn.length === 0) return;
+            const i = labelPresetsForColumn.indexOf(
+              labelPalette.preset as typeof labelPresetsForColumn[number],
             );
-            setLabelPalette(next);
-            setLabelVisibleClasses(new Set(next.classes.map(c => c.value)));
-            setLabelActiveClass(next.classes.find(c => c.value !== 0)?.value ?? 0);
-            setLabelFromClasses(null);
-            // Counts are keyed by class VALUE, so a stale map renders one
-            // column's numbers under another's class names. Refetch for the
-            // column this palette actually describes.
-            setLabelClassCounts({});
-            const sid = labelTargetCloud.data.octree?.sessionId;
-            if (sid) void refreshLabelCounts(sid, next.slug);
+            const preset = labelPresetsForColumn[(i + 1) % labelPresetsForColumn.length];
+            applyLabelPalette(makePreset(preset, labelPalette.slug, Date.now()));
           }}
           onEditPalette={() => setShowPaletteEditor(true)}
           tool={labelTool}

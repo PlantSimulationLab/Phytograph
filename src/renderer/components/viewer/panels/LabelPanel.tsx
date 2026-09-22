@@ -1,6 +1,7 @@
 import { Brush, X, Undo2, Check, Eye, EyeOff, Palette, Shuffle, Lasso } from 'lucide-react';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
+import type { LabelableColumn } from '../../../lib/classPalettes';
 
 // Presentational manual-labelling panel. All painting, stroke bookkeeping and
 // backend calls live in PointCloudViewer; this renders the class list, the
@@ -10,6 +11,19 @@ import { rgbToHex } from '../../../lib/classification';
 // The data-* attributes are the E2E seam: the DOM cannot show what the GPU
 // painted, so the panel publishes the parent's own counts (see also the narrow
 // window.__labelOverlay fact the overlay module publishes).
+
+/**
+ * Sentinel option value for "+ New classification…". Not a slug — the handler
+ * intercepts it — and it can never collide with a real one, which must start
+ * with a lowercase letter.
+ */
+const NEW_COLUMN_SENTINEL = '__new__';
+
+const COLUMN_GROUP_LABEL: Record<LabelableColumn['kind'], string> = {
+  manual: 'Labelling',
+  categorical: 'Classifications',
+  scalar: 'Other columns',
+};
 
 export interface LabelPanelProps {
   /** Classes from the cloud's bound palette, in display order. */
@@ -52,7 +66,26 @@ export interface LabelPanelProps {
   onToolChange: (t: 'lasso' | 'brush') => void;
   /** Brush radius in screen pixels, shown so the wheel/bracket keys are discoverable. */
   brushPx: number;
-  /** Cycle to the next built-in preset vocabulary. */
+  /**
+   * The columns of this cloud that can be labelled, in display order.
+   *
+   * The tool used to reach only the four columns its presets named, so a cloud
+   * carrying its own classification — a `tree_instance` from a tree
+   * segmentation that needs correcting — could not be hand-edited at all.
+   */
+  columns: LabelableColumn[];
+  /** The column being painted. Always equals the live palette's slug. */
+  activeSlug: string;
+  onSelectColumn: (slug: string) => void;
+  /** Start a brand-new classification column. */
+  onNewColumn: () => void;
+  /**
+   * How many stock vocabularies describe the ACTIVE column. Zero disables the
+   * Preset button — a preset names a column as well as a class list, so cycling
+   * one that belongs to another column would silently move the user off theirs.
+   */
+  presetCount: number;
+  /** Cycle to the next built-in preset vocabulary for this column. */
   onCyclePreset: () => void;
   /** Open the editor to add/rename/recolour classes. */
   onEditPalette: () => void;
@@ -82,6 +115,11 @@ export function LabelPanel({
   tool,
   onToolChange,
   brushPx,
+  columns,
+  activeSlug,
+  onSelectColumn,
+  onNewColumn,
+  presetCount,
   onCyclePreset,
   onEditPalette,
   onClose,
@@ -97,6 +135,7 @@ export function LabelPanel({
     : '';
   // "Paint X only over X" — the combination that silently does nothing.
   const isNoOp = !!fromClasses && fromClasses.size === 1 && fromClasses.has(activeClass);
+  const activeColumn = columns.find((c) => c.slug === activeSlug);
 
   return (
     <div
@@ -107,6 +146,9 @@ export function LabelPanel({
       data-label-drawing={drawing ? 'true' : 'false'}
       data-section-active={sectionActive ? 'true' : 'false'}
       data-labelled-count={labelled}
+      // The column being painted. The DOM cannot show which backend column a
+      // stroke lands in, so the panel states it.
+      data-label-slug={activeSlug}
       // Serialised counts, so a spec can assert on per-class totals without
       // reaching into the scene graph.
       data-label-counts={JSON.stringify(classCounts)}
@@ -209,6 +251,51 @@ export function LabelPanel({
         </div>
       )}
 
+      {/* WHICH COLUMN the strokes land in. Above the class set, because it is
+          the more fundamental choice: a class set is a vocabulary FOR a column,
+          and conflating the two is what made a cloud's own classification
+          unreachable. A <select> rather than a text input — this is a discrete
+          choice, and selects are immune to the partial-keystroke problem
+          DebouncedNumberInput exists for. */}
+      <div className="mb-2">
+        <label className="block text-[9px] text-neutral-500 uppercase tracking-wide mb-0.5">
+          Column
+        </label>
+        <select
+          data-testid="label-column-select"
+          value={activeSlug}
+          onChange={(e) => {
+            if (e.target.value === NEW_COLUMN_SENTINEL) onNewColumn();
+            else onSelectColumn(e.target.value);
+          }}
+          className="w-full bg-neutral-900 border border-neutral-700 rounded px-1.5 py-1 text-[11px] text-neutral-100"
+        >
+          {(['manual', 'categorical', 'scalar'] as const).map((kind) => {
+            const group = columns.filter((c) => c.kind === kind);
+            if (group.length === 0) return null;
+            return (
+              <optgroup key={kind} label={COLUMN_GROUP_LABEL[kind]}>
+                {group.map((c) => (
+                  <option key={c.slug} value={c.slug} data-column-kind={c.kind}
+                    title={kind === 'scalar'
+                      ? 'A measurement, not a classification — painting it overwrites those values'
+                      : c.missing ? 'Created when you paint the first points' : c.slug}>
+                    {c.label}{c.missing ? ' (new)' : ''}
+                  </option>
+                ))}
+              </optgroup>
+            );
+          })}
+          <option value={NEW_COLUMN_SENTINEL}>+ New classification…</option>
+        </select>
+        {activeColumn?.kind === 'scalar' && (
+          <p data-testid="label-scalar-warning"
+            className="text-[9px] text-amber-400 mt-0.5 leading-tight">
+            This column holds measurements. Painting it replaces those values.
+          </p>
+        )}
+      </div>
+
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] text-neutral-400 truncate" title={paletteName}>
           {paletteName}
@@ -217,8 +304,11 @@ export function LabelPanel({
           <button
             data-testid="label-cycle-preset"
             onClick={onCyclePreset}
-            title="Switch to the next built-in class set"
-            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
+            disabled={presetCount < 2}
+            title={presetCount >= 2
+              ? 'Switch class set for this column'
+              : 'No other built-in class set describes this column'}
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-neutral-700"
           >
             <Shuffle className="w-3 h-3" />
             Preset

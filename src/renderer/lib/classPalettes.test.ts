@@ -281,3 +281,318 @@ describe('parsePalette', () => {
     expect(list).toHaveLength(2);
   });
 });
+
+// ── Labelable columns ────────────────────────────────────────────────────────
+//
+// The feature these back: the labelling tool could reach exactly four columns,
+// so a cloud carrying its own classification (a `tree_instance` from a failed
+// tree segmentation) could not be hand-corrected at all. These assert the
+// column list and the derived class list against the shape of a REAL failing
+// file — example-datasets/almond_treseg_failure.laz, whose tree_instance holds
+// exactly {1, 2} and no 0.
+
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  labelableColumnsFor, derivePaletteForColumn, withRequiredUnclassified,
+  slugifyLabelColumn, validateLabelColumn, isValidLabelSlug,
+  LAS_RESERVED_SLUGS, LABEL_SLUG_RE,
+} from './classPalettes';
+import {
+  categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues,
+  treeInstanceColor, MANUAL_CLASS_ATTRIBUTE,
+} from './classification';
+
+/** The almond file's columns, as octreeScalarFieldOptions would report them. */
+const ALMOND_OPTIONS = [
+  { value: 'col_4', label: 'col_4' },
+  { value: 'col_5', label: 'col_5' },
+  { value: 'tree_instance', label: 'Tree instance' },
+];
+const ALMOND_RANGES = {
+  col_4: { min: [0], max: [1.5] },
+  col_5: { min: [0], max: [3.25] },
+  tree_instance: { min: [1], max: [2] },
+};
+
+function columnsForAlmond(over: Partial<Parameters<typeof labelableColumnsFor>[0]> = {}) {
+  return labelableColumnsFor({
+    columnOptions: ALMOND_OPTIONS,
+    attributeRanges: ALMOND_RANGES,
+    observedClasses: { tree_instance: [1, 2] },
+    manualSlug: MANUAL_CLASS_ATTRIBUTE,
+    // tree_instance is categorical BY NAME in the real registry.
+    isCategorical: (s) => s === 'tree_instance',
+    ...over,
+  });
+}
+
+describe('labelableColumnsFor', () => {
+  it('lists the cloud own classification, with the manual column first and marked missing', () => {
+    const cols = columnsForAlmond();
+    expect(cols.map((c) => c.slug)).toEqual([
+      MANUAL_CLASS_ATTRIBUTE, 'tree_instance', 'col_4', 'col_5',
+    ]);
+    expect(cols.map((c) => c.kind)).toEqual(['manual', 'categorical', 'scalar', 'scalar']);
+    // The almond file has no manual_class column yet — the backend makes it on
+    // the first stroke, so it must still be offered.
+    expect(cols[0].missing).toBe(true);
+    expect(cols[1].missing).toBe(false);
+  });
+
+  it('carries the observed values and range through, so the palette can be derived', () => {
+    const tree = columnsForAlmond().find((c) => c.slug === 'tree_instance')!;
+    expect(tree.observed).toEqual([1, 2]);
+    expect(tree.range).toEqual([1, 2]);
+    expect(tree.label).toBe('Tree instance');
+  });
+
+  it('treats a continuous column as scalar, NOT as a classification', () => {
+    // col_4 holds measurements. Offering it is deliberate (the app cannot always
+    // tell), but it must never be enumerated as classes.
+    const col4 = columnsForAlmond().find((c) => c.slug === 'col_4')!;
+    expect(col4.kind).toBe('scalar');
+  });
+
+  it('promotes an unregistered integer column to categorical', () => {
+    // A collaborator's `species_id` that was never marked in the wizard: its
+    // values are class-like, so it is reachable without a re-import.
+    const cols = labelableColumnsFor({
+      columnOptions: [{ value: 'species_id', label: 'Species id' }],
+      attributeRanges: { species_id: { min: [1], max: [4] } },
+      observedClasses: { species_id: [1, 2, 3, 4] },
+      manualSlug: MANUAL_CLASS_ATTRIBUTE,
+      isCategorical: () => false,
+    });
+    expect(cols.find((c) => c.slug === 'species_id')!.kind).toBe('categorical');
+  });
+
+  it('does not promote a float column even when it has few distinct values', () => {
+    const cols = labelableColumnsFor({
+      columnOptions: [{ value: 'ratio', label: 'Ratio' }],
+      observedClasses: { ratio: [0.5, 1.5] },
+      manualSlug: MANUAL_CLASS_ATTRIBUTE,
+      isCategorical: () => false,
+    });
+    expect(cols.find((c) => c.slug === 'ratio')!.kind).toBe('scalar');
+  });
+
+  it('a bound palette makes a column categorical even with nothing else to go on', () => {
+    const cols = labelableColumnsFor({
+      columnOptions: [{ value: 'my_qc', label: 'My QC' }],
+      classPalettes: { my_qc: palette([{ value: 0, label: 'U', color: [0, 0, 0] }]) },
+      manualSlug: MANUAL_CLASS_ATTRIBUTE,
+      isCategorical: () => false,
+    });
+    expect(cols.find((c) => c.slug === 'my_qc')!.kind).toBe('categorical');
+  });
+
+  it('never offers a column the backend would reject', () => {
+    const cols = labelableColumnsFor({
+      columnOptions: [
+        { value: 'Reflectance_dB', label: 'Reflectance' },   // capitals
+        { value: 'classification', label: 'Classification' }, // reserved (crashes laspy)
+        { value: 'las_classification', label: 'LAS class' },  // NOT reserved — keep
+      ],
+      manualSlug: MANUAL_CLASS_ATTRIBUTE,
+      isCategorical: () => true,
+    });
+    const slugs = cols.map((c) => c.slug);
+    expect(slugs).not.toContain('Reflectance_dB');
+    expect(slugs).not.toContain('classification');
+    expect(slugs).toContain('las_classification');
+  });
+
+  it('lists the manual column exactly once when the cloud already has it', () => {
+    const cols = labelableColumnsFor({
+      columnOptions: [{ value: MANUAL_CLASS_ATTRIBUTE, label: 'Hand labels' }],
+      attributeRanges: { [MANUAL_CLASS_ATTRIBUTE]: { min: [0], max: [2] } },
+      manualSlug: MANUAL_CLASS_ATTRIBUTE,
+      isCategorical: () => true,
+    });
+    expect(cols.filter((c) => c.slug === MANUAL_CLASS_ATTRIBUTE)).toHaveLength(1);
+    expect(cols[0].missing).toBe(false);
+  });
+});
+
+describe('the mirrored backend slug rule', () => {
+  // The picker refuses what the backend would refuse. Parsed out of main.py so
+  // a backend tightening fails HERE rather than drifting into a 400 the user
+  // only meets on their first brush stroke.
+  const mainPy = readFileSync(
+    join(__dirname, '..', '..', '..', 'backend-api', 'main.py'), 'utf8',
+  );
+
+  it('matches _LABEL_SLUG_RE in main.py', () => {
+    const m = /_LABEL_SLUG_RE = re\.compile\(r"([^"]+)"\)/.exec(mainPy);
+    expect(m, 'could not find _LABEL_SLUG_RE in main.py').toBeTruthy();
+    expect(LABEL_SLUG_RE.source).toBe(m![1]);
+  });
+
+  it('covers every name in _LAS_RESERVED_SLUGS', () => {
+    const block = /_LAS_RESERVED_SLUGS = frozenset\(\{([\s\S]*?)\}\)/.exec(mainPy);
+    expect(block, 'could not find _LAS_RESERVED_SLUGS in main.py').toBeTruthy();
+    const backend = [...block![1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
+    expect(backend.length).toBeGreaterThan(10);
+    for (const slug of backend) expect(LAS_RESERVED_SLUGS.has(slug)).toBe(true);
+  });
+
+  it('isValidLabelSlug rejects the reserved and the malformed', () => {
+    expect(isValidLabelSlug('tree_instance')).toBe(true);
+    expect(isValidLabelSlug('las_classification')).toBe(true);
+    expect(isValidLabelSlug('classification')).toBe(false);
+    expect(isValidLabelSlug('Classification')).toBe(false);   // case-insensitive
+    expect(isValidLabelSlug('2nd')).toBe(false);
+    expect(isValidLabelSlug('a'.repeat(32))).toBe(false);
+    expect(isValidLabelSlug('')).toBe(false);
+  });
+});
+
+describe('derivePaletteForColumn', () => {
+  const treeColumn = {
+    slug: 'tree_instance', label: 'Tree instance',
+    kind: 'categorical' as const, missing: false,
+    observed: [1, 2], range: [1, 2] as [number, number],
+  };
+  const derive = (col: Parameters<typeof derivePaletteForColumn>[0]) =>
+    derivePaletteForColumn(col, NOW, categoricalSchemeForRange,
+      buildGenericCategoricalSchemeFromValues);
+
+  it('derives the real classes of a tree-instance column, with 0 synthesised', () => {
+    const p = derive(treeColumn);
+    expect(p.classes.map((c) => c.value)).toEqual([0, 1, 2]);
+    expect(p.classes.map((c) => c.label)).toEqual(['Unassigned', 'Tree 1', 'Tree 2']);
+    expect(p.slug).toBe('tree_instance');
+    expect(p.name).toBe('Tree instance');
+    // No 'preset' — a derived palette is not a stock vocabulary, and marking it
+    // as one would let Preset cycle the user away from their own column.
+    expect(p.preset).toBeUndefined();
+    expect(validatePalette(p)).toEqual([]);
+  });
+
+  it('uses the colours the VIEWER already draws for those ids', () => {
+    // The assertion that proves panel and viewport agree. A palette that merely
+    // had the right names would still mislabel every swatch.
+    const p = derive(treeColumn);
+    expect(p.classes[1].color).toEqual(treeInstanceColor(1));
+    expect(p.classes[2].color).toEqual(treeInstanceColor(2));
+  });
+
+  it('derives from the EXACT observed values, not the range', () => {
+    // Trees 1 and 3 survive a filter. A [1,3] range enumeration would invent a
+    // Tree 2 that owns no points.
+    const p = derive({ ...treeColumn, observed: [1, 3], range: [1, 3] });
+    expect(p.classes.map((c) => c.value)).toEqual([0, 1, 3]);
+  });
+
+  it('gives a scalar column an empty palette, never its millions of values', () => {
+    const p = derive({
+      slug: 'col_4', label: 'col_4', kind: 'scalar', missing: false,
+      observed: [0.5, 1.5], range: [0, 1.5],
+    });
+    expect(p.classes.map((c) => c.value)).toEqual([0]);
+    expect(p.slug).toBe('col_4');
+  });
+
+  it('keeps a registered scheme whole (ground_class keeps its domain names)', () => {
+    const p = derive({
+      slug: 'ground_class', label: 'Ground class', kind: 'categorical',
+      missing: false, observed: [1, 2], range: [1, 2],
+    });
+    expect(p.classes.map((c) => c.label)).toEqual(['Unclassified', 'Ground', 'Non-ground']);
+  });
+
+  it('ids derived palettes per column, so switching column remounts the editor', () => {
+    expect(derive(treeColumn).id).not.toBe(
+      derive({ ...treeColumn, slug: 'ground_class', label: 'G' }).id,
+    );
+  });
+});
+
+describe('withRequiredUnclassified', () => {
+  it('is idempotent — a scheme that already has 0 is untouched', () => {
+    // A duplicate 0 would make validatePalette reject its own derived palette.
+    const classes = [
+      { value: 0, label: 'Unclassified', color: [0.5, 0.5, 0.5] as const },
+      { value: 1, label: 'A', color: [1, 0, 0] as const },
+    ];
+    expect(withRequiredUnclassified(classes as never)).toBe(classes);
+  });
+});
+
+describe('a palette must name a column the backend accepts', () => {
+  it('blocks saving a palette with a missing or reserved column', () => {
+    expect(paletteErrors({ ...OK, slug: '' })).not.toEqual([]);
+    expect(paletteErrors({ ...OK, slug: 'classification' })).not.toEqual([]);
+    expect(paletteErrors({ ...OK, slug: 'Tree_Instance' })).not.toEqual([]);
+    expect(paletteErrors({ ...OK, slug: 'tree_instance' })).toEqual([]);
+  });
+});
+
+describe('slugifyLabelColumn / validateLabelColumn', () => {
+  it.each([
+    ['QC pass 2!', 'qc_pass_2'],
+    ['2nd pass', 'nd_pass'],
+    ['  Row  QC  ', 'row_qc'],
+    ['Tree-Instance', 'tree_instance'],
+    ['!!!', ''],
+  ])('slugifies %j to %j', (input, expected) => {
+    expect(slugifyLabelColumn(input)).toBe(expected);
+  });
+
+  it('every non-empty slug it produces is one the backend accepts', () => {
+    for (const name of ['QC pass 2!', '2nd pass', 'Row  QC', 'a'.repeat(60)]) {
+      const slug = slugifyLabelColumn(name);
+      if (slug) expect(isValidLabelSlug(slug)).toBe(true);
+    }
+  });
+
+  it('rejects an empty name, a reserved name, and a column the cloud already has', () => {
+    expect(validateLabelColumn('', [])).not.toEqual([]);
+    expect(validateLabelColumn('Classification', [])).not.toEqual([]);
+    expect(validateLabelColumn('Tree instance', ['tree_instance'])).not.toEqual([]);
+    expect(validateLabelColumn('Row QC', ['tree_instance'])).toEqual([]);
+  });
+});
+
+describe('nextFreeClassValue with a start hint', () => {
+  it('continues an existing column numbering instead of jumping to 64', () => {
+    // Splitting a merged tree must give Tree 3, not class 64.
+    const derived = palette([
+      { value: 0, label: 'Unassigned', color: [0.2, 0.2, 0.2] },
+      { value: 1, label: 'Tree 1', color: [1, 0, 0] },
+      { value: 2, label: 'Tree 2', color: [0, 1, 0] },
+    ]);
+    expect(nextFreeClassValue(derived, 1)).toBe(3);
+  });
+
+  it('still uses the user-definable band for a hand-built palette', () => {
+    expect(nextFreeClassValue(OK)).toBe(USER_CLASS_MIN + 2);
+  });
+
+  it('marks a derived palette as derived, and a preset as not', () => {
+    // `derived` is what the editor reads to decide where Add class numbers
+    // from. It CANNOT be inferred from the values: wood/leaf and organs also
+    // number from 1, so an "are these below 64" test renumbers those too and
+    // silently breaks the ASPRS user-definable band.
+    const p = derivePaletteForColumn(
+      { slug: 'tree_instance', label: 'Tree instance', kind: 'categorical',
+        missing: false, observed: [1, 2], range: [1, 2] },
+      NOW, categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues,
+    );
+    expect(p.derived).toBe(true);
+    expect(makePreset('wood_leaf', 'manual_class', NOW).derived).toBeUndefined();
+    expect(makeEmptyPalette('row_qc', NOW, 'x').derived).toBeUndefined();
+  });
+
+  it('survives the library JSON round-trip', () => {
+    // Saved palettes come back through parsePalette; losing `derived` there
+    // would make Add class jump to 64 the second time a user opened the column.
+    const p = derivePaletteForColumn(
+      { slug: 'tree_instance', label: 'Tree instance', kind: 'categorical',
+        missing: false, observed: [1, 2], range: [1, 2] },
+      NOW, categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues,
+    );
+    expect(parsePalette(JSON.parse(JSON.stringify(p)))?.derived).toBe(true);
+  });
+});

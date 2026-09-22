@@ -30,6 +30,17 @@ export interface ClassPalette {
   classes: ClassDef[];
   /** Provenance; undefined once the user edits it into something of their own. */
   preset?: PalettePreset;
+  /**
+   * True when the class list was DERIVED from values already in the column
+   * (a tree segmentation's instance ids, an imported class byte) rather than
+   * authored as a vocabulary.
+   *
+   * It decides where "Add class" numbers from, and cannot be inferred from the
+   * values: the wood/leaf and organ presets also use low numbers, so a
+   * "are the classes below 64" test would renumber those too. Provenance, like
+   * `preset` — and for the same reason the two are separate fields.
+   */
+  derived?: boolean;
   updatedAt: number;
 }
 
@@ -71,6 +82,42 @@ export const PALETTE_SOFT_MAX = 48;
 /** Hard ceiling, matching GENERIC_CATEGORICAL_MAX_CLASSES. */
 export const PALETTE_HARD_MAX = 256;
 
+/**
+ * The slug rule, MIRRORED from `_LABEL_SLUG_RE` in backend-api/main.py.
+ *
+ * Mirrored rather than discovered at runtime so the column picker can refuse a
+ * column the backend would reject, instead of offering it and taking a 400 on
+ * the user's first brush stroke. `classPalettes.test.ts` parses the pattern out
+ * of main.py and asserts the two agree, so a backend tightening fails here.
+ */
+export const LABEL_SLUG_RE = /^[a-z][a-z0-9_]{0,30}$/;
+
+/**
+ * Standard LAS dimension names a label column must never take, MIRRORED from
+ * `_LAS_RESERVED_SLUGS` in backend-api/main.py.
+ *
+ * `classification` is the one that matters most: laspy would try to bit-pack a
+ * float column into the classification-flags byte and HARD-CRASH the backend
+ * process. The rest would silently shadow real LAS data on export. Note this is
+ * the bare name only — `las_classification` (what an imported classification
+ * byte carries under) is deliberately NOT reserved and stays labelable.
+ */
+export const LAS_RESERVED_SLUGS: ReadonlySet<string> = new Set([
+  'x', 'y', 'z', 'intensity', 'classification', 'classification_flags',
+  'raw_classification', 'return_number', 'number_of_returns', 'scan_direction_flag',
+  'edge_of_flight_line', 'scan_angle', 'scan_angle_rank', 'user_data',
+  'point_source_id', 'gps_time', 'red', 'green', 'blue', 'nir',
+  'scanner_channel', 'synthetic', 'key_point', 'withheld', 'overlap',
+]);
+
+/** True when `slug` is one the backend's `_validate_label_slug` would accept. */
+export function isValidLabelSlug(slug: string | undefined | null): boolean {
+  if (!slug) return false;
+  if (!LABEL_SLUG_RE.test(slug)) return false;
+  // Case-insensitive: laspy resolves standard dimension names case-blind.
+  return !LAS_RESERVED_SLUGS.has(slug.toLowerCase());
+}
+
 export interface PaletteIssue {
   level: 'error' | 'warning';
   message: string;
@@ -85,6 +132,19 @@ export function validatePalette(palette: ClassPalette): PaletteIssue[] {
 
   if (!palette.name?.trim()) {
     issues.push({ level: 'error', message: 'Palette needs a name.' });
+  }
+  // The column this palette writes to. Checked here so a palette that could
+  // never be painted is rejected at Save rather than at the first stroke.
+  if (!isValidLabelSlug(palette.slug)) {
+    issues.push({
+      level: 'error',
+      message: !palette.slug?.trim()
+        ? 'Palette needs a column.'
+        : LAS_RESERVED_SLUGS.has(palette.slug.toLowerCase())
+          ? `Column "${palette.slug}" is a standard LAS dimension name; pick another.`
+          : `Column ${palette.slug} must start with a letter and use only `
+            + 'lowercase letters, digits and underscores (max 31 characters).',
+    });
   }
   if (classes.length === 0) {
     issues.push({ level: 'error', message: 'Palette needs at least one class.' });
@@ -146,10 +206,28 @@ export function paletteErrors(palette: ClassPalette): PaletteIssue[] {
   return validatePalette(palette).filter((i) => i.level === 'error');
 }
 
-/** The lowest unused value in the user-definable band, for "add class". */
-export function nextFreeClassValue(palette: ClassPalette): number {
+/**
+ * The lowest unused value for "add class".
+ *
+ * Defaults to the ASPRS user-definable band (64+) so a hand-built vocabulary
+ * never collides with the standard codes. But a palette DERIVED from an
+ * existing column must continue THAT column's own numbering instead: a user
+ * splitting a wrongly-merged tree in a `tree_instance` column wants Tree 3, not
+ * class 64 — the ids are data written by the segmentation, not a vocabulary we
+ * chose, and jumping to 64 would both look wrong and leave a 61-value hole in
+ * the legend. `derivePaletteForColumn` passes `startAt` for exactly that case.
+ */
+export function nextFreeClassValue(palette: ClassPalette, startAt?: number): number {
   const used = new Set(palette.classes.map((c) => c.value));
-  for (let v = USER_CLASS_MIN; v <= CLASS_VALUE_MAX; v++) {
+  const from = Number.isFinite(startAt)
+    ? Math.max(CLASS_VALUE_MIN, Math.round(startAt as number))
+    : USER_CLASS_MIN;
+  for (let v = from; v <= CLASS_VALUE_MAX; v++) {
+    if (!used.has(v)) return v;
+  }
+  // The preferred band is full — fall back to any free value at all before
+  // giving up, so a derived palette starting high can still grow downward.
+  for (let v = CLASS_VALUE_MIN; v < from; v++) {
     if (!used.has(v)) return v;
   }
   return CLASS_VALUE_MAX;
@@ -285,6 +363,243 @@ export function makeEmptyPalette(slug: string, now: number, id: string): ClassPa
   };
 }
 
+// ── Labelable columns ────────────────────────────────────────────────────────
+
+/**
+ * A column the labelling tool can paint into.
+ *
+ * The tool used to be able to reach exactly four columns, because a PRESET
+ * named both a vocabulary and its column. That made any other classification a
+ * cloud carried — a `tree_instance` from a failed tree segmentation being the
+ * motivating case — unreachable for hand correction, however plainly it was
+ * displayed everywhere else in the app.
+ */
+export interface LabelableColumn {
+  slug: string;
+  /** Display text: the cloud's own attribute label, else a humanised slug. */
+  label: string;
+  /**
+   * `manual` — the hand-labelling column, always offered.
+   * `categorical` — a real classification: class-valued, safe to repaint.
+   * `scalar` — a continuous measurement. Offered deliberately (see below) but
+   *   painting one OVERWRITES measured values, so the caller must confirm.
+   */
+  kind: 'manual' | 'categorical' | 'scalar';
+  /** True when the cloud does not carry this column yet (created on first paint). */
+  missing: boolean;
+  observed?: readonly number[];
+  range?: [number, number];
+}
+
+/** `tree_instance` → `Tree instance`. Only used when the cloud names no label. */
+function humaniseSlug(slug: string): string {
+  const spaced = slug.replace(/_/g, ' ').trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : slug;
+}
+
+/** True when every observed value is an integer inside the one-byte class range. */
+function looksLikeClassValues(observed: readonly number[] | undefined): boolean {
+  if (!observed || observed.length === 0) return false;
+  if (observed.length > PALETTE_HARD_MAX) return false;
+  return observed.every((v) => Number.isInteger(v)
+    && v >= CLASS_VALUE_MIN && v <= CLASS_VALUE_MAX);
+}
+
+/**
+ * The columns of one cloud that the labelling tool can paint into.
+ *
+ * `isCategorical` is INJECTED rather than imported because the real
+ * implementation (`isCategoricalAttribute`) consults process-wide registries in
+ * classification.ts. Injecting keeps this function pure — testable without
+ * mutating module globals, and deterministic across both branches — which is
+ * the same discipline `categoricalSchemeForCloud` already uses for palettes.
+ *
+ * `columnOptions` comes from `octreeScalarFieldOptions`, reused rather than
+ * re-derived so this list, the Color-by picker and the Filter panel cannot
+ * disagree about which columns a cloud has.
+ */
+export function labelableColumnsFor(args: {
+  columnOptions: ReadonlyArray<{ value: string; label: string }>;
+  attributeRanges?: Record<string, { min: number[]; max: number[] }>;
+  observedClasses?: Record<string, number[]>;
+  classPalettes?: Record<string, ClassPalette>;
+  manualSlug: string;
+  isCategorical: (slug: string) => boolean;
+}): LabelableColumn[] {
+  const {
+    columnOptions, attributeRanges, observedClasses, classPalettes,
+    manualSlug, isCategorical,
+  } = args;
+
+  const rangeFor = (slug: string): [number, number] | undefined => {
+    const r = attributeRanges?.[slug];
+    if (!r?.min?.length || !r?.max?.length) return undefined;
+    return [r.min[0], r.max[0]];
+  };
+
+  const out: LabelableColumn[] = [];
+  for (const { value: slug, label } of columnOptions) {
+    // Never offer a column the backend would refuse — a picker entry that 400s
+    // on the first stroke is worse than one that isn't there.
+    if (!isValidLabelSlug(slug)) continue;
+    if (slug === manualSlug) continue;   // added below, always first
+
+    const observed = observedClasses?.[slug];
+    const categorical = isCategorical(slug)
+      || !!classPalettes?.[slug]
+      || looksLikeClassValues(observed);
+    out.push({
+      slug,
+      label: label || humaniseSlug(slug),
+      kind: categorical ? 'categorical' : 'scalar',
+      missing: false,
+      ...(observed ? { observed } : {}),
+      ...(rangeFor(slug) ? { range: rangeFor(slug) } : {}),
+    });
+  }
+
+  out.sort((a, b) => (
+    a.kind === b.kind ? a.label.localeCompare(b.label) : (a.kind === 'categorical' ? -1 : 1)
+  ));
+
+  // The hand-labelling column is ALWAYS offered, even on a cloud that has no
+  // such column yet: the backend creates it on the first stroke. Without this
+  // the picker would be empty on a fresh import and the tool would regress to
+  // less than it could do before.
+  const manualObserved = observedClasses?.[manualSlug];
+  out.unshift({
+    slug: manualSlug,
+    label: columnOptions.find((o) => o.value === manualSlug)?.label ?? 'Hand labels',
+    kind: 'manual',
+    missing: !attributeRanges || !(manualSlug in attributeRanges),
+    ...(manualObserved ? { observed: manualObserved } : {}),
+    ...(rangeFor(manualSlug) ? { range: rangeFor(manualSlug) } : {}),
+  });
+  return out;
+}
+
+/**
+ * Ensure class 0 exists, prepending it when it does not.
+ *
+ * Class 0 is required in every palette and this is load-bearing rather than
+ * cosmetic (see UNCLASSIFIED_VALUE above): `merge` zero-fills a column missing
+ * from one of its inputs, so 0 must mean "unclassified" on EVERY column.
+ *
+ * A column derived from real data often has no 0 — `tree_instance` from a tree
+ * segmentation starts at 1. Synthesising one is right anyway, for a reason
+ * beyond the merge rule: the labelling tool can WRITE 0, so a palette without
+ * it would make "un-assign these mis-grabbed points" unreachable, which is
+ * half of what correcting a bad segmentation means.
+ */
+export function withRequiredUnclassified(
+  classes: ClassDef[], label?: string, color?: RGB,
+): ClassDef[] {
+  if (classes.some((c) => c.value === UNCLASSIFIED_VALUE)) return classes;
+  return [
+    def(UNCLASSIFIED_VALUE, label ?? UNCLASSIFIED_LABEL, color ?? UNCLASSIFIED_COLOR),
+    ...classes,
+  ];
+}
+
+/**
+ * A starting palette for an existing column, derived from the values it holds.
+ *
+ * `schemeFor` is `categoricalSchemeForRange`, injected to keep this pure. It
+ * already routes every case correctly — `tree_instance` to the Tree-N scheme
+ * with its golden-angle colours, a registered slug (ground_class, organ, …) to
+ * its fixed domain names, a wizard-marked column to generic Class-N — so this
+ * function derives NO class list of its own. Deriving one here would be a
+ * second definition of the same thing, and the two would drift.
+ *
+ * A `scalar` column is NEVER enumerated from its values: a continuous column
+ * can hold millions of distinct floats, and the user picking one is declaring
+ * an intent to classify INTO it, not to describe what is already there.
+ */
+export function derivePaletteForColumn(
+  column: LabelableColumn,
+  now: number,
+  schemeFor: (
+    slug: string,
+    range: [number, number] | null,
+    observed?: readonly number[] | null,
+  ) => CategoricalScheme | null,
+  fallbackScheme: (slug: string, observed: readonly number[]) => CategoricalScheme,
+): ClassPalette {
+  // `derived-<slug>` is deterministic per column, so the editor (keyed on
+  // palette.id) remounts when the user switches column instead of showing the
+  // previous column's draft.
+  const id = `derived-${column.slug}`;
+  const name = column.label;
+
+  if (column.kind === 'scalar') {
+    return { ...makeEmptyPalette(column.slug, now, id), name };
+  }
+
+  const scheme = schemeFor(column.slug, column.range ?? null, column.observed ?? null)
+    ?? (column.observed?.length ? fallbackScheme(column.slug, column.observed) : null);
+
+  // The name for class 0. A scheme that already describes 0 supplies it; one
+  // whose values start at 1 does not, so ask the scheme what it WOULD call 0 —
+  // for tree instances that is "Unassigned", the same word the viewer and the
+  // filter panel already use for id 0. validatePalette requires the VALUE 0,
+  // not any particular label, so this is free.
+  const zeroFromScheme = scheme?.classes.find((c) => c.value === UNCLASSIFIED_VALUE)
+    ?? schemeFor(column.slug, [0, 0], [0])?.classes
+      .find((c) => c.value === UNCLASSIFIED_VALUE);
+
+  const classes = scheme
+    ? withRequiredUnclassified(
+        scheme.classes.map((c) => ({ ...c })),
+        zeroFromScheme?.label,
+        zeroFromScheme?.color,
+      )
+    : [def(UNCLASSIFIED_VALUE, UNCLASSIFIED_LABEL, UNCLASSIFIED_COLOR)];
+
+  // `preset` stays undefined: a derived palette is not one of the four stock
+  // vocabularies, and marking it as one would make Preset cycle away from it.
+  // `derived` records where the class VALUES came from, which is what decides
+  // whether Add class continues the column's numbering or starts a new band.
+  return { id, name, slug: column.slug, classes, derived: true, updatedAt: now };
+}
+
+/** Free text → a slug the backend will accept, or '' when nothing survives. */
+export function slugifyLabelColumn(name: string): string {
+  const base = (name ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    // A slug must START with a letter, so drop any leading digits ("2nd pass").
+    .replace(/^[0-9_]+/, '');
+  return base.slice(0, 31);
+}
+
+/**
+ * Validate a user-typed column name for a NEW classification. Returns the same
+ * `PaletteIssue[]` shape `validatePalette` does, so the editor can concatenate
+ * them and its existing disabled-Save wiring covers both with no new gating.
+ */
+export function validateLabelColumn(
+  name: string, takenSlugs: readonly string[],
+): PaletteIssue[] {
+  const slug = slugifyLabelColumn(name);
+  if (!slug) {
+    return [{ level: 'error', message: 'Classification needs a name (letters, digits, spaces).' }];
+  }
+  if (LAS_RESERVED_SLUGS.has(slug)) {
+    return [{ level: 'error',
+      message: `"${slug}" is a standard LAS dimension name; pick another name.` }];
+  }
+  if (takenSlugs.includes(slug)) {
+    return [{ level: 'error',
+      message: `This cloud already has a "${slug}" column — pick it from the Column list to edit it.` }];
+  }
+  if (!isValidLabelSlug(slug)) {
+    return [{ level: 'error', message: `"${slug}" is not a usable column name.` }];
+  }
+  return [];
+}
+
 // ── Serialisation (for the shareable library / JSON export) ──────────────────
 
 /** Narrow an untrusted parsed-JSON value to a ClassPalette, or null. */
@@ -313,6 +628,7 @@ export function parsePalette(raw: unknown): ClassPalette | null {
   return {
     id: o.id, name: o.name, slug: o.slug, classes,
     preset: typeof o.preset === 'string' ? (o.preset as PalettePreset) : undefined,
+    ...(o.derived === true ? { derived: true } : {}),
     updatedAt: typeof o.updatedAt === 'number' ? o.updatedAt : 0,
   };
 }

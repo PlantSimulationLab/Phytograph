@@ -11,8 +11,9 @@
 //
 // Pure + stateless — no three.js, no React, no DOM.
 import {
-  categoricalSchemeForRange,
+  categoricalSchemeForCloud,
   type CategoricalScheme,
+  type ClassDef,
 } from './classification';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
 import { OCTREE_BUILTIN_ATTRIBUTES, octreeAttributeSlug } from './pointCloudHelpers';
@@ -319,6 +320,15 @@ export interface AttributeContext {
   // slug → observed [min,max], from OctreeRef.attributeRanges. Needed to build
   // the range-derived categorical schemes (tree_instance, wizard-marked fields).
   ranges?: Record<string, { min: number[]; max: number[] }>;
+  // slug → the cloud's own user-defined palette, from OctreeRef.classPalettes.
+  // Threaded so a picked point reads back the class name the USER gave it —
+  // the by-name schemes are process-wide and cannot know that this cloud's
+  // "Tree 1" was renamed "North row" in the labelling tool.
+  palettes?: Record<string, { slug: string; classes: ClassDef[] }>;
+  // slug → this cloud's exact surviving class values, from
+  // OctreeRef.observedClasses. Preferred over `ranges` for a dynamic scheme,
+  // which a [min,max] pair cannot express once a class has been filtered out.
+  observed?: Record<string, number[]>;
 }
 
 function rangeFor(
@@ -371,7 +381,9 @@ export function buildAttributeRows(
     }
 
     if (typeof raw !== 'number' || Number.isNaN(raw)) continue;
-    const scheme = categoricalSchemeForRange(key, rangeFor(key, ctx.ranges));
+    const scheme = categoricalSchemeForCloud(
+      key, rangeFor(key, ctx.ranges), ctx.palettes, ctx.observed?.[key],
+    );
     rows.push({ slug, label, value: raw, display: formatAttributeValue(raw, scheme) });
   }
   return rows.sort((a, b) => a.label.localeCompare(b.label));

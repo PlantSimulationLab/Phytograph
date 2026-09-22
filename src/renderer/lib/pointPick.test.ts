@@ -17,6 +17,7 @@ import {
   chooseNearestCandidate,
   type PickedPoint,
 } from './pointPick';
+import type { RGB } from './colormaps';
 import {
   registerCategoricalSlug,
   unregisterCategoricalSlug,
@@ -485,5 +486,51 @@ describe('chooseNearestCandidate', () => {
 
   it('handles a single candidate', () => {
     expect(chooseNearestCandidate([{ depth: 7, offsetPx: 2 }])).toBe(0);
+  });
+});
+
+describe('a picked point reads back the class name the USER gave it', () => {
+  // The palette is per-cloud; the by-name schemes in classification.ts are
+  // process-wide and cannot express "on THIS cloud, tree 1 is the north row".
+  // Before this was wired, the labelling panel showed the user's name while the
+  // picker (and the legend, and the filter) still showed the built-in one.
+  const palettes = {
+    tree_instance: {
+      slug: 'tree_instance',
+      classes: [
+        { value: 0, label: 'Unassigned', color: [0.2, 0.2, 0.2] as RGB },
+        { value: 1, label: 'North row', color: [1, 0, 0] as RGB },
+        { value: 2, label: 'South row', color: [0, 1, 0] as RGB },
+      ],
+    },
+  };
+
+  it('prefers the cloud palette over the built-in Tree-N naming', () => {
+    const rows = buildAttributeRows(
+      { tree_instance: 1 },
+      { ranges: { tree_instance: { min: [1], max: [2] } }, palettes },
+    );
+    expect(rows[0].display).toBe('1 (North row)');
+  });
+
+  it('falls back to the built-in naming when the cloud has no palette', () => {
+    const rows = buildAttributeRows(
+      { tree_instance: 1 },
+      { ranges: { tree_instance: { min: [1], max: [2] } } },
+    );
+    expect(rows[0].display).toBe('1 (Tree 1)');
+  });
+
+  it('uses the exact observed classes, so a filtered cloud names its survivors', () => {
+    // Keeping only trees 1 and 3: a [1,3] range would invent a Tree 2 and shift
+    // every name after it.
+    const rows = buildAttributeRows(
+      { tree_instance: 3 },
+      {
+        ranges: { tree_instance: { min: [1], max: [3] } },
+        observed: { tree_instance: [1, 3] },
+      },
+    );
+    expect(rows[0].display).toBe('3 (Tree 3)');
   });
 });

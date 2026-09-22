@@ -605,3 +605,167 @@ def test_stroke_ids_take_precedence_over_edit_count(client, cache_root, grid_xyz
                       json={"edit_count": 2, "undo_after_stroke_ids": ["s1"]})
     assert res.status_code == 200, res.text
     assert res.json()["label_edit_count"] == 1
+
+
+# ── Labelling a column the file already carries ──────────────────────────────
+#
+# The renderer feature these back: the labelling tool can now paint into ANY
+# classification column, not just the four its presets named. That rests
+# entirely on `_ensure_label_column_locked` REUSING a pre-existing column rather
+# than creating a parallel one — behaviour the backend already had and nothing
+# pinned. Without these, a refactor could break the whole feature with every
+# frontend test still green.
+
+TREE_SLUG = "tree_instance"
+TREE_FORMAT = "x y z tree_instance"
+
+
+@pytest.fixture
+def tree_instance_xyz(tmp_path) -> Path:
+    """The grid fixture plus a tree_instance column holding only 1 and 3.
+
+    Shaped after a REAL failed tree segmentation
+    (example-datasets/almond_treseg_failure.laz holds exactly {1, 2}):
+
+      * no 0 — so a synthesised "unassigned" class is the only way to
+        un-assign a mis-grabbed point, and
+      * a GAP at 2 — so a class list built from the column's [min,max] is
+        distinguishable from one built from its exact surviving values.
+    """
+    f = tmp_path / "grid_tree.xyz"
+    lines = []
+    for i in range(10):
+        for j in range(10):
+            for k in range(10):
+                # Split on x so a box region can straddle the two instances.
+                tree = 1 if i < 4 else 3
+                lines.append(f"{i*0.1:.4f} {j*0.1:.4f} {k*0.1:.4f} {tree}")
+    f.write_text("\n".join(lines) + "\n")
+    return f
+
+
+def test_label_region_reuses_an_imported_column_in_place(
+    client, cache_root, tree_instance_xyz,
+):
+    """Painting an existing column EDITS it; it does not shadow it.
+
+    If this regressed to creating a fresh zero-filled column, every count in
+    the UI would start at "all unclassified" and the user's correction would be
+    written somewhere the rest of the app never reads.
+    """
+    sid = _create(client, tree_instance_xyz, fmt=TREE_FORMAT)
+    sess = main._cloud_sessions[sid]
+    before = sess.extras[TREE_SLUG].copy()
+    assert set(np.unique(before)) == {1.0, 3.0}
+
+    expected = _box_mask(sess.positions, BOX_SMALL)
+    assert expected.sum() > 0
+
+    res = client.post(f"/api/cloud/session/{sid}/label_region",
+                      json={"strokes": [_stroke(BOX_SMALL, 1, "s1")],
+                            "slug": TREE_SLUG})
+    assert res.status_code == 200, res.text
+    body = res.json()
+
+    # The column was ALREADY there, so nothing was created.
+    assert body["created_column"] is False
+
+    after = sess.extras[TREE_SLUG]
+    assert np.all(after[expected] == 1)
+    # Everything the stroke did not cover keeps the FILE's value — not 0, which
+    # is what a freshly-created column would have left behind.
+    assert np.array_equal(after[~expected], before[~expected])
+    assert 3.0 in set(np.unique(after))
+
+
+def test_label_summary_reports_an_imported_column_real_classes(
+    client, cache_root, tree_instance_xyz,
+):
+    """Before any paint, the summary is the FILE's classes — not {0: N}.
+
+    This is the single assertion that distinguishes "reused the column" from
+    "created a new one", and it is what the panel's opening class counts are
+    read from.
+    """
+    sid = _create(client, tree_instance_xyz, fmt=TREE_FORMAT)
+    res = client.get(f"/api/cloud/session/{sid}/label_summary",
+                     params={"slug": TREE_SLUG})
+    assert res.status_code == 200, res.text
+    counts = {int(k): v for k, v in res.json()["class_counts"].items()}
+    assert counts == {1: 400, 3: 600}
+    assert main.MANUAL_CLASS_UNLABELED not in counts
+
+
+def test_observed_classes_keeps_the_gap(client, cache_root, tree_instance_xyz):
+    """The session reports the EXACT surviving values, gap included.
+
+    The renderer derives its class list from these. A [min,max] pair cannot
+    express the gap, so a range-derived list would invent a "Tree 2" owning no
+    points — which is why the fixture skips 2.
+    """
+    sid = _create(client, tree_instance_xyz, fmt=TREE_FORMAT)
+    with main._cloud_session_lock:
+        observed = main._session_observed_classes_locked(main._cloud_sessions[sid])
+    assert observed[TREE_SLUG] == [1, 3]
+
+
+def test_a_custom_slug_creates_a_column_with_the_requested_label(
+    client, cache_root, grid_xyz,
+):
+    """A brand-new classification is named by the USER, not "Manual Class"."""
+    sid = _create(client, grid_xyz)
+    res = client.post(f"/api/cloud/session/{sid}/label_region",
+                      json={"strokes": [_stroke(BOX_BIG, 64, "s1")],
+                            "slug": "row_qc", "label": "Row QC"})
+    assert res.status_code == 200, res.text
+    assert res.json()["created_column"] is True
+
+    sess = main._cloud_sessions[sid]
+    assert "row_qc" in sess.extras
+    meta = {d["slug"]: d.get("label") for d in sess.extra_dims_meta}
+    assert meta["row_qc"] == "Row QC"
+
+
+def test_two_label_columns_keep_independent_histories(
+    client, cache_root, tree_instance_xyz,
+):
+    """Undo on one column must not disturb another.
+
+    The renderer holds ONE stroke list and blocks a column switch while it is
+    non-empty; that guard is a convenience only because the backend genuinely
+    keys its history per slug. If it did not, the block would be load-bearing
+    and a stale UI could silently corrupt the wrong column.
+    """
+    sid = _create(client, tree_instance_xyz, fmt=TREE_FORMAT)
+    sess = main._cloud_sessions[sid]
+
+    _paint(client, sid, [_stroke(BOX_BIG, 2, "m1")])          # manual_class
+    manual_after = sess.extras[SLUG].copy()
+
+    res = client.post(f"/api/cloud/session/{sid}/label_region",
+                      json={"strokes": [_stroke(BOX_BIG, 1, "t1")],
+                            "slug": TREE_SLUG})
+    assert res.status_code == 200, res.text
+
+    # Undo the tree_instance stroke only.
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"edit_count": 0, "slug": TREE_SLUG,
+                            "undo_after_stroke_ids": ["t1"]})
+    assert res.status_code == 200, res.text
+
+    # tree_instance is back to the file's values; manual_class is untouched.
+    assert set(np.unique(sess.extras[TREE_SLUG])) == {1.0, 3.0}
+    assert np.array_equal(sess.extras[SLUG], manual_after)
+
+
+def test_a_reserved_slug_is_refused_rather_than_crashing_the_writer(
+    client, cache_root, grid_xyz,
+):
+    """`classification` would make laspy bit-pack a float column into the
+    classification-flags byte and hard-crash the process. The renderer mirrors
+    this list to keep it out of the picker; the backend is the real guard."""
+    sid = _create(client, grid_xyz)
+    res = client.post(f"/api/cloud/session/{sid}/label_region",
+                      json={"strokes": [_stroke(BOX_BIG, 1, "s1")],
+                            "slug": "classification"})
+    assert res.status_code == 400

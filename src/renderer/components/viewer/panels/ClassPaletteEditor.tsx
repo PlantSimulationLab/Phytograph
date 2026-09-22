@@ -5,12 +5,14 @@ import {
   validatePalette,
   paletteErrors,
   nextFreeClassValue,
+  slugifyLabelColumn,
+  validateLabelColumn,
   UNCLASSIFIED_VALUE,
   CLASS_VALUE_MIN,
   CLASS_VALUE_MAX,
 } from '../../../lib/classPalettes';
 import type { RGB } from '../../../lib/colormaps';
-import { rgbToHex } from '../../../lib/classification';
+import { rgbToHex, treeInstanceColor } from '../../../lib/classification';
 
 // Editor for a user-defined class palette.
 //
@@ -46,6 +48,16 @@ export interface ClassPaletteEditorProps {
    * value; an empty one is free to move.
    */
   classCounts?: Record<number, number>;
+  /**
+   * Present ONLY when creating a brand-new classification column. Renders the
+   * column-name field and validates it against the cloud's existing columns.
+   *
+   * Editing an existing palette deliberately has NO column field: the column is
+   * chosen in the panel, and a second place to change it would let a user
+   * silently repoint a palette whose classes already have points — the mirror
+   * of the per-class value lock below.
+   */
+  newColumn?: { takenSlugs: string[] };
   /** Saved palettes to load from, most recent first. */
   library: ClassPalette[];
   onSave: (palette: ClassPalette) => void;
@@ -59,6 +71,7 @@ export interface ClassPaletteEditorProps {
 export function ClassPaletteEditor({
   palette,
   classCounts = {},
+  newColumn,
   library,
   onSave,
   onLoad,
@@ -68,9 +81,31 @@ export function ClassPaletteEditor({
   onClose,
 }: ClassPaletteEditorProps) {
   const [draft, setDraft] = useState<ClassPalette>(palette);
+  // Free text for a new column; the slug is DERIVED from it and shown, so the
+  // user sees the name their data will actually carry before committing to it.
+  const [columnName, setColumnName] = useState('');
+  const columnSlug = useMemo(() => slugifyLabelColumn(columnName), [columnName]);
 
-  const issues = useMemo(() => validatePalette(draft), [draft]);
-  const errors = useMemo(() => paletteErrors(draft), [draft]);
+  // The draft the caller would receive: in new-column mode the typed column
+  // name supplies both the slug and, unless the user renamed it, the palette
+  // name. Validated as one object so a bad column blocks Save through the
+  // SAME disabled-on-errors wiring every other rule already uses.
+  const effectiveDraft = useMemo<ClassPalette>(() => (
+    newColumn ? { ...draft, slug: columnSlug } : draft
+  ), [draft, newColumn, columnSlug]);
+
+  const columnIssues = useMemo(() => (
+    newColumn ? validateLabelColumn(columnName, newColumn.takenSlugs) : []
+  ), [newColumn, columnName]);
+
+  const issues = useMemo(
+    () => [...columnIssues, ...validatePalette(effectiveDraft)],
+    [columnIssues, effectiveDraft],
+  );
+  const errors = useMemo(
+    () => [...columnIssues.filter((i) => i.level === 'error'), ...paletteErrors(effectiveDraft)],
+    [columnIssues, effectiveDraft],
+  );
   const warnings = issues.filter((i) => i.level === 'warning');
 
   const patchClass = (index: number, patch: Partial<ClassPalette['classes'][number]>) => {
@@ -85,17 +120,44 @@ export function ClassPaletteEditor({
   };
 
   const addClass = () => {
-    setDraft((d) => ({
-      ...d,
-      preset: undefined,
-      // Lands in the user-definable 64+ band, so a future writer to the real
-      // LAS classification byte needs no renumbering of painted data.
-      classes: [...d.classes, {
-        value: nextFreeClassValue(d),
-        label: 'New class',
-        color: [0.6, 0.6, 0.6] as RGB,
-      }],
-    }));
+    setDraft((d) => {
+      // A palette DERIVED from an existing column continues that column's own
+      // numbering; everything else lands in the user-definable 64+ band, so a
+      // future writer to the real LAS classification byte needs no renumbering
+      // of painted data.
+      //
+      // The distinction is what a user splitting a wrongly-merged tree needs:
+      // the next instance is Tree 3, not class 64. Those ids are data written
+      // by the segmentation, not a vocabulary we chose, so jumping to 64 would
+      // both read wrong and leave a 61-value hole in the legend.
+      const own = d.classes.filter((c) => c.value !== UNCLASSIFIED_VALUE);
+      // `derived` is PROVENANCE, not a guess from the values: the wood/leaf and
+      // organ presets also number from 1, so an "are these below 64" test would
+      // renumber those too and break the user-definable band.
+      const derivedNumbering = !!d.derived && own.length > 0;
+      const value = nextFreeClassValue(
+        d,
+        derivedNumbering ? Math.max(...own.map((c) => c.value)) + 1 : undefined,
+      );
+      // Name it the way its siblings are named — "Tree 2" ⇒ "Tree 3" — so a
+      // class the user adds to a segmentation's output reads like one the
+      // segmentation wrote. Falls back to a neutral name when the existing
+      // labels share no "<word> <number>" shape.
+      const stem = own.map((c) => /^(.*\D)\d+$/.exec(c.label)?.[1]).filter(Boolean);
+      const sharedStem = stem.length === own.length && new Set(stem).size === 1
+        ? stem[0]! : null;
+      return {
+        ...d,
+        preset: undefined,
+        classes: [...d.classes, {
+          value,
+          label: derivedNumbering && sharedStem ? `${sharedStem}${value}` : 'New class',
+          // Match the colour the viewer already draws for this id, so a class
+          // added here and a class the segmentation wrote look alike.
+          color: derivedNumbering ? treeInstanceColor(value) : ([0.6, 0.6, 0.6] as RGB),
+        }],
+      };
+    });
   };
 
   const removeClass = (index: number) => {
@@ -127,6 +189,44 @@ export function ClassPaletteEditor({
           <X className="w-3 h-3 text-neutral-400" />
         </button>
       </div>
+
+      {newColumn && (
+        <>
+          <label className="text-[10px] text-neutral-400 block mb-1">
+            Classification name
+          </label>
+          <input
+            data-testid="palette-column-name"
+            type="text"
+            value={columnName}
+            placeholder="e.g. Row QC"
+            autoFocus
+            onChange={(e) => {
+              const v = e.target.value;
+              setColumnName(v);
+              // Keep the palette name in step while the user has not renamed it
+              // themselves — one field to fill in the common case, two when they
+              // want the vocabulary called something else.
+              setDraft((d) => (
+                d.name === 'My classes' || d.name === slugifyLabelColumn(columnName)
+                  ? { ...d, name: v || 'My classes' }
+                  : d
+              ));
+            }}
+            className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs text-neutral-100"
+          />
+          {/* The name the DATA will carry — shown because it is what appears in
+              Color by, in an export's column list, and in any other software
+              that opens the file. */}
+          <p data-testid="palette-column-slug"
+            data-slug={columnSlug}
+            className="text-[9px] text-neutral-500 mt-0.5 mb-3">
+            {columnSlug
+              ? <>Stored as <span className="text-neutral-300 font-mono">{columnSlug}</span></>
+              : 'Use letters and digits — this becomes the column name in the file.'}
+          </p>
+        </>
+      )}
 
       <label className="text-[10px] text-neutral-400 block mb-1">Palette name</label>
       <input
@@ -192,7 +292,12 @@ export function ClassPaletteEditor({
                 data-testid="palette-class-label"
                 type="text"
                 value={c.label}
-                readOnly={isUnclassified}
+                // Renaming class 0 is safe and sometimes necessary: a palette
+                // derived from a tree segmentation calls it "Unassigned", and
+                // another column may want another word. Only the VALUE is the
+                // contract (validatePalette requires value 0, not any label),
+                // so the lock stays on the value and the remove button.
+                title="Class name"
                 onChange={(e) => patchClass(i, { label: e.target.value })}
                 className="flex-1 min-w-0 bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-[11px] text-neutral-100"
               />
@@ -244,13 +349,13 @@ export function ClassPaletteEditor({
 
       <button
         data-testid="palette-save"
-        onClick={() => onSave(draft)}
+        onClick={() => onSave(effectiveDraft)}
         disabled={errors.length > 0}
         title={errors.length > 0 ? 'Fix the errors above first' : 'Apply and save to your library'}
         className="w-full mb-3 px-2 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white disabled:bg-neutral-700 disabled:text-neutral-500 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
       >
         <Save className="w-3 h-3" />
-        Save palette
+        {newColumn ? 'Create classification' : 'Save palette'}
       </button>
 
       <div className="border-t border-neutral-700/50 pt-2">

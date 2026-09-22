@@ -159,6 +159,16 @@ export function schemeFor(
   return schemeAndKind(channel, dataRange).scheme;
 }
 
+/**
+ * The longest class list worth drawing as a legend.
+ *
+ * Above this a categorical legend stops informing and starts occluding — the
+ * reason the tree_instance legend is suppressed at all. Callers that resolve a
+ * per-cloud scheme themselves gate on this rather than re-deciding, so "is this
+ * list readable" has one definition.
+ */
+export const LEGEND_MAX_CLASSES = 24;
+
 // Single source of truth for "is this categorical, and if so with what
 // classes" — computed once so the kind and the scheme can never disagree.
 function schemeAndKind(
@@ -171,6 +181,16 @@ function schemeAndKind(
     || channel.mode === 'rgb' || channel.mode === 'per-scan') {
     return { kind: 'none', scheme: null };
   }
+  // Tree instances are arbitrary nominal ids, often 100+ of them: a gradient is
+  // meaningless and the class list would fill the viewport, so the legend is
+  // dropped while the points stay coloured.
+  //
+  // A CALLER-SUPPLIED scheme overrides this (see `buildLegendEntries`), which
+  // is how a cloud whose tree instances the user has NAMED still gets a legend:
+  // a bound palette is an explicit statement that these classes mean something,
+  // and it is the only thing that can carry those names. The caller also gates
+  // on `LEGEND_MAX_CLASSES`, so the viewport-filling case this guard exists for
+  // is unaffected either way.
   if (channel.field === TREE_INSTANCE_ATTRIBUTE) return { kind: 'none', scheme: null };
   if (channel.field) {
     const range: [number, number] | null = dataRange
