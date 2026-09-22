@@ -424,10 +424,12 @@ export function deWitLabel(model: DeWitModel): string {
 
 // A two-parameter Beta distribution is the standard continuous model for a leaf
 // inclination distribution (Goel & Strebel 1984): inclination is normalized to
-// t = theta/90 in [0,1], and a Beta(alpha,beta) density on t describes the
-// canopy. The shape parameters are estimated by MOMENT MATCHING — the closed
-// form that maps the mean and variance of t to (alpha,beta), no optimizer:
-//   nu = tbar(1 - tbar)/var - 1,  alpha = tbar*nu,  beta = (1 - tbar)*nu
+// t = theta/90 in [0,1], and a Beta(nu,mu) density on t describes the canopy —
+// nu the toward-vertical weight, mu the toward-horizontal weight, matching the
+// naming Helios uses for its plant-architecture leaf sampler. The shape
+// parameters are estimated by MOMENT MATCHING — the closed form that maps the
+// mean and variance of t to (nu,mu), no optimizer:
+//   nuTot = tbar(1 - tbar)/var - 1,  nu = tbar*nuTot,  mu = (1 - tbar)*nuTot
 // This is the Goel-Strebel estimator and the one the literature reports.
 //
 // SOLID-ANGLE CONVENTION (same as de Wit above): the empirical `density` is
@@ -438,7 +440,7 @@ export function deWitLabel(model: DeWitModel): string {
 // is what we plot — so the fitted Beta overlays the empirical curve like-for-like.
 
 // Natural log of the Gamma function (Lanczos approximation, g=7, n=9). Accurate
-// to ~1e-15 for x > 0, which is all we need (alpha,beta are positive).
+// to ~1e-15 for x > 0, which is all we need (nu,mu are positive).
 function lgamma(x: number): number {
   const G = 7;
   const C = [
@@ -457,15 +459,15 @@ function lgamma(x: number): number {
   return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(tmp) - tmp + Math.log(a);
 }
 
-// Beta(alpha,beta) probability density at t in [0,1]. Uses lgamma for the
-// normalizing 1/B(alpha,beta); t is clamped off the exact endpoints so a shape
+// Beta(nu,mu) probability density at t in [0,1]. Uses lgamma for the
+// normalizing 1/B(nu,mu); t is clamped off the exact endpoints so a shape
 // parameter < 1 (a density that diverges at an edge) yields a large-but-finite
 // value rather than 0^(negative) = Infinity/NaN.
-function betaPdfUnit(t: number, alpha: number, beta: number): number {
+function betaPdfUnit(t: number, nu: number, mu: number): number {
   const eps = 1e-9;
   const tc = Math.min(1 - eps, Math.max(eps, t));
-  const logB = lgamma(alpha) + lgamma(beta) - lgamma(alpha + beta);
-  const logPdf = (alpha - 1) * Math.log(tc) + (beta - 1) * Math.log(1 - tc) - logB;
+  const logB = lgamma(nu) + lgamma(mu) - lgamma(nu + mu);
+  const logPdf = (nu - 1) * Math.log(tc) + (mu - 1) * Math.log(1 - tc) - logB;
   return Math.exp(logPdf);
 }
 
@@ -473,13 +475,15 @@ function betaPdfUnit(t: number, alpha: number, beta: number): number {
 // histogram, returning a per-DEGREE density so it overlays the empirical density
 // curve. The Beta is defined on t = deg/90, so the change of variable adds the
 // Jacobian dt/dtheta = 1/90.
-export function betaCurve(alpha: number, beta: number, binCenters: number[]): number[] {
-  return binCenters.map(deg => betaPdfUnit(deg / 90, alpha, beta) / 90);
+export function betaCurve(nu: number, mu: number, binCenters: number[]): number[] {
+  return binCenters.map(deg => betaPdfUnit(deg / 90, nu, mu) / 90);
 }
 
 export interface BetaFit {
-  alpha: number;
-  beta: number;
+  // Toward-vertical weight (Helios/Goel-Strebel "nu").
+  nu: number;
+  // Toward-horizontal weight (Helios/Goel-Strebel "mu").
+  mu: number;
   // Area-weighted mean inclination in DEGREES (= tbar * 90), for display.
   meanIncl: number;
   // Goodness vs the empirical per-degree density, computed like fitDeWit's:
@@ -488,12 +492,12 @@ export interface BetaFit {
   r2: number;
 }
 
-// Estimate Beta(alpha,beta) from an empirical inclination histogram by
+// Estimate Beta(nu,mu) from an empirical inclination histogram by
 // Goel-Strebel moment matching. Returns null when the fit is undefined:
 //   - empty histogram (no area),
 //   - zero variance (all mass in one bin — a Beta needs spread), or
 //   - over-dispersed: var >= tbar(1 - tbar), where the moment estimator gives a
-//     non-positive nu (no valid unimodal Beta matches those moments).
+//     non-positive shape sum (no valid unimodal Beta matches those moments).
 export function fitBeta(hist: Histogram): BetaFit | null {
   if (hist.totalArea <= 0) return null;
   const { binCenters, binWidth, density } = hist;
@@ -511,17 +515,17 @@ export function fitBeta(hist: Histogram): BetaFit | null {
   }
   if (variance <= 0) return null;
 
-  const nu = (tbar * (1 - tbar)) / variance - 1;
-  if (nu <= 0) return null;
-  const alpha = tbar * nu;
-  const beta = (1 - tbar) * nu;
+  const nuTot = (tbar * (1 - tbar)) / variance - 1;
+  if (nuTot <= 0) return null;
+  const nu = tbar * nuTot;
+  const mu = (1 - tbar) * nuTot;
 
   // Goodness of fit on the per-degree density, identical convention to fitDeWit.
   const mean = density.reduce((s, d) => s + d, 0) / density.length;
   const ssTot = density.reduce((s, d) => s + (d - mean) ** 2, 0) || 1e-30;
-  const curve = betaCurve(alpha, beta, binCenters);
+  const curve = betaCurve(nu, mu, binCenters);
   let sse = 0;
   for (let b = 0; b < density.length; b++) sse += (density[b] - curve[b]) ** 2;
 
-  return { alpha, beta, meanIncl: tbar * 90, sse, r2: 1 - sse / ssTot };
+  return { nu, mu, meanIncl: tbar * 90, sse, r2: 1 - sse / ssTot };
 }

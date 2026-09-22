@@ -162,7 +162,7 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
   const deWit = useMemo(() => (combinedPdf ? fitDeWit(combinedPdf) : null), [combinedPdf]);
 
   // Per-cell fits for the parameters table: each visible cell's own de Wit
-  // archetype and Beta(alpha,beta). Both can be null for a degenerate cell
+  // archetype and Beta(nu,mu). Both can be null for a degenerate cell
   // (e.g. all triangles coplanar) — the table shows "—" then.
   // gtheta is measured directly from the mesh geometry (per-triangle normal vs.
   // its beam direction — the scanner when known, else nadir), so it needs
@@ -202,7 +202,7 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
   const exportParamsCsv = () => {
     const header = [
       'Cell', 'center_xyz_m', 'dimensions_xyz_m',
-      'alpha', 'beta', 'mean_inclination_deg', 'R2', 'G_theta', 'de_Wit',
+      'nu', 'mu', 'mean_inclination_deg', 'R2', 'G_theta', 'de_Wit',
     ];
     const num = (v: number | null | undefined, digits: number) => (v != null ? v.toFixed(digits) : '');
     // Quote a field if it contains a comma, quote, or newline (the cell labels
@@ -213,8 +213,8 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
           cell.label,
           vec3(cell.center),
           vec3(cell.size),
-          num(beta?.alpha, 2),
-          num(beta?.beta, 2),
+          num(beta?.nu, 2),
+          num(beta?.mu, 2),
           num(beta?.meanIncl, 1),
           num(beta?.r2, 2),
           num(gtheta, 3),
@@ -224,8 +224,8 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
           `All visible (${visibleCells.length} cells)`,
           '',
           '',
-          num(combinedBeta?.alpha, 2),
-          num(combinedBeta?.beta, 2),
+          num(combinedBeta?.nu, 2),
+          num(combinedBeta?.mu, 2),
           num(combinedBeta?.meanIncl, 1),
           num(combinedBeta?.r2, 2),
           num(combinedGTheta, 3),
@@ -274,7 +274,7 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
     const centers = inclPdfs[0].pdf.binCenters;
     const fitCurve = deWit && combinedPdf ? deWitCurve(deWit.best, centers) : null;
     const betaCurves = overlayPerCell && showBeta
-      ? cellFits.map(f => ({ id: f.cell.id, curve: f.beta ? betaCurve(f.beta.alpha, f.beta.beta, centers) : null }))
+      ? cellFits.map(f => ({ id: f.cell.id, curve: f.beta ? betaCurve(f.beta.nu, f.beta.mu, centers) : null }))
       : [];
     return centers.map((angle, b) => {
       const row: Record<string, number> = { angle: Math.round(angle) };
@@ -515,8 +515,8 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                       <thead>
                         <tr className="text-neutral-500 text-left">
                           <th className="font-medium py-0.5 pr-2">Cell</th>
-                          <th className="font-medium py-0.5 px-2 text-right" title="Beta shape parameter α">α</th>
-                          <th className="font-medium py-0.5 px-2 text-right" title="Beta shape parameter β">β</th>
+                          <th className="font-medium py-0.5 px-2 text-right" title="Beta shape parameter ν (toward-vertical weight)">ν</th>
+                          <th className="font-medium py-0.5 px-2 text-right" title="Beta shape parameter μ (toward-horizontal weight)">μ</th>
                           <th className="font-medium py-0.5 px-2 text-right" title="Mean inclination">mean θ (°)</th>
                           <th className="font-medium py-0.5 px-2 text-right" title="Beta fit R²">R²</th>
                           <th
@@ -546,8 +546,8 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                                 <span className="truncate">{cell.label}</span>
                               </span>
                             </td>
-                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.alpha.toFixed(2) : '—'}</td>
-                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.beta.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.nu.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.mu.toFixed(2) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.meanIncl.toFixed(1) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{beta ? beta.r2.toFixed(2) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{gtheta != null ? gtheta.toFixed(3) : '—'}</td>
@@ -568,8 +568,8 @@ export function LeafAnglePlotPopup({ isOpen, onClose, mesh, meshName }: LeafAngl
                                 <span className="truncate">All visible ({visibleCells.length} cells)</span>
                               </span>
                             </td>
-                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.alpha.toFixed(2) : '—'}</td>
-                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.beta.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.nu.toFixed(2) : '—'}</td>
+                            <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.mu.toFixed(2) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.meanIncl.toFixed(1) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{combinedBeta ? combinedBeta.r2.toFixed(2) : '—'}</td>
                             <td className="py-0.5 px-2 text-right tabular-nums">{combinedGTheta != null ? combinedGTheta.toFixed(3) : '—'}</td>

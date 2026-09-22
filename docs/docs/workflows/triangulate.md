@@ -438,8 +438,10 @@ just the visible ones.
 
 Below the inclination chart a **fitted distribution parameters** table reports,
 **per cell**, a continuous two-parameter **Beta** distribution fit to that cell's
-leaf inclination — the standard Goel & Strebel (1984) model. The shape
-parameters **α** and **β** are estimated by moment matching (the mean and
+leaf inclination — the standard Goel & Strebel (1984) model, in the same
+**Beta (μ, ν)** convention Helios and the [LAD tool](estimate-leaf-area-density.md#override-g-directly)
+use. The shape parameters **ν** (toward-vertical weight) and **μ**
+(toward-horizontal weight) are estimated by moment matching (the mean and
 variance of the normalized inclination *t = θ/90*), alongside the mean
 inclination **mean θ** in degrees, the fit **R²**, the leaf-projection
 coefficient **G(θ)** (see below), and that cell's best de Wit archetype, so you
@@ -453,7 +455,7 @@ Phytograph, both reflecting the **currently visible** cells:
 
 - **Parameters CSV** — the fitted-parameters table exactly as shown: one row per
   visible cell (or the single **All visible** row in combined mode) with the
-  α, β, mean θ, R², G(θ), and de Wit columns.
+  ν, μ, mean θ, R², G(θ), and de Wit columns.
 - **Distributions CSV** — the empirical inclination probability density curves
   plotted in the chart: one row per visible cell (or a single combined row in
   combined mode), with one column per inclination bin (the column headers are

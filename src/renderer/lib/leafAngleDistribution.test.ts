@@ -310,12 +310,12 @@ describe('fitBeta (Goel-Strebel moment matching)', () => {
     const fit = fitBeta(pdf)!;
     expect(fit).not.toBeNull();
     // 5° bins + integer-count sampling blur the moments a little; ±0.3 is ample.
-    expect(Math.abs(fit.alpha - 2)).toBeLessThan(0.3);
-    expect(Math.abs(fit.beta - 4)).toBeLessThan(0.3);
+    expect(Math.abs(fit.nu - 2)).toBeLessThan(0.3);
+    expect(Math.abs(fit.mu - 4)).toBeLessThan(0.3);
     expect(fit.r2).toBeGreaterThan(0.9);
   });
 
-  it('planophile (mostly-horizontal) mesh → small mean, α<β (mass near 0)', () => {
+  it('planophile (mostly-horizontal) mesh → small mean, ν<μ (mass near 0)', () => {
     // A planophile g(θ) — most leaf area at low inclination — gives a left-
     // skewed Beta. (A single-inclination mesh has zero variance and no Beta;
     // a realistic distribution does.)
@@ -323,15 +323,15 @@ describe('fitBeta (Goel-Strebel moment matching)', () => {
     const data = meshSampledFromDensity(deg => deWitDensityRad('planophile', deg) * k);
     const fit = fitBeta(computeInclinationPdf(data))!;
     expect(fit.meanIncl).toBeLessThan(35);
-    expect(fit.alpha).toBeLessThan(fit.beta);
+    expect(fit.nu).toBeLessThan(fit.mu);
   });
 
-  it('erectophile (mostly-vertical) mesh → large mean, α>β (mass near 1)', () => {
+  it('erectophile (mostly-vertical) mesh → large mean, ν>μ (mass near 1)', () => {
     const k = Math.PI / 180;
     const data = meshSampledFromDensity(deg => deWitDensityRad('erectophile', deg) * k);
     const fit = fitBeta(computeInclinationPdf(data))!;
     expect(fit.meanIncl).toBeGreaterThan(55);
-    expect(fit.alpha).toBeGreaterThan(fit.beta);
+    expect(fit.nu).toBeGreaterThan(fit.mu);
   });
 
   it('meanIncl is the area-weighted mean inclination in degrees', () => {
@@ -387,7 +387,7 @@ describe('fitBeta (Goel-Strebel moment matching)', () => {
   it('produces no NaNs for a valid fit', () => {
     const data = meshSampledFromDensity(deg => betaCurve(3, 2, [deg])[0]);
     const fit = fitBeta(computeInclinationPdf(data))!;
-    for (const v of [fit.alpha, fit.beta, fit.meanIncl, fit.sse, fit.r2]) {
+    for (const v of [fit.nu, fit.mu, fit.meanIncl, fit.sse, fit.r2]) {
       expect(Number.isFinite(v)).toBe(true);
     }
   });
@@ -403,7 +403,7 @@ describe('betaCurve overlays on the empirical density scale', () => {
     expect(integral).toBeCloseTo(1, 2);
   });
 
-  it('is symmetric for α=β (peak at 45°)', () => {
+  it('is symmetric for ν=μ (peak at 45°)', () => {
     const curve = betaCurve(3, 3, [10, 45, 80]);
     expect(curve[1]).toBeGreaterThan(curve[0]);
     expect(curve[1]).toBeGreaterThan(curve[2]);

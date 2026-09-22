@@ -130,7 +130,8 @@ def fit_beta(centers: np.ndarray, density: np.ndarray, bin_width: float) -> Opti
 
     Returns ``(beta_mu, beta_nu)`` or None (empty / zero-variance / over-dispersed).
     The sampler's mean inclination fraction is ``nu/(nu+mu) = tbar``, so we set
-    ``nu = alpha = tbar*nu_tot`` and ``mu = beta = (1-tbar)*nu_tot``.
+    ``nu = tbar*nu_tot`` (toward-vertical weight) and ``mu = (1-tbar)*nu_tot``
+    (toward-horizontal weight).
     """
     if density.sum() <= 0:
         return None
@@ -142,11 +143,11 @@ def fit_beta(centers: np.ndarray, density: np.ndarray, bin_width: float) -> Opti
     nu_tot = tbar * (1.0 - tbar) / var - 1.0
     if nu_tot <= 0:
         return None
-    alpha = tbar * nu_tot          # toward-vertical weight -> Helios nu
-    beta = (1.0 - tbar) * nu_tot   # toward-horizontal weight -> Helios mu
-    if not (np.isfinite(alpha) and np.isfinite(beta) and alpha > 0 and beta > 0):
+    nu = tbar * nu_tot          # toward-vertical weight
+    mu = (1.0 - tbar) * nu_tot  # toward-horizontal weight
+    if not (np.isfinite(nu) and np.isfinite(mu) and nu > 0 and mu > 0):
         return None
-    return float(beta), float(alpha)  # (mu, nu)
+    return float(mu), float(nu)  # (mu, nu)
 
 
 # Calibrated axial-resultant -> eccentricity table, built once at import by
