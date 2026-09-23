@@ -539,20 +539,24 @@ test('a touched-but-unnarrowed X does not crop siblings to the first scan', asyn
 // scan row's point count deliberately does not move until commit).
 
 /**
- * The mask's tally for the loaded cloud.
+ * The mask's tally for the fixture cloud, looked up by the cacheId on its scan
+ * row — the same key the Filter panel's percentage reads.
  *
- * Picks the entry with the most points rather than asserting there is exactly
- * one: the hook is keyed by octree cacheId, and a scan whose octree component
- * has not yet unmounted (or a previously-filtered cloud in the same session)
- * can still have an entry. The fixture is the only 60-point cloud in play.
+ * It used to pick the entry with the most points, on the theory that the
+ * fixture was the only 60-point cloud in play. It isn't: a scan whose octree
+ * component has not yet unmounted, or an earlier test's import of this same
+ * fixture, can leave a 60-point entry behind, and the tie kept whichever came
+ * first. Against the packaged macOS app that was a stale all-drawn entry — the
+ * test read 60 of 60 while the panel beside it correctly said "60% kept".
  */
 async function maskStats(page: import('@playwright/test').Page) {
-  return page.evaluate(() => {
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="scalars"]');
+  const cacheId = await row.getAttribute('data-octree-cache-id');
+  expect(cacheId, 'the fixture cloud has no octree cacheId').toBeTruthy();
+  return page.evaluate((id) => {
     const byCloud = (window as any).__octreeMaskByCloud ?? {};
-    const entries = Object.values(byCloud) as { drawn: number; full: number }[];
-    if (entries.length === 0) return null;
-    return entries.reduce((a, b) => (b.full > a.full ? b : a));
-  });
+    return (byCloud[id] ?? null) as { drawn: number; full: number } | null;
+  }, cacheId!);
 }
 
 test('previews a scalar filter live, before any commit', async () => {
