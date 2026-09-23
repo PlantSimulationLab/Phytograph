@@ -354,6 +354,40 @@ test('commit bakes the labels into the cloud and clears the dirty flag', async (
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
   await expect(panel).toHaveAttribute('data-label-dirty', 'true');
+  await expect.poll(() => page.evaluate(
+    () => (globalThis as any).__labelOverlay?.painted ?? -1), { timeout: 15_000 }).toBe(60);
+
+  // THE PAINT MUST NEVER DISAPPEAR. Between the click and the rebuild landing
+  // the octree still does not carry the column, so the only thing drawing the
+  // labels is the client-side overlay — which the commit clears the pending
+  // strokes out from under. A hold dropped one step too early shows up as a
+  // window where the overlay paints nothing, and by the time the rebuild lands
+  // the evidence is gone. Once it HAS landed the overlay reads the committed
+  // column back out of the octree as its baseline, so 60 stays 60 either side
+  // of the swap.
+  //
+  // So the window is sampled INSIDE the page, once per frame, from before the
+  // click. Polling from the test process can't see it reliably: a Playwright
+  // click takes ~2 s on the Linux CI runner, and a 60-point bake is over before
+  // the click returns — the old poll loop then read the frame the swap landed
+  // on (a -1) or never saw `data-label-baking="true"` at all.
+  await page.evaluate(() => {
+    const w = globalThis as any;
+    const samples: Array<{ painted: number; baking: string | null; pill: boolean }> = [];
+    w.__labelCommitSamples = samples;
+    w.__labelCommitSampling = true;
+    const tick = () => {
+      if (!w.__labelCommitSampling) return;
+      samples.push({
+        painted: w.__labelOverlay?.painted ?? -1,
+        baking: document.querySelector('[data-testid="label-panel"]')
+          ?.getAttribute('data-label-baking') ?? null,
+        pill: !!document.querySelector('[data-testid="octree-refresh-running"]'),
+      });
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
 
   await page.getByTestId('label-commit').click();
 
@@ -364,33 +398,28 @@ test('commit bakes the labels into the cloud and clears the dirty flag', async (
   await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
   await expect(panel).toHaveAttribute('data-pending-strokes', '0');
 
-  // THE PAINT MUST NEVER DISAPPEAR. Between the click and the rebuild landing
-  // the octree still does not carry the column, so the only thing drawing the
-  // labels is the client-side overlay — which the commit clears the pending
-  // strokes out from under. Poll it continuously rather than checking the end
-  // state: a hold dropped one step too early shows up as a window where the
-  // overlay paints nothing, and by the time the rebuild lands the evidence is
-  // gone. Once it HAS landed the overlay reads the committed column back out of
-  // the octree as its baseline, so 60 stays 60 either side of the swap.
-  const painted = () => page.evaluate(
-    () => (globalThis as any).__labelOverlay?.painted ?? -1);
-  const pill = page.getByTestId('octree-refresh-running');
-  const deadline = Date.now() + 90_000;
-  let sawBaking = false;
-  for (;;) {
-    expect(await painted()).toBe(60);
-    // ...and nothing on screen asks the user to wait for it. A progress
-    // indicator here would offer no decision and no action — the labels are
-    // saved and the tool is free — so it would only re-create the wait this
-    // change removed. Asserted inside the loop, so the baking window is
-    // actually observed rather than checked once it has already closed.
-    expect(await pill.count()).toBe(0);
-    const baking = await panel.getAttribute('data-label-baking');
-    if (baking === 'true') sawBaking = true;
-    if (sawBaking && baking === 'false') break;
-    if (Date.now() > deadline) throw new Error('the background bake never finished');
-    await page.waitForTimeout(100);
-  }
+  // Wait for a sampled frame showing the bake running, then one showing it done.
+  await expect.poll(() => page.evaluate(() => {
+    const s = (globalThis as any).__labelCommitSamples as Array<{ baking: string | null }>;
+    const started = s.findIndex(x => x.baking === 'true');
+    return started >= 0 && s.slice(started).some(x => x.baking === 'false');
+  }), { message: 'the background bake never ran and finished', timeout: 90_000 }).toBe(true);
+  const samples = await page.evaluate(() => {
+    const w = globalThis as any;
+    w.__labelCommitSampling = false;
+    return w.__labelCommitSamples as Array<{ painted: number; baking: string | null; pill: boolean }>;
+  });
+  const baked = samples.filter(s => s.baking === 'true').length;
+  expect(baked, 'no sampled frame caught the bake running').toBeGreaterThan(0);
+  // Every frame, before, during and after the swap, drew all 60 labels.
+  const dropped = samples.filter(s => s.painted !== 60);
+  expect(dropped, `${dropped.length}/${samples.length} frames did not paint all 60 labels`
+    + ` (first: ${JSON.stringify(dropped[0])})`).toEqual([]);
+  // ...and nothing on screen asked the user to wait for it. A progress
+  // indicator here would offer no decision and no action — the labels are saved
+  // and the tool is free — so it would only re-create the wait this change
+  // removed. Sampled per frame, so the baking window is actually observed.
+  expect(samples.filter(s => s.pill).length, 'a progress pill appeared during the bake').toBe(0);
 
   // The labels survived the rebuild as real data, and the cloud kept its points.
   await expect(panel).toHaveAttribute('data-labelled-count', '60');
@@ -436,7 +465,11 @@ test('you can keep painting and commit again while a bake is still running', asy
   const c = await counts(panel);
   expect(c[String(second)]).toBe(60);
   expect(c[String(first)] ?? 0).toBe(0);
-  expect(await page.evaluate(() => (globalThis as any).__labelOverlay?.painted ?? -1)).toBe(60);
+  // Polled: the swapped-in octree publishes its overlay count on its first
+  // frame, which on a slow software-GL renderer lands after data-label-baking
+  // flips. A drop to nothing is caught by the per-frame test above.
+  await expect.poll(() => page.evaluate(
+    () => (globalThis as any).__labelOverlay?.painted ?? -1), { timeout: 15_000 }).toBe(60);
 });
 
 test('the labels stay on screen when the tool is closed mid-bake', async () => {

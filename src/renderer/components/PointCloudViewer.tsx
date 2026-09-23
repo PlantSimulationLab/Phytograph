@@ -5279,12 +5279,18 @@ export default function PointCloudViewer({
   // setCropPolygon (see labelModeRef there). Every gate on the overlay, the
   // blocked-zone clamping, the camera freeze and the Escape/Backspace cascade
   // therefore works unchanged.
+  // Reset the published overlay fact when the tool (re)opens on a cloud, so it
+  // can never report the previous session's counts before the first frame.
+  // Keyed on the cloud's ID, not the object: a Commit's background bake swaps a
+  // new octree into the SAME cloud, and resetting there blanked a fact that was
+  // still true (the overlay keeps drawing across the swap) until the next frame
+  // republished it — which on a slow renderer read as the paint vanishing.
+  const labelTargetId = labelTargetCloud?.id ?? null;
   useEffect(() => {
-    if (labelTargetCloud) {
-      // Reset the published overlay fact when (re)opening on a cloud, so it can
-      // never report the previous session's counts before the first frame.
-      (window as any).__labelOverlay = undefined;
-    }
+    if (labelTargetId) (window as any).__labelOverlay = undefined;
+  }, [labelTargetId]);
+
+  useEffect(() => {
     if (labelTargetCloud && labelDrawing) {
       // Its OWN mode. Borrowing editMode==='crop' made the label tool literally
       // BE the crop tool: the Crop toolbar button lit up as active, the crop
