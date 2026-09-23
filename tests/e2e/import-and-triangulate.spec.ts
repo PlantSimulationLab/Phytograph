@@ -48,31 +48,56 @@ test('imports a point cloud, then triangulates via the UI with non-default optio
     // (No re-click — a plain click on the sole selection toggles it off.)
     await expect(cloudRow).toHaveAttribute('data-selected', 'true');
 
-    // Open the unified Triangulation modal. The imported scan (no scan params)
-    // makes Ball Pivoting the default method and the scan auto-selected.
-    await page.getByTestId('tool-triangulate').click();
-    const modal = page.getByTestId('triangulation-popup');
-    await expect(modal).toBeVisible();
-    // The freshly-imported scan should be pre-selected in the picker.
-    await expect(modal.getByTestId('triangulation-scan-row')).toHaveCount(1);
-
-    // Non-default user options: switch from Ball Pivoting to Poisson, pick a
-    // non-default octree depth of 7. Lower depth = faster on sparse fixtures
-    // and exercises method-specific parameter wiring.
-    await modal.getByTestId('triangulation-method').selectOption('poisson');
-    const depth = modal.getByTestId('triangulation-poisson-depth');
-    await expect(depth).toBeVisible();
-    // Range input: fill triggers React's onChange the same way the slider does.
-    await depth.fill('7');
-    await expect(depth).toHaveValue('7');
-
-    // Run it.
-    await modal.getByTestId('triangulation-run-button').click();
-
-    // Wait for the mesh row to appear (Poisson on 60 pts at depth 7 takes a
-    // few seconds at most against the local backend).
+    // Poisson IS the subject here (this is the only spec driving Poisson and its
+    // depth wiring through the UI), so it can't move to Ball Pivoting the way
+    // per-instance-colormap / triangulate-merge did. Open3D 0.19.0's Poisson
+    // fails nondeterministically on ~6% of calls (see `_run_poisson_isolated`),
+    // surfacing as either the child's own PoissonRecon error ("Failed to close
+    // loop … FEMTree.IsoSurface…") or the backend's segfault note. Retry ONLY
+    // on those two upstream signatures — any other error fails immediately.
+    const UPSTREAM_POISSON_FLAKE = /PoissonRecon|Poisson reconstruction crashed inside Open3D/;
     const meshRow = page.getByTestId('mesh-row').first();
-    await expect(meshRow).toBeVisible({ timeout: 60_000 });
+    const errorToast = page.getByTestId('toast-error').filter({ hasText: 'Triangulation Failed' });
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
+      // Open the unified Triangulation modal. The imported scan (no scan params)
+      // makes Ball Pivoting the default method and the scan auto-selected.
+      await page.getByTestId('tool-triangulate').click();
+      const modal = page.getByTestId('triangulation-popup');
+      await expect(modal).toBeVisible();
+      // The freshly-imported scan should be pre-selected in the picker.
+      await expect(modal.getByTestId('triangulation-scan-row')).toHaveCount(1);
+
+      // Non-default user options: switch from Ball Pivoting to Poisson, pick a
+      // non-default octree depth of 7. Lower depth = faster on sparse fixtures
+      // and exercises method-specific parameter wiring.
+      await modal.getByTestId('triangulation-method').selectOption('poisson');
+      const depth = modal.getByTestId('triangulation-poisson-depth');
+      await expect(depth).toBeVisible();
+      // Range input: fill triggers React's onChange the same way the slider does.
+      await depth.fill('7');
+      await expect(depth).toHaveValue('7');
+
+      // Run it.
+      await modal.getByTestId('triangulation-run-button').click();
+
+      // Wait for the mesh row OR a failure toast (Poisson on 60 pts at depth 7
+      // takes a few seconds at most against the local backend).
+      await expect(meshRow.or(errorToast)).toBeVisible({ timeout: 60_000 });
+      if (await meshRow.isVisible()) break;
+
+      const message = (await errorToast.getByTestId('toast-message').textContent()) ?? '';
+      if (!UPSTREAM_POISSON_FLAKE.test(message) || attempt >= MAX_ATTEMPTS) {
+        throw new Error(`Triangulation failed on attempt ${attempt}/${MAX_ATTEMPTS}: ${message}`);
+      }
+      console.log(`[import-and-triangulate] upstream Open3D Poisson flake on attempt ${attempt}, retrying: ${message}`);
+      // A failed run must not leave a mesh behind, and the toast must go so it
+      // can't be mistaken for the next attempt's result.
+      await expect(page.getByTestId('mesh-row')).toHaveCount(0);
+      await errorToast.getByTestId('toast-close').click();
+      await expect(errorToast).toHaveCount(0);
+    }
+    await expect(page.getByTestId('mesh-row')).toHaveCount(1);
 
     // The triangle count attribute is set from the live backend response.
     // For this cylinder fixture at Poisson depth 7 we expect a meaningful
