@@ -1,0 +1,18 @@
+name: final_S_finetune_s0
+description: "Leaf/wood PointNeXt-S: synthetic pre-training, then fine-tuned on hand-labelled real trees (seed 0)."
+task: wood_leaf
+cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache
+out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs
+model: {variant: S}
+hierarchy: {voxel: 0.01, levels: 5, k: 16}
+channels: [dxyz]
+crop: {max_points: 24000}
+train:
+  - {name: real, weight: 1.0, domain: real, splits: [train]}
+val: {splits: [val, val_synth], max_points_per_item: 400000}
+optim: {steps: 25000, batch: 8, lr: 0.0005, weight_decay: 0.05, warmup: 1000, label_smoothing: 0.1}
+eval_every: 2500
+checkpoint_every: 500
+workers: 14
+seed: 0
+init: /group/bnbaileygrp/bnbailey/phytograph_ml/runs/final_S_synth_s0/package

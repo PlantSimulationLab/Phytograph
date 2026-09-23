@@ -1,7 +1,7 @@
 {
   "name": "phytograph",
   "private": true,
-  "version": "0.91.0",
+  "version": "0.92.0",
   "description": "Phytograph desktop app.",
   "author": "Phytograph",
   "main": "dist-main/main.js",
@@ -214,6 +214,13 @@
         "to": "resources",
         "filter": [
           "potree_converter/**/*"
+        ]
+      },
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": [
+          "ml_models/**/*"
         ]
       },
       {

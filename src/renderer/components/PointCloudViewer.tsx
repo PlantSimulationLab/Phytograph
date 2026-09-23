@@ -383,6 +383,7 @@ type WoodSegmentTuning = {
   reflectance_weight_max?: number;
   scalar_slug?: string;
   method?: WoodMethod;
+  model_id?: string;
 };
 
 // Converts the user-facing Mesh Lighting multiplier (Display panel, default
@@ -1242,7 +1243,11 @@ export default function PointCloudViewer({
   // Classification method: 'sota' (branch-segment + cylinder-fit — recovers thin
   // branches without flooding leaves; needs ground removed) is the default;
   // 'connectivity' (skeleton backbone) and 'geometric' (point-wise) are alternatives.
-  const [woodMethod, setWoodMethod] = useState<WoodMethod>('sota');
+  // 'ml' by default: on 59 held-out real trees it reaches wood IoU 0.81 vs
+  // 0.61 for 'sota' (backend-api/research/ml/README.md).
+  const [woodMethod, setWoodMethod] = useState<WoodMethod>('ml');
+  // ML model for method 'ml' (null = the backend's bundled default).
+  const [woodModelId, setWoodModelId] = useState<string | null>(null);
   // Reflectance assist (opt-in toggle; defaults on when the selected cloud
   // carries a reflectance/intensity scalar — see woodReflectanceAvailable).
   const [woodUseReflectance, setWoodUseReflectance] = useState(true);
@@ -13873,6 +13878,7 @@ export default function PointCloudViewer({
       reg_iters: woodRegIters,
       reflectance_weight_max: reflWeight,
       method: woodMethod,
+      ...(woodMethod === 'ml' && woodModelId ? { model_id: woodModelId } : {}),
     };
     const aggregate = targets.length > 1 && woodMultiMode === 'aggregate';
 
@@ -14014,7 +14020,7 @@ export default function PointCloudViewer({
       woodSegmentAbortRef.current = null;
       woodSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodUseReflectance, inlineReflectance]);
+  }, [selectedIds, clouds, buildPointSource, getEditState, onUpdateCloud, woodBias, woodKMax, woodRegIters, woodMultiMode, woodMethod, woodModelId, woodUseReflectance, inlineReflectance]);
 
   // Segment a single cloud and apply the result per `woodMode` (label / split /
   // remove). Used by the per-scan path (and single selection).
@@ -24805,6 +24811,7 @@ export default function PointCloudViewer({
           mode={woodMode}
           multiMode={woodMultiMode}
           method={woodMethod}
+          modelId={woodModelId}
           selectedCount={selectedIds.size}
           inProgress={woodSegmentInProgress}
           error={woodSegmentError}
@@ -24817,6 +24824,7 @@ export default function PointCloudViewer({
           onModeChange={setWoodMode}
           onMultiModeChange={setWoodMultiMode}
           onMethodChange={setWoodMethod}
+          onModelIdChange={setWoodModelId}
           onUseReflectanceChange={setWoodUseReflectance}
           onSegment={handleWoodSegment}
           onCancel={cancelWoodSegment}

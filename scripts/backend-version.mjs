@@ -58,7 +58,11 @@ export const BACKEND_LIBHELIOS_HASH_FILE = 'phytograph_backend_libhelios.sha256'
 // `tools/`, `scripts/` and `tests/` are dev-only and deliberately excluded — a
 // change there cannot affect the shipped binary, and hashing them would demand
 // pointless 10-minute rebuilds.
-const BUNDLED_SOURCE_DIRS = ['', 'qsm', 'qsm/validation', 'vendor/treeiso'];
+// The walk is NOT recursive, so every bundled subpackage must be listed; a
+// new one left out here (as ml/ nearly was) is invisible to the check.
+const BUNDLED_SOURCE_DIRS = [
+  '', 'qsm', 'qsm/validation', 'vendor/treeiso', 'ml', 'ml/data', 'ml/models',
+];
 
 // The THIRD input to the bundle, and the one this hash was originally blind to:
 // PyHelios. `--collect-all pyhelios` pulls the submodule's Python package AND

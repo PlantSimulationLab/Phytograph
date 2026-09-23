@@ -140,6 +140,16 @@ const hiddenImports = [
   // is enough; they need no data files.
   'joblib',
   'threadpoolctl',
+  // The ML point classifier (backend-api/ml/). main.py and seg_worker import it
+  // only inside functions, so it is declared rather than left to the scan.
+  // torch itself is already in the bundle (phytorch-lib pulls it in).
+  'ml',
+  'ml.registry',
+  'ml.package',
+  'ml.infer',
+  'ml.device',
+  'ml.models',
+  'ml.models.pointnext',
 ];
 
 // --collect-all bundles a package's binaries + data files + submodules.

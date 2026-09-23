@@ -1,0 +1,96 @@
+{
+  "format": "phytograph-ml-model",
+  "schema_version": 1,
+  "id": "wood-leaf-pointnext-s-v1",
+  "name": "Wood/leaf (PointNeXt-S)",
+  "description": "PointNeXt-S pre-trained on 17 Helios synthetic scenes, then fine-tuned on 178 hand-labelled real trees (LeWoS, BCI, Weiser). Selected from three seeds by validation mIoU.",
+  "task": "wood_leaf",
+  "arch": "pointnext",
+  "hparams": {
+    "in_channels": 3,
+    "num_classes": 2,
+    "radii": [
+      0.03535533905932738,
+      0.07071067811865477,
+      0.14142135623730953,
+      0.28284271247461906,
+      0.5656854249492381
+    ],
+    "variant": "S"
+  },
+  "hierarchy": {
+    "voxel": 0.01,
+    "levels": 5,
+    "k": 16,
+    "radius_factor": 2.5,
+    "stride": 4,
+    "clamp_factor": 4.0
+  },
+  "inputs": {
+    "channels": [
+      "dxyz"
+    ]
+  },
+  "crop": {
+    "max_points": 24000,
+    "inner_fraction": 0.7
+  },
+  "classes": [
+    {
+      "value": 1,
+      "name": "Wood",
+      "color": "#664221"
+    },
+    {
+      "value": 2,
+      "name": "Leaf",
+      "color": "#4db04f"
+    }
+  ],
+  "output_slug": "wood_class",
+  "training": {
+    "config": "final_S_finetune_s0",
+    "task": "wood_leaf",
+    "steps": 22500,
+    "train_groups": [
+      {
+        "name": "real",
+        "weight": 1.0,
+        "domain": "real",
+        "splits": [
+          "train"
+        ]
+      }
+    ],
+    "commit": "4d1580c85333b8d3b9e942daca90c0024e95c20f"
+  },
+  "metrics": {
+    "val_mean_item_miou": 0.7410867330183634,
+    "val_pooled": {
+      "n": 13337063,
+      "oa": 0.904602310118802,
+      "miou": 0.7950383946560333,
+      "iou_wood": 0.7156077175794028,
+      "f1_wood": 0.8342323367361311,
+      "recall_wood": 0.7637481261230141,
+      "precision_wood": 0.9190488206281773,
+      "iou_leaf": 0.8744690717326637,
+      "f1_leaf": 0.9330312085910802,
+      "recall_leaf": 0.9691648718308441,
+      "precision_leaf": 0.8994950655377612
+    },
+    "step": 22500,
+    "benchmark": {
+      "held_out_real_trees": 59,
+      "mean_item_miou": 0.834,
+      "mean_item_wood_iou": 0.805,
+      "sota_mean_item_miou": 0.658,
+      "sota_mean_item_wood_iou": 0.608,
+      "leafoff_almond_wood_recall": 0.888,
+      "sota_leafoff_almond_wood_recall": 0.466,
+      "at_3cm_spacing_mean_item_miou": 0.782,
+      "sota_at_3cm_spacing_mean_item_miou": 0.604,
+      "source": "backend-api/research/ml/bench.py; splits in research/ml/corpus.py"
+    }
+  }
+}

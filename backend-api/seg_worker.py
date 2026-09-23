@@ -10,7 +10,7 @@ before importing uvicorn so the frozen PyInstaller binary can re-enter as a
 worker. NOT imported by the FastAPI server — it only runs in the child.
 
 Protocol (all files live in `workdir`):
-  IN   request.json     {"tool": "ground|wood|trees|denoise|skeleton|poisson|normals", "params": {...}}
+  IN   request.json     {"tool": "ground|wood|trees|denoise|skeleton|poisson|normals|ml_device|ml_import", "params": {...}}
        input.npy        (N, 3) float64 points
        reflectance.npy  optional (N,) float64           (wood only)
        seeds.npy        optional (S, 3) float64          (trees only)
@@ -19,7 +19,9 @@ Protocol (all files live in `workdir`):
                                                           beam origins)
   OUT  output.npy       (N,) int labels                  (ground/wood/trees/denoise)
                         (N, 5) float32                   (normals)
-       result.json      skeleton's structured result dict (skeleton only)
+       result.json      skeleton's structured result dict (skeleton only);
+                        the device probe (ml_device); the installed model's
+                        summary or a readable error (ml_import)
        vertices.npy     (V, 3) float64                   (poisson only)
        triangles.npy    (T, 3) int32                     (poisson only)
        densities.npy    (V,) float64                     (poisson only)
@@ -97,6 +99,26 @@ def run(workdir: str) -> int:
                     np.asarray(mesh.triangles, dtype=np.int32))
             np.save(os.path.join(workdir, "densities.npy"),
                     np.asarray(densities, dtype=np.float64))
+            return 0
+
+        if tool in ("ml_device", "ml_import"):
+            # ML housekeeping. Here, not in the server, so torch is never
+            # imported into the backend process (see _ML_DEVICE_CACHE in
+            # main.py). Neither needs main.
+            if tool == "ml_device":
+                from ml.device import probe
+                result = probe()
+            else:
+                from ml import registry
+                from ml.package import PackageError
+                try:
+                    pkg = registry.import_package(params["path"])
+                    result = {"success": True, "model": {**pkg.summary(), "origin": "user"}}
+                except PackageError as e:
+                    # A readable reason for the user, not a traceback.
+                    result = {"success": False, "error": str(e)}
+            with open(os.path.join(workdir, "result.json"), "w") as f:
+                json.dump(result, f, default=_json_default)
             return 0
 
         # Import the compute functions lazily, AFTER args are staged, so a

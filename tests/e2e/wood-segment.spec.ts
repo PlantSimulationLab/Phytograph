@@ -10,9 +10,10 @@ const FIXTURE2 = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tree_wood_leaf2.xyz
 
 // tree_wood_leaf.xyz is a synthetic woody plant: a vertical trunk + two angled
 // branches (1380 compact "wood" points) and 11 scattered leaf blobs (2860
-// "leaf" points), shuffled in z. The geometric classifier separates these
-// cleanly (~0.90 accuracy). The 4th column is a ground-truth label, irrelevant
-// to the workflow — segmentation computes its own `wood_class`.
+// "leaf" points), shuffled in z. The default method (the ML model) calls ~900
+// of its points wood and the geometric 'sota' method ~1250; the bounds below
+// admit both. The 4th column is a ground-truth label, irrelevant to the
+// workflow — segmentation computes its own `wood_class`.
 //
 // Drives the real DOM against the live backend: import (→ octree) → select →
 // open the Wood/Leaf panel → run → assert the cloud is re-coloured by the
@@ -96,6 +97,10 @@ test('removes wood, leaving a leaf-only cloud', async () => {
   expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(4240);
 
   await page.getByTestId('tool-wood-segment').click();
+  // Pinned to the geometric method: ML is the default and every other test
+  // here exercises it, so this one keeps 'sota' (and its ground-removal
+  // skeleton path) covered end to end.
+  await page.getByTestId('wood-method').selectOption('sota');
   await page.getByTestId('wood-mode').selectOption('remove');
   await page.getByTestId('wood-segment-run-button').click();
 
@@ -147,4 +152,50 @@ test('segments two selected scans together and labels both', async () => {
   // not split or removed).
   expect(parseInt((await row1.getAttribute('data-point-count')) ?? '0', 10)).toBe(4240);
   expect(parseInt((await row2.getAttribute('data-point-count')) ?? '0', 10)).toBe(3360);
+});
+
+// A REAL tree, not the toy above: LeWoS tree 1 (tropical, hand-labelled,
+// decimated to 50k points), shared with the backend's accuracy gates. The
+// benchmark held it out of the model's training (backend-api/research/ml/
+// corpus.py), so this is the shipped model on a tree it has never seen.
+// Ground truth: 8188 wood / 41812 leaf. The model predicts ~6700 wood (OA
+// 0.96); the bounds allow for seed-to-seed variation between model versions
+// but fail a model that has lost the trunk (too little wood) or flooded the
+// crown (too much).
+const LEWOS_FIXTURE = join(repoRoot, 'backend-api', 'tests', 'fixtures', 'leafwood', 'lewos_tropical_small.xyz');
+
+test('machine-learning method splits a real tree close to its hand labels', async () => {
+  const { app, page } = session;
+
+  await importFiles(app, page, 'import-point-cloud', LEWOS_FIXTURE);
+  await completeImportWizard(page);
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="lewos_tropical_small"]');
+  await expect(cloudRow).toBeVisible({ timeout: 20_000 });
+  expect(parseInt((await cloudRow.getAttribute('data-point-count')) ?? '0', 10)).toBe(50000);
+
+  await page.getByTestId('tool-wood-segment').click();
+  await expect(page.getByTestId('wood-segment-panel')).toBeVisible();
+  await page.getByTestId('wood-method').selectOption('ml');
+
+  // The ML method has no geometric knobs, and reports where it will run: the
+  // pill's device is torch's own answer, fetched from the live backend.
+  await expect(page.getByTestId('wood-ml-controls')).toBeVisible();
+  await expect(page.getByTestId('wood-bias')).toHaveCount(0);
+  await expect(page.getByTestId('wood-kmax')).toHaveCount(0);
+  const pill = page.getByTestId('wood-ml-device');
+  await expect(pill).toBeVisible({ timeout: 60_000 });
+  expect(['cuda', 'mps', 'cpu']).toContain(await pill.getAttribute('data-device'));
+
+  await page.getByTestId('wood-mode').selectOption('split');
+  await page.getByTestId('wood-segment-run-button').click();
+
+  const woodRow = page.locator('[data-testid="scan-row"][data-scan-name="lewos_tropical_small (wood)"]');
+  const leafRow = page.locator('[data-testid="scan-row"][data-scan-name="lewos_tropical_small (leaf)"]');
+  await expect(woodRow).toBeVisible({ timeout: 180_000 });
+  await expect(leafRow).toBeVisible({ timeout: 60_000 });
+  const woodN = parseInt((await woodRow.getAttribute('data-point-count')) ?? '0', 10);
+  const leafN = parseInt((await leafRow.getAttribute('data-point-count')) ?? '0', 10);
+  expect(woodN + leafN).toBe(50000);
+  expect(woodN).toBeGreaterThan(5500);
+  expect(woodN).toBeLessThan(9500);
 });

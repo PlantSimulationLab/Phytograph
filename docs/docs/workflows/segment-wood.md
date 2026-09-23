@@ -2,12 +2,18 @@
 
 For plant-architecture work — skeletons, QSMs, branch geometry — the
 **woody structure** (trunk and branches) needs to be separated from the
-**leaves**. Phytograph classifies each point as wood or leaf with no machine
-learning and no training step, so it runs locally on any ground-cropped cloud.
+**leaves**. Phytograph classifies each point as wood or leaf locally, on any
+ground-cropped cloud.
 
-There are three methods (see **Method** below):
+There are four methods (see **Method** below):
 
-- **Branch-segment** (the default, recommended) builds a skeleton, breaks it into
+- **Machine learning** (the default, recommended) runs a PointNeXt network trained on about 180
+  hand-labelled real trees plus Helios synthetic scans. It is the most accurate
+  method on trees it has never seen (see *How accurate is it?* below) and has
+  no tuning knobs. It uses an NVIDIA GPU (Windows/Linux) or Apple-silicon GPU
+  when one is available, and otherwise runs on the CPU, at about a minute per
+  2 million points.
+- **Branch-segment** builds a skeleton, breaks it into
   individual **branch segments**, and classifies each *whole segment* by how well
   it fits a cylinder — a real branch wraps a tight cylinder, a clump of leaves
   does not. Classifying segments rather than individual points recovers the thin
@@ -28,11 +34,16 @@ There are three methods (see **Method** below):
 3. Click **Segment Wood / Leaf** (the icon showing a bare forked branch and a
    leaf either side of a dashed split, in the **Tools** › Segmentation group),
    or open the command palette and choose **Segment Wood / Leaf**.
-4. Adjust the parameters if needed (the defaults work across broadleaf and
-   conifer scans):
-    - **Method** — **Branch-segment** (default; segment-wise cylinder-fit, best on
-      real trees, needs the ground removed), **Connectivity** (skeleton backbone),
-      or **Geometric** (local shape only). Use Geometric if the cloud can't be
+4. Choose the method and adjust the parameters if needed (the defaults work
+   across broadleaf and conifer scans; the sensitivity, neighbourhood, smoothing
+   and reflectance settings belong to the geometric methods and are hidden for
+   Machine learning):
+    - **Method** — **Machine learning** (default; a trained network, no other
+      settings apply, and the panel shows a **GPU**/**CPU** pill for where it
+      will run), **Branch-segment** (segment-wise cylinder-fit, needs the ground
+      removed), **Connectivity** (skeleton backbone), or **Geometric** (local
+      shape only). When more than one model is installed, a model picker
+      appears under the method. Use Geometric if the cloud can't be
       cleanly ground-removed, or for a quick shape-based pass on a
       partial/disconnected cloud where a single rooted tree can't be traced.
     - **Wood sensitivity (0–1)** — the wood/leaf decision threshold. Raise it
@@ -96,11 +107,20 @@ extraction or QSM building on the `… (wood)` cloud alone; if you chose **Remov
 wood**, the surviving cloud is the leaves, ready for leaf-area analysis.
 
 !!! note "How accurate is it?"
-    On manually-labelled terrestrial-laser scans of real trees (oak, beech,
-    maple, pine, spruce) the geometric and connectivity methods reach roughly
-    **80–90 %** overall accuracy; **Branch-segment** — the newer default, which
-    fits cylinders per skeleton segment — is generally the most reliable on real
-    trees.
+    Measured on 59 hand-labelled real trees that no method was tuned or
+    trained on (tropical, temperate and boreal), **Machine learning** labels
+    wood with an intersection-over-union of about **0.80**, against **0.61**
+    for Branch-segment. On leaf-off almond trees, where every point is wood,
+    it keeps about 89 % of the wood where Branch-segment keeps under half.
+    It still leads on clouds thinned to 3 cm point spacing, but by less, and
+    on a very sparse cloud a geometric method can occasionally do better, so
+    segment before decimating when you can.
+
+    Among the geometric methods, on the same kind of scans (oak, beech,
+    maple, pine, spruce) Geometric and Connectivity reach roughly
+    **80–90 %** overall accuracy; **Branch-segment**, which fits cylinders per
+    skeleton segment, is generally the most reliable of the three, and is the
+    one to reach for when a cloud is too sparse for the model.
     Fine twigs embedded in dense foliage are the usual error source — and that is
     exactly where **Connectivity** helps: by tracing branches back to the trunk it
     recovers thin twigs the geometric method drops, which matters most when the
