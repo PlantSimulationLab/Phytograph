@@ -64,7 +64,15 @@ function isRetryableNotaryError(err) {
     /HTTPError\(statusCode: nil/.test(message) ||
     /\b(429|500|502|503|504)\b.*\b(notary|appstoreconnect)\b/i.test(message) ||
     // Upload/submission plumbing that isn't a verdict.
-    /Failed to upload|Unable to (?:upload|submit)/i.test(message)
+    /Failed to upload|Unable to (?:upload|submit)/i.test(message) ||
+    // Stapling AFTER an accepted notarization, when Apple's ticket-delivery
+    // service (api.apple-cloudkit.com) is down. The verdict is already in, so
+    // this is weather, not a judgement — but its message names neither
+    // "notary" nor "appstoreconnect", so the gateway rule above misses it. It
+    // cost the v0.91.0 arm64 build: "Failed to staple … code: 68" with a 503 in
+    // the stapler output. Only on a server/throttle status; a staple failure
+    // without one (e.g. no ticket exists) is not retried.
+    (/Failed to staple/i.test(message) && /Status Code: (?:429|5\d\d)\b/.test(message))
   );
 }
 

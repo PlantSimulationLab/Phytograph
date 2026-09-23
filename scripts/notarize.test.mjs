@@ -61,6 +61,25 @@ describe('isRetryableNotaryError', () => {
     expect(isRetryableNotaryError(new Error(message))).toBe(true);
   });
 
+  it('retries the real v0.91.0 staple failure (ticket service 503)', () => {
+    // Trimmed from the v0.91.0 macos-14 build log (2026-09-23T18:14:38Z): the
+    // app was already notarized; stapler could not fetch the ticket.
+    const V091_STAPLE_503 =
+      'Failed to staple your application with code: 68\n\n' +
+      'Processing: /Users/runner/work/Phytograph/Phytograph/release/mac-arm64/Phytograph.app\n' +
+      'Domain is api.apple-cloudkit.com\n' +
+      'Response is <NSHTTPURLResponse: 0x60000036a5e0> { URL: https://api.apple-cloudkit.com/database/1/' +
+      'com.apple.gk.ticket-delivery/production/public/records/lookup } { Status Code: 503, Headers {';
+    expect(isRetryableNotaryError(new Error(V091_STAPLE_503))).toBe(true);
+  });
+
+  it('does NOT retry a staple failure that carries no server status', () => {
+    const noTicket =
+      'Failed to staple your application with code: 65\n\n' +
+      'Processing: /tmp/Phytograph.app\nCloudKit query for Phytograph.app (2/abc) failed due to "Record not found".';
+    expect(isRetryableNotaryError(new Error(noTicket))).toBe(false);
+  });
+
   it('does NOT retry a rejected verdict, even though it mentions notarytool', () => {
     expect(isRetryableNotaryError(new Error(REJECTED_VERDICT))).toBe(false);
   });
