@@ -177,40 +177,85 @@ def test_an_inline_payload_within_the_limit_is_accepted():
     assert result["success"], result.get("error")
 
 
-def test_the_reported_pair_count_is_exact_not_an_estimate():
-    """The progress label promises a total, so it must be the real one.
+def _counting_searches(sabotage=None):
+    """Patch the coarse search to count calls, optionally corrupting some.
 
-    It was genuinely approximate under the old probe-then-fill scheme: a
-    bounded subgraph picked the variant and the winner filled the rest, so the
-    total depended on how those overlapped, and the label said "of ~N". Per-pair
-    selection tries every graph edge against every variant, which is their
-    product -- exact. Counting the actual searches pins that, so the tilde
-    cannot quietly become wrong again.
+    `sabotage(call_kwargs, index)` returning True makes that call's result a
+    pose 6 m and 30 deg wrong -- the size of a real row-shifted answer.
     """
+    import threading
     from unittest.mock import patch
 
     import raster_correlation
 
-    poses = [np.eye(4), _rigid(9.0, [2.0, -1.0, 0.0]), _rigid(-6.0, [-2.0, 2.0, 0.0]),
-             _rigid(4.0, [1.0, 3.0, 0.0])]
-    views = _views(_scene(), poses, seed=21)
-
     real = raster_correlation.register_by_correlation
-    calls = {"n": 0}
+    calls = []
+
+    lock = threading.Lock()
 
     def counting(*args, **kwargs):
-        calls["n"] += 1
-        return real(*args, **kwargs)
+        # Searches run concurrently, so the call's index is taken under a lock
+        # at entry, not read back after the search returns.
+        with lock:
+            index = len(calls)
+            calls.append(kwargs)
+        result = real(*args, **kwargs)
+        if sabotage is not None and sabotage(kwargs, index):
+            result = dict(result)
+            result["transformation"] = (_rigid(30.0, [6.0, 0.0, 0.0])
+                                        @ np.asarray(result["transformation"]))
+        return result
 
-    with patch.object(raster_correlation, "register_by_correlation", counting):
+    return patch.object(raster_correlation, "register_by_correlation",
+                        counting), calls
+
+
+def _four_views():
+    poses = [np.eye(4), _rigid(9.0, [2.0, -1.0, 0.0]), _rigid(-6.0, [-2.0, 2.0, 0.0]),
+             _rigid(4.0, [1.0, 3.0, 0.0])]
+    return poses, _views(_scene(), poses, seed=21)
+
+
+def test_a_graph_that_closes_costs_one_search_per_edge():
+    """The other matching settings are tried only when the default's graph
+    fails loop closure. On every real set measured the default closes, so the
+    common case is one search per edge -- a quarter of the old cost."""
+    from loop_closure import scan_graph_edges
+
+    poses, views = _four_views()
+    patcher, calls = _counting_searches()
+    with patcher:
         result = main._do_multi_scan_register(
             _request(views, refine_icp=False), progress=None)
     assert result["success"], result.get("error")
+    assert result["loops_consistent"]
+    assert len(calls) == len(scan_graph_edges(len(views)))
+    assert all(c.get("cell") is None and c.get("mode") == "occupancy"
+               for c in calls)
+    assert result["variant"]["mode"] == "occupancy"
 
-    predicted = main._expected_coarse_runs(
-        len(views), True, False, 0)
-    assert calls["n"] == predicted, (
-        f"progress promises {predicted} searches but {calls['n']} ran")
+
+def test_a_graph_that_does_not_close_falls_back_to_every_setting():
+    """Corrupt the default setting's answer on one edge: the loops break, so
+    every other setting must be tried on every edge and the per-pair search
+    must route around the bad one -- the old behaviour, reached only when it
+    is needed."""
+    from loop_closure import _COARSE_VARIANTS, scan_graph_edges
+
+    poses, views = _four_views()
+    n_edges = len(scan_graph_edges(len(views)))
+    patcher, calls = _counting_searches(
+        sabotage=lambda kw, i: i == 0)       # first default-setting search
+    with patcher:
+        result = main._do_multi_scan_register(
+            _request(views, refine_icp=False), progress=None)
+    assert result["success"], result.get("error")
+    assert len(calls) == n_edges * len(_COARSE_VARIANTS)
+    assert result["variant"]["mode"] == "per-pair"
+    assert result["loops_consistent"], result["loops"]
+    for k, P in enumerate(poses[1:], start=1):
+        M = np.asarray(result["transformation_matrices"][str(k)]).reshape(4, 4)
+        assert np.linalg.norm(M[:2, 3] - P[:2, 3]) < 1.0
 
 
 def test_the_fine_stage_keeps_the_near_field_and_equalises_it_instead():

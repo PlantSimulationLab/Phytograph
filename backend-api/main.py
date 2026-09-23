@@ -41073,27 +41073,6 @@ def _reject_sparse_voxels(points: np.ndarray,
 # and the returns that were being thrown away are the most accurate in the
 # scan. See `fine_registration`.
 
-def _expected_coarse_runs(n_scans: int, select_variant: bool,
-                          complete_graph: bool = False,
-                          reference: int = 0) -> int:
-    """How many coarse searches a run will perform, for the progress bar.
-
-    EXACT, not an estimate. It was approximate under the old probe-then-fill
-    scheme, where a bounded subgraph chose the variant and the winner then
-    filled the remaining edges, so the total depended on how those two sets
-    overlapped. Per-pair selection replaced that: every edge in the graph is
-    tried against every variant, which is simply their product. Verified
-    against the real call count at 3, 4 and 5 scans.
-    """
-    from loop_closure import _COARSE_VARIANTS, scan_graph_edges
-
-    n_edges = len(scan_graph_edges(n_scans, reference, complete_graph))
-    if not select_variant or n_scans < 3:
-        return n_edges
-    # Per-pair selection tries every variant on every edge in the graph.
-    return n_edges * len(_COARSE_VARIANTS)
-
-
 # Concurrent coarse searches. Each search's ranking ICP is itself OpenMP-
 # threaded but spends most of a call in serial numpy (rasterise / FFT) and in
 # Open3D's fixed per-call overhead, so a few in flight fill the cores the one
@@ -41314,19 +41293,13 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                  finest_voxel if finest_voxel > v * 1.01 else v)
                 for pts, v in working]
 
-        # A 5-scan set runs 32 coarse searches (8 graph edges x 4 variants).
-        # Reporting only the phase left the bar frozen at 10% for minutes on a
-        # real set, which reads as a hang.
-        expected = max(1, _expected_coarse_runs(
-            n, request.select_variant, request.complete_graph, request.reference))
-
         # Each scan is in several edges and every edge runs every variant, so
         # the per-cloud half of a coarse call (ground strip, ranking cloud and
         # its normals) is computed once here rather than per call. See
         # `raster_correlation.CoarseCloud`.
         coarse = [CoarseCloud(X) for X in clouds]
 
-        def run_coarse(jobs):
+        def run_coarse(jobs, span=(0.10, 0.70), label="Registering scan pairs"):
             """{(a, b, cell, mode): 4x4} for every job, computed concurrently.
 
             Every (edge, variant) search is independent, so they run on a small
@@ -41363,10 +41336,9 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                     for f in as_completed(futures):
                         out[futures[f]] = f.result()
                         if progress is not None:
-                            frac = min(len(out) / expected, 1.0)
-                            progress(0.10 + 0.60 * frac,
-                                     f"Registering scan pairs "
-                                     f"({len(out)} of {expected})")
+                            frac = min(len(out) / max(len(jobs), 1), 1.0)
+                            progress(span[0] + (span[1] - span[0]) * frac,
+                                     f"{label} ({len(out)} of {len(jobs)})")
                         _cancel_checkpoint(progress)
                 except BaseException:
                     for pending in futures:
@@ -41397,23 +41369,50 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # 10 pairs took 104 s against 15 pairs at 201 s, both 5 of 5.
             edges = scan_graph_edges(n, reference=request.reference,
                                      complete=request.complete_graph)
-            # The selector asks for every edge's candidates up front, so the
-            # whole table is computed in one concurrent batch and served here.
-            table = run_coarse([(a, b, cell, mode) for a, b in edges
-                                for cell, mode in _COARSE_VARIANTS])
+            # LAZILY: the default variant first, on every edge, and the rest
+            # only if its graph does not close.
+            #
+            # Trying every variant on every edge up front was 3/4 of the coarse
+            # stage, and on every real set now measured it bought nothing: the
+            # default variant ALONE closes every loop with every edge correct
+            # against RiSCAN's poses (edge errors 1-18 cm) on olive (8 edges),
+            # peach (10), UC Davis (3) and the peach .riproject (10), and
+            # closes GrapeX's loop to 4.9 cm. The other variants either
+            # matched it or were the ones going 26-107 m wrong. Loop closure is
+            # the same test that picks among the variants, so a graph it
+            # passes is one the full search would have accepted too; a graph
+            # it fails gets exactly the full search, reusing the first pass.
+            first = _COARSE_VARIANTS[0]
+            table = run_coarse([(a, b) + first for a, b in edges],
+                               span=(0.10, 0.40))
+            pairs = {(a, b): table[(a, b) + first] for a, b in edges}
+            report = check_loops(pairs, n)
+            if report.get("consistent"):
+                variant = dict(cell=first[0], mode=first[1],
+                               worst_loop=max((lp["translation_error"]
+                                               for lp in report["loops"]),
+                                              default=None),
+                               closed=len(report["loops"]),
+                               total=len(report["loops"]),
+                               tried=[f"{first[0]}/{first[1]}"])
+            else:
+                table.update(run_coarse(
+                    [(a, b, cell, mode) for a, b in edges
+                     for cell, mode in _COARSE_VARIANTS[1:]],
+                    span=(0.40, 0.70), label="Trying other matching settings"))
 
-            def candidates(a, b):
-                return [table[(a, b, cell, mode)]
-                        for cell, mode in _COARSE_VARIANTS]
+                def candidates(a, b):
+                    return [table[(a, b, cell, mode)]
+                            for cell, mode in _COARSE_VARIANTS]
 
-            chosen = select_per_pair_by_loops(n, candidates, edges=edges)
-            pairs, report = chosen["pairs"], chosen["report"]
-            variant = dict(cell=None, mode="per-pair",
-                           worst_loop=max((lp["translation_error"]
-                                           for lp in report.get("loops", [])),
-                                          default=None),
-                           closed=chosen["closed"], total=chosen["total"],
-                           tried=[f"{c}/{m}" for c, m in _COARSE_VARIANTS])
+                chosen = select_per_pair_by_loops(n, candidates, edges=edges)
+                pairs, report = chosen["pairs"], chosen["report"]
+                variant = dict(cell=None, mode="per-pair",
+                               worst_loop=max((lp["translation_error"]
+                                               for lp in report.get("loops", [])),
+                                              default=None),
+                               closed=chosen["closed"], total=chosen["total"],
+                               tried=[f"{c}/{m}" for c, m in _COARSE_VARIANTS])
         else:
             edges = scan_graph_edges(n, reference=request.reference,
                                      complete=request.complete_graph)
