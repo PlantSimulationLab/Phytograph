@@ -488,3 +488,118 @@ def test_pyramid_feed_hands_over_in_order_and_bounds_what_it_holds():
     parked.close()
     parked._thread.join(timeout=5)
     assert not parked._thread.is_alive()
+
+
+# --- surface pyramid (per-voxel moments) -------------------------------------
+
+
+def test_voxel_moments_match_a_direct_per_voxel_computation():
+    rng = np.random.default_rng(21)
+    pts = rng.normal(0, 1.0, (20_000, 3)) * [3.0, 2.0, 0.5] + [120.0, -40.0, 8.0]
+    voxel = 0.7
+    m = fr.VoxelMoments.from_points(pts, voxel)
+    key = fr._voxel_keys(pts, voxel, pts.min(axis=0))
+    _, inverse = np.unique(key, return_inverse=True)
+    inverse = inverse.ravel()
+    assert len(m) == inverse.max() + 1
+    assert m.n.sum() == len(pts)
+    # Check a spread of voxels against numpy's own mean / covariance.
+    order = np.argsort(m.mean[:, 0])
+    for v in order[:: max(1, len(order) // 25)]:
+        # Voxel ids from from_points are in sorted-key order, as are np.unique's.
+        members = pts[inverse == v]
+        assert len(members) == m.n[v]
+        np.testing.assert_allclose(m.mean[v], members.mean(axis=0), atol=1e-9)
+        if len(members) > 1:
+            c = np.cov(members.T, bias=True)
+            got = m.cov[v]
+            np.testing.assert_allclose(
+                got, [c[0, 0], c[1, 1], c[2, 2], c[0, 1], c[1, 2], c[0, 2]],
+                rtol=1e-5, atol=1e-7)
+
+
+def test_regridding_moments_conserves_mass_mean_and_spread():
+    """Coarser levels are built from moments alone; merging must be exact, or
+    every normal above the finest level is fitted to the wrong spread."""
+    rng = np.random.default_rng(22)
+    pts = _scene(rng, count=60_000)
+    fine = fr.VoxelMoments.from_points(pts, 0.05)
+    for voxel in (0.1, 0.4, 1000.0):
+        coarse, parent = fine.regrid(voxel)
+        assert coarse.n.sum() == len(pts)
+        assert parent.shape == (len(fine),)
+        whole = coarse.regrid(1e6)[0]            # everything in one cell
+        assert len(whole) == 1
+        np.testing.assert_allclose(whole.mean[0], pts.mean(axis=0), atol=1e-9)
+        c = np.cov(pts.T, bias=True)
+        np.testing.assert_allclose(
+            whole.cov[0], [c[0, 0], c[1, 1], c[2, 2], c[0, 1], c[1, 2], c[0, 2]],
+            rtol=1e-4, atol=1e-6)
+
+
+def test_closed_form_eigen_matches_numpy():
+    rng = np.random.default_rng(23)
+    A = rng.normal(size=(5000, 3, 3))
+    C = A @ np.transpose(A, (0, 2, 1))
+    C[:100] = np.diag([1.0, 1.0, 1e-6])            # near-perfect planes
+    six = np.stack([C[:, 0, 0], C[:, 1, 1], C[:, 2, 2],
+                    C[:, 0, 1], C[:, 1, 2], C[:, 0, 2]], axis=1)
+    vec, variation = fr._smallest_eigen(six)
+    w, V = np.linalg.eigh(C)
+    dot = np.abs((vec * V[:, :, 0]).sum(axis=1))
+    assert np.all(dot > 1 - 1e-6)
+    np.testing.assert_allclose(variation, w[:, 0] / w.sum(axis=1), atol=1e-9)
+    assert np.all(variation[:100] < 1e-5)
+
+
+def test_surface_pyramid_trusts_planes_and_matches_thin_foliage_point_to_point():
+    """A dense flat sheet is fitted as a plane; a sparse volumetric scatter --
+    one return per voxel, like far-field canopy -- gets no plane at all."""
+    rng = np.random.default_rng(24)
+    sheet = np.column_stack([rng.uniform(0, 4, 80_000), rng.uniform(0, 4, 80_000),
+                             rng.normal(0, 0.002, 80_000)])
+    blob = rng.uniform([10, 10, 0], [14, 14, 4], (3_000, 3))
+    m = fr.VoxelMoments.from_points(np.vstack([sheet, blob]), 0.1)
+    levels = fr.plan_levels(0.1, 0.5)
+    pyramid = fr.SurfacePyramid(m, levels)
+    finest = pyramid.level(len(levels) - 1)
+    pts = np.asarray(finest.points)
+    cov = np.asarray(finest.covariances)
+    on_sheet = pts[:, 0] < 5
+    # Plane-shaped with a vertical normal on the sheet...
+    normal_var = cov[on_sheet][:, 2, 2]
+    assert np.median(normal_var) < 0.01
+    # ...isotropic in the scatter.
+    blob_cov = cov[~on_sheet]
+    iso = np.all(np.abs(blob_cov - np.eye(3)) < 1e-9, axis=(1, 2))
+    assert iso.mean() > 0.9
+    assert pyramid.sizes == [len(pyramid.level(i).points) for i in range(len(levels))]
+
+
+def test_surface_pyramid_recovers_a_known_pose_from_two_viewpoints():
+    """The same end-to-end check `align` has for `Pyramid`, on the surface
+    pyramid the multi-scan stage uses."""
+    rng = np.random.default_rng(7)
+    surface = _scene(rng)
+    target = _scan_from(surface, np.array([-6.0, -4.0, 2.0]), rng)
+    source_world = _scan_from(surface, np.array([7.0, 5.0, 2.0]), rng)
+    yaw = np.radians(1.2)
+    truth = np.eye(4)
+    truth[:3, :3] = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                              [np.sin(yaw), np.cos(yaw), 0],
+                              [0, 0, 1]])
+    truth[:3, 3] = [0.18, -0.11, 0.04]
+    inv = np.linalg.inv(truth)
+    source = source_world @ inv[:3, :3].T + inv[:3, 3]
+
+    tm, tv = fr.surface_moments(target)
+    sm, sv = fr.surface_moments(source)
+    levels = fr.plan_levels(max(tv, sv), 1.0)
+    result = fr.align(fr.SurfacePyramid(tm, levels), fr.SurfacePyramid(sm, levels),
+                      levels, init=np.eye(4))
+    error = inv @ result["transformation"]
+    offset = float(np.linalg.norm(error[:3, 3]))
+    angle = np.degrees(np.arccos(np.clip((np.trace(error[:3, :3]) - 1) / 2, -1, 1)))
+    assert result["fitness"] > 0.5
+    assert offset < 0.02, f"translation off by {offset:.3f} m"
+    assert angle < 0.1, f"rotation off by {angle:.3f} deg"

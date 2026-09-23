@@ -41163,7 +41163,7 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # aid, not a cleaning step.
             work = None
             if request.refine_icp and request.refine_method != "planes":
-                work = fine_registration.working_copy(X)
+                work = fine_registration.surface_moments(X)
             # Reject sparse voxels, but keep the ORIGINAL footprint for scale.
             #
             # These two steps fight each other if left alone. `auto_cell_size`
@@ -41272,26 +41272,35 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                 clouds[ref], _robust_cloud_diagonal(clouds[ref]))
             levels = fine_registration.plan_levels(
                 max(v for _, v in working), pull_in)
-            # Now that the ladder is known, drop the detail each working
-            # copy holds BELOW its finest level -- the pyramid's own first
-            # downsample would merge those points away, so carrying them
-            # into every level costs time for nothing. A no-op when the set
-            # is homogeneous. See `fine_registration.trim_to_anchor`.
+            # Now that the ladder is known, merge each scan's moments up to
+            # its finest level -- detail BELOW it is detail no level can
+            # read, and holding it costs memory for nothing. A no-op when the
+            # set is homogeneous (see `fine_registration.trim_to_anchor` for
+            # the heterogeneous case that motivated it).
             #
-            # Trimmed to the LADDER's finest voxel, not to the widest
-            # working voxel that was passed in: `plan_levels` clamps its
-            # argument to [_MIN_FINEST_VOXEL_M, _MAX_FINEST_VOXEL_M], so on
-            # a set whose budget pushed a voxel past the ceiling the two
-            # differ and only the ladder's own value is the grid the
-            # pyramid will actually build.
+            # To the LADDER's finest voxel, not to the widest working voxel
+            # that was passed in: `plan_levels` clamps its argument to
+            # [_MIN_FINEST_VOXEL_M, _MAX_FINEST_VOXEL_M], so on a set whose
+            # budget pushed a voxel past the ceiling the two differ and only
+            # the ladder's own value is the grid the pyramid will build.
             finest_voxel = levels[-1][0]
-            # Each copy leaves here ON the finest level's grid when either
-            # step gridded it at that voxel, which lets `Pyramid` skip its
-            # own redundant first downsample (`gridded_at`).
             working = [
-                (fine_registration.trim_to_anchor(pts, v, finest_voxel),
-                 finest_voxel if finest_voxel > v * 1.01 else v)
-                for pts, v in working]
+                (moments.regrid(finest_voxel)[0]
+                 if finest_voxel > v * 1.01 else moments, v)
+                for moments, v in working]
+            # Every pyramid's inputs are now fixed, so they are built from
+            # here on -- reference first -- on a background thread, WHILE the
+            # coarse stage runs. That overlap is only worth having because
+            # `SurfacePyramid` is numpy and releases the GIL: the Open3D
+            # pyramid it replaced held it, and building those during the
+            # coarse stage stretched that stage 15 s -> 34 s. Bounded to the
+            # reference, the in-flight aligns and one ready spare; the Open3D
+            # hand-over happens later, in the align that first reads a level.
+            feed = fine_registration.PyramidFeed(
+                lambda k: fine_registration.SurfacePyramid(working[k][0],
+                                                           levels),
+                [ref] + [k for k in range(n) if k != ref],
+                ahead=_FINE_ALIGN_WORKERS + 2)
 
         # Each scan is in several edges and every edge runs every variant, so
         # the per-cloud half of a coarse call (ground strip, ranking cloud and
@@ -41526,30 +41535,19 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
 
                 if progress is not None:
                     progress(0.79, "Preparing the reference scan")
-                # Pyramids are built on a background thread, one ahead of the
-                # aligns that consume them (see `PyramidFeed`), bounded to the
-                # reference, the in-flight aligns and one ready spare.
-                #
-                # Deliberately started only NOW, not straight after ingest
-                # when the ladder is already known. That was tried: building
-                # pyramids during the coarse stage stretched it 15 s -> 34 s
-                # and the run got slower overall, because pyramid
-                # construction is Open3D code that holds the GIL and the
-                # coarse workers are starved while it runs. A GIL-free
-                # rewrite of the surface pass (scipy k-NN + closed-form 3x3
-                # eigenvectors) matched Open3D's normals exactly but ran 5x
-                # slower, so it could not pay for the overlap either.
-                feed = fine_registration.PyramidFeed(
-                    lambda k: fine_registration.Pyramid(
-                        working[k][0], levels, gridded_at=working[k][1]),
-                    [ref] + movers,
-                    ahead=_FINE_ALIGN_WORKERS + 2)
+                # The feed started building pyramids before the coarse stage
+                # (see above); take them in its order.
                 reference = feed.take(ref)
                 in_flight: List[tuple] = []
                 with ThreadPoolExecutor(max_workers=_FINE_ALIGN_WORKERS,
                                         thread_name_prefix="fine") as pool:
                     try:
                         for i in feed.order[1:]:
+                            if i not in fine_state:
+                                # Placed by no trustworthy pair: nothing to
+                                # refine, but its slot must still be freed.
+                                feed.discard(i)
+                                continue
                             _cancel_checkpoint(progress)
                             fine_report(i, 0.0, f"Aligning scan "
                                                 f"{movers.index(i) + 1} of "
