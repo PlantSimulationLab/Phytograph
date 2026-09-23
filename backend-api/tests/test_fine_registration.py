@@ -377,3 +377,229 @@ def test_trim_to_anchor_drops_only_detail_the_ladder_cannot_read():
                                                            levels).sizes, (
         "trimming changed what the pyramid holds -- it must only remove points "
         "the pyramid's own downsample would have merged")
+
+
+def test_voxel_centroids_match_open3d_exactly():
+    """The numpy downsample exists to release the GIL, not to change the
+    answer: same cells, same centroids as Open3D's, only the row order may
+    differ."""
+    import open3d as o3d
+
+    rng = np.random.default_rng(3)
+    pts = _scene(rng, count=120_000)
+    for voxel in (0.05, 0.2, 0.73):
+        mine = fr.voxel_centroids(pts, voxel)
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+        theirs = np.asarray(pc.voxel_down_sample(voxel).points)
+        assert len(mine) == len(theirs)
+        a = mine[np.lexsort(mine.T)]
+        b = theirs[np.lexsort(theirs.T)]
+        np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
+
+
+def test_occupied_voxel_count_predicts_the_downsample_length():
+    """`working_copy` searches its voxel by COUNTING rather than downsampling;
+    the count is only a valid stand-in if it is the downsample's length."""
+    rng = np.random.default_rng(4)
+    pts = _scene(rng, count=120_000)
+    for voxel in (0.03, 0.11, 0.4):
+        assert (fr._occupied_voxels(pts, voxel, pts.min(axis=0))
+                == len(fr.voxel_centroids(pts, voxel)))
+
+
+def test_working_copy_search_lands_under_budget_on_volumetric_cover():
+    """Vegetation fills volume, so occupancy falls slower than 1/voxel^2 and
+    the old sqrt step undershot for several passes. The measured-exponent
+    search must still land inside the budget, and not far under it."""
+    rng = np.random.default_rng(5)
+    canopy = rng.uniform([-10, -10, 0], [10, 10, 4], size=(600_000, 3))
+    budget = 60_000
+    pts, voxel = fr.working_copy(canopy, budget=budget)
+    assert len(pts) <= budget
+    assert len(pts) > 0.6 * budget
+    assert len(pts) == len(fr.voxel_centroids(canopy, voxel))
+
+
+def test_median_spacing_block_subset_tracks_the_full_cloud(monkeypatch):
+    """Above the size threshold the spacing probe measures whole columns of the
+    cloud rather than all of it; the answer must stay close to the full one."""
+    rng = np.random.default_rng(6)
+    pts = _scene(rng, count=400_000)
+    monkeypatch.setattr(fr, "_SPACING_BLOCK_MIN_POINTS", 10 ** 12)
+    full = fr.median_spacing(pts)
+    monkeypatch.setattr(fr, "_SPACING_BLOCK_MIN_POINTS", 1000)
+    subset = fr.median_spacing(pts)
+    assert abs(subset - full) / full < 0.10
+
+
+def test_pyramid_skips_only_a_redundant_finest_pass():
+    """`gridded_at` lets a caller whose points already sit on the finest grid
+    skip re-voxelising them. The levels must match an unskipped build to
+    within the handful of cells a second centroid pass merges."""
+    rng = np.random.default_rng(7)
+    pts = _scene(rng, count=200_000)
+    levels = fr.plan_levels(0.1, 0.6)
+    gridded = fr.voxel_centroids(pts, levels[-1][0])
+    plain = fr.Pyramid(gridded, levels).sizes
+    skipped = fr.Pyramid(gridded, levels, gridded_at=levels[-1][0]).sizes
+    assert skipped[-1] == len(gridded)
+    for a, b in zip(plain, skipped):
+        assert abs(a - b) <= 0.01 * b
+
+
+def test_pyramid_feed_hands_over_in_order_and_bounds_what_it_holds():
+    import threading
+    import time
+
+    built, live = [], []
+    lock = threading.Lock()
+
+    def build(k):
+        with lock:
+            built.append(k)
+            live.append(k)
+            assert len(live) <= 3
+        return f"pyramid-{k}"
+
+    feed = fr.PyramidFeed(build, [2, 0, 1, 3, 4], ahead=3)
+    try:
+        assert feed.take(2) == "pyramid-2"          # held, never released
+        for k in [0, 1, 3, 4]:
+            assert feed.take(k) == f"pyramid-{k}"
+            with lock:
+                live.remove(k)
+            feed.release()
+        assert built == [2, 0, 1, 3, 4]
+    finally:
+        feed.close()
+
+    # A builder failure surfaces to the consumer instead of hanging it.
+    def boom(k):
+        raise MemoryError("no room")
+
+    bad = fr.PyramidFeed(boom, [0, 1], ahead=2)
+    with pytest.raises(MemoryError):
+        bad.take(0)
+    bad.close()
+
+    # Closing while the builder is parked on a full window lets it exit.
+    parked = fr.PyramidFeed(lambda k: k, [0, 1, 2, 3], ahead=1)
+    assert parked.take(0) == 0
+    parked.close()
+    parked._thread.join(timeout=5)
+    assert not parked._thread.is_alive()
+
+
+# --- surface pyramid (per-voxel moments) -------------------------------------
+
+
+def test_voxel_moments_match_a_direct_per_voxel_computation():
+    rng = np.random.default_rng(21)
+    pts = rng.normal(0, 1.0, (20_000, 3)) * [3.0, 2.0, 0.5] + [120.0, -40.0, 8.0]
+    voxel = 0.7
+    m = fr.VoxelMoments.from_points(pts, voxel)
+    key = fr._voxel_keys(pts, voxel, pts.min(axis=0))
+    _, inverse = np.unique(key, return_inverse=True)
+    inverse = inverse.ravel()
+    assert len(m) == inverse.max() + 1
+    assert m.n.sum() == len(pts)
+    # Check a spread of voxels against numpy's own mean / covariance.
+    order = np.argsort(m.mean[:, 0])
+    for v in order[:: max(1, len(order) // 25)]:
+        # Voxel ids from from_points are in sorted-key order, as are np.unique's.
+        members = pts[inverse == v]
+        assert len(members) == m.n[v]
+        np.testing.assert_allclose(m.mean[v], members.mean(axis=0), atol=1e-9)
+        if len(members) > 1:
+            c = np.cov(members.T, bias=True)
+            got = m.cov[v]
+            np.testing.assert_allclose(
+                got, [c[0, 0], c[1, 1], c[2, 2], c[0, 1], c[1, 2], c[0, 2]],
+                rtol=1e-5, atol=1e-7)
+
+
+def test_regridding_moments_conserves_mass_mean_and_spread():
+    """Coarser levels are built from moments alone; merging must be exact, or
+    every normal above the finest level is fitted to the wrong spread."""
+    rng = np.random.default_rng(22)
+    pts = _scene(rng, count=60_000)
+    fine = fr.VoxelMoments.from_points(pts, 0.05)
+    for voxel in (0.1, 0.4, 1000.0):
+        coarse, parent = fine.regrid(voxel)
+        assert coarse.n.sum() == len(pts)
+        assert parent.shape == (len(fine),)
+        whole = coarse.regrid(1e6)[0]            # everything in one cell
+        assert len(whole) == 1
+        np.testing.assert_allclose(whole.mean[0], pts.mean(axis=0), atol=1e-9)
+        c = np.cov(pts.T, bias=True)
+        np.testing.assert_allclose(
+            whole.cov[0], [c[0, 0], c[1, 1], c[2, 2], c[0, 1], c[1, 2], c[0, 2]],
+            rtol=1e-4, atol=1e-6)
+
+
+def test_closed_form_eigen_matches_numpy():
+    rng = np.random.default_rng(23)
+    A = rng.normal(size=(5000, 3, 3))
+    C = A @ np.transpose(A, (0, 2, 1))
+    C[:100] = np.diag([1.0, 1.0, 1e-6])            # near-perfect planes
+    six = np.stack([C[:, 0, 0], C[:, 1, 1], C[:, 2, 2],
+                    C[:, 0, 1], C[:, 1, 2], C[:, 0, 2]], axis=1)
+    vec, variation = fr._smallest_eigen(six)
+    w, V = np.linalg.eigh(C)
+    dot = np.abs((vec * V[:, :, 0]).sum(axis=1))
+    assert np.all(dot > 1 - 1e-6)
+    np.testing.assert_allclose(variation, w[:, 0] / w.sum(axis=1), atol=1e-9)
+    assert np.all(variation[:100] < 1e-5)
+
+
+def test_surface_pyramid_trusts_planes_and_matches_thin_foliage_point_to_point():
+    """A dense flat sheet is fitted as a plane; a sparse volumetric scatter --
+    one return per voxel, like far-field canopy -- gets no plane at all."""
+    rng = np.random.default_rng(24)
+    sheet = np.column_stack([rng.uniform(0, 4, 80_000), rng.uniform(0, 4, 80_000),
+                             rng.normal(0, 0.002, 80_000)])
+    blob = rng.uniform([10, 10, 0], [14, 14, 4], (3_000, 3))
+    m = fr.VoxelMoments.from_points(np.vstack([sheet, blob]), 0.1)
+    levels = fr.plan_levels(0.1, 0.5)
+    pyramid = fr.SurfacePyramid(m, levels)
+    finest = pyramid.level(len(levels) - 1)
+    pts = np.asarray(finest.points)
+    cov = np.asarray(finest.covariances)
+    on_sheet = pts[:, 0] < 5
+    # Plane-shaped with a vertical normal on the sheet...
+    normal_var = cov[on_sheet][:, 2, 2]
+    assert np.median(normal_var) < 0.01
+    # ...isotropic in the scatter.
+    blob_cov = cov[~on_sheet]
+    iso = np.all(np.abs(blob_cov - np.eye(3)) < 1e-9, axis=(1, 2))
+    assert iso.mean() > 0.9
+    assert pyramid.sizes == [len(pyramid.level(i).points) for i in range(len(levels))]
+
+
+def test_surface_pyramid_recovers_a_known_pose_from_two_viewpoints():
+    """The same end-to-end check `align` has for `Pyramid`, on the surface
+    pyramid the multi-scan stage uses."""
+    rng = np.random.default_rng(7)
+    surface = _scene(rng)
+    target = _scan_from(surface, np.array([-6.0, -4.0, 2.0]), rng)
+    source_world = _scan_from(surface, np.array([7.0, 5.0, 2.0]), rng)
+    yaw = np.radians(1.2)
+    truth = np.eye(4)
+    truth[:3, :3] = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                              [np.sin(yaw), np.cos(yaw), 0],
+                              [0, 0, 1]])
+    truth[:3, 3] = [0.18, -0.11, 0.04]
+    inv = np.linalg.inv(truth)
+    source = source_world @ inv[:3, :3].T + inv[:3, 3]
+
+    tm, tv = fr.surface_moments(target)
+    sm, sv = fr.surface_moments(source)
+    levels = fr.plan_levels(max(tv, sv), 1.0)
+    result = fr.align(fr.SurfacePyramid(tm, levels), fr.SurfacePyramid(sm, levels),
+                      levels, init=np.eye(4))
+    error = inv @ result["transformation"]
+    offset = float(np.linalg.norm(error[:3, 3]))
+    angle = np.degrees(np.arccos(np.clip((np.trace(error[:3, :3]) - 1) / 2, -1, 1)))
+    assert result["fitness"] > 0.5
+    assert offset < 0.02, f"translation off by {offset:.3f} m"
+    assert angle < 0.1, f"rotation off by {angle:.3f} deg"

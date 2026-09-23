@@ -268,6 +268,31 @@ _ITERATION_BATCH = _MAX_ITERATIONS_PER_LEVEL
 # a global RMSE hides this failure completely.
 
 
+# Above this many points `median_spacing` measures a SPATIAL subset -- whole
+# 0.5 m columns, one in `_SPACING_BLOCK_KEEP` -- instead of building a tree over
+# the entire cloud. A nearest neighbour lies millimetres away, so keeping whole
+# columns keeps every probe's true neighbour except within a spacing of a
+# column wall; a RANDOM subset would not, since it thins the very neighbours
+# being measured. Many small columns rather than a few large ones, because
+# density varies with range: 2 m columns / 1-in-8 missed the full-cloud
+# median by up to 18% on real scans, 0.5 m / 1-in-4 by 2-3%. The full tree was
+# ~2 s of every 13 M-point scan's ingest; this is ~0.9 s.
+_SPACING_BLOCK_MIN_POINTS = 2_000_000
+_SPACING_BLOCK_M = 0.5
+_SPACING_BLOCK_KEEP = 4
+
+
+def _block_subset(points: np.ndarray) -> np.ndarray:
+    """Every point in a deterministic one-in-`_SPACING_BLOCK_KEEP` of the XY
+    columns; the whole cloud if that would leave too little to measure."""
+    b = np.floor(points[:, :2] / _SPACING_BLOCK_M).astype(np.int64)
+    h = (b[:, 0] * 73856093) ^ (b[:, 1] * 19349663)
+    keep = (h % _SPACING_BLOCK_KEEP) == 0
+    if keep.sum() < 100_000:
+        return points
+    return points[keep]
+
+
 def median_spacing(points: np.ndarray, sample: int = 20000) -> Optional[float]:
     """Median nearest-neighbour distance, sampled. None when unmeasurable.
 
@@ -281,9 +306,12 @@ def median_spacing(points: np.ndarray, sample: int = 20000) -> Optional[float]:
     """
     from scipy.spatial import cKDTree
 
-    finite = points[np.isfinite(points).all(axis=1)]
+    finite = (points if np.isfinite(points).all()
+              else points[np.isfinite(points).all(axis=1)])
     if len(finite) < 100:
         return None
+    if len(finite) > _SPACING_BLOCK_MIN_POINTS:
+        finite = _block_subset(finite)
     probe = finite[np.linspace(0, len(finite) - 1,
                                min(sample, len(finite))).astype(int)]
     tree = cKDTree(finite, leafsize=64, compact_nodes=False, balanced_tree=False)
@@ -307,24 +335,106 @@ def working_copy(points: np.ndarray,
     count-based formula is only a first guess -- it is corrected by downsampling
     and looking. `budget` wins over `_MAX_FINEST_VOXEL_M`; see that constant.
     """
-    import open3d as o3d
 
     pts = np.asarray(points, dtype=np.float64)
-    pts = pts[np.isfinite(pts).all(axis=1)]
+    if not np.isfinite(pts).all():
+        pts = pts[np.isfinite(pts).all(axis=1)]
+    voxel = _budget_voxel(pts, budget)
+    return voxel_centroids(pts, voxel), voxel
+
+
+def _budget_voxel(pts: np.ndarray, budget: int) -> float:
+    """The finest voxel whose occupied-cell count fits `budget`; see
+    `working_copy`. `pts` must be finite."""
     spacing = median_spacing(pts)
     voxel = float(np.clip(_FINEST_PER_SPACING * (spacing or _MIN_FINEST_VOXEL_M),
                           _MIN_FINEST_VOXEL_M, _MAX_FINEST_VOXEL_M))
-    cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(pts)
-    for _ in range(6):
-        reduced = cloud.voxel_down_sample(voxel)
-        count = len(reduced.points)
+    # SEARCH by counting, then downsample ONCE. The search used to run a full
+    # Open3D `voxel_down_sample` per guess and step the voxel by sqrt(count /
+    # budget), i.e. assume occupancy ~ 1/voxel^2. Vegetation is volumetric, not
+    # a surface: measured on a 13.7 M-point orchard scan occupancy fell as
+    # voxel^-0.82, so the sqrt step undershot and the loop took FIVE full passes
+    # (~2.5-4.2 s each, 14.6 s of an 18 s call, x every scan in a set). Now each
+    # guess is an occupied-cell COUNT (~1.2 s, same grid as Open3D's, so the
+    # same number), the exponent is measured from the counts already taken, and
+    # only the chosen voxel pays for centroids.
+    lo = pts.min(axis=0) if len(pts) else np.zeros(3)
+    seen: List[Tuple[float, int]] = []
+    for _ in range(8):
+        count = _occupied_voxels(pts, voxel, lo)
         if count <= budget:
             break
-        # Returns lie on surfaces, so occupancy falls roughly as 1/voxel^2; the
-        # 5% overshoot keeps this from needing a second pass in the common case.
-        voxel *= float(np.sqrt(count / budget)) * 1.05
-    return np.asarray(reduced.points), voxel
+        seen.append((voxel, count))
+        exponent = 2.0
+        if len(seen) >= 2:
+            (v1, c1), (v2, c2) = seen[-2], seen[-1]
+            if c1 > c2 and v2 > v1:
+                exponent = float(np.clip(np.log(c1 / c2) / np.log(v2 / v1),
+                                         0.5, 3.0))
+        # Aim a little under the budget so the common case needs no correction.
+        voxel *= float((count / budget) ** (1.0 / exponent)) * 1.02
+    return voxel
+
+
+def _voxel_keys(points: np.ndarray, voxel: float,
+                min_bound: np.ndarray) -> np.ndarray:
+    """One int64 cell id per point, on Open3D's `voxel_down_sample` grid
+    (origin at the cloud's min bound less half a voxel).
+
+    Built a column at a time: an (N, 3) int64 index array is 330 MB on a
+    13.7 M-point scan, and this runs on several scans at once during ingest.
+    """
+    origin = min_bound - voxel * 0.5
+    key = None
+    for axis in range(3):
+        col = np.floor((points[:, axis] - origin[axis]) / voxel).astype(np.int64)
+        if key is None:
+            key = col
+        else:
+            key *= int(col.max()) + 1
+            key += col
+    return key
+
+
+def _occupied_voxels(points: np.ndarray, voxel: float,
+                     min_bound: np.ndarray) -> int:
+    """How many cells Open3D's `voxel_down_sample(voxel)` would return.
+
+    Same grid Open3D uses, so the count is the length of the downsample it
+    predicts, at a third of the cost (no centroids: one integer sort).
+    """
+    if len(points) == 0:
+        return 0
+    key = _voxel_keys(points, voxel, min_bound)
+    key.sort()
+    return int(np.count_nonzero(np.diff(key))) + 1
+
+
+def voxel_centroids(points: np.ndarray, voxel: float) -> np.ndarray:
+    """Open3D's `voxel_down_sample(voxel)`, in numpy.
+
+    SAME CELLS AND SAME CENTROIDS -- verified identical to the last bit on a
+    13.7 M-point scan, only the row order differs -- at the same speed
+    (2.3 s against 2.6 s there). The reason to have it is the GIL: Open3D
+    holds it for the whole call (measured: a spinning Python thread got ~1% of
+    its normal throughput during one), so no two scans' downsamples could ever
+    overlap, whereas numpy's sort / gather / reduce release it. That is what
+    lets multi-scan ingest run several scans at once.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) == 0:
+        return pts.reshape(0, 3)
+    key = _voxel_keys(pts, voxel, pts.min(axis=0))
+    order = np.argsort(key, kind="stable")
+    key = key[order]
+    starts = np.flatnonzero(np.concatenate(([True], key[1:] != key[:-1])))
+    del key
+    counts = np.diff(np.append(starts, len(order))).astype(np.float64)
+    out = np.empty((len(starts), 3))
+    for axis in range(3):
+        # A column at a time, for the same memory reason as `_voxel_keys`.
+        out[:, axis] = np.add.reduceat(pts[order, axis], starts) / counts
+    return out
 
 
 def trim_to_anchor(points: np.ndarray, voxel: float,
@@ -355,18 +465,13 @@ def trim_to_anchor(points: np.ndarray, voxel: float,
     measured, and deferring the reduction until then would mean holding every
     full cloud at once -- the exact peak `working_copy` exists to bound.
     """
-    import open3d as o3d
-
     # `voxel_down_sample` returns cell CENTROIDS, so re-gridding a copy already
     # on this grid would shift points slightly for no gain. Only act when the
     # anchor is genuinely coarser; the 1% guard keeps float wobble in the
     # measured voxel from triggering a pointless pass.
     if not (anchor > voxel * 1.01):
         return points
-    cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(np.asarray(points,
-                                                         dtype=np.float64))
-    return np.asarray(cloud.voxel_down_sample(anchor).points)
+    return voxel_centroids(points, anchor)
 
 
 def plan_levels(finest: float, pull_in: float) -> List[Tuple[float, float]]:
@@ -434,11 +539,13 @@ class Pyramid:
     """
 
     def __init__(self, points: np.ndarray,
-                 levels: Sequence[Tuple[float, float]]):
+                 levels: Sequence[Tuple[float, float]],
+                 gridded_at: Optional[float] = None):
         import open3d as o3d
 
         pts = np.asarray(points, dtype=np.float64)
-        pts = pts[np.isfinite(pts).all(axis=1)]
+        if not np.isfinite(pts).all():
+            pts = pts[np.isfinite(pts).all(axis=1)]
         self._levels = list(levels)
         self._clouds = []
         # Downsample from the previous (finer) level rather than from the full
@@ -451,10 +558,22 @@ class Pyramid:
         # quite one -- `voxel_down_sample` returns cell CENTROIDS, so a second
         # pass shifts points slightly and merges a few (1,765,169 -> 1,765,146
         # on an olive scan) -- and skipping it was measured at 1.1 s per scan
-        # (~3% of a run) for a ~0.1 mm change in the result. Not worth threading
-        # the input's grid size through to find out; the pass stays.
+        # (~3% of a run) for a ~0.1 mm change in the result.
+        #
+        # That trade was judged "not worth threading the input's grid size
+        # through" when the stage was dominated by other costs. It no longer
+        # is: on a 13 M-point-per-scan set the pass measured 1.5 s per scan, of
+        # a fine stage that is now mostly fixed Open3D work. So callers that
+        # KNOW their points already sit on the finest level's grid -- a
+        # `working_copy` / `trim_to_anchor` output at that voxel -- pass
+        # `gridded_at`, and the redundant pass is skipped. Everyone else gets
+        # the pass exactly as before.
+        finest = min(voxel for voxel, _ in self._levels) if self._levels else 0.0
+        skip_finest = (gridded_at is not None and finest > 0
+                       and abs(gridded_at - finest) <= 0.01 * finest)
         for voxel, _corr in sorted(self._levels, key=lambda level: level[0]):
-            current = current.voxel_down_sample(voxel)
+            if not (skip_finest and voxel == finest):
+                current = current.voxel_down_sample(voxel)
             level = o3d.geometry.PointCloud(current)
             # NORMALS, then `_plane_shaped` -- see that function for why the
             # estimator's covariance needs nothing else. Computed here rather
@@ -570,3 +689,346 @@ def refine(target_points: np.ndarray, source_points: np.ndarray,
     return align(Pyramid(target, levels), Pyramid(source, levels), levels,
                  init=init, max_iterations=max_iterations,
                  rmse_threshold=rmse_threshold, progress=progress)
+
+
+class PyramidFeed:
+    """Build pyramids on a background thread, in a fixed order, a bounded
+    number ahead of whoever is consuming them.
+
+    Why: once the ladder is known -- which in a multi-scan run is right after
+    ingest -- every pyramid's inputs are fixed, but the fine stage that needs
+    them only starts after the coarse stage. Building them in that gap moves
+    ~5 s per 13 M-point scan off the critical path. The overlap is partial by
+    nature: pyramid construction is Open3D code that holds the GIL, so it
+    pauses Python-level work elsewhere while it runs, but the coarse stage's
+    workers spend most of their time inside GIL-released C++ (ICP, FFT).
+
+    `ahead` bounds how many built-but-not-released pyramids exist at once --
+    the memory bound, at ~0.3 GB per 2.5 M-point pyramid. A consumer must
+    `take` every index in `order`, in order (`discard` one it does not need),
+    and `release` each slot once done with that pyramid; an index held
+    indefinitely (the reference) simply keeps its slot. `close` stops the
+    builder after its current build; it is safe to call more than once.
+    """
+
+    def __init__(self, build, order: Sequence[int], ahead: int):
+        import threading
+
+        self.order = list(order)
+        self._build = build
+        self._ready: dict = {}
+        self._error: Optional[BaseException] = None
+        self._closed = False
+        self._cv = threading.Condition()
+        self._slots = threading.Semaphore(max(1, int(ahead)))
+        self._thread = threading.Thread(target=self._run, name="pyramids",
+                                        daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            for index in self.order:
+                self._slots.acquire()
+                if self._closed:
+                    return
+                built = self._build(index)
+                with self._cv:
+                    self._ready[index] = built
+                    self._cv.notify_all()
+        except BaseException as exc:  # handed to the consumer by `take`
+            with self._cv:
+                self._error = exc
+                self._cv.notify_all()
+
+    def take(self, index: int):
+        """Block until `index`'s pyramid is built; hand it over."""
+        with self._cv:
+            while index not in self._ready:
+                if self._error is not None:
+                    raise self._error
+                if self._closed:
+                    raise RuntimeError("pyramid feed closed")
+                self._cv.wait()
+            return self._ready.pop(index)
+
+    def release(self) -> None:
+        self._slots.release()
+
+    def discard(self, index: int) -> None:
+        self.take(index)
+        self.release()
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._ready.clear()
+            self._cv.notify_all()
+        # Unblock a builder parked on a slot so it can see `_closed` and exit.
+        self._slots.release()
+
+
+# ---------------------------------------------------------------------------
+# Surface pyramid from per-voxel MOMENTS -- the multi-scan fine stage.
+# ---------------------------------------------------------------------------
+#
+# What it replaces, and why: `working_copy` + `Pyramid` reduce each scan to
+# voxel centroids and then fit every level's normals by k-NN over those
+# centroids. That k-NN pass is Open3D code which holds the GIL (~5 s per
+# 13 M-point scan, strictly one scan at a time), and it fits each surface to
+# 30 CENTROIDS -- an already-averaged cloud -- rather than to the returns.
+#
+# Here one sorted pass over the RAW returns records, per voxel, the count, mean
+# and covariance. Everything after that is arithmetic on those moments: a
+# coarser level is the finer one regridded (moments add), and a voxel's normal
+# is the smallest eigenvector of ITS OWN returns' covariance. This is the shape
+# of what RIEGL's scanners store for registration (per-voxel centroid, PCA
+# normal, point count). It is numpy throughout, so it releases the GIL and
+# pyramids are built concurrently with the coarse stage; only the final
+# hand-over to Open3D holds it.
+#
+# MOST VOXELS ARE TOO THIN TO FIT A PLANE, and that shapes everything below.
+# Return density falls as 1/r^2, so the median voxel at the finest level holds
+# ONE return on every set measured (peach, olive, UC Davis), and 80-95% hold
+# fewer than `_MIN_SURFACE_POINTS` at every level. The dense minority -- the
+# near field -- gets a plane fitted to its own returns. A thin voxel INHERITS
+# the plane of the coarser voxel it merged into, but only if that plane is
+# genuinely planar (`_INHERIT_MAX_SURFACE_VARIATION`); otherwise it is matched
+# point-to-point, with an isotropic covariance, rather than against a plane
+# pointing wherever a handful of foliage returns happened to lie.
+#
+# Measured against RiSCAN's poses (median displacement per scan):
+#
+#     set              k-NN normals (before)    this
+#     peach .riproj 4  1.08 / 1.17 cm           0.52 / 0.79 cm
+#     peach 6          1.09 cm                  0.49 cm
+#     olive 5          0.45 cm (worst 0.57)     0.25 cm (worst 0.27)
+#     UC Davis 3       1.53 cm (worst 1.75)     1.30 cm (worst 1.78)
+#
+# The inheritance gate is what reconciles the scenes, and each simpler rule
+# lost one of them:
+#   * inherit every parent's plane: orchards 0.45/0.67 cm, UC Davis 1.88 cm.
+#     A coarse block of canopy is not a surface; UC Davis's sparse scan, whose
+#     voxels are 97% thin, took most of its normals from such blocks.
+#   * gate ALL planes on planarity (dense voxels too): UC Davis 1.23 cm, but
+#     peach 0.77/1.25 cm -- a dense voxel of trunk or branch constrains the fit
+#     usefully even when it is not flat.
+#   * no inheritance (thin -> isotropic): UC Davis 2.17 cm.
+#   * pool a thin voxel's 3x3x3 neighbourhood (a centred k-NN analogue):
+#     UC Davis 1.61 cm, peach 0.79/0.98 cm, and 2.4x slower.
+#   * each voxel's real covariance shape (normalised, eps-floored) in place of
+#     a plane: UC Davis 2.06 cm, peach unchanged.
+
+# Raw returns a voxel needs before its own covariance is trusted as a plane.
+# Swept 6 / 12 / 25 / 50 on UC Davis: 1.80 / 1.88 / 1.93 / 2.19 cm with the
+# ungated rule, i.e. not the dial that matters.
+_MIN_SURFACE_POINTS = 12
+
+# Surface variation (lambda_min / trace; 0 = perfect plane, 1/3 = blob) below
+# which a voxel's plane may be passed down to thin voxels inside it. 0.02 and
+# 0.05 measured alike (UC Davis 1.25 / 1.30 cm, peach 0.53 / 0.52 cm).
+_INHERIT_MAX_SURFACE_VARIATION = 0.05
+
+_MOMENT_PAIRS = ((0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (0, 2))
+
+
+class VoxelMoments:
+    """Per-voxel count, mean and covariance of the raw returns on one grid.
+
+    `n` int32, `mean` float64 (N, 3) absolute, `cov` float32 (N, 6) as
+    xx, yy, zz, xy, yz, xz. ~52 bytes per voxel -- the covariance is CENTRAL
+    (about each voxel's own mean), so single precision loses nothing that
+    matters, where raw second moments about a far origin would cancel badly.
+    """
+
+    __slots__ = ("n", "mean", "cov", "voxel")
+
+    def __init__(self, n, mean, cov, voxel):
+        self.n, self.mean, self.cov, self.voxel = n, mean, cov, voxel
+
+    def __len__(self) -> int:
+        return len(self.n)
+
+    @classmethod
+    def from_points(cls, points: np.ndarray, voxel: float) -> "VoxelMoments":
+        """One sorted pass over the returns, on Open3D's grid for `voxel`."""
+        pts = np.asarray(points, dtype=np.float64)
+        if len(pts) == 0:
+            return cls(np.zeros(0, np.int32), np.zeros((0, 3)),
+                       np.zeros((0, 6), np.float32), voxel)
+        key = _voxel_keys(pts, voxel, pts.min(axis=0))
+        order = np.argsort(key, kind="stable")
+        key = key[order]
+        starts = np.flatnonzero(np.concatenate(([True], key[1:] != key[:-1])))
+        del key
+        n = np.diff(np.append(starts, len(order)))
+        inv_n = 1.0 / n
+        mean = np.empty((len(starts), 3))
+        dev = []
+        for axis in range(3):
+            col = pts[order, axis]
+            mean[:, axis] = np.add.reduceat(col, starts) * inv_n
+            col -= np.repeat(mean[:, axis], n)
+            dev.append(col)
+        del order
+        cov = np.empty((len(starts), 6), dtype=np.float32)
+        for k, (i, j) in enumerate(_MOMENT_PAIRS):
+            cov[:, k] = np.add.reduceat(dev[i] * dev[j], starts) * inv_n
+        return cls(n.astype(np.int32), mean, cov, voxel)
+
+    def regrid(self, voxel: float) -> Tuple["VoxelMoments", np.ndarray]:
+        """These moments on a coarser grid, and each voxel's parent index.
+
+        A voxel is assigned whole to the coarse cell holding its MEAN, so a
+        coarse cell is a slightly irregular union of fine ones rather than an
+        exact cube -- immaterial for registration, and it is what lets a grid
+        of ANY size be built from these moments without the raw returns.
+        Combined exactly by the parallel-axis rule.
+        """
+        if len(self.n) == 0:
+            return (VoxelMoments(self.n, self.mean, self.cov, voxel),
+                    np.zeros(0, np.int64))
+        key = _voxel_keys(self.mean, voxel, self.mean.min(axis=0))
+        _, parent = np.unique(key, return_inverse=True)
+        parent = parent.ravel()
+        m = int(parent.max()) + 1
+        w = self.n.astype(np.float64)
+        n = np.bincount(parent, weights=w, minlength=m)
+        mean = np.stack([np.bincount(parent, weights=w * self.mean[:, a],
+                                     minlength=m) for a in range(3)],
+                        axis=1) / n[:, None]
+        d = self.mean - mean[parent]
+        cov = np.empty((m, 6), dtype=np.float32)
+        for k, (i, j) in enumerate(_MOMENT_PAIRS):
+            cov[:, k] = np.bincount(
+                parent, weights=w * (self.cov[:, k] + d[:, i] * d[:, j]),
+                minlength=m) / n
+        return VoxelMoments(n.astype(np.int32), mean, cov, voxel), parent
+
+
+def surface_moments(points: np.ndarray,
+                    budget: int = _MAX_POINTS_PER_LEVEL
+                    ) -> Tuple[VoxelMoments, float]:
+    """`working_copy`'s counterpart for `SurfacePyramid`: the same budgeted
+    voxel, but keeping each voxel's moments rather than only its centroid."""
+    pts = np.asarray(points, dtype=np.float64)
+    if not np.isfinite(pts).all():
+        pts = pts[np.isfinite(pts).all(axis=1)]
+    voxel = _budget_voxel(pts, budget)
+    return VoxelMoments.from_points(pts, voxel), voxel
+
+
+def _smallest_eigen(cov6: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """(unit eigenvector, surface variation) of each symmetric 3x3's smallest
+    eigenvalue. Surface variation is lambda_min / trace: 0 for a perfect plane,
+    1/3 for an isotropic blob.
+
+    Closed form (trigonometric eigenvalues, then the largest cross product of
+    two rows of C - lambda*I), vectorised: batched `numpy.linalg.eigh` was
+    measured at 3.1 s per level on a real scan. The vector's sign is
+    arbitrary, which `_plane_shaped` does not see. Degenerate inputs come back
+    as +z with variation 1/3; callers decide trust from the point count.
+    """
+    c = cov6.astype(np.float64)
+    a, b, cc, d, e, f = (c[:, k] for k in range(6))
+    trace = a + b + cc
+    q = trace / 3.0
+    p = np.sqrt(np.maximum(((a - q) ** 2 + (b - q) ** 2 + (cc - q) ** 2
+                            + 2.0 * (d * d + e * e + f * f)) / 6.0, 1e-300))
+    inv = 1.0 / p
+    b00, b11, b22 = (a - q) * inv, (b - q) * inv, (cc - q) * inv
+    b01, b12, b02 = d * inv, e * inv, f * inv
+    det = (b00 * (b11 * b22 - b12 * b12) - b01 * (b01 * b22 - b12 * b02)
+           + b02 * (b01 * b12 - b11 * b02))
+    phi = np.arccos(np.clip(det / 2.0, -1.0, 1.0)) / 3.0
+    lam = q + 2.0 * p * np.cos(phi + 2.0 * np.pi / 3.0)
+    r0 = np.stack([a - lam, d, f], axis=1)
+    r1 = np.stack([d, b - lam, e], axis=1)
+    r2 = np.stack([f, e, cc - lam], axis=1)
+    x01, x02, x12 = np.cross(r0, r1), np.cross(r0, r2), np.cross(r1, r2)
+    n01, n02, n12 = ((x * x).sum(axis=1) for x in (x01, x02, x12))
+    pick = np.where((n01 >= n02) & (n01 >= n12), 0, np.where(n02 >= n12, 1, 2))
+    v = np.where((pick == 0)[:, None], x01,
+                 np.where((pick == 1)[:, None], x02, x12))
+    norm = np.sqrt(np.choose(pick, [n01, n02, n12]))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = v / norm[:, None]
+        variation = np.maximum(lam, 0.0) / trace
+    bad = ~np.isfinite(out).all(axis=1) | (norm < 1e-150)
+    out[bad] = (0.0, 0.0, 1.0)
+    variation[~np.isfinite(variation)] = 1.0 / 3.0
+    return out, variation
+
+
+class SurfacePyramid:
+    """`Pyramid`'s interface, built from `VoxelMoments` -- see the block
+    comment above `_MIN_SURFACE_POINTS`.
+
+    The numpy half runs in the constructor and releases the GIL; the Open3D
+    clouds are made on first use of each level (`level`), which is the only
+    part that holds it. Thread-safe: the reference pyramid of a multi-scan run
+    is read by concurrent aligns.
+    """
+
+    def __init__(self, moments: VoxelMoments,
+                 levels: Sequence[Tuple[float, float]]):
+        import threading
+
+        voxels = sorted(v for v, _ in levels)              # fine -> coarse
+        grids, parents = [], []
+        current = moments
+        for k, voxel in enumerate(voxels):
+            if k == 0 and abs(current.voxel - voxel) <= 0.01 * voxel:
+                grids.append(current)                      # already on it
+                parents.append(None)
+                continue
+            current, parent = current.regrid(voxel)
+            grids.append(current)
+            parents.append(parent)
+        # Coarse -> fine: a voxel too thin to fit its own plane inherits the
+        # plane of the coarser voxel it merged into, if that one may pass it
+        # on. See the block comment above `_MIN_SURFACE_POINTS`.
+        normals: List[np.ndarray] = [None] * len(grids)
+        trusted: List[np.ndarray] = [None] * len(grids)
+        heritable: List[np.ndarray] = [None] * len(grids)
+        for k in range(len(grids) - 1, -1, -1):
+            g = grids[k]
+            nrm, variation = _smallest_eigen(g.cov)
+            ok = g.n >= _MIN_SURFACE_POINTS
+            passable = ok & (variation <= _INHERIT_MAX_SURFACE_VARIATION)
+            if k + 1 < len(grids):
+                up = parents[k + 1]
+                gets = ~ok & heritable[k + 1][up]
+                nrm = np.where(gets[:, None], normals[k + 1][up], nrm)
+                ok = ok | gets
+                passable = passable | gets
+            normals[k], trusted[k], heritable[k] = nrm, ok, passable
+        # Stored coarse -> fine, to match `levels` / `Pyramid.level`.
+        self._points = [g.mean for g in reversed(grids)]
+        self._normals = list(reversed(normals))
+        self._trusted = list(reversed(trusted))
+        self._clouds = [None] * len(grids)
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self._points)
+
+    def level(self, index: int):
+        with self._lock:
+            cloud = self._clouds[index]
+            if cloud is None:
+                import open3d as o3d
+                cloud = o3d.geometry.PointCloud()
+                cloud.points = o3d.utility.Vector3dVector(self._points[index])
+                shaped = _plane_shaped(self._normals[index])
+                # No trustworthy plane: point-to-point for this voxel.
+                shaped[~self._trusted[index]] = np.eye(3)
+                cloud.covariances = o3d.utility.Matrix3dVector(shaped)
+                self._clouds[index] = cloud
+                # The Open3D cloud holds its own copy from here on.
+                self._normals[index] = self._trusted[index] = None
+            return cloud
+
+    @property
+    def sizes(self) -> List[int]:
+        return [len(p) for p in self._points]
+
