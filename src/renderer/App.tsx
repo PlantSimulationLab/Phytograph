@@ -342,14 +342,28 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // #3b82f6 again and the scene rendered two identical swatches.
   const scansRef = useRef(scans);
   scansRef.current = scans;
+  // Same reason, for the other coloured objects imports create. Seeding from
+  // scans alone gave every mesh imported one at a time the same colour: none of
+  // the meshes already on the scene was ever "used", so each separate import
+  // restarted the palette at blue (a multi-file drop hid it, since one
+  // allocator spans the whole batch).
+  const meshesRef = useRef(scene.state.meshes);
+  meshesRef.current = scene.state.meshes;
+  const skeletonsRef = useRef(scene.state.skeletons);
+  skeletonsRef.current = scene.state.skeletons;
 
-  // A stateful colour generator for ONE import, seeded from the scan list as it
-  // is at the moment of the call. Call it once per import, and call the
-  // returned function once per new scan — several scans built before any is
-  // committed (a multi-block PTX, a multi-scan E57, a mixed drop) is exactly
-  // what a plain "first colour not on the scene" cannot handle.
+  // A stateful colour generator for ONE import, seeded from the colours of
+  // every scan, mesh and skeleton on the scene at the moment of the call. Call
+  // it once per import, and call the returned function once per new object —
+  // several built before any is committed (a multi-block PTX, a multi-scan E57,
+  // a mixed drop) is exactly what a plain "first colour not on the scene"
+  // cannot handle.
   const makeScanColorAllocator = useCallback(
-    () => createScanColorAllocator(scansRef.current.map(s => s.color)),
+    () => createScanColorAllocator([
+      ...scansRef.current.map(s => s.color),
+      ...meshesRef.current.map(m => m.color),
+      ...skeletonsRef.current.map(s => s.color),
+    ]),
     // No dependencies: the only thing it reads is a ref, so this identity is
     // stable and the import callbacks holding it never go stale.
     [],
