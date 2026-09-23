@@ -302,6 +302,19 @@ def test_the_check_covers_the_container_library_too(monkeypatch, tmp_path):
     assert main._riegl_rivlib_unloadable(str(root)) is None
 
 
+def _docker_available(monkeypatch):
+    """Make Docker look installed AND running, whatever this host has.
+
+    Two seams, not one: `/api/riegl/status` asks `_docker_exe()` whether a CLI
+    exists before `_docker_present()` asks the daemon (see `_docker_probe`).
+    Stubbing only the daemon passed on any machine with Docker installed and
+    failed on the GitHub macOS runner, which has none — the status then reported
+    the missing CLI ahead of the RiVLib check the test was written for.
+    """
+    monkeypatch.setattr(main, "_docker_exe", lambda: "/usr/local/bin/docker")
+    monkeypatch.setattr(main, "_docker_present", lambda: True)
+
+
 def test_an_arm_linux_rivlib_is_refused_on_a_mac(client, monkeypatch, tmp_path):
     """Apple silicon does not mean an ARM RiVLib.
 
@@ -310,7 +323,7 @@ def test_an_arm_linux_rivlib_is_refused_on_a_mac(client, monkeypatch, tmp_path):
     make on an M-series machine.
     """
     _mac(monkeypatch)
-    monkeypatch.setattr(main, "_docker_present", lambda: True)
+    _docker_available(monkeypatch)
     monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
     root = _rivlib(tmp_path, "libscanifc.so", machine=ELF_AARCH64)
 
@@ -326,7 +339,7 @@ def test_an_arm_linux_rivlib_is_refused_on_a_mac(client, monkeypatch, tmp_path):
 
 def test_a_truncated_so_is_refused_on_a_mac(client, monkeypatch, tmp_path):
     _mac(monkeypatch)
-    monkeypatch.setattr(main, "_docker_present", lambda: True)
+    _docker_available(monkeypatch)
     monkeypatch.setattr(main, "_riegl_image_built", lambda: True)
     root = _rivlib(tmp_path, "libscanifc.so")
     (root / "lib" / "libscanifc.so").write_bytes(b"")
@@ -653,7 +666,8 @@ def test_docker_invocation_is_unchanged(monkeypatch, tmp_path):
     # argv[0] is the RESOLVED docker binary, not the bare name: a GUI-launched
     # app inherits launchd's PATH and would not find "docker" on it. Everything
     # after it is unchanged.
-    assert os.path.basename(cmd[0]) == "docker"
+    # `docker.EXE` on Windows, where shutil.which returns the real file name.
+    assert os.path.splitext(os.path.basename(cmd[0]))[0].lower() == "docker"
     assert cmd[0] == (main._docker_exe() or "docker")
     assert cmd[1:5] == ["run", "--rm", "--name", container]
     assert "--platform" in cmd and "linux/amd64" in cmd
