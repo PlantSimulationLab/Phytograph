@@ -12,7 +12,6 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import waitOn from 'wait-on';
@@ -21,6 +20,7 @@ import waitOn from 'wait-on';
 // screenshot capture — see scripts/dev-state-root.mjs for why it is the OS
 // cache dir and not tmpdir().
 import { devStateRoot } from './dev-state-root.mjs';
+import { findFreePort, PORT_BANDS } from './free-port.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -105,21 +105,11 @@ function devMemoryBudgetEnv() {
   return {};
 }
 
-// Ask the OS for a free TCP port (bind :0, read the assignment). Each
-// `npm run dev` picks its own backend + renderer ports so concurrent dev
+// Each `npm run dev` picks its own backend + renderer ports (from the dev band
+// of scripts/free-port.mjs, below the ephemeral range) so concurrent dev
 // sessions — or another co-developed app — never collide. The chosen ports are
 // threaded to uvicorn (--port), Vite (--port), and Electron (env), and the
 // renderer learns the backend port from main via the getInfo IPC.
-function findFreePort() {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-}
 
 const isWin = process.platform === 'win32';
 const backendDir = join(root, 'backend-api');
@@ -139,8 +129,11 @@ async function runOnce(cmd, args) {
 
 (async () => {
   // Per-session ports — never collide with another dev session or app.
-  const backendPort = Number(process.env.PHYTOGRAPH_BACKEND_PORT) || (await findFreePort());
-  const rendererPort = Number(process.env.PHYTOGRAPH_RENDERER_PORT) || (await findFreePort());
+  const backendPort = Number(process.env.PHYTOGRAPH_BACKEND_PORT) || (await findFreePort(PORT_BANDS.dev));
+  // Exclude the backend's: its probe has closed, so nothing stops a second
+  // probe landing on the same number.
+  const rendererPort = Number(process.env.PHYTOGRAPH_RENDERER_PORT)
+    || (await findFreePort(PORT_BANDS.dev, { exclude: [backendPort] }));
   const RENDERER_URL = `http://localhost:${rendererPort}`;
   const BACKEND_URL = `http://127.0.0.1:${backendPort}/version`;
   console.log(`[dev] backend port ${backendPort}, renderer port ${rendererPort}`);

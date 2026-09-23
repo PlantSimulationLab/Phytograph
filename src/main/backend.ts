@@ -3,7 +3,6 @@
 
 import { spawn, execSync, ChildProcess } from 'node:child_process';
 import { existsSync, chmodSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { app, BrowserWindow } from 'electron';
 import Store from 'electron-store';
@@ -11,6 +10,7 @@ import { EXPECTED_BACKEND_VERSION, BACKEND_PORT_PROD } from '../shared/constants
 import { IPC, type BackendStatusPayload } from '../shared/ipc.js';
 import { backendLog } from './logger.js';
 import { resolveOctreeCacheRoot } from './octreeCacheRoot.js';
+import { findFreePort, PORT_BANDS } from '../../scripts/free-port.mjs';
 
 // Split a possibly-multi-line stdout/stderr chunk into clean lines for the log
 // file. Carries a trailing partial line across chunks so a traceback split mid-
@@ -179,18 +179,6 @@ function emitBackendStatus(payload: BackendStatusPayload): void {
   }
 }
 
-/** Ask the OS for a free TCP port by binding :0 and reading back the assignment. */
-function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(() => (port ? resolve(port) : reject(new Error('no port'))));
-    });
-  });
-}
 
 /**
  * The backend port for this instance. Resolution order:
@@ -209,7 +197,10 @@ async function resolvePort(): Promise<number> {
     return resolvedPort;
   }
   if (resolvedPort != null) return resolvedPort;
-  resolvedPort = await findFreePort();
+  // From the app's own band below the ephemeral range — see scripts/free-port.mjs
+  // for the race a `listen(0)` port loses, which here meant every respawn (they
+  // reuse this port) failing to bind until the restart budget ran out.
+  resolvedPort = await findFreePort(PORT_BANDS.app);
   // Publish it so the spawned backend and the getInfo IPC see the same value.
   process.env.PHYTOGRAPH_BACKEND_PORT = String(resolvedPort);
   return resolvedPort;

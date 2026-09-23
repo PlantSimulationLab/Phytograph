@@ -574,7 +574,7 @@ user saves and drags into a bug report (`copySessionLogTo` in `logger.ts`).
 Whoever owns the instance picks the real port, so concurrent app instances,
 a `npm run dev` session, and parallel E2E runs never collide:
 
-- **`npm run dev`** — `scripts/dev.mjs` calls `findFreePort()` (bind `:0`) for
+- **`npm run dev`** — `scripts/dev.mjs` calls `findFreePort()` for
   both the backend and Vite, passes the backend port to `uvicorn --port` and to
   Electron via `PHYTOGRAPH_BACKEND_PORT`, and the renderer port via
   `PHYTOGRAPH_RENDERER_PORT`. It also sets `PHYTOGRAPH_DEV_BACKEND=1`, which
@@ -585,6 +585,23 @@ a `npm run dev` session, and parallel E2E runs never collide:
   with it.
 - **E2E** — `tests/e2e/helpers/launchApp.ts` picks a free port per launch and
   pins it via `PHYTOGRAPH_BACKEND_PORT`.
+
+All three choose through one helper, `scripts/free-port.mjs`, which probes
+random ports in a band per owner and never binds `:0`:
+
+| Owner | Band |
+|---|---|
+| Packaged app | 10000–14999 |
+| `npm run dev` (backend + Vite) | 15000–19999 |
+| E2E | 20000–31999, one 1000-port slice per Playwright worker |
+
+A `:0` port comes from the OS *ephemeral* range, which is also where outgoing
+connections get their local port. A localhost connection opened between the
+probe closing and the server binding can be handed that exact port and hold it,
+so the bind fails with "address already in use". The supervisor respawns on the
+same port (the renderer has already cached it), so the backend would never come
+up. The bands sit below every ephemeral range (Linux 32768+, macOS and Windows
+49152+), where the OS never hands out a connection's port, and never overlap.
 
 The renderer learns the port over the `backend.getInfo` IPC (see above), which
 returns `getBackendPort()` from the main process.

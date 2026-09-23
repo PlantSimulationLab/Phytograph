@@ -1,7 +1,6 @@
 import { _electron, type ElectronApplication, type Page } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +9,7 @@ import { waitForBackend } from './waitForBackend';
 import { ensureHeadlessElectron } from '../../../scripts/headless-electron.mjs';
 // @ts-expect-error -- plain .mjs helper, shared with scripts/check-backend-bundle.mjs
 import { checkBackendBundle, readExpectedBackendVersion } from '../../../scripts/backend-version.mjs';
+import { e2eWorkerBand, findFreePort } from '../../../scripts/free-port.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = join(__dirname, '..', '..', '..');
@@ -61,35 +61,9 @@ async function sessionLogTails(pid: number | undefined, userDataDir: string, lin
 // PHYTOGRAPH_BACKEND_PORT. This keeps a test run from ever colliding with a
 // developer's `npm run dev` backend (or a parallel spec's app) — the supervisor
 // binds the port we hand it, and we poll that same port. No fixed 8008 anywhere.
-//
-// NOT `listen(0)`. That returns a port from the OS's EPHEMERAL range, which is
-// the same pool every outgoing TCP connection draws its local port from — and
-// the port is free only until we close the probe. With two workers keeping
-// localhost busy, an outgoing connection took the port in that gap on the Linux
-// runner, held it, and every bind of the pinned port failed ("[Errno 98]
-// address already in use", 4 attempts over 12 s) until the spec timed out.
-// So probe ports BELOW every ephemeral range (Linux 32768+, macOS/Windows
-// 49152+), where the OS never assigns one to a connection, and give each
-// Playwright worker its own slice so two workers never pick the same one —
-// the guarantee `listen(0)` used to provide.
-const PORT_FLOOR = 20_000;
-const PORT_SLICE = 1_000; // 12 slices fit below 32768
-function tryListen(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const srv = createServer();
-    srv.once('error', () => resolve(false));
-    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
-  });
-}
-async function findFreePort(): Promise<number> {
-  const worker = Number(process.env.TEST_PARALLEL_INDEX ?? 0) % 12;
-  const base = PORT_FLOOR + worker * PORT_SLICE;
-  for (let i = 0; i < 200; i++) {
-    const port = base + Math.floor(Math.random() * PORT_SLICE);
-    if (await tryListen(port)) return port;
-  }
-  throw new Error(`no free port in ${base}-${base + PORT_SLICE - 1} after 200 tries`);
-}
+// Drawn from this worker's own slice of the e2e band, below the ephemeral range
+// — see scripts/free-port.mjs for the startup race a `listen(0)` port lost here.
+const findE2ePort = () => findFreePort(e2eWorkerBand(process.env.TEST_PARALLEL_INDEX));
 
 export interface LaunchedApp {
   app: ElectronApplication;
@@ -145,7 +119,7 @@ export async function launchApp(extraEnv?: Record<string, string>): Promise<Laun
     );
   }
 
-  const backendPort = await findFreePort();
+  const backendPort = await findE2ePort();
 
   // Isolate the on-disk octree cache per launch. The cache is otherwise a single
   // per-user dir (~/Library/Caches/Phytograph/octrees on macOS) shared
