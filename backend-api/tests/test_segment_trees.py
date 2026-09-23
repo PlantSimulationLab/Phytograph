@@ -870,7 +870,10 @@ def _five_trees_two_rows(per_tree=400, trunk_frac=0.10, seed=0):
 
     The DEFAULTS are calibrated to trip the stage-1 solver collapse: 400 crown
     points + a 10% trunk per tree (2,200 total) collapses at decimate_res1
-    0.08/0.10/0.12 m while segmenting normally at 0.05 m. Those numbers are not
+    0.06/0.08/0.11/0.12 m while segmenting normally at 0.05 m — on BOTH macOS
+    arm64 and Linux x86_64. The set is platform-dependent (0.09 and 0.10 collapse
+    on macOS only, so a 0.10 fixture passed locally and failed every CI run);
+    pick the test's resolution from the intersection. Those numbers are not
     arbitrary and are not a "small cloud" effect — the collapse depends on the
     exact decimated node count in a way nothing in the data predicts, so it is
     genuinely sensitive to them: the same fixture at trunk_frac 0.0, 0.17 or 0.30
@@ -893,8 +896,9 @@ def _five_trees_two_rows(per_tree=400, trunk_frac=0.10, seed=0):
     return np.vstack(clouds).astype(np.float64)
 
 
-# The stage-1 voxel size this fixture collapses at (see `_five_trees_two_rows`).
-_COLLAPSING_RES1 = 0.10
+# The stage-1 voxel size this fixture collapses at on every platform we test on
+# (see `_five_trees_two_rows`). NOT 0.10: that one collapses on macOS arm64 only.
+_COLLAPSING_RES1 = 0.08
 
 
 @requires_treeiso
