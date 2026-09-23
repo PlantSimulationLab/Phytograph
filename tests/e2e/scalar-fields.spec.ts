@@ -283,6 +283,97 @@ test('renames the NAME THE USER SEES, everywhere it is shown', async () => {
   await expect(colorMode.locator('option[value="scalar:Strata"]')).toHaveText('Strata!', { timeout: 30_000 });
 });
 
+/**
+ * Sample the points actually on screen every animation frame until stopped.
+ * `drawnPoints` counts octrees attached to the scene, including one frozen
+ * while its replacement streams (see potreeManager), so a frame at zero is a
+ * frame where the cloud had vanished.
+ */
+async function startDrawnSampler(page: LaunchedApp['page']) {
+  await page.evaluate(() => {
+    const w = window as unknown as { __drawnSampler?: { min: number; zeroFrames: number; frames: number; stop: boolean } };
+    const s = { min: Infinity, zeroFrames: 0, frames: 0, stop: false };
+    w.__drawnSampler = s;
+    const tick = () => {
+      if (s.stop) return;
+      const drawn = (window as unknown as { __potreeFrameStats?: { drawnPoints?: number } })
+        .__potreeFrameStats?.drawnPoints;
+      if (typeof drawn === 'number') {
+        s.frames++;
+        s.min = Math.min(s.min, drawn);
+        if (drawn === 0) s.zeroFrames++;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+async function stopDrawnSampler(page: LaunchedApp['page']) {
+  return page.evaluate(() => {
+    const s = (window as unknown as { __drawnSampler: { min: number; zeroFrames: number; frames: number; stop: boolean } }).__drawnSampler;
+    s.stop = true;
+    return { min: s.min, zeroFrames: s.zeroFrames, frames: s.frames };
+  });
+}
+
+async function renameField(page: LaunchedApp['page'], slug: string, name: string) {
+  await page.getByTestId('scalar-fields-tab-fields').click();
+  await page.locator(`[data-testid="scalar-field-row"][data-slug="${slug}"]`).hover();
+  await page.getByTestId(`scalar-field-menu-${slug}`).click();
+  await page.getByTestId(`scalar-field-rename-${slug}`).click();
+  await page.getByTestId(`scalar-field-name-input-${slug}`).fill(name);
+  await page.getByTestId(`scalar-field-name-apply-${slug}`).click();
+  await expect(page.locator(`[data-testid="scalar-field-row"][data-slug="${name}"]`))
+    .toHaveCount(1, { timeout: 60_000 });
+}
+
+test('a rename never blanks the cloud, whether or not it is coloured by the field', async () => {
+  // THE BUG THIS PINS: a rename relabels the octree in milliseconds, but hands
+  // back a new cache id, and the viewer disposed the drawn octree the moment the
+  // id changed and streamed the new one from nothing — so every renamed cloud
+  // blinked out and refilled, although nothing on screen had changed. When the
+  // field was the one being COLOURED it was worse: the octree component is keyed
+  // on the field name, so the rename remounted it outright. Both are now a
+  // handover: the old octree stays drawn until the new one has streamed in.
+  const { app, page } = session;
+  await importFixture(app, page);
+  await openScalarPanel(page);
+
+  // A derived field, which the compute also selects for colouring.
+  await page.getByTestId('scalar-fields-tab-compute').click();
+  await page.getByTestId('scalar-compute-expression').fill('band * 2');
+  await page.getByTestId('scalar-compute-slug').fill('twice');
+  await page.getByTestId('scalar-compute-run').click();
+  await expect(page.getByTestId('scalar-stats')).toBeVisible({ timeout: 60_000 });
+  await page.getByRole('button', { name: 'Display' }).click();
+  const colorMode = page.getByTestId('display-color-mode');
+  await expect(colorMode).toHaveValue('scalar:twice', { timeout: 30_000 });
+  // Settled and drawing before measuring.
+  await expect.poll(() => page.evaluate(
+    () => (window as unknown as { __potreeFrameStats?: { drawnPoints?: number } })
+      .__potreeFrameStats?.drawnPoints ?? 0), { timeout: 30_000 }).toBeGreaterThan(0);
+
+  // 1. A field that is NOT being coloured.
+  await startDrawnSampler(page);
+  await renameField(page, 'band', 'level');
+  // Past the handover's own timeout, so the swap has certainly happened.
+  await page.waitForTimeout(3_000);
+  const uncoloured = await stopDrawnSampler(page);
+  expect(uncoloured.frames).toBeGreaterThan(10);
+  expect(uncoloured.zeroFrames).toBe(0);
+
+  // 2. The field that IS being coloured — the remount path.
+  await startDrawnSampler(page);
+  await renameField(page, 'twice', 'doubled');
+  await page.waitForTimeout(3_000);
+  const coloured = await stopDrawnSampler(page);
+  expect(coloured.frames).toBeGreaterThan(10);
+  expect(coloured.zeroFrames).toBe(0);
+  // And the colouring followed the rename rather than dropping to a default.
+  await expect(colorMode).toHaveValue('scalar:doubled');
+});
+
 test('refuses to delete a field other tools read by name, and deletes an ordinary one', async () => {
   const { app, page } = session;
   await importFixture(app, page);

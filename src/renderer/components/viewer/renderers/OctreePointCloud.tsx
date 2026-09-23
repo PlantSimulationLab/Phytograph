@@ -199,6 +199,12 @@ export interface OctreePointCloudProps {
   // effect; this is the narrowest way to expose it without plumbing the potree
   // manager's internals through React.
   onOctreeReady?: (octree: PointCloudOctree | null) => void;
+  // Fired when an octree is actually ATTACHED to the scene — i.e. on screen —
+  // with its cache id. Not the same moment `data.octree.cacheId` changes: a
+  // replacement stages off-scene first (see the loader effect), and anything
+  // that must wait for the new octree to be VISIBLE (a label hold whose strokes
+  // the new octree now carries) has to key on this instead.
+  onOctreeDrawn?: (cacheId: string) => void;
   // Called when the octree files can't be loaded because they're absent on disk
   // (the app:// protocol handler 404s and the loader rejects). The parent owns
   // recovery: rebuild the octree from the source descriptor or surface an
@@ -237,6 +243,14 @@ function swapScalarIntoIntensity(geometry: any, field: string): boolean {
 // lib/octreeWideAttributes.ts, shared with the point picker: potree
 // pre-normalises those buffers into 0..1, and every reader has to undo it the
 // same way. See the long note at the intensityRange assignment below.
+
+// Cache-id handover (see the loader effect): a replacement octree is committed
+// once its visible node set has been stable, with nothing loading, for this
+// many consecutive frames...
+const OCTREE_HANDOVER_STABLE_FRAMES = 3;
+// ...or after this long regardless. A cloud that shows nothing (off-screen,
+// fully clipped) never "settles", and its swap is invisible anyway.
+const OCTREE_HANDOVER_TIMEOUT_MS = 2000;
 
 // Walk an octree's currently-loaded tiles and apply the scalar→intensity
 // buffer swap to each. Tiles stream in asynchronously, so this is called both
@@ -360,6 +374,7 @@ export function OctreePointCloud({
   displayOffset,
   onFirstTilesReady,
   onOctreeReady,
+  onOctreeDrawn,
   onOctreeMissing,
 }: OctreePointCloudProps) {
   const [octree, setOctree] = useState<PointCloudOctree | null>(null);
@@ -393,6 +408,10 @@ export function OctreePointCloud({
   // cacheId) doesn't re-run when the parent passes a new callback identity.
   const onOctreeReadyRef = useRef(onOctreeReady);
   onOctreeReadyRef.current = onOctreeReady;
+  const onOctreeDrawnRef = useRef(onOctreeDrawn);
+  onOctreeDrawnRef.current = onOctreeDrawn;
+  // Which cache id each loaded octree came from, for onOctreeDrawn.
+  const cacheIdOfRef = useRef(new WeakMap<PointCloudOctree, string>());
 
   // Same ref pattern for the missing-octree callback, so the cacheId-keyed loader
   // effect doesn't re-run when the parent passes a new callback identity.
@@ -432,16 +451,41 @@ export function OctreePointCloud({
   // min-corner to the origin. Captured once per load.
   const basePositionRef = useRef<THREE.Vector3>(new THREE.Vector3());
 
-  // Load on cacheId change, then attach the resulting PointCloudOctree
-  // directly to the scene. `<primitive object={...}/>` works but is fiddly
-  // when the same Potree manager has multiple clouds — explicit scene.add /
-  // scene.remove is what the potree-core README recommends and gives us a
-  // predictable lifecycle.
+  // The octree currently ATTACHED to the scene — i.e. the one on screen. Owned
+  // by the attach effect below, not by the loader: the loader's cleanup runs
+  // the moment the cache id changes, and disposing the drawn octree there is
+  // what made every cache-id swap blank the cloud until the new one streamed in.
+  const attachedRef = useRef<PointCloudOctree | null>(null);
+  // True while a replacement octree is STAGING (streaming off-scene). The drawn
+  // octree is skipped by the frame driver meanwhile, so the replacement gets the
+  // whole point budget instead of half of it — see the loader effect.
+  const stagingRef = useRef(false);
+
+  // Load on cacheId change. The resulting PointCloudOctree lives directly on the
+  // scene root (explicit scene.add / scene.remove is what the potree-core README
+  // recommends; `<primitive object>` is fiddly with a shared manager).
+  //
+  // A cache-id change on a cloud that is already drawn is a HANDOVER, not a
+  // reload. A relabel (scalar-field rename), a crop apply, a filter commit or a
+  // label bake each hand back a new cache id, and this used to dispose the drawn
+  // octree immediately and stream the new one from nothing — so the cloud
+  // vanished and refilled node by node, and a rename across a dozen clouds made
+  // the whole scene blink although nothing on screen had changed. Now the new
+  // octree STAGES: it streams its visible nodes while detached from the scene
+  // (potree's visibility pass needs `matrixWorld` and `visible`, not scene
+  // membership), with the drawn octree frozen in place. Once its visible set has
+  // settled — nothing loading, node count stable — it is committed as `octree`,
+  // and the attach effect swaps the two in the same effect flush as the material
+  // and mask effects configure it, so no frame shows either a gap or an
+  // unconfigured material.
   useEffect(() => {
     if (!data.octree) return;
     const url = `app://octree/${data.octree.cacheId}/metadata.json`;
     let cancelled = false;
-    let pcoForCleanup: PointCloudOctree | null = null;
+    // A replacement that has loaded but not yet been committed. Disposed here if
+    // the cache id moves on again (or the cloud unmounts) before it lands.
+    let staged: PointCloudOctree | null = null;
+    let unregisterStage: (() => void) | null = null;
     manager
       .loadPointCloud(url, OctreeRequestManager)
       .then((pco) => {
@@ -449,18 +493,6 @@ export function OctreePointCloud({
           pco.dispose();
           return;
         }
-        // Snapshot the loader's base offset, then seed our transform (translation
-        // + rotation about the pivot) on top of it before the first frame so the
-        // cloud streams in at its transformed pose (no visible jump). Kept live by
-        // the effect below as the user drags a gizmo / types a value.
-        basePositionRef.current.copy(pco.position);
-        applyOctreePose(
-          pco, basePositionRef.current,
-          translationRef.current, rotationRef.current, pivotRef.current, displayOffsetRef.current,
-        );
-        scene.add(pco);
-        pcoForCleanup = pco;
-        setOctree(pco);
         // E2E seam: how many times each octree has been LOADED into the scene.
         // A cache id that reaches 2 was remounted, which is the flicker
         // regression (see tests/e2e/octree-no-remount.spec.ts): a remount drops
@@ -471,7 +503,69 @@ export function OctreePointCloud({
           const counts = ((globalThis as any).__octreeLoadCounts ??= {});
           counts[data.octree.cacheId] = (counts[data.octree.cacheId] ?? 0) + 1;
         }
-        onOctreeReadyRef.current?.(pco);
+        // The loader's base offset for THIS octree. Held locally rather than
+        // written to basePositionRef, which still describes the drawn octree
+        // until the commit.
+        if (data.octree?.cacheId) cacheIdOfRef.current.set(pco, data.octree.cacheId);
+        const base = pco.position.clone();
+        const seatPose = () => {
+          applyOctreePose(
+            pco, base,
+            translationRef.current, rotationRef.current, pivotRef.current, displayOffsetRef.current,
+          );
+          pco.updateMatrixWorld(true);
+        };
+        // Seed our transform (translation + rotation about the pivot) on top of
+        // the base before the first frame, so the cloud streams in at its
+        // transformed pose (no visible jump). Kept live by the pose effect as the
+        // user drags a gizmo / types a value.
+        const commit = () => {
+          basePositionRef.current.copy(base);
+          seatPose();
+          staged = null;   // ownership passes to the attach effect
+          setOctree(pco);
+        };
+
+        if (!attachedRef.current) {
+          // Nothing drawn yet: a first load has nothing to hand over from.
+          commit();
+          return;
+        }
+
+        staged = pco;
+        seatPose();
+        stagingRef.current = true;
+        const startedAt = performance.now();
+        let lastCount = -1;
+        let stableFrames = 0;
+        unregisterStage = registerOctreeForFrame({
+          octree: pco,
+          afterUpdate: () => {
+            if (cancelled || staged !== pco) return;
+            // Follow a gizmo drag that happens mid-stage, so LOD is chosen for
+            // where the cloud will actually be drawn.
+            seatPose();
+            const count = (pco as any).visibleNodes?.length ?? 0;
+            const loading = (pco as any).pcoGeometry?.numNodesLoading ?? 0;
+            // Settled = something visible, nothing in flight, and no growth for
+            // a few frames. The last clause matters: potree uploads at most two
+            // loaded nodes to the GPU per frame, so "nothing loading" alone
+            // fires while loaded nodes are still queued for upload.
+            stableFrames = count > 0 && loading === 0 && count === lastCount
+              ? stableFrames + 1 : 0;
+            lastCount = count;
+            // The timeout covers a cloud that never shows anything (off-screen,
+            // fully clipped): the swap is invisible then, so there is nothing to
+            // wait for — just don't wait forever.
+            if (stableFrames >= OCTREE_HANDOVER_STABLE_FRAMES
+                || performance.now() - startedAt > OCTREE_HANDOVER_TIMEOUT_MS) {
+              unregisterStage?.();
+              unregisterStage = null;
+              stagingRef.current = false;
+              commit();
+            }
+          },
+        });
       })
       .catch((err) => {
         if (cancelled) return;
@@ -490,10 +584,15 @@ export function OctreePointCloud({
       });
     return () => {
       cancelled = true;
-      onOctreeReadyRef.current?.(null);
-      if (pcoForCleanup) {
-        scene.remove(pcoForCleanup);
-        pcoForCleanup.dispose();
+      // Only a replacement still STAGING is this effect's to dispose. The drawn
+      // octree stays on screen until its successor commits (attach effect), or
+      // until the component unmounts (unmount effect).
+      unregisterStage?.();
+      unregisterStage = null;
+      stagingRef.current = false;
+      if (staged) {
+        staged.dispose();
+        staged = null;
       }
     };
   }, [data.octree?.cacheId, manager, scene]);
@@ -1186,6 +1285,12 @@ export function OctreePointCloud({
       // filled point budget otherwise makes it stream the whole region (ultra-lag
       // on large clouds). Hide the cloud while empty; restore on the next frame
       // the box overlaps again.
+      // A replacement is staging: freeze this octree's LOD where it is, still
+      // drawn, so the replacement streams with the whole point budget rather
+      // than splitting it with a cloud it is about to replace. Frozen, not
+      // skipped: afterUpdate below keeps the overlay/masks/material applied to
+      // the tiles it is still showing.
+      frozen: () => stagingRef.current,
       shouldSkip: () => {
         const { clipBox: cb, data: d, translation: t } = frameStateRef.current;
         const cropEmpty = !!cb && cropClipsEverything(cb, d.bounds, t ?? { x: 0, y: 0, z: 0 }, frameStateRef.current.rotation);
@@ -1299,10 +1404,42 @@ export function OctreePointCloud({
     });
   }, [octree]);
 
-  // Scene attach/detach is handled in the loader effect above. This
-  // component returns null because the cloud lives directly on the scene
-  // root, not inside a React-managed `<primitive>` element. We still need
-  // to render *something* so the component participates in React's tree
+  // Scene attach + handover. DECLARED LAST ON PURPOSE: passive effects run in
+  // declaration order within one flush, so by the time this adds the new octree
+  // to the scene, the pose, material, clip, mask and frame-registration effects
+  // above have already configured it for `octree` — and removing its
+  // predecessor in the same synchronous flush means no rendered frame ever holds
+  // both, neither, or a new octree still wearing potree's default material.
+  useEffect(() => {
+    if (!octree) return;
+    const prev = attachedRef.current;
+    if (prev === octree) return;
+    scene.add(octree);
+    attachedRef.current = octree;
+    onOctreeReadyRef.current?.(octree);
+    const drawnId = cacheIdOfRef.current.get(octree);
+    if (drawnId) onOctreeDrawnRef.current?.(drawnId);
+    if (prev) {
+      scene.remove(prev);
+      prev.dispose();
+    }
+  }, [octree, scene]);
+
+  // Unmount: detach whatever is drawn. (A replacement still staging is disposed
+  // by the loader effect's own cleanup.)
+  useEffect(() => () => {
+    const drawn = attachedRef.current;
+    attachedRef.current = null;
+    onOctreeReadyRef.current?.(null);
+    if (drawn) {
+      scene.remove(drawn);
+      drawn.dispose();
+    }
+  }, [scene]);
+
+  // This component returns null because the cloud lives directly on the scene
+  // root, not inside a React-managed `<primitive>` element. We still need to
+  // render *something* so the component participates in React's tree
   // (useFrame requires a mounted component).
   return null;
 }

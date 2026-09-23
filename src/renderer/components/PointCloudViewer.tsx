@@ -825,6 +825,25 @@ export default function PointCloudViewer({
       cloudColorModes.get(cloudId) ?? { mode: colorMode, field: selectedScalarField },
     [cloudColorModes, colorMode, selectedScalarField],
   );
+  // A RENAMED scalar field's remount identity, per cloud. The octree component
+  // is keyed on its scalar field so that switching to a DIFFERENT field gets a
+  // fresh material (see the key on <OctreePointCloud>). A rename is not a
+  // different field — same values, new name — and keying on the name made it
+  // remount, which disposes the drawn octree and re-streams it from nothing:
+  // every cloud coloured by the renamed field blinked. So a rename records
+  // "`slug` is still what `token` was", and the key uses the token. Pruned the
+  // moment the cloud is coloured by anything else (effect below), so two
+  // genuinely different fields can never share a token.
+  const scalarKeyAliasRef = useRef(new Map<string, { slug: string; token: string }>());
+  const scalarKeyToken = (cloudId: string, field: string | undefined): string | undefined => {
+    const alias = scalarKeyAliasRef.current.get(cloudId);
+    return alias && field && alias.slug === field ? alias.token : field;
+  };
+  useEffect(() => {
+    for (const [cloudId, alias] of Array.from(scalarKeyAliasRef.current)) {
+      if (colorModeFor(cloudId).field !== alias.slug) scalarKeyAliasRef.current.delete(cloudId);
+    }
+  }, [colorModeFor]);
   // Set (or clear, with `undefined`) one cloud's color-mode override.
   const setCloudColorMode = useCallback(
     (cloudId: string, next: { mode: ColorMode; field?: string } | undefined) => {
@@ -2610,7 +2629,28 @@ export default function PointCloudViewer({
        * and no way to retry.
        */
       failed?: boolean;
+      /**
+       * The rebuild carrying these strokes has landed under this cache id, but
+       * may not be ON SCREEN yet: the new octree stages off-scene while the old
+       * one — which does not carry the column — stays drawn (see
+       * OctreePointCloud's handover). The hold keeps painting until the octree
+       * with this id is actually attached (`onOctreeDrawn`); dropping it at the
+       * cache-id change blanked the labels for the length of the handover.
+       */
+      releaseOnCacheId?: string;
     }>>(() => new Map());
+  // The cache id each cloud is DRAWING, as reported by onOctreeDrawn.
+  const drawnCacheIdRef = useRef(new Map<string, string>());
+  const handleOctreeDrawn = useCallback((cloudId: string, cacheId: string) => {
+    drawnCacheIdRef.current.set(cloudId, cacheId);
+    setLabelCommitHolds((prev) => {
+      const hold = prev.get(cloudId);
+      if (!hold || hold.releaseOnCacheId !== cacheId) return prev;
+      const next = new Map(prev);
+      next.delete(cloudId);
+      return next;
+    });
+  }, []);
   const labelCommitSeqRef = useRef(0);
   // Live PointCloudOctree of EVERY mounted octree cloud, keyed by cloud id and
   // handed up by OctreePointCloud (which also reports null on unmount).
@@ -3930,7 +3970,11 @@ export default function PointCloudViewer({
         // here would blank them until its own rebuild landed.
         if (!hold || hold.seq !== reason.labelSeq) return prev;
         const next = new Map(prev);
-        next.delete(cloudId);
+        // Retire it once the rebuilt octree is on screen, not now — see
+        // `releaseOnCacheId`. (Now only if it already is: an unchanged cache id
+        // swaps nothing, so no draw event would ever come.)
+        if (drawnCacheIdRef.current.get(cloudId) === baked.cache_id) next.delete(cloudId);
+        else next.set(cloudId, { ...hold, releaseOnCacheId: baked.cache_id });
         return next;
       });
     }
@@ -13037,8 +13081,21 @@ export default function PointCloudViewer({
    * filter, which reads as the rename having broken something.
    */
   const migrateScalarSlug = useCallback((cloudId: string, from: string, to: string) => {
+    // Keep the octree component's identity across the rename — see
+    // scalarKeyAliasRef. Recorded before the colour mode moves, so the render
+    // that sees the new field name also sees its old token.
+    scalarKeyAliasRef.current.set(cloudId, { slug: to, token: scalarKeyToken(cloudId, from) ?? from });
     setCloudColorModes(prev => {
-      const current = prev.get(cloudId);
+      // A cloud with no override of its own is coloured by the SCENE DEFAULT.
+      // If that default is the renamed field, pin this cloud to the new name
+      // explicitly: the default cannot move yet, because other clouds in the
+      // same run are still waiting for their own rename to land and would
+      // lose their colouring — and remount — if it moved under them. The
+      // default itself is moved once the whole run is done (see
+      // handleManageScalarField).
+      const current = prev.get(cloudId)
+        ?? (colorMode === 'scalar' && selectedScalarField === from
+          ? { mode: 'scalar' as const, field: from } : undefined);
       if (!current || current.mode !== 'scalar' || current.field !== from) return prev;
       const next = new Map(prev);
       next.set(cloudId, { ...current, field: to });
@@ -13059,7 +13116,7 @@ export default function PointCloudViewer({
         { ...filters, scalarFields: { ...restFilters, [to]: movedFilter } });
       return next;
     });
-  }, []);
+  }, [colorMode, selectedScalarField]);
 
   /**
    * Apply a management action whose name (for rename/duplicate) the PANEL has
@@ -13194,6 +13251,15 @@ export default function PointCloudViewer({
       if (succeeded.length > 0) {
         setScalarSelectedSlug(action === 'delete' ? null : resultSlug);
       }
+      // Move the scene-default colour field now that every renamed cloud has
+      // been pinned to the new name (see migrateScalarSlug) — unless a cloud
+      // outside this run still carries the old name and is coloured by it.
+      if (action === 'rename' && resultSlug !== slug && selectedScalarField === slug
+          && succeeded.length > 0
+          && !cloudsRef.current.some(c =>
+            !succeeded.includes(c.id) && !!c.data.octree?.attributeRanges?.[slug])) {
+        setSelectedScalarField(resultSlug);
+      }
 
       if (failures.length > 0) {
         setScalarFailures(failures);
@@ -13241,7 +13307,7 @@ export default function PointCloudViewer({
       scalarAbortRef.current = null;
     }
   }, [scalarInProgress, scalarTargets, scalarIntersection, onUpdateCloud, scene,
-      showToast, migrateScalarSlug, refreshScalarFields]);
+      showToast, migrateScalarSlug, refreshScalarFields, selectedScalarField]);
 
 
   const handleGroundSegment = useCallback(async () => {
@@ -20645,7 +20711,7 @@ export default function PointCloudViewer({
                   // octreePaintedRef above.
                   // `octreeReloadGen` is still here: an octree REBUILD can land
                   // on the same cache id, and only a remount re-runs the loader.
-                  key={`octree-${cloudColorMode}-${cloudScalarField ?? ''}-${sourceData.octree ? (octreeReloadGen[sourceData.octree.cacheId] ?? 0) : 0}`}
+                  key={`octree-${cloudColorMode}-${scalarKeyToken(cloud.id, cloudScalarField) ?? ''}-${sourceData.octree ? (octreeReloadGen[sourceData.octree.cacheId] ?? 0) : 0}`}
                   data={sourceData}
                   // The octree attaches to the scene root, NOT inside the parent
                   // <group position> above, so the group's translation never
@@ -20794,6 +20860,7 @@ export default function PointCloudViewer({
                     if (oct) octreeRegistryRef.current.set(cloud.id, oct);
                     else octreeRegistryRef.current.delete(cloud.id);
                   }}
+                  onOctreeDrawn={(cacheId) => handleOctreeDrawn(cloud.id, cacheId)}
                   // The octree files are gone on disk (cache cleared / evicted /
                   // version-bumped). Rebuild from the source descriptor or, if
                   // that's impossible, surface a clear message.

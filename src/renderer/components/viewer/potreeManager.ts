@@ -89,6 +89,14 @@ export interface OctreeFrameEntry {
   // box that provably clips the whole cloud — see cropClipsEverything).
   // Skipped clouds don't consume budget and aren't touched in the LRU.
   shouldSkip?: () => boolean;
+  // Return true to leave this octree's LOD exactly where it is this frame — not
+  // updated, so it neither claims budget nor changes what it draws — while its
+  // `afterUpdate` STILL runs over the tiles it has. Distinct from `shouldSkip`,
+  // which drops the per-frame sync too. Used while a replacement octree is
+  // streaming in (the cache-id handover in OctreePointCloud): the drawn octree
+  // must hand the budget over, but its label overlay, masks and material sync
+  // must keep applying, or anything that changes during the handover is lost.
+  frozen?: () => boolean;
   // Runs after the shared update, for per-cloud work that depends on the
   // freshly-computed visibleNodes (material sync, scalar buffer swaps, E2E hooks).
   afterUpdate?: () => void;
@@ -112,11 +120,13 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
   const manager = getPotreeManager();
 
   const active: OctreeFrameEntry[] = [];
+  const frozen: OctreeFrameEntry[] = [];
   for (const entry of _frameEntries.values()) {
     // `disposed` clouds linger for a frame between potree's dispose and our
     // unregister; passing one to updatePointClouds would touch freed geometry.
     if ((entry.octree as unknown as { disposed?: boolean }).disposed) continue;
     if (entry.shouldSkip?.()) continue;
+    if (entry.frozen?.()) { frozen.push(entry); continue; }
     active.push(entry);
   }
   if (active.length > 0) {
@@ -145,8 +155,27 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
       visibleNodes += (e.octree as any).visibleNodes?.length ?? 0;
       visiblePoints += (e.octree as any).numVisiblePoints ?? 0;
     }
+    // What is actually ON SCREEN: every registered octree ATTACHED to the scene,
+    // skipped or not. Differs from `visiblePoints` (which counts only octrees
+    // updated this frame) in exactly the case a cache-id handover creates: the
+    // drawn octree is frozen (skipped) while its replacement streams detached.
+    // A frame where this hits zero on a scene with clouds is a visible blink.
+    //
+    // Summed over `visibleNodes` (tree nodes: loaded AND uploaded), never from
+    // `numVisiblePoints`, which potree credits the moment it SELECTS a node —
+    // before its geometry has arrived — so a freshly loaded octree would report
+    // points it has not drawn yet and hide exactly the gap this exists to catch.
+    let drawnPoints = 0;
+    for (const e of _frameEntries.values()) {
+      const o = e.octree as any;
+      if (o.disposed || !o.parent || !o.visible) continue;
+      for (const node of o.visibleNodes ?? []) {
+        drawnPoints += node?.numPoints ?? node?.geometryNode?.numPoints ?? 0;
+      }
+    }
     const lru = (manager as any).lru;
     g.__potreeFrameStats = {
+      drawnPoints,
       frame: ((g.__potreeFrameStats?.frame ?? 0) as number) + 1,
       clouds: active.length,
       visibleNodes,
@@ -157,8 +186,10 @@ export function updateAllPointClouds(camera: THREE.Camera, renderer: THREE.WebGL
       evictAbove: manager.pointBudget * 2,
     };
   }
-  // After the shared pass, so every callback sees final visibleNodes.
+  // After the shared pass, so every callback sees final visibleNodes. Frozen
+  // entries too: their visibleNodes are simply last frame's, still on screen.
   for (const entry of active) entry.afterUpdate?.();
+  for (const entry of frozen) entry.afterUpdate?.();
 }
 
 // potree-core's RequestManager just wraps fetch + URL resolution. With
