@@ -1,0 +1,4 @@
+# Upstream PotreeConverter sources are CRLF; the patch must reach `git apply`
+# byte-for-byte (build-potree-converter.mjs also checks its SHA-256), so never
+# let line-ending conversion touch it on any platform.
+scripts/patches/*.patch -text

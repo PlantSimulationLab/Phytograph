@@ -6,6 +6,15 @@
 // parallel STL fix). This script applies that patch before configuring;
 // when #686 merges, drop the patch step.
 //
+// BOTH inputs are pinned: the upstream commit (POTREE_COMMIT) and the patch
+// (scripts/patches/potree-converter-pr686.patch, checked by PATCH_SHA256).
+// They used to float — `git clone --depth 1` of the default branch plus a live
+// `gh pr diff 686` — and upstream merging #697 ("compressed_chunks") on
+// 2026-09-22 broke every cold build: #686 stopped applying, and had it applied
+// we would have shipped an unreviewed octree-format change. Bumping either
+// edits this file, which is also what moves every workflow's potree cache key
+// (they hash this script), so a bump always forces a real rebuild.
+//
 // Usage:
 //   npm run build:potree-converter                # build for the current platform
 //   FORCE=1 npm run build:potree-converter        # rebuild even if binary exists
@@ -19,7 +28,8 @@
 //   Windows: Visual Studio 2019+, CMake. TBB is pulled via vcpkg if present.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync, chmodSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, copyFileSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { platform, arch } from 'node:os';
@@ -30,12 +40,15 @@ const repoRoot = join(__dirname, '..');
 const SRC_DIR = join(repoRoot, 'tmp', 'potree-converter-src');
 const BUILD_DIR = join(SRC_DIR, 'build');
 const POTREE_REPO = process.env.POTREE_REPO ?? 'https://github.com/potree/PotreeConverter.git';
-// The patch is a snapshot of PR #686 saved alongside this script. We fetch
-// it dynamically (instead of vendoring the diff) so the script tracks the PR
-// if its author updates it. Pinning the SHA would avoid surprises — TODO
-// once #686 stabilises.
+// Upstream commit every shipped converter has been built from: the tip of the
+// default branch immediately before the #697 merge ("Add support for point data
+// format 8", 2026-06-22).
+const POTREE_COMMIT = 'a70ef212198b0e5ae1d071713a0c8cbda8fcc9a7';
+// PR #686 as `gh pr diff 686` returned it at head 9def4f9 (last updated
+// 2026-01-01), vendored so the build needs no network call to GitHub's API.
 const PR_NUMBER = 686;
-const PATCH_FILE = join(SRC_DIR, '.phytograph-pr686.patch');
+const PATCH_FILE = join(__dirname, 'patches', 'potree-converter-pr686.patch');
+const PATCH_SHA256 = '1fd6fa2a2a5417606ac9c5f4c12a13ef0eaa64b89667cb8b0e67052c4916cb59';
 const FORCE = process.env.FORCE === '1';
 
 function platformTag() {
@@ -92,8 +105,9 @@ function preflight() {
     }
   }
 
-  if (spawnSync('gh', ['--version'], { stdio: 'ignore' }).status !== 0) {
-    throw new Error('gh CLI not found on PATH. Needed to fetch PR #686 as a patch until upstream merges.');
+  const patchHash = createHash('sha256').update(readFileSync(PATCH_FILE)).digest('hex');
+  if (patchHash !== PATCH_SHA256) {
+    throw new Error(`${PATCH_FILE} does not match PATCH_SHA256 (got ${patchHash}). Update the constant deliberately if the patch was meant to change.`);
   }
 }
 
@@ -101,18 +115,24 @@ function ensureSourceTree() {
   if (!existsSync(SRC_DIR)) {
     console.log(`cloning ${POTREE_REPO} -> ${SRC_DIR}`);
     mkdirSync(dirname(SRC_DIR), { recursive: true });
-    run('git', ['clone', '--depth', '1', POTREE_REPO, SRC_DIR]);
+    // A shallow fetch of one exact commit (GitHub serves any reachable SHA).
+    mkdirSync(SRC_DIR, { recursive: true });
+    run('git', ['init', '-q'], { cwd: SRC_DIR });
+    run('git', ['remote', 'add', 'origin', POTREE_REPO], { cwd: SRC_DIR });
+    run('git', ['fetch', '--depth', '1', 'origin', POTREE_COMMIT], { cwd: SRC_DIR });
+    run('git', ['checkout', '-q', 'FETCH_HEAD'], { cwd: SRC_DIR });
   } else {
     console.log(`reusing source tree at ${SRC_DIR}`);
+  }
+  const head = runCapture('git', ['rev-parse', 'HEAD'], { cwd: SRC_DIR }).trim();
+  if (head !== POTREE_COMMIT) {
+    throw new Error(
+      `${SRC_DIR} is at ${head}, not the pinned ${POTREE_COMMIT}. ` +
+      `Delete that directory and re-run to fetch the pinned source.`);
   }
 }
 
 function applyPatchIfNeeded() {
-  if (!existsSync(PATCH_FILE)) {
-    console.log(`fetching upstream PR #${PR_NUMBER} as patch...`);
-    const diff = runCapture('gh', ['pr', 'diff', String(PR_NUMBER), '--repo', 'potree/PotreeConverter']);
-    writeFileSync(PATCH_FILE, diff);
-  }
   // `git apply --reverse --check` succeeds iff the patch is already applied.
   // This handles the case where the source tree was patched in a previous
   // run (or by a developer manually) and we'd otherwise fail with "patch
