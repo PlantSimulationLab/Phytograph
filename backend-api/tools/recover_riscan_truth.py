@@ -53,7 +53,7 @@ def _load_drop_far_outliers():
     the tool and the registration path share a single definition of "this is a
     sky return" rather than drifting apart.
     """
-    src = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
     start = src.index("def _drop_far_outliers(")
     end = src.index("\ndef ", start + 1)
     ns = {"np": np}

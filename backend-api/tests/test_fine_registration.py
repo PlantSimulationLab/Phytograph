@@ -377,3 +377,114 @@ def test_trim_to_anchor_drops_only_detail_the_ladder_cannot_read():
                                                            levels).sizes, (
         "trimming changed what the pyramid holds -- it must only remove points "
         "the pyramid's own downsample would have merged")
+
+
+def test_voxel_centroids_match_open3d_exactly():
+    """The numpy downsample exists to release the GIL, not to change the
+    answer: same cells, same centroids as Open3D's, only the row order may
+    differ."""
+    import open3d as o3d
+
+    rng = np.random.default_rng(3)
+    pts = _scene(rng, count=120_000)
+    for voxel in (0.05, 0.2, 0.73):
+        mine = fr.voxel_centroids(pts, voxel)
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+        theirs = np.asarray(pc.voxel_down_sample(voxel).points)
+        assert len(mine) == len(theirs)
+        a = mine[np.lexsort(mine.T)]
+        b = theirs[np.lexsort(theirs.T)]
+        np.testing.assert_allclose(a, b, rtol=0, atol=1e-9)
+
+
+def test_occupied_voxel_count_predicts_the_downsample_length():
+    """`working_copy` searches its voxel by COUNTING rather than downsampling;
+    the count is only a valid stand-in if it is the downsample's length."""
+    rng = np.random.default_rng(4)
+    pts = _scene(rng, count=120_000)
+    for voxel in (0.03, 0.11, 0.4):
+        assert (fr._occupied_voxels(pts, voxel, pts.min(axis=0))
+                == len(fr.voxel_centroids(pts, voxel)))
+
+
+def test_working_copy_search_lands_under_budget_on_volumetric_cover():
+    """Vegetation fills volume, so occupancy falls slower than 1/voxel^2 and
+    the old sqrt step undershot for several passes. The measured-exponent
+    search must still land inside the budget, and not far under it."""
+    rng = np.random.default_rng(5)
+    canopy = rng.uniform([-10, -10, 0], [10, 10, 4], size=(600_000, 3))
+    budget = 60_000
+    pts, voxel = fr.working_copy(canopy, budget=budget)
+    assert len(pts) <= budget
+    assert len(pts) > 0.6 * budget
+    assert len(pts) == len(fr.voxel_centroids(canopy, voxel))
+
+
+def test_median_spacing_block_subset_tracks_the_full_cloud(monkeypatch):
+    """Above the size threshold the spacing probe measures whole columns of the
+    cloud rather than all of it; the answer must stay close to the full one."""
+    rng = np.random.default_rng(6)
+    pts = _scene(rng, count=400_000)
+    monkeypatch.setattr(fr, "_SPACING_BLOCK_MIN_POINTS", 10 ** 12)
+    full = fr.median_spacing(pts)
+    monkeypatch.setattr(fr, "_SPACING_BLOCK_MIN_POINTS", 1000)
+    subset = fr.median_spacing(pts)
+    assert abs(subset - full) / full < 0.10
+
+
+def test_pyramid_skips_only_a_redundant_finest_pass():
+    """`gridded_at` lets a caller whose points already sit on the finest grid
+    skip re-voxelising them. The levels must match an unskipped build to
+    within the handful of cells a second centroid pass merges."""
+    rng = np.random.default_rng(7)
+    pts = _scene(rng, count=200_000)
+    levels = fr.plan_levels(0.1, 0.6)
+    gridded = fr.voxel_centroids(pts, levels[-1][0])
+    plain = fr.Pyramid(gridded, levels).sizes
+    skipped = fr.Pyramid(gridded, levels, gridded_at=levels[-1][0]).sizes
+    assert skipped[-1] == len(gridded)
+    for a, b in zip(plain, skipped):
+        assert abs(a - b) <= 0.01 * b
+
+
+def test_pyramid_feed_hands_over_in_order_and_bounds_what_it_holds():
+    import threading
+    import time
+
+    built, live = [], []
+    lock = threading.Lock()
+
+    def build(k):
+        with lock:
+            built.append(k)
+            live.append(k)
+            assert len(live) <= 3
+        return f"pyramid-{k}"
+
+    feed = fr.PyramidFeed(build, [2, 0, 1, 3, 4], ahead=3)
+    try:
+        assert feed.take(2) == "pyramid-2"          # held, never released
+        for k in [0, 1, 3, 4]:
+            assert feed.take(k) == f"pyramid-{k}"
+            with lock:
+                live.remove(k)
+            feed.release()
+        assert built == [2, 0, 1, 3, 4]
+    finally:
+        feed.close()
+
+    # A builder failure surfaces to the consumer instead of hanging it.
+    def boom(k):
+        raise MemoryError("no room")
+
+    bad = fr.PyramidFeed(boom, [0, 1], ahead=2)
+    with pytest.raises(MemoryError):
+        bad.take(0)
+    bad.close()
+
+    # Closing while the builder is parked on a full window lets it exit.
+    parked = fr.PyramidFeed(lambda k: k, [0, 1, 2, 3], ahead=1)
+    assert parked.take(0) == 0
+    parked.close()
+    parked._thread.join(timeout=5)
+    assert not parked._thread.is_alive()

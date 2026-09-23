@@ -458,3 +458,45 @@ def test_shortlist_ranking_is_robust_to_its_iteration_budget():
         f"ranking picked a genuinely different pose, not just a different index"
     )
     assert _RANK_ITERATIONS >= 5, "below this the ranking was never measured"
+
+
+def test_prepared_clouds_give_the_same_answer_as_arrays():
+    """`CoarseCloud` only caches per-cloud work across calls; every variant
+    must come out as it would from plain arrays."""
+    from raster_correlation import CoarseCloud
+
+    target = _planting()
+    source = target @ _rigid(25.0, [3.0, -2.0, 0.0])[:3, :3].T + [3.0, -2.0, 0.0]
+    a, b = CoarseCloud(target), CoarseCloud(source)
+    for cell, mode in [(None, "occupancy"), (None, "height"), (2.0, "occupancy")]:
+        want = register_by_correlation(target, source, mode=mode, cell=cell)
+        got = register_by_correlation(a, b, mode=mode, cell=cell)
+        np.testing.assert_allclose(got["transformation"], want["transformation"],
+                                   atol=1e-9)
+        assert got["yaw_deg"] == want["yaw_deg"]
+
+
+def test_the_yaw_sweep_is_safe_to_run_from_several_threads():
+    """Concurrent coarse searches once deadlocked: the sweep's rotation went
+    through `@`, and the bundled OpenBLAS hangs when two Python threads enter
+    it at once. The rotation is elementwise now; four concurrent searches must
+    all finish, and agree with a serial run."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from raster_correlation import CoarseCloud
+
+    rng = np.random.default_rng(12)
+    target = rng.uniform([-20, -20, 0], [20, 20, 3], size=(60_000, 3))
+    source = target @ _rigid(-40.0, [1.0, 4.0, 0.0])[:3, :3].T + [1.0, 4.0, 0.0]
+    a, b = CoarseCloud(target), CoarseCloud(source)
+    a.warm()
+    b.warm()
+    variants = [(None, "occupancy"), (None, "height"), (2.0, "occupancy"),
+                (2.0, "height")]
+    serial = [register_by_correlation(a, b, mode=m, cell=c)["yaw_deg"]
+              for c, m in variants]
+    with ThreadPoolExecutor(4) as pool:
+        futures = [pool.submit(register_by_correlation, a, b, mode=m, cell=c)
+                   for c, m in variants]
+        concurrent = [f.result(timeout=120)["yaw_deg"] for f in futures]
+    assert concurrent == serial

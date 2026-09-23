@@ -242,9 +242,10 @@ On a real vineyard this was the difference between failing completely and
 registering to about 0.1 m — the correct settings were not the ones that scored
 best on any individual pair.
 
-The cost is that every pair has to be registered, so time grows with the square
-of the scan count. Expect a few minutes for a handful of scans and appreciably
-longer for a dozen.
+Each scan is matched to the reference scan and to its neighbour in a closing
+ring, not to every other scan, so time grows roughly in proportion to the scan
+count. Expect about a minute for four to six full-resolution terrestrial scans
+(10–14 million points each).
 
 ### Reading the result
 

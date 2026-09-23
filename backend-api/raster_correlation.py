@@ -175,8 +175,14 @@ def rasterise(points: np.ndarray, cell: float, extent: float,
     a terrestrial scan's bbox is dominated by sparse far-field returns, so its
     centre can sit hundreds of metres from the actual plot.
     """
+    return _rasterise_xy(points[:, :2], points[:, 2], cell, extent, centre, mode)
+
+
+def _rasterise_xy(xy: np.ndarray, z: np.ndarray, cell: float, extent: float,
+                  centre: np.ndarray, mode: str = "occupancy") -> np.ndarray:
+    """`rasterise` over separate XY and Z columns -- see that function."""
     n = max(int(round(extent / cell)), 4)
-    ij = np.floor((points[:, :2] - centre + extent / 2.0) / cell).astype(np.int64)
+    ij = np.floor((xy - centre + extent / 2.0) / cell).astype(np.int64)
     inside = (ij[:, 0] >= 0) & (ij[:, 0] < n) & (ij[:, 1] >= 0) & (ij[:, 1] < n)
     ij = ij[inside]
     if len(ij) == 0:
@@ -185,7 +191,7 @@ def rasterise(points: np.ndarray, cell: float, extent: float,
     counts = np.bincount(flat, minlength=n * n).astype(np.float64)
     if mode == "occupancy":
         return (counts > 0).astype(np.float64).reshape(n, n)
-    sums = np.bincount(flat, weights=points[inside, 2], minlength=n * n)
+    sums = np.bincount(flat, weights=z[inside], minlength=n * n)
     out = np.zeros(n * n)
     filled = counts > 0
     out[filled] = sums[filled] / counts[filled]
@@ -288,7 +294,27 @@ def _shift_to_matrix(shift, n, cell, angle_deg, tgt_centre, src_centre,
     return M
 
 
-def _best_by_icp(candidates, target: np.ndarray, source: np.ndarray):
+def _ranking_cloud(points: np.ndarray, voxel: float = 0.40):
+    """The voxelised, normal-carrying cloud `_best_by_icp` ranks against.
+
+    0.40 m, not the 0.15 m used for a final pose. This ICP only has to RANK
+    candidates -- the fine stage recomputes the winner at full resolution --
+    and ranking survives coarse geometry while cost scales with point count:
+    measured 0.330 s per candidate at 0.15 m against 0.089 s at 0.50 m, so a
+    32-candidate shortlist went from ~10.6 s to ~2.8 s per pair.
+    """
+    import open3d as o3d
+
+    p = o3d.geometry.PointCloud()
+    p.points = o3d.utility.Vector3dVector(np.asarray(points, dtype=np.float64))
+    p = p.voxel_down_sample(voxel)
+    p.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=max(0.6, voxel * 6), max_nn=30))
+    return p
+
+
+def _best_by_icp(candidates, target, source):
     """Pick the candidate pose that ICP fits best.
 
     Returns (index, inlier_rmse, refined_transform, rmse_margin).
@@ -311,29 +337,19 @@ def _best_by_icp(candidates, target: np.ndarray, source: np.ndarray):
 
     Returns (0, None, None, 0.0) if Open3D is unavailable, i.e. keep the top
     peak, which is exactly the previous behaviour.
+
+    `target` / `source` are arrays or `CoarseCloud`s; the latter carry their
+    ranking cloud (see `_ranking_cloud`) so it is built once per scan rather
+    than once per call.
     """
     try:
         import open3d as o3d
     except ImportError:
         return 0, None, None, 0.0
 
-    # 0.40 m, not the 0.15 m used for a final pose. This ICP only has to RANK
-    # candidates -- the fine stage recomputes the winner at full resolution --
-    # and ranking survives coarse geometry while cost scales with point count:
-    # measured 0.330 s per candidate at 0.15 m against 0.089 s at 0.50 m, so a
-    # 32-candidate shortlist went from ~10.6 s to ~2.8 s per pair.
-    def _pc(a, voxel=0.40):
-        p = o3d.geometry.PointCloud()
-        p.points = o3d.utility.Vector3dVector(np.asarray(a, dtype=np.float64))
-        p = p.voxel_down_sample(voxel)
-        p.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                radius=max(0.6, voxel * 6), max_nn=30))
-        return p
-
-    try:
-        tgt, src = _pc(target), _pc(source)
-    except (RuntimeError, ValueError):
+    tgt = _as_coarse(target).ranking_cloud()
+    src = _as_coarse(source).ranking_cloud()
+    if tgt is None or src is None:
         return 0, None, None, 0.0
     if len(tgt.points) < 10 or len(src.points) < 10:
         return 0, None, None, 0.0
@@ -392,6 +408,56 @@ def _best_by_icp(candidates, target: np.ndarray, source: np.ndarray):
     return best_i, best_rmse, best_M, float(margin)
 
 
+class CoarseCloud:
+    """One cloud's partner-independent coarse-stage inputs, computed once.
+
+    `register_by_correlation` derives several things from each cloud that do
+    not depend on the OTHER cloud or on the variant being tried: whether it has
+    a ground sheet, its ground-stripped canopy, its XY median, and the
+    voxelised, normal-carrying copy the shortlist ICP ranks against. A scan set
+    registers every graph edge under every variant -- 24 calls on four scans,
+    each taking two clouds -- so each of those was recomputed up to twelve
+    times per scan. Measured on a real four-scan set, ground stripping plus the
+    ranking cloud's normals were ~20% of the coarse stage, all repeated work.
+
+    Pass instances instead of arrays whenever a cloud takes part in more than
+    one call; the result is identical to passing the array (same inputs, same
+    arithmetic), only cheaper.
+    """
+
+    def __init__(self, points: np.ndarray):
+        self.points = np.asarray(points, dtype=np.float64)
+        self.has_ground = _has_ground(self.points)
+        self._canopy = None
+        self._ranking = None
+        self._ranking_failed = False
+
+    def warm(self) -> None:
+        """Build everything a search may ask for, ahead of concurrent use."""
+        if self.has_ground:
+            self.canopy()
+        self.ranking_cloud()
+
+    def canopy(self) -> np.ndarray:
+        if self._canopy is None:
+            from anchor_extraction import _drop_ground
+            self._canopy = _drop_ground(self.points)
+        return self._canopy
+
+    def ranking_cloud(self):
+        """Open3D cloud for `_best_by_icp`, or None if it cannot be built."""
+        if self._ranking is None and not self._ranking_failed:
+            try:
+                self._ranking = _ranking_cloud(self.points)
+            except (ImportError, RuntimeError, ValueError):
+                self._ranking_failed = True
+        return self._ranking
+
+
+def _as_coarse(cloud) -> CoarseCloud:
+    return cloud if isinstance(cloud, CoarseCloud) else CoarseCloud(cloud)
+
+
 def _rotate_xy(points: np.ndarray, degrees: float, centre: np.ndarray) -> np.ndarray:
     th = math.radians(degrees)
     c, s = math.cos(th), math.sin(th)
@@ -432,8 +498,8 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     Pass None only when no heading is available; then the full circle is
     searched and the result should be treated with more suspicion.
     """
-    target = np.asarray(target, dtype=np.float64)
-    source = np.asarray(source, dtype=np.float64)
+    target_cc, source_cc = _as_coarse(target), _as_coarse(source)
+    target, source = target_cc.points, source_cc.points
     empty = dict(transformation=np.eye(4), score=0.0, margin=0.0,
                  ambiguous=True, pose_margin=None, yaw_deg=0.0)
     if len(target) < 100 or len(source) < 100:
@@ -451,10 +517,9 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     # against 0.08 s for the same job. The full clouds are still what ICP and
     # the height offset use; only the rasters see the canopy.
     tgt_grid, src_grid = target, source
-    if strip_ground and _has_ground(target) and _has_ground(source):
+    if strip_ground and target_cc.has_ground and source_cc.has_ground:
         try:
-            from anchor_extraction import _drop_ground
-            t_hi, s_hi = _drop_ground(target), _drop_ground(source)
+            t_hi, s_hi = target_cc.canopy(), source_cc.canopy()
             # _drop_ground returns the input unchanged when it would empty the
             # cloud; only adopt a result that actually kept a usable canopy.
             if len(t_hi) >= 100 and len(s_hi) >= 100:
@@ -481,12 +546,33 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     tgt_fft = np.fft.rfft2(tgt_raster)
     shape = tgt_raster.shape
 
+    # The sweep rasterises the source once per yaw -- ~93 times a call -- so the
+    # per-angle work is trimmed to the XY columns it actually reads, centred
+    # once rather than per angle.
+    #
+    # The rotation is a COMPLEX MULTIPLY, not `xy @ R.T`, and that is a
+    # correctness fix, not style. `@` dispatches even this (N,2)x(2,2) product
+    # to OpenBLAS, and the bundled OpenBLAS (0.3.30, Windows) DEADLOCKS when
+    # two Python threads enter it at once: measured, four concurrent calls here
+    # left one worker blocked in the matmul forever. The backend serves
+    # requests from a threadpool, so two registrations -- or this stage run in
+    # parallel -- could hang the process. Elementwise complex arithmetic never
+    # reaches BLAS. It agrees with the matmul to ~3e-14 m, which moves a raster
+    # cell assignment only for a point sitting exactly on a cell wall.
+    src_xy_centred = np.ascontiguousarray(src_grid[:, :2] - src_centre)
+    src_xy_complex = src_xy_centred.view(np.complex128).ravel()
+    src_z = src_grid[:, 2]
+
+    def raster_at(angle):
+        th = math.radians(angle)
+        turned = src_xy_complex * complex(math.cos(th), math.sin(th))
+        xy = turned.view(np.float64).reshape(-1, 2) + src_centre
+        return _rasterise_xy(xy, src_z, cell, extent, src_centre, mode)
+
     def best_over(angles):
         out = []
         for a in angles:
-            rot = _rotate_xy(src_grid, a, src_centre)
-            peak, shift = _correlate(tgt_fft, shape, tgt_norm,
-                                     rasterise(rot, cell, extent, src_centre, mode))
+            peak, shift = _correlate(tgt_fft, shape, tgt_norm, raster_at(a))
             out.append((peak, a, shift))
         return sorted(out, key=lambda t: -t[0])
 
@@ -526,9 +612,7 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     # regular planting has many near-equal peaks -- one per row spacing -- and
     # the tallest is often a neighbouring row rather than the true pose. Build
     # the top few as candidate matrices and let ICP arbitrate on geometry.
-    rot_best = _rotate_xy(src_grid, best_angle, src_centre)
-    shortlist = _top_shifts(tgt_fft, shape, tgt_norm,
-                            rasterise(rot_best, cell, extent, src_centre, mode),
+    shortlist = _top_shifts(tgt_fft, shape, tgt_norm, raster_at(best_angle),
                             max(1, int(refine_top_k)))
     if not shortlist:
         shortlist = [(best_peak, best_shift)]
@@ -541,7 +625,8 @@ def register_by_correlation(target: np.ndarray, source: np.ndarray,
     M = candidates[0]
     pose_margin = None
     if len(candidates) > 1:
-        chosen, _, refined, pose_margin = _best_by_icp(candidates, target, source)
+        chosen, _, refined, pose_margin = _best_by_icp(candidates, target_cc,
+                                                       source_cc)
         M = candidates[chosen]
         # Return the REFINED pose, not the raw grid candidate. Choosing already
         # cost a full ICP run per candidate, so the aligned result is in hand --

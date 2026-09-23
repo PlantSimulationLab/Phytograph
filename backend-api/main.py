@@ -41094,8 +41094,27 @@ def _expected_coarse_runs(n_scans: int, select_variant: bool,
     return n_edges * len(_COARSE_VARIANTS)
 
 
+# Concurrent coarse searches. Each search's ranking ICP is itself OpenMP-
+# threaded but spends most of a call in serial numpy (rasterise / FFT) and in
+# Open3D's fixed per-call overhead, so a few in flight fill the cores the one
+# search leaves idle. Memory is small -- each search holds only rasters and
+# the shared, already-decimated clouds.
+_COARSE_WORKERS = 4
+
+# Scans ingested at once. Each holds a full cloud plus the working-copy
+# temporaries (~0.8 GB on a 13.7 M-point scan), so this is the memory bound as
+# much as the parallelism.
+_INGEST_WORKERS = 3
+
+# Concurrent fine aligns -- see the pipelined loop in `_do_multi_scan_register`.
+# Each in-flight align holds one source pyramid (~320 MB at the point cap), so
+# this is also the memory bound on top of the reference.
+_FINE_ALIGN_WORKERS = 2
+
+
 def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) -> dict:
     """Worker for /api/multi/register. See _do_c2m_distance for the contract."""
+    feed = None
     try:
         import itertools
 
@@ -41104,7 +41123,7 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         from loop_closure import (check_loops, scan_graph_edges,
                                   select_per_pair_by_loops,
                                   select_variant_by_loops)
-        from raster_correlation import register_by_correlation
+        from raster_correlation import CoarseCloud, register_by_correlation
 
         _cancel_checkpoint(progress)
         if progress is not None:
@@ -41138,11 +41157,13 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         # and a stride sample cannot give it that at any size (a scan samples in
         # angle, so stride preserves the 1/r^2 density bias exactly). Built here,
         # from the full cloud, so the full array can be dropped immediately --
-        # peak memory stays one scan, not all of them.
+        # peak memory stays `_INGEST_WORKERS` scans, not all of them.
         working: List[tuple] = []
 
-        def _ingest(X: np.ndarray) -> None:
-            X = X[np.isfinite(X).all(axis=1)]
+        def _ingest(X: np.ndarray) -> tuple:
+            """(coarse sample, footprint span, fine working copy or None)."""
+            if not np.isfinite(X).all():
+                X = X[np.isfinite(X).all(axis=1)]
             # Decide the sky/miss cut from a SAMPLE, then apply it to the whole
             # cloud. `_drop_far_outliers` looks for a large multiplicative gap in
             # distance-from-centre, and misses sit ~1 km out -- a sample sees
@@ -41161,8 +41182,9 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # terrestrial scan means the far field, and the far field is what
             # the fine stage exists to weigh properly. It is a coarse-raster
             # aid, not a cleaning step.
+            work = None
             if request.refine_icp and request.refine_method != "planes":
-                working.append(fine_registration.working_copy(X))
+                work = fine_registration.working_copy(X)
             # Reject sparse voxels, but keep the ORIGINAL footprint for scale.
             #
             # These two steps fight each other if left alone. `auto_cell_size`
@@ -41183,23 +41205,60 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # opt-in until it is.
             if request.density_filter:
                 X = _reject_sparse_voxels(X)
-            spans.append(span)
             if len(X) > budget:
                 X = X[np.linspace(0, len(X) - 1, budget).astype(int)]
-            clouds.append(X)
+            return X, span, work
+
+        # One loader per scan, called only once a worker is free for it.
+        loaders = [
+            (lambda flat=flat: np.asarray(flat, dtype=np.float64).reshape(-1, 3))
+            for flat in (request.scan_points or [])
+        ] + [
+            (lambda src=src: _read_points_from_source(src)[0])
+            for src in request.scans
+        ]
+
+        # Scans are ingested CONCURRENTLY. Every step of `_ingest` is numpy
+        # that releases the GIL (the working copy's downsample included -- see
+        # `fine_registration.voxel_centroids`), and scans are independent, so
+        # this was ~9 s per 13 M-point scan run strictly one after another.
+        # The READS stay on this thread: a session read pins the session to
+        # this request through a contextvar that pool threads do not inherit.
+        # A scan is read only when a worker is free for it, which is what
+        # bounds peak memory to `_INGEST_WORKERS` full clouds.
+        from concurrent.futures import ThreadPoolExecutor
+
+        ingested: dict = {}
+        pending: List[tuple] = []
+
+        def _collect(k, fut):
+            ingested[k] = fut.result()
             if progress is not None and n_in:
                 # Reading is a real fraction of the run on a big set; showing it
                 # move beats a bar frozen at 2% for a minute.
-                progress(0.02 + 0.06 * (len(clouds) / n_in),
-                         f"Reading scan {len(clouds)} of {n_in}")
+                progress(0.02 + 0.06 * (len(ingested) / n_in),
+                         f"Reading scan {len(ingested)} of {n_in}")
 
-        if request.scan_points:
-            for flat in request.scan_points:
-                _ingest(np.asarray(flat, dtype=np.float64).reshape(-1, 3))
-        for src in request.scans:
-            _cancel_checkpoint(progress)
-            pts, _, _ = _read_points_from_source(src)
-            _ingest(pts)
+        with ThreadPoolExecutor(max_workers=_INGEST_WORKERS,
+                                thread_name_prefix="ingest") as pool:
+            try:
+                for k, load in enumerate(loaders):
+                    while len(pending) >= _INGEST_WORKERS:
+                        _collect(*pending.pop(0))
+                    _cancel_checkpoint(progress)
+                    pending.append((k, pool.submit(_ingest, load())))
+                while pending:
+                    _collect(*pending.pop(0))
+            except BaseException:
+                for _, fut in pending:
+                    fut.cancel()
+                raise
+        for k in sorted(ingested):
+            X, span, work = ingested.pop(k)
+            clouds.append(X)
+            spans.append(span)
+            if work is not None:
+                working.append(work)
 
         if len(clouds) < 2:
             return dict(success=False,
@@ -41221,24 +41280,99 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         # every pair comparable. Largest footprint wins so no scan is clipped.
         grid_extent = max(spans) if spans else None
 
+        ref = request.reference
+        levels = None
+        if request.refine_icp and request.refine_method != "planes" and working:
+            # One ladder for the whole set, from the WIDEST working voxel:
+            # a level the sparsest scan cannot populate helps nobody and
+            # costs the dense ones time. The pull-in follows the same rule
+            # as the pairwise endpoint (measured here on the coarse
+            # sample), so both entry points capture the same starting error
+            # rather than each having its own reach.
+            pull_in = _auto_correspondence_distance(
+                clouds[ref], _robust_cloud_diagonal(clouds[ref]))
+            levels = fine_registration.plan_levels(
+                max(v for _, v in working), pull_in)
+            # Now that the ladder is known, drop the detail each working
+            # copy holds BELOW its finest level -- the pyramid's own first
+            # downsample would merge those points away, so carrying them
+            # into every level costs time for nothing. A no-op when the set
+            # is homogeneous. See `fine_registration.trim_to_anchor`.
+            #
+            # Trimmed to the LADDER's finest voxel, not to the widest
+            # working voxel that was passed in: `plan_levels` clamps its
+            # argument to [_MIN_FINEST_VOXEL_M, _MAX_FINEST_VOXEL_M], so on
+            # a set whose budget pushed a voxel past the ceiling the two
+            # differ and only the ladder's own value is the grid the
+            # pyramid will actually build.
+            finest_voxel = levels[-1][0]
+            # Each copy leaves here ON the finest level's grid when either
+            # step gridded it at that voxel, which lets `Pyramid` skip its
+            # own redundant first downsample (`gridded_at`).
+            working = [
+                (fine_registration.trim_to_anchor(pts, v, finest_voxel),
+                 finest_voxel if finest_voxel > v * 1.01 else v)
+                for pts, v in working]
+
         # A 5-scan set runs 32 coarse searches (8 graph edges x 4 variants).
         # Reporting only the phase left the bar frozen at 10% for minutes on a
         # real set, which reads as a hang.
-        done = {"n": 0}
         expected = max(1, _expected_coarse_runs(
             n, request.select_variant, request.complete_graph, request.reference))
 
-        def register(a, b, cell, mode):
-            _cancel_checkpoint(progress)
-            result = register_by_correlation(clouds[a], clouds[b],
-                                             mode=mode, cell=cell,
-                                             extent=grid_extent)
-            done["n"] += 1
-            if progress is not None:
-                frac = min(done["n"] / expected, 1.0)
-                progress(0.10 + 0.60 * frac,
-                         f"Registering scan pairs ({done['n']} of {expected})")
-            return np.asarray(result["transformation"], dtype=np.float64)
+        # Each scan is in several edges and every edge runs every variant, so
+        # the per-cloud half of a coarse call (ground strip, ranking cloud and
+        # its normals) is computed once here rather than per call. See
+        # `raster_correlation.CoarseCloud`.
+        coarse = [CoarseCloud(X) for X in clouds]
+
+        def run_coarse(jobs):
+            """{(a, b, cell, mode): 4x4} for every job, computed concurrently.
+
+            Every (edge, variant) search is independent, so they run on a small
+            pool rather than one after another -- measured on a four-scan
+            orchard set, 24 serial searches took 56 s. Progress and
+            cancellation are reported from THIS thread as results land; the
+            workers only check for cancellation, so a cancelled run stops
+            taking new searches and the in-flight ones finish within one call.
+            """
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def one(job):
+                _cancel_checkpoint(progress)
+                a, b, cell, mode = job
+                result = register_by_correlation(coarse[a], coarse[b],
+                                                 mode=mode, cell=cell,
+                                                 extent=grid_extent)
+                return np.asarray(result["transformation"], dtype=np.float64)
+
+            def warm(cc):
+                _cancel_checkpoint(progress)
+                cc.warm()
+
+            out = {}
+            workers = max(1, min(_COARSE_WORKERS, len(jobs)))
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="coarse") as pool:
+                # Per-cloud preparation first, so two searches sharing a scan
+                # do not both build its canopy and ranking cloud.
+                for f in [pool.submit(warm, cc) for cc in coarse]:
+                    f.result()
+                futures = {pool.submit(one, job): job for job in jobs}
+                try:
+                    for f in as_completed(futures):
+                        out[futures[f]] = f.result()
+                        if progress is not None:
+                            frac = min(len(out) / expected, 1.0)
+                            progress(0.10 + 0.60 * frac,
+                                     f"Registering scan pairs "
+                                     f"({len(out)} of {expected})")
+                        _cancel_checkpoint(progress)
+                except BaseException:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
+            return out
 
         if progress is not None:
             progress(0.10, "Registering scan pairs")
@@ -41256,10 +41390,6 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # picks each pair's variant rather than merely validating the result.
             from loop_closure import _COARSE_VARIANTS
 
-            def candidates(a, b):
-                return [register(a, b, cell, mode)
-                        for cell, mode in _COARSE_VARIANTS]
-
             # Register a star to the reference plus a closing ring, not every
             # pair. Quadratic pair cost was the dominant expense on a large set
             # and most of it bought nothing: what the result needs is a path to
@@ -41267,6 +41397,15 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # 10 pairs took 104 s against 15 pairs at 201 s, both 5 of 5.
             edges = scan_graph_edges(n, reference=request.reference,
                                      complete=request.complete_graph)
+            # The selector asks for every edge's candidates up front, so the
+            # whole table is computed in one concurrent batch and served here.
+            table = run_coarse([(a, b, cell, mode) for a, b in edges
+                                for cell, mode in _COARSE_VARIANTS])
+
+            def candidates(a, b):
+                return [table[(a, b, cell, mode)]
+                        for cell, mode in _COARSE_VARIANTS]
+
             chosen = select_per_pair_by_loops(n, candidates, edges=edges)
             pairs, report = chosen["pairs"], chosen["report"]
             variant = dict(cell=None, mode="per-pair",
@@ -41276,10 +41415,10 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                            closed=chosen["closed"], total=chosen["total"],
                            tried=[f"{c}/{m}" for c, m in _COARSE_VARIANTS])
         else:
-            pairs = {}
-            for a, b in scan_graph_edges(n, reference=request.reference,
-                                         complete=request.complete_graph):
-                pairs[(a, b)] = register(a, b, None, "occupancy")
+            edges = scan_graph_edges(n, reference=request.reference,
+                                     complete=request.complete_graph)
+            table = run_coarse([(a, b, None, "occupancy") for a, b in edges])
+            pairs = {(a, b): table[(a, b, None, "occupancy")] for a, b in edges}
             report = check_loops(pairs, n)
             variant = dict(cell=None, mode="occupancy",
                            worst_loop=max((lp["translation_error"]
@@ -41291,7 +41430,6 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         if progress is not None:
             progress(0.75, "Checking loop closure")
 
-        ref = request.reference
         suspect = {tuple(sorted(p)) for p in report.get("suspect_pairs", [])}
 
         def relative(a, b):
@@ -41319,68 +41457,42 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
             # refinement is seconds of blocking ICP.
             movers = [i for i in transforms if i != ref]
             patch_cache: dict = {}
-            levels = pyramids = None
-            if request.refine_method != "planes" and working:
-                # One ladder for the whole set, from the WIDEST working voxel:
-                # a level the sparsest scan cannot populate helps nobody and
-                # costs the dense ones time. The pull-in follows the same rule
-                # as the pairwise endpoint (measured here on the coarse
-                # sample), so both entry points capture the same starting error
-                # rather than each having its own reach.
-                pull_in = _auto_correspondence_distance(
-                    clouds[ref], _robust_cloud_diagonal(clouds[ref]))
-                levels = fine_registration.plan_levels(
-                    max(v for _, v in working), pull_in)
-                # Now that the ladder is known, drop the detail each working
-                # copy holds BELOW its finest level -- the pyramid's own first
-                # downsample would merge those points away, so carrying them
-                # into every level costs time for nothing. A no-op when the set
-                # is homogeneous. See `fine_registration.trim_to_anchor`.
-                #
-                # Trimmed to the LADDER's finest voxel, not to the widest
-                # working voxel that was passed in: `plan_levels` clamps its
-                # argument to [_MIN_FINEST_VOXEL_M, _MAX_FINEST_VOXEL_M], so on
-                # a set whose budget pushed a voxel past the ceiling the two
-                # differ and only the ladder's own value is the grid the
-                # pyramid will actually build.
-                finest_voxel = levels[-1][0]
-                working = [(fine_registration.trim_to_anchor(pts, v, finest_voxel), v)
-                           for pts, v in working]
-                if progress is not None:
-                    progress(0.79, "Preparing the reference scan")
-                # The reference's pyramid is reused by every pair; the others
-                # are built and dropped one at a time, so peak memory is two
-                # pyramids rather than one per scan.
-                pyramids = {ref: fine_registration.Pyramid(working[ref][0], levels)}
+            # 0.80-0.99 is shared out by how far each scan's ladder has got.
+            # Aligns overlap (below), so a per-scan slice reported in turn
+            # would jump backwards whenever an earlier scan's level landed
+            # after a later one's; summing every scan's progress keeps the bar
+            # monotonic. It is also the cancellation checkpoint, per level.
+            fine_state = {i: 0.0 for i in movers}
+            fine_lock = threading.Lock()
 
-            # Each scan gets an equal slice of 0.80-0.99, subdivided by the
-            # ladder. A marker per SCAN was enough when a refinement was a few
-            # seconds; a full-resolution ladder is tens of seconds, and a pill
-            # that does not move for that long reads as a hang -- and, since
-            # this callback is also the cancellation checkpoint, a coarser one
-            # would mean the user could not stop it either.
-            span = 0.19 / max(len(movers), 1)
+            def fine_report(i, fraction, message):
+                if progress is None:
+                    return
+                with fine_lock:
+                    fine_state[i] = max(fine_state[i], fraction)
+                    overall = sum(fine_state.values()) / max(len(movers), 1)
+                progress(0.80 + 0.19 * overall, message)
 
-            def scan_progress(done_n):
+            def scan_progress(i):
                 if progress is None:
                     return None
-                base = 0.80 + span * done_n
 
                 def report(level, count, voxel):
                     _cancel_checkpoint(progress)
-                    progress(base + span * (level / max(count, 1)),
-                             f"Aligning scan {done_n + 1} of {len(movers)} "
-                             f"at {voxel * 100:.0f} cm detail")
+                    fine_report(i, level / max(count, 1),
+                                f"Aligning scan {movers.index(i) + 1} of "
+                                f"{len(movers)} at {voxel * 100:.0f} cm detail")
 
                 return report
 
-            for done_n, i in enumerate(movers):
-                M = transforms[i]
-                _cancel_checkpoint(progress)
-                if progress is not None:
-                    progress(0.80 + span * done_n,
-                             f"Aligning scan {done_n + 1} of {len(movers)}")
-                if request.refine_method == "planes":
+            def adopt(i, refined):
+                if refined["fitness"] > 0.0:
+                    transforms[i] = refined["transformation"]
+
+            if request.refine_method == "planes":
+                for done_n, i in enumerate(movers):
+                    _cancel_checkpoint(progress)
+                    fine_report(i, 0.0, f"Aligning scan {done_n + 1} of {len(movers)}")
                     # Plane-to-plane: adjust against ~10^4 oriented patches
                     # instead of ~10^5 points. Same residual (distance along the
                     # surface normal) over far fewer primitives.
@@ -41389,28 +41501,79 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
                                             for k, v in enumerate(clouds)})
                     tc, tn = patch_cache[ref]
                     sc, sn = patch_cache[i]
-                    result = plane_patches.align(tc, tn, sc, sn, init=M)
+                    result = plane_patches.align(tc, tn, sc, sn, init=transforms[i])
                     # A solve that never found enough correspondences must not
                     # overwrite the coarse pose -- same rule as zero-fitness ICP.
                     if result["pairs"] >= 6:
                         transforms[i] = result["transformation"]
-                    continue
-
-                if levels is None:
-                    continue
+            elif levels is not None:
                 # Fine stage on the SPATIALLY UNIFORM copies, not the strided
                 # coarse ones. `_drop_near_field` used to run here, deleting
                 # everything inside 5 m so the far field could still be heard
                 # over 1/r^2 sampling; voxel uniformity removes the reason for
                 # that, so both fields now contribute in proportion to the
                 # surface area they cover. See fine_registration.
-                source = fine_registration.Pyramid(working[i][0], levels)
-                refined = fine_registration.align(
-                    pyramids[ref], source, levels, init=M,
-                    progress=scan_progress(done_n))
-                del source
-                if refined["fitness"] > 0.0:
-                    transforms[i] = refined["transformation"]
+                #
+                # PIPELINED: each scan's align runs on a worker while this
+                # thread builds the next scan's pyramid. The two want
+                # different things -- building a pyramid is Open3D code that
+                # holds the GIL (so pyramids cannot usefully be built in
+                # parallel with each other), while GICP releases it for most
+                # of its run -- so they genuinely overlap. Every align is
+                # against the shared reference pyramid, read-only, and the
+                # movers are independent of one another, so the result is the
+                # same as aligning them one after another.
+                from concurrent.futures import ThreadPoolExecutor
+
+                if progress is not None:
+                    progress(0.79, "Preparing the reference scan")
+                # Pyramids are built on a background thread, one ahead of the
+                # aligns that consume them (see `PyramidFeed`), bounded to the
+                # reference, the in-flight aligns and one ready spare.
+                #
+                # Deliberately started only NOW, not straight after ingest
+                # when the ladder is already known. That was tried: building
+                # pyramids during the coarse stage stretched it 15 s -> 34 s
+                # and the run got slower overall, because pyramid
+                # construction is Open3D code that holds the GIL and the
+                # coarse workers are starved while it runs. A GIL-free
+                # rewrite of the surface pass (scipy k-NN + closed-form 3x3
+                # eigenvectors) matched Open3D's normals exactly but ran 5x
+                # slower, so it could not pay for the overlap either.
+                feed = fine_registration.PyramidFeed(
+                    lambda k: fine_registration.Pyramid(
+                        working[k][0], levels, gridded_at=working[k][1]),
+                    [ref] + movers,
+                    ahead=_FINE_ALIGN_WORKERS + 2)
+                reference = feed.take(ref)
+                in_flight: List[tuple] = []
+                with ThreadPoolExecutor(max_workers=_FINE_ALIGN_WORKERS,
+                                        thread_name_prefix="fine") as pool:
+                    try:
+                        for i in feed.order[1:]:
+                            _cancel_checkpoint(progress)
+                            fine_report(i, 0.0, f"Aligning scan "
+                                                f"{movers.index(i) + 1} of "
+                                                f"{len(movers)}")
+                            # Bound memory: at most `_FINE_ALIGN_WORKERS`
+                            # source pyramids aligning at once.
+                            while len(in_flight) >= _FINE_ALIGN_WORKERS:
+                                k, f = in_flight.pop(0)
+                                adopt(k, f.result())
+                                feed.release()
+                            source = feed.take(i)
+                            in_flight.append((i, pool.submit(
+                                fine_registration.align, reference, source,
+                                levels, init=transforms[i],
+                                progress=scan_progress(i))))
+                            del source
+                        for k, f in in_flight:
+                            adopt(k, f.result())
+                            feed.release()
+                    except BaseException:
+                        for _, f in in_flight:
+                            f.cancel()
+                        raise
 
         if progress is not None:
             progress(1.0, "Done")
@@ -41447,6 +41610,11 @@ def _do_multi_scan_register(request: "MultiScanRegisterRequest", progress=None) 
         import traceback
         traceback.print_exc()
         return dict(success=False, error=str(e))
+    finally:
+        # Stops a builder still working ahead (a cancel, an error, scans left
+        # unresolved) so it does not outlive the request holding pyramids.
+        if feed is not None:
+            feed.close()
 
 
 @app.post("/api/multi/register")
