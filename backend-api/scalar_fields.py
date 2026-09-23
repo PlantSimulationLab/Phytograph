@@ -50,7 +50,8 @@ from __future__ import annotations
 
 import ast
 import math
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+import re
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -73,9 +74,30 @@ class SlugError(ValueError):
     """A proposed scalar-field slug is unusable. Message is user-facing."""
 
 
+# Canonical import roles a field MAY be named after. A name that import resolves
+# to one of these comes back as that measurement, which is what the user meant
+# by choosing it: `reflectance` is re-read as the cloud's reflectance channel
+# (values intact), exactly as any other file's reflectance column is. Every
+# other role feeds a tool BY NAME — `target_index` drives LAD's pulse grouping,
+# `row`/`col` the gap-fill raster, `time` the trajectory join — so a field that
+# merely shares the name would be mistaken for it after a round trip.
+MEASUREMENT_ALIAS_TARGETS = frozenset({"reflectance"})
+
+
+def normalise_column_name(name: str) -> str:
+    """The comparison form import uses to match a column to a canonical role.
+
+    Mirrors `_normalise_column_name` in main.py: drop a bracketed unit, lower
+    case, strip everything but letters and digits — so `GPS_Time`, `Time` and
+    `time` are one name to the importer, and must be one name here.
+    """
+    base = re.sub(r'\[.*?\]', '', name)
+    return re.sub(r'[^a-z0-9]+', '', base.strip().lower())
+
+
 def validate_slug(slug: str, *, existing: Iterable[str] = (),
                   reserved: Iterable[str] = (),
-                  aliases: Iterable[str] = ()) -> str:
+                  aliases: Mapping[str, str] = {}) -> str:
     """Return `slug` if it is a legal, unclaimed scalar-field name, else raise.
 
     Four distinct rejections, each with its own message, because they need
@@ -86,12 +108,16 @@ def validate_slug(slug: str, *, existing: Iterable[str] = (),
       - already on this cloud → pick another, or delete that field first
       - reserved / a canonical import alias → pick another
 
-    The alias check is the subtle one. `_CANONICAL_ALIAS_TO_SLUG` in main.py
-    maps source-column SPELLINGS to canonical slugs, so a field named `time` or
-    `elevation` would be silently re-resolved to `timestamp` / `z` if the cloud
-    were ever exported and re-imported. The field would appear to survive the
-    round trip under a different name, or collide with a real column. Refusing
-    the name up front is the only place that is cheap to explain.
+    The alias check is the subtle one. `aliases` is `_CANONICAL_ALIAS_TO_SLUG`
+    from main.py: normalised source-column SPELLING -> canonical slug. A field
+    named `time` or `elevation` would be silently re-resolved to `timestamp` /
+    `z` if the cloud were ever exported and re-imported — it would come back as
+    a different field, or collide with a real one. Refusing the name up front is
+    the only place that is cheap to explain.
+
+    Matched on the NORMALISED name, because that is what import matches on: an
+    exact comparison let `Time` and `GPS_Time` through while still refusing
+    `time`. Roles in `MEASUREMENT_ALIAS_TARGETS` are allowed — see there.
     """
     if not slug:
         raise SlugError("Name cannot be empty.")
@@ -111,10 +137,11 @@ def validate_slug(slug: str, *, existing: Iterable[str] = (),
     if slug in set(reserved):
         raise SlugError(
             f"{slug!r} is reserved for a built-in field and cannot be reused.")
-    if slug in set(aliases):
+    canonical = aliases.get(normalise_column_name(slug))
+    if canonical is not None and canonical not in MEASUREMENT_ALIAS_TARGETS:
         raise SlugError(
-            f"{slug!r} is how an imported column of that meaning is named, so "
-            "reusing it would collide on export. Pick another name.")
+            f"{slug!r} would be read back as the {canonical!r} column if this "
+            "cloud were exported and imported again. Pick another name.")
     return slug
 
 

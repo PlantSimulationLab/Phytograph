@@ -226,3 +226,22 @@ export function poolingCaution(
   }
   return null;
 }
+
+/**
+ * The reason a fan-out failed, when every failing cloud gave the SAME one.
+ *
+ * A name the backend refuses (a reserved word, an import alias) is refused on
+ * every cloud identically, and the toast used to list only the cloud names —
+ * "Failed on 12 of 12 Clouds: Tree1, Tree2, …" — with the reason itself shown
+ * once per cloud at the foot of the panel, where it is easy to miss. When the
+ * reason is shared it is the one thing worth saying, so the toast leads with it.
+ * Null when the clouds failed for different reasons (then only the per-cloud
+ * list is honest).
+ */
+export function sharedFailureReason(
+  failures: ReadonlyArray<{ message: string }>,
+): string | null {
+  if (failures.length === 0) return null;
+  const first = failures[0].message;
+  return failures.every(f => f.message === first) ? first : null;
+}

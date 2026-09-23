@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   intersectScalarFields,
   poolingCaution,
+  sharedFailureReason,
   UNPOOLABLE_SLUGS,
 } from './scalarFieldTargets';
 import type { ScalarFieldInfo, ScalarFieldListResult } from '../utils/backendApi';
@@ -246,5 +247,16 @@ describe('poolingCaution', () => {
 
   it('stays quiet when the column has no finite values', () => {
     expect(poolingCaution('empty', stats({}), 2)).toBeNull();
+  });
+});
+
+describe('sharedFailureReason', () => {
+  it('returns the reason when every cloud failed the same way', () => {
+    const msg = "'time' is how an imported column of that meaning is named";
+    expect(sharedFailureReason([{ message: msg }, { message: msg }])).toBe(msg);
+  });
+  it('returns null when the reasons differ, or nothing failed', () => {
+    expect(sharedFailureReason([{ message: 'a' }, { message: 'b' }])).toBeNull();
+    expect(sharedFailureReason([])).toBeNull();
   });
 });

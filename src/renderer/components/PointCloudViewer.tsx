@@ -268,7 +268,7 @@ import { ComputeNormalsPanel, type NormalOrientation } from './viewer/panels/Com
 import { ScalarFieldsPanel, type ScalarFieldsTab } from './viewer/panels/ScalarFieldsPanel';
 import type { ScalarStats } from '../lib/scalarFieldStats';
 import { suggestSlug } from '../lib/scalarFieldExpression';
-import { intersectScalarFields, poolingCaution } from '../lib/scalarFieldTargets';
+import { intersectScalarFields, poolingCaution, sharedFailureReason } from '../lib/scalarFieldTargets';
 import { renameSlugInOctreeRef, dropSlugFromOctreeRef } from '../lib/scalarFieldRename';
 import type { PickerItem } from './ObjectPicker';
 import { DEMPanel } from './viewer/panels/DEMPanel';
@@ -12975,14 +12975,17 @@ export default function PointCloudViewer({
       if (failures.length > 0) {
         setScalarFailures(failures);
         const names = failures.map(f => f.name).join(', ');
-        setScalarError(
-          `Failed on ${failures.length} of ${targets.length} clouds: ${names}`);
+        // Lead with the reason when it is the same everywhere — see
+        // `sharedFailureReason`.
+        const reason = sharedFailureReason(failures);
+        setScalarError(reason
+          ?? `Failed on ${failures.length} of ${targets.length} clouds: ${names}`);
         showToast({
           type: 'error',
           title: `Compute Failed on ${failures.length} of ${targets.length} Clouds`,
-          message: succeeded.length > 0
+          message: (reason ? `${reason} ` : '') + (succeeded.length > 0
             ? `${label} created${scope}. Not created on: ${names}.`
-            : `${label} was not created. Failed on: ${names}.`,
+            : `${label} was not created. Failed on: ${names}.`),
         });
       } else if (succeeded.length > 0) {
         showToast({
@@ -13195,8 +13198,11 @@ export default function PointCloudViewer({
       if (failures.length > 0) {
         setScalarFailures(failures);
         const names = failures.map(f => f.name).join(', ');
-        setScalarError(
-          `Failed on ${failures.length} of ${targets.length} clouds: ${names}`);
+        // Lead with the reason when it is the same everywhere — see
+        // `sharedFailureReason`.
+        const reason = sharedFailureReason(failures);
+        setScalarError(reason
+          ?? `Failed on ${failures.length} of ${targets.length} clouds: ${names}`);
         // A PARTIAL RENAME is the worst outcome this tool can produce: the
         // clouds no longer share a slug, so BOTH names fall out of the
         // intersection and the panel looks like it lost two fields. Say so,
@@ -13209,7 +13215,7 @@ export default function PointCloudViewer({
         showToast({
           type: 'error',
           title: `Failed on ${failures.length} of ${targets.length} Clouds`,
-          message: `${names}.${split}`,
+          message: (reason ? `${reason} ` : '') + `${names}.${split}`,
         });
       } else if (succeeded.length > 0) {
         const scope = targets.length > 1 ? ` on ${succeeded.length} clouds` : '';

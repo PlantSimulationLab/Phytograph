@@ -292,11 +292,30 @@ def test_reserved_slug_is_rejected():
     assert "reserved" in str(exc.value)
 
 
-def test_canonical_alias_is_rejected():
-    """A field named `time` would be re-resolved to `timestamp` on re-import."""
+ALIASES = {"time": "timestamp", "gpstime": "timestamp", "elevation": "z",
+           "targetindex": "target_index", "reflectance": "reflectance",
+           "reflectivity": "reflectance"}
+
+
+@pytest.mark.parametrize("slug", ["time", "Time", "GPS_Time", "elevation",
+                                  "target_index", "TargetIndex"])
+def test_canonical_alias_is_rejected(slug):
+    """A field named `time` would be re-resolved to `timestamp` on re-import.
+
+    Matched after the SAME normalisation import applies — an exact match let
+    `Time` and `GPS_Time` through, and import folds both into `timestamp`."""
     with pytest.raises(sf.SlugError) as exc:
-        sf.validate_slug("time", aliases=["time", "elevation"])
-    assert "collide on export" in str(exc.value)
+        sf.validate_slug(slug, aliases=ALIASES)
+    assert "read back as the" in str(exc.value)
+
+
+@pytest.mark.parametrize("slug", ["reflectance", "Reflectance", "reflectivity"])
+def test_a_measurement_alias_is_allowed(slug):
+    """Naming a column `reflectance` DECLARES it reflectance, and a round trip
+    re-reads it as the cloud's reflectance channel with its values intact. It
+    was refused as a "collision", which blocked the one name a user renaming
+    RIEGL's reflectance column obviously wants."""
+    assert sf.validate_slug(slug, aliases=ALIASES) == slug
 
 
 # ── describe() ──────────────────────────────────────────────────────────────

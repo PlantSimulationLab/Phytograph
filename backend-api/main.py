@@ -38531,7 +38531,7 @@ def session_scalar_field_compute(session_id: str,
             slug,
             existing=() if replacing else existing,
             reserved=reserved,
-            aliases=_CANONICAL_ALIAS_TO_SLUG.keys(),
+            aliases=_CANONICAL_ALIAS_TO_SLUG,
         )
     except scalar_fields.SlugError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -38682,7 +38682,7 @@ def session_scalar_field_manage(session_id: str,
                         new_slug,
                         existing=set(_session_scalar_columns_locked(sess)),
                         reserved=reserved,
-                        aliases=_CANONICAL_ALIAS_TO_SLUG.keys(),
+                        aliases=_CANONICAL_ALIAS_TO_SLUG,
                     )
             except scalar_fields.SlugError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None

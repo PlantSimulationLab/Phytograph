@@ -196,9 +196,11 @@ Derived fields appear in the export column picker like any other. See
 
 Field names are limited to letters, digits and underscores, and must start with
 a letter or underscore, because the name has to survive as a LAS dimension name
-and an ASCII column header. Phytograph also refuses a name that would collide
-with one it recognises on import — `time`, `elevation` and similar — since a
-field called `time` would be read back as the GPS time column.
+and an ASCII column header. Phytograph also refuses a name that import would
+read back as a different column — `time`, `elevation`, `row`, `target_index` and
+similar, in any capitalisation — since a field called `Time` would come back as
+the GPS time column. `reflectance` is the exception: naming a column that says
+what it is, and a round trip reads it back as the cloud's reflectance.
 
 ## Large clouds
 

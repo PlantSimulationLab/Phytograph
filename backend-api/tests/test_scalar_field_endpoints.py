@@ -563,3 +563,23 @@ def test_pooled_label_comes_from_the_first_session_carrying_the_field(
     assert body["label"] == "Intensity Col"          # sess's label, listed first
     assert [s["label"] for s in body["sources"]] == [
         "Intensity Col", "Reflectance [dB]"]
+
+
+@pytest.mark.parametrize("name", ["GPS_Time", "Reflectance[dB]", "target-index",
+                                  "Scan Row", "x", "Return  Number", "col_5"])
+def test_slug_alias_check_normalises_exactly_like_import(name):
+    """The alias guard in scalar_fields and the importer in main each fold a
+    name to its comparison form. If the two ever drift, a name the guard lets
+    through is re-resolved on import — the exact collision the guard exists to
+    prevent — so they are pinned to agree."""
+    import scalar_fields
+    assert scalar_fields.normalise_column_name(name) == main._normalise_column_name(name)
+
+
+def test_rename_to_reflectance_is_allowed(client, sess):
+    """Renaming a column to `reflectance` names it for what it is, and must not
+    be refused as an import-alias collision."""
+    res = manage(client, sess, action="rename", slug="intensity_col",
+                 new_slug="reflectance", new_label="Reflectance")
+    assert res.status_code == 200, res.text
+    assert "reflectance" in sess.extras
