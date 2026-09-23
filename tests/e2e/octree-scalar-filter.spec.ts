@@ -652,6 +652,15 @@ test('preview and commit agree on which points survive', async () => {
     // lands still draws all 60 — and 60 is not a preview of this filter. The
     // range excludes Deviation 0 and 4, so a real preview hides something.
     expect(s.drawn).toBeLessThan(s.full);
+    // "Hides something" is not enough on its own: the min alone ([1, ∞)) hides
+    // Deviation 0 and previews 48. The release gate's Platform run sampled
+    // exactly that ~290 ms after the max was typed, before the max's debounce
+    // landed, and then (correctly) got 36 back from the commit. Accept a value
+    // only once it has held for a second — far longer than the input and mask
+    // debounces combined — so it is the preview of the FINISHED range.
+    await page.waitForTimeout(1_000);
+    const later = await maskStats(page);
+    expect(later?.drawn, 'the preview was still settling').toBe(s.drawn);
     previewed = s.drawn;
   }).toPass({ timeout: 20_000 });
 
