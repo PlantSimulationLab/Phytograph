@@ -57,21 +57,38 @@ async function sessionLogTails(pid: number | undefined, userDataDir: string, lin
   return out.join('\n');
 }
 
-// Each launched app gets its own free backend port (bind :0, read the
-// assignment), passed to Electron via PHYTOGRAPH_BACKEND_PORT. This keeps a
-// test run from ever colliding with a developer's `npm run dev` backend (or a
-// parallel spec's app) — the supervisor binds the port we hand it, and we poll
-// that same port. No fixed 8008 anywhere.
-function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
+// Each launched app gets its own free backend port, passed to Electron via
+// PHYTOGRAPH_BACKEND_PORT. This keeps a test run from ever colliding with a
+// developer's `npm run dev` backend (or a parallel spec's app) — the supervisor
+// binds the port we hand it, and we poll that same port. No fixed 8008 anywhere.
+//
+// NOT `listen(0)`. That returns a port from the OS's EPHEMERAL range, which is
+// the same pool every outgoing TCP connection draws its local port from — and
+// the port is free only until we close the probe. With two workers keeping
+// localhost busy, an outgoing connection took the port in that gap on the Linux
+// runner, held it, and every bind of the pinned port failed ("[Errno 98]
+// address already in use", 4 attempts over 12 s) until the spec timed out.
+// So probe ports BELOW every ephemeral range (Linux 32768+, macOS/Windows
+// 49152+), where the OS never assigns one to a connection, and give each
+// Playwright worker its own slice so two workers never pick the same one —
+// the guarantee `listen(0)` used to provide.
+const PORT_FLOOR = 20_000;
+const PORT_SLICE = 1_000; // 12 slices fit below 32768
+function tryListen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
     const srv = createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(() => (port ? resolve(port) : reject(new Error('no port'))));
-    });
+    srv.once('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
   });
+}
+async function findFreePort(): Promise<number> {
+  const worker = Number(process.env.TEST_PARALLEL_INDEX ?? 0) % 12;
+  const base = PORT_FLOOR + worker * PORT_SLICE;
+  for (let i = 0; i < 200; i++) {
+    const port = base + Math.floor(Math.random() * PORT_SLICE);
+    if (await tryListen(port)) return port;
+  }
+  throw new Error(`no free port in ${base}-${base + PORT_SLICE - 1} after 200 tries`);
 }
 
 export interface LaunchedApp {
