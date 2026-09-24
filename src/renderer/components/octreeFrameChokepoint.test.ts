@@ -186,6 +186,25 @@ describe('screen-space regions refresh the octree first', () => {
   });
 });
 
+describe('a label stroke the backend never received does not stay on screen', () => {
+  it('a failed frame refresh rolls the painted stroke back, like a failed request', async () => {
+    const src = await viewerSource();
+    const start = src.indexOf('const paintLabelStroke = useCallback');
+    const end = src.indexOf('paintLabelStrokeRef.current = paintLabelStroke', start);
+    const block = src.slice(start, end);
+    // The optimistic paint lands before the guard is awaited...
+    const paint = block.indexOf('strokes: [...e.strokes, stroke]');
+    const guard = block.search(/if \(!\(await ensureOctreeFrameCurrentRef\.current\(cloud\.id\)\)\) \{/);
+    expect(paint).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(paint);
+    // ...so the guard's false branch must undo it before returning.
+    const branch = block.slice(guard, block.indexOf('return;', guard));
+    expect(branch).toContain('rollbackStroke();');
+    // And the request's failure path uses the same rollback.
+    expect(block.slice(block.indexOf('} catch (err) {', guard))).toMatch(/^\} catch \(err\) \{\s*rollbackStroke\(\);/);
+  });
+});
+
 describe('a committed transform keeps render pose and geometry in step', () => {
   it('awaits the session write, then poses only when the octree was left alone', async () => {
     const src = await viewerSource();

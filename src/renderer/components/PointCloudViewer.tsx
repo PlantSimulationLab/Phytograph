@@ -5775,8 +5775,20 @@ export default function PointCloudViewer({
       strokes: [...e.strokes, stroke], dirty: true, palette,
     }));
     setLabelBusy(true);
-    // Screen-space stroke: the octree must be in the session's frame first.
-    if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) { setLabelBusy(false); return; }
+    // Roll the optimistic paint back so the viewport can never show a stroke
+    // the session does not actually carry. Every path that ends without the
+    // backend applying the stroke goes through here.
+    const rollbackStroke = () => updateLabelPending(cloud.id, slug, (e) => ({
+      ...e, strokes: e.strokes.filter((x) => x.strokeId !== strokeId), dirty: before.dirty ?? false,
+    }));
+    // Screen-space stroke: the octree must be in the session's frame first. A
+    // failed refresh has already said "the edit was not applied", so the paint
+    // must go too — it used to stay on screen as if it had.
+    if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) {
+      rollbackStroke();
+      setLabelBusy(false);
+      return;
+    }
     try {
       // `label` names the column in extra_dims_meta when the backend CREATES
       // it. Without it every hand-made column exported as "Manual Class",
@@ -5806,11 +5818,7 @@ export default function PointCloudViewer({
         actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
       });
     } catch (err) {
-      // Roll the optimistic paint back so the viewport can never show a stroke
-      // the session does not actually carry.
-      updateLabelPending(cloud.id, slug, (e) => ({
-        ...e, strokes: e.strokes.filter((x) => x.strokeId !== strokeId), dirty: before.dirty ?? false,
-      }));
+      rollbackStroke();
       showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
     } finally {
       setLabelBusy(false);
