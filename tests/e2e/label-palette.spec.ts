@@ -542,3 +542,35 @@ test('committed labels keep their colour when the class numbers have gaps', asyn
     return h.magenta > 40 && h.cyan === 0;
   }, { timeout: 20_000 }).toBe(true);
 });
+
+test('tree ids above 255 can be added and painted, 300 then 301', async () => {
+  // Every class value was capped at one byte, so a plot with more than 255
+  // trees could not number a new one: the editor refused 300 and the backend
+  // answered 400. Instance columns now run past it.
+  const { page, panel } = await openLabelToolOnTreeCloud();
+  const addTree = async (value: number) => {
+    const editor = await openEditor(page);
+    await page.getByTestId('palette-add-class').click();
+    const row = page.getByTestId('palette-class-row').last();
+    await row.getByTestId('palette-class-value').fill(String(value));
+    await expect(row).toHaveAttribute('data-class-value', String(value));
+    await row.getByTestId('palette-class-label').fill(`Tree ${value}`);
+    await expect(page.getByTestId('palette-save')).toBeEnabled();
+    await page.getByTestId('palette-save').click();
+    await expect(editor).toHaveCount(0);
+  };
+
+  await addTree(300);
+  await panel.getByTestId('label-class-300').click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))['300'], { timeout: 30_000 }).toBe(60);
+
+  // Split it: 301, gated on 300 so only tree 300's points move.
+  await addTree(301);
+  await panel.getByTestId('label-class-301').click();
+  await page.getByTestId('label-from-300').click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))['301'], { timeout: 30_000 }).toBe(60);
+  expect((await counts(panel))['300'] ?? 0).toBe(0);
+  await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
+});

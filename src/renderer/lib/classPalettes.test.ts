@@ -298,6 +298,7 @@ import {
   labelableColumnsFor, derivePaletteForColumn, withRequiredUnclassified,
   slugifyLabelColumn, validateLabelColumn, isValidLabelSlug,
   LAS_RESERVED_SLUGS, LABEL_SLUG_RE,
+  INSTANCE_CLASS_VALUE_MAX, isInstanceColumnSlug, classValueMaxFor,
 } from './classPalettes';
 import {
   categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues,
@@ -646,5 +647,37 @@ describe('withPendingLabelColumn', () => {
     // that 400s on the first stroke is worse than one that is not there.
     expect(withPendingLabelColumn(base(), { slug: 'classification', label: 'x' }))
       .toEqual(base());
+  });
+});
+
+describe('per-column class range', () => {
+  const tree = (values: number[], slug = 'tree_instance'): ClassPalette => ({
+    id: 'p', name: 'Trees', slug, updatedAt: 0,
+    classes: values.map((v) => ({ value: v, label: v ? `Tree ${v}` : 'Unassigned', color: [1, 0, 0] })),
+  });
+
+  it('an instance column accepts ids past one byte; a class column does not', () => {
+    expect(paletteErrors(tree([0, 300, 301]))).toEqual([]);
+    expect(paletteErrors(tree([0, INSTANCE_CLASS_VALUE_MAX + 1])).map((i) => i.value))
+      .toEqual([INSTANCE_CLASS_VALUE_MAX + 1]);
+    expect(paletteErrors(tree([0, 300], 'manual_class')).map((i) => i.value)).toEqual([300]);
+  });
+
+  it('Add class continues an instance column past 255', () => {
+    expect(nextFreeClassValue(tree([0, 254, 255]), 255)).toBe(256);
+    expect(nextFreeClassValue(tree([0, 300]), 300)).toBe(301);
+  });
+
+  it('matches the backend rule it mirrors', () => {
+    const mainPy = readFileSync(
+      join(__dirname, '..', '..', '..', 'backend-api', 'main.py'), 'utf8');
+    expect(mainPy).toMatch(/^LABEL_INSTANCE_CLASS_MAX = 1 << 24$/m);
+    expect(INSTANCE_CLASS_VALUE_MAX).toBe(2 ** 24);
+    expect(mainPy).toMatch(
+      /def _is_instance_label_slug\(slug: str\) -> bool:\s+return slug\.endswith\("_instance"\)/);
+    expect(isInstanceColumnSlug('tree_instance')).toBe(true);
+    expect(isInstanceColumnSlug('organ_instance')).toBe(true);
+    expect(isInstanceColumnSlug('manual_class')).toBe(false);
+    expect(classValueMaxFor('row_qc')).toBe(255);
   });
 });

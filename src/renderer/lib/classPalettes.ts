@@ -62,6 +62,24 @@ export const CLASS_VALUE_MIN = 0;
 export const CLASS_VALUE_MAX = 255;
 
 /**
+ * INSTANCE columns (`tree_instance`, any `<name>_instance`) number objects, and
+ * a plot holds more than 255 trees. Their ceiling is the storage instead:
+ * session columns are float32, exact for integers only up to 2^24. MIRRORED
+ * from `LABEL_INSTANCE_CLASS_MAX` / `_is_instance_label_slug` in
+ * backend-api/main.py; classPalettes.test.ts reads that file to keep them equal.
+ */
+export const INSTANCE_CLASS_VALUE_MAX = 2 ** 24;
+
+export function isInstanceColumnSlug(slug: string): boolean {
+  return slug.endsWith('_instance');
+}
+
+/** Largest class value a palette for column `slug` may use. */
+export function classValueMaxFor(slug: string): number {
+  return isInstanceColumnSlug(slug) ? INSTANCE_CLASS_VALUE_MAX : CLASS_VALUE_MAX;
+}
+
+/**
  * ASPRS reserves 19–63 for future standard use. Custom classes belong in
  * 64–255, the explicitly user-definable band — keeping them there means a
  * future writer to the real LAS classification byte is pure serialisation with
@@ -172,6 +190,7 @@ export function validatePalette(palette: ClassPalette): PaletteIssue[] {
     });
   }
 
+  const valueMax = classValueMaxFor(palette.slug);
   const seen = new Set<number>();
   for (const c of classes) {
     if (!Number.isInteger(c.value)) {
@@ -179,9 +198,9 @@ export function validatePalette(palette: ClassPalette): PaletteIssue[] {
         message: `Class values must be whole numbers; got ${c.value}.` });
       continue;
     }
-    if (c.value < CLASS_VALUE_MIN || c.value > CLASS_VALUE_MAX) {
+    if (c.value < CLASS_VALUE_MIN || c.value > valueMax) {
       issues.push({ level: 'error', value: c.value,
-        message: `Class ${c.value} is outside ${CLASS_VALUE_MIN}–${CLASS_VALUE_MAX}.` });
+        message: `Class ${c.value} is outside ${CLASS_VALUE_MIN}–${valueMax}.` });
     }
     if (seen.has(c.value)) {
       issues.push({ level: 'error', value: c.value,
@@ -219,10 +238,11 @@ export function paletteErrors(palette: ClassPalette): PaletteIssue[] {
  */
 export function nextFreeClassValue(palette: ClassPalette, startAt?: number): number {
   const used = new Set(palette.classes.map((c) => c.value));
+  const max = classValueMaxFor(palette.slug);
   const from = Number.isFinite(startAt)
     ? Math.max(CLASS_VALUE_MIN, Math.round(startAt as number))
     : USER_CLASS_MIN;
-  for (let v = from; v <= CLASS_VALUE_MAX; v++) {
+  for (let v = from; v <= max; v++) {
     if (!used.has(v)) return v;
   }
   // The preferred band is full — fall back to any free value at all before
@@ -230,7 +250,7 @@ export function nextFreeClassValue(palette: ClassPalette, startAt?: number): num
   for (let v = CLASS_VALUE_MIN; v < from; v++) {
     if (!used.has(v)) return v;
   }
-  return CLASS_VALUE_MAX;
+  return max;
 }
 
 // ── Scheme bridge ────────────────────────────────────────────────────────────
@@ -397,12 +417,12 @@ function humaniseSlug(slug: string): string {
   return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : slug;
 }
 
-/** True when every observed value is an integer inside the one-byte class range. */
-function looksLikeClassValues(observed: readonly number[] | undefined): boolean {
+/** True when every observed value is an integer inside the column's class range. */
+function looksLikeClassValues(observed: readonly number[] | undefined, slug: string): boolean {
   if (!observed || observed.length === 0) return false;
   if (observed.length > PALETTE_HARD_MAX) return false;
-  return observed.every((v) => Number.isInteger(v)
-    && v >= CLASS_VALUE_MIN && v <= CLASS_VALUE_MAX);
+  const max = classValueMaxFor(slug);
+  return observed.every((v) => Number.isInteger(v) && v >= CLASS_VALUE_MIN && v <= max);
 }
 
 /**
@@ -447,7 +467,7 @@ export function labelableColumnsFor(args: {
     const observed = observedClasses?.[slug];
     const categorical = isCategorical(slug)
       || !!classPalettes?.[slug]
-      || looksLikeClassValues(observed);
+      || looksLikeClassValues(observed, slug);
     out.push({
       slug,
       label: label || humaniseSlug(slug),

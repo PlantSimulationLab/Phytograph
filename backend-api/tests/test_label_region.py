@@ -954,3 +954,51 @@ def test_rerunning_a_segmentation_ends_that_columns_undo(
     res = client.post(f"/api/cloud/session/{sid}/reset_label_edits", json=req)
     assert res.status_code == 200, res.text
     np.testing.assert_array_equal(main._cloud_sessions[sid].extras[wood], fresh)
+
+
+def test_instance_columns_take_ids_above_255(client, cache_root, tree_instance_xyz):
+    """A plot holds more than 255 trees, but every column was capped at one
+    byte, so tree 300 could not be painted at all (400). Instance columns now
+    run to the float32 column's exact-integer limit; the undo round-trips."""
+    slug = "tree_instance"
+    sid = _create(client, tree_instance_xyz, fmt=TREE_FORMAT)
+    sess = main._cloud_sessions[sid]
+    before = sess.extras[slug].copy()
+    big = _box_mask(sess.positions, BOX_BIG)
+    small = _box_mask(sess.positions, BOX_SMALL)
+
+    res = client.post(f"/api/cloud/session/{sid}/label_region",
+                      json={"strokes": [_stroke(BOX_BIG, 300, "a")], "slug": slug})
+    assert res.status_code == 200, res.text
+    # Split tree 300: the From gate on 300 repaints only what is already 300.
+    res = client.post(f"/api/cloud/session/{sid}/label_region", json={
+        "strokes": [_stroke(BOX_SMALL, 301, "b", from_classes=[300])], "slug": slug})
+    assert res.status_code == 200, res.text
+    col = sess.extras[slug]
+    assert int((col == 301).sum()) == int(small.sum())
+    assert int((col == 300).sum()) == int((big & ~small).sum())
+    assert res.json()["class_counts"]["301"] == int(small.sum())
+
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"undo_after_stroke_ids": ["a"], "slug": slug})
+    assert res.status_code == 200, res.text
+    assert int((sess.extras[slug] == 300).sum()) == int(big.sum())
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"undo_after_stroke_ids": [], "slug": slug})
+    np.testing.assert_array_equal(sess.extras[slug], before)
+
+
+@pytest.mark.parametrize("slug,cls,ok", [
+    ("tree_instance", main.LABEL_INSTANCE_CLASS_MAX, True),
+    ("tree_instance", main.LABEL_INSTANCE_CLASS_MAX + 1, False),
+    ("organ_instance", 70_000, True),
+    ("manual_class", 300, False),
+    ("row_qc", 256, False),
+])
+def test_class_range_is_per_column(client, cache_root, grid_xyz, slug, cls, ok):
+    sid = _create(client, grid_xyz)
+    res = client.post(f"/api/cloud/session/{sid}/label_region",
+                      json={"strokes": [_stroke(BOX_BIG, cls, "s1")], "slug": slug})
+    assert (res.status_code == 200) == ok, res.text
+    if ok:
+        assert float(main._cloud_sessions[sid].extras[slug].max()) == cls

@@ -17239,6 +17239,24 @@ MANUAL_CLASS_UNLABELED = 0
 MANUAL_CLASS_MIN = 0
 MANUAL_CLASS_MAX = 255
 
+# INSTANCE columns (a tree segmentation's `tree_instance`, and any
+# `<name>_instance` a future instance tool writes) number objects, not classes:
+# a plot can hold far more than 255 trees. They are capped by the column's
+# storage instead: session columns are float32, which holds every integer
+# exactly only up to 2**24, so a larger id would silently round to a
+# neighbour's. MIRRORED by `INSTANCE_CLASS_VALUE_MAX` / `isInstanceColumnSlug`
+# in src/renderer/lib/classPalettes.ts (a test there reads this file).
+LABEL_INSTANCE_CLASS_MAX = 1 << 24
+
+
+def _is_instance_label_slug(slug: str) -> bool:
+    return slug.endswith("_instance")
+
+
+def _label_class_max(slug: str) -> int:
+    """Largest class value a stroke may write into (or gate on in) `slug`."""
+    return LABEL_INSTANCE_CLASS_MAX if _is_instance_label_slug(slug) else MANUAL_CLASS_MAX
+
 # Slugs must be a safe extra-dim name. The hard rule is the reserved-name one:
 # `_session_to_las` re-adds every extra-dim slug via `add_extra_dim`, and a slug
 # colliding with a standard LAS dimension name — `classification` above all —
@@ -32345,8 +32363,10 @@ class _LabelDelta:
     `prev` is uint8 because class values are a single byte (MANUAL_CLASS_MIN..MAX)
     — a 4x saving over float32, lossless GIVEN that invariant. `prev_float` is
     the escape hatch for a column that holds non-integral or out-of-range values
-    (e.g. a palette bound to an imported float column), where the uint8
-    assumption would silently corrupt the rollback.
+    (e.g. a palette bound to an imported float column, or an instance id above
+    255), where the uint8 assumption would silently corrupt the rollback. It is
+    float32 because the COLUMN is: every value it can hold round-trips exactly,
+    so a wider integer type would buy nothing (see LABEL_INSTANCE_CLASS_MAX).
     """
     stroke_id: str
     encoding: str                                  # 'sparse' | 'runs'
@@ -35234,23 +35254,24 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
     # Validate every region and class BEFORE taking the lock — these raise 400
     # and must not leave a half-applied batch behind.
     region_dicts = []
+    class_max = _label_class_max(slug)
     for stroke in request.strokes:
         rd = stroke.region.model_dump()
         _canonical_region(rd)
         if stroke.slab is not None:
             _canonical_region(stroke.slab.model_dump())   # validate (raises 400)
-        if not (MANUAL_CLASS_MIN <= stroke.to_class <= MANUAL_CLASS_MAX):
+        if not (MANUAL_CLASS_MIN <= stroke.to_class <= class_max):
             raise HTTPException(
                 status_code=400,
-                detail=(f"to_class must be in [{MANUAL_CLASS_MIN}, {MANUAL_CLASS_MAX}]; "
-                        f"got {stroke.to_class}"),
+                detail=(f"to_class must be in [{MANUAL_CLASS_MIN}, {class_max}] "
+                        f"for {slug!r}; got {stroke.to_class}"),
             )
         for fc in (stroke.from_classes or []):
-            if not (MANUAL_CLASS_MIN <= fc <= MANUAL_CLASS_MAX):
+            if not (MANUAL_CLASS_MIN <= fc <= class_max):
                 raise HTTPException(
                     status_code=400,
                     detail=(f"from_classes entries must be in [{MANUAL_CLASS_MIN}, "
-                            f"{MANUAL_CLASS_MAX}]; got {fc}"),
+                            f"{class_max}] for {slug!r}; got {fc}"),
                 )
         region_dicts.append(rd)
 

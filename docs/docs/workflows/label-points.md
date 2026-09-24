@@ -178,6 +178,11 @@ the result as a palette of your own.
   carries, a new class instead continues **that column's** numbering — Tree 3
   after Tree 2 — because those ids are data the segmentation wrote, not a
   vocabulary you chose.
+- Class values run from 0 to 255, the range of the LAS classification byte.
+  **Instance** columns, which number objects rather than classes (a
+  `tree_instance` from [Separate trees](segment-trees.md), or any column whose
+  name ends in `_instance`), take ids up to 16,777,216, so a plot with hundreds
+  of trees can still be split and renumbered by hand.
 - **Save palette** applies it, binds it to the cloud (so it is still there when
   you reopen the tool), and adds it to your saved palettes.
 - **Export / Import** move palettes between projects or collaborators as a JSON

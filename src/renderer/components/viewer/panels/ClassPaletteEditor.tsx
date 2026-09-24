@@ -10,6 +10,7 @@ import {
   UNCLASSIFIED_VALUE,
   CLASS_VALUE_MIN,
   CLASS_VALUE_MAX,
+  classValueMaxFor,
 } from '../../../lib/classPalettes';
 import type { RGB } from '../../../lib/colormaps';
 import { rgbToHex, treeInstanceColor } from '../../../lib/classification';
@@ -93,6 +94,8 @@ export function ClassPaletteEditor({
   const effectiveDraft = useMemo<ClassPalette>(() => (
     newColumn ? { ...draft, slug: columnSlug } : draft
   ), [draft, newColumn, columnSlug]);
+  // Instance columns (tree ids…) run past the one-byte class range.
+  const valueMax = classValueMaxFor(effectiveDraft.slug);
 
   const columnIssues = useMemo(() => (
     newColumn ? validateLabelColumn(columnName, newColumn.takenSlugs) : []
@@ -269,7 +272,7 @@ export function ClassPaletteEditor({
                 // DebouncedNumberInput exists for does not arise.
                 type="number"
                 min={CLASS_VALUE_MIN}
-                max={CLASS_VALUE_MAX}
+                max={valueMax}
                 value={c.value}
                 readOnly={valueLocked}
                 title={valueLocked
@@ -282,7 +285,7 @@ export function ClassPaletteEditor({
                   const v = parseInt(e.target.value, 10);
                   if (Number.isFinite(v)) patchClass(i, { value: v });
                 }}
-                className={`w-12 shrink-0 border rounded px-1 py-1 text-[10px] tabular-nums ${
+                className={`${valueMax > CLASS_VALUE_MAX ? 'w-16' : 'w-12'} shrink-0 border rounded px-1 py-1 text-[10px] tabular-nums ${
                   valueLocked
                     ? 'bg-neutral-800 border-neutral-800 text-neutral-500 cursor-not-allowed'
                     : 'bg-neutral-900 border-neutral-700 text-neutral-100'
