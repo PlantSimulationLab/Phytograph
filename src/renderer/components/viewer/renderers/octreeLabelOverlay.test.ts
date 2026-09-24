@@ -329,6 +329,28 @@ describe('applyLabelOverlayToVisibleNodes', () => {
     expect((geom.attributes.intensity.array as Float32Array)[0]).toBe(3);
   });
 
+  it('clears tiles that are loaded but out of view, not only the visible ones', () => {
+    // A tile out of view is hidden, not unloaded, so it kept the label buffer
+    // aliased into its intensity slot after the tool closed, and coloured by
+    // intensity it drew the labels when it came back into view.
+    const seen = makeGeometry([[0, 0, 0]], {
+      intensity: new THREE.BufferAttribute(new Float32Array([3]), 1),
+    });
+    const hidden = makeGeometry([[0.1, 0, 0]], {
+      intensity: new THREE.BufferAttribute(new Float32Array([7]), 1),
+    });
+    const both = makeOctree([makeNode(seen), makeNode(hidden)]);
+    applyLabelOverlayToVisibleNodes(both, undefined, state([lowX(1)]));
+    expect(hidden.attributes.intensity).toBe(hidden.attributes[LABEL_ATTRIBUTE]);
+    // Now only the first is in view; the second is still in the octree's tree.
+    const later = { ...both, visibleNodes: [both.visibleNodes[0]] };
+    clearLabelOverlayFromVisibleNodes(later);
+    for (const [g, v] of [[seen, 3], [hidden, 7]] as const) {
+      expect(g.attributes[LABEL_ATTRIBUTE]).toBeUndefined();
+      expect((g.attributes.intensity.array as Float32Array)[0]).toBe(v);
+    }
+  });
+
   it('tolerates a missing visibleNodes list', () => {
     expect(() => applyLabelOverlayToVisibleNodes(null, undefined, state([]))).not.toThrow();
     expect(() => clearLabelOverlayFromVisibleNodes({})).not.toThrow();

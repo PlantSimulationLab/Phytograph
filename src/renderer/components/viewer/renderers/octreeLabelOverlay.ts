@@ -266,7 +266,15 @@ export function applyLabelOverlayToVisibleNodes(
   publishLabelOverlayStats(octree, state, statsId);
 }
 
-/** Remove the overlay from every loaded tile (tool close / commit rebuild). */
+/**
+ * Remove the overlay from every LOADED tile (tool close / rebuild landed).
+ *
+ * Loaded, not visible: a tile out of view is hidden, not unloaded, and it kept
+ * the label buffer aliased into its intensity slot, so coloured by intensity it
+ * drew labels when it came back into view. `traverse` visits the octree's whole
+ * object tree, hidden children included; evicted tiles have left the tree and
+ * their buffers go with them, so nothing needs to be remembered here.
+ */
 export function clearLabelOverlayFromVisibleNodes(octree: any, statsId?: string): void {
   const visible = octree?.visibleNodes;
   if (!Array.isArray(visible)) return;
@@ -274,6 +282,9 @@ export function clearLabelOverlayFromVisibleNodes(octree: any, statsId?: string)
     const geom = node?.sceneNode?.geometry;
     if (geom) clearLabelOverlayFromGeometry(geom);
   }
+  octree.traverse?.((obj: any) => {
+    if (obj?.geometry?.attributes?.[LABEL_ATTRIBUTE]) clearLabelOverlayFromGeometry(obj.geometry);
+  });
   // Always clear, even if the octree is already gone — a stale global would
   // otherwise report counts for a cloud that no longer exists.
   (globalThis as any).__labelOverlay = undefined;
