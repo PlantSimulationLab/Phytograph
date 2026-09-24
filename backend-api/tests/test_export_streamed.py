@@ -103,7 +103,7 @@ def test_streamed_file_matches_the_generic_export(client, edited_session, monkey
     ref = _read(base64.b64decode(ref_out["data"]))
 
     assert len(streamed.points) == len(ref.points) == out["point_count"]
-    assert out["has_colors"] is True and streamed.point_format.id == 3
+    assert out["has_colors"] is True and streamed.point_format.id == 7
     for ax in "xyz":
         np.testing.assert_allclose(np.asarray(getattr(streamed, ax)), np.asarray(getattr(ref, ax)), atol=1.5e-3)
     # World coordinates came back (shift + translation), not session-frame ones.
@@ -128,12 +128,12 @@ def test_streamed_file_matches_the_generic_export(client, edited_session, monkey
     assert streamed.header.mins[0] <= streamed.x.min() and streamed.header.maxs[2] >= streamed.z.max()
 
 
-def test_column_selection_drops_rgb_to_format_1_and_filters_scalars(client, edited_session):
+def test_column_selection_drops_rgb_to_format_6_and_filters_scalars(client, edited_session):
     sid, las, tmp = edited_session
     dest = tmp / "subset.las"
     out = _export(client, sid, las, "las", dest=dest, columns=["x", "y", "z", "reflectance"])
     f = _read(dest)
-    assert out["has_colors"] is False and f.point_format.id == 1
+    assert out["has_colors"] is False and f.point_format.id == 6
     names = set(f.point_format.extra_dimension_names)
     assert names == {"reflectance"}
     # Intensity was deselected: the dimension exists (core record) but is zero.

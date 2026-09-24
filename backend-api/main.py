@@ -22949,6 +22949,19 @@ def export_point_cloud_las(request: PointCloudExportRequest, http_request: Reque
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
+def _las_export_point_format(want_color: bool) -> int:
+    """Point format for every LAS/LAZ export: 7 with RGB, 6 without.
+
+    Formats 0-5 (the legacy records) give `classification` only 5 bits, so any
+    class above 31 raised `OverflowError` and the export failed outright - and
+    every user label class starts at 64. The LAS 1.4 records 6/7 have a full
+    classification byte, and carry intensity and GPS time like 1/3 did, with 7
+    adding RGB exactly as 3 did. PotreeConverter reads them, so a re-import of
+    our own export still builds its octree.
+    """
+    return 7 if want_color else 6
+
+
 def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                            columns: "Optional[List[str]]", translation,
                            progress=None) -> dict:
@@ -23018,7 +23031,7 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
             _cancel_checkpoint(progress)
 
     _stage(0.05, "Computing bounds")
-    header = laspy.LasHeader(point_format=3 if want_color else 1, version="1.4")
+    header = laspy.LasHeader(point_format=_las_export_point_format(want_color), version="1.4")
     header.offsets = np.floor(pos_min)
     header.scales = [0.001, 0.001, 0.001]
     for slug in export_slugs:
@@ -23290,17 +23303,17 @@ def _do_point_cloud_export(
             wanted = set(request.columns)
             export_extras = {k: v for k, v in export_extras.items() if k in wanted}
 
-        # Point format: 3 = XYZ + intensity + RGB + GPS time, 1 = the same minus
-        # RGB — the pairing `_xyz_to_las` uses on import, so an export re-imports
-        # through our own loader unchanged. Dropping r/g/b from the selection
-        # picks format 1, which is how RGB is genuinely omitted (the point format
-        # is a fixed menu, so RGB can only be dropped as a bundle with GPS time).
+        # Point format: 7 = XYZ + intensity + RGB + GPS time, 6 = the same minus
+        # RGB (see `_las_export_point_format` for why not 3/1: their 5-bit
+        # classification cannot hold a user class). Dropping r/g/b from the
+        # selection picks format 6, which is how RGB is genuinely omitted (the
+        # point format is a fixed menu, so RGB can only be dropped as a bundle).
         #
         # Two standard dimensions can NOT be honored à la carte, and the UI says
         # so rather than pretending otherwise:
         #   * `intensity` is in the core point record of ALL formats, so it always
         #     exists as a field; deselecting it can only zero it, not remove it.
-        #   * GPS time is coupled to RGB by the format menu (0/1/2/3).
+        #   * GPS time is in both 6 and 7, so it is always present.
         #
         # Note it is NOT the point format that was losing scalars: laspy accepts
         # extra dimensions on any format. The old `2 if has_colors else 0` narrowed
@@ -23308,7 +23321,7 @@ def _do_point_cloud_export(
         # (`want_extras`), never declaring them, and never assigning intensity.
         want_color = has_colors and (not request.columns or bool(
             {"r", "g", "b"} & set(request.columns)))
-        point_format = 3 if want_color else 1
+        point_format = _las_export_point_format(want_color)
 
         # Assembling the LAS is NOT free, despite each step being vectorised: at
         # 25 M points the stages below total ~5 s (bounds ~0.5 s, the quantising

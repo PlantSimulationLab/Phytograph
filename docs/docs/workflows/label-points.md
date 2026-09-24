@@ -159,9 +159,8 @@ the result as a palette of your own.
 
 - **Add class** appends a new class in the 64–255 band, which LAS reserves for
   user-defined codes — so your classes never collide with the ASPRS standard
-  ones. (Labels export as their own column rather than the LAS classification
-  byte; keeping custom classes in 64–255 means the numbers stay valid when
-  writing that byte becomes an option.) On a classification the cloud already
+  ones, and they fit the LAS classification byte they are exported into. On a
+  classification the cloud already
   carries, a new class instead continues **that column's** numbering — Tree 3
   after Tree 2 — because those ids are data the segmentation wrote, not a
   vocabulary you chose.
@@ -236,7 +235,10 @@ scalar:
   names and colours),
 - [filter](clean-point-cloud.md) to particular classes,
 - split the cloud into one cloud per class,
-- [export](import-export.md) them to LAS/LAZ.
+- [export](import-export.md) them to LAS/LAZ, where they are written both as
+  their own named column and into the standard LAS classification byte (classes
+  0–255), so other LiDAR software sees them too. You do not need to commit
+  before exporting: export reads the labels you have painted.
 
 ## Work in a cross-section
 

@@ -128,6 +128,12 @@ export interface AvailableColumnsOptions {
   // Only attributes that appear here AND are all-zero are dropped; an attribute
   // with no range entry is kept (absence of evidence isn't evidence of absence).
   octreeAttributeRanges?: Record<string, { min: number[]; max: number[] }>;
+  // Label columns the backend SESSION carries that the octree does not yet: a
+  // column the label tool created is written to the session on the first
+  // stroke, but reaches the octree's attribute list only when a commit's
+  // rebuild lands. Without these, exporting before a commit silently dropped
+  // every hand-made label, because the picker only offered octree attributes.
+  sessionLabelSlugs?: string[];
 }
 
 // True when an octree attribute's reported range is identically zero — the
@@ -217,6 +223,9 @@ export function defaultExportColumns(
     // backend allowlist keys off `timestamp`, so offering the column as
     // `gps-time` would export a name the writer then ignores.
     const slug = octreeAttributeSlug(name);
+    if (!seen.has(slug)) { seen.add(slug); scalarSlugs.push(slug); }
+  }
+  for (const slug of opts.sessionLabelSlugs ?? []) {
     if (!seen.has(slug)) { seen.add(slug); scalarSlugs.push(slug); }
   }
   for (const tok of fmtTokens) {

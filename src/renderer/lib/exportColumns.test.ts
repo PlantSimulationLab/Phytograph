@@ -517,3 +517,24 @@ describe('reorderColumns', () => {
     expect(reorderColumns(cols, -1, 0).map(c => c.slug)).toEqual(['x', 'y', 'z']);
   });
 });
+
+describe('session label columns', () => {
+  it('offers a label column the octree does not carry yet, as a label', () => {
+    const cols = defaultExportColumns({}, {
+      octreeAttributes: ['position', 'rgb'],
+      sessionLabelSlugs: ['manual_class'],
+      isLabel: (s) => s === 'manual_class',
+    });
+    const col = cols.find((c) => c.slug === 'manual_class');
+    expect(col).toMatchObject({ kind: 'label', selected: true });
+  });
+
+  it('does not duplicate a label column the octree already has', () => {
+    const cols = defaultExportColumns({}, {
+      octreeAttributes: ['manual_class'],
+      octreeAttributeRanges: { manual_class: { min: [0], max: [64] } },
+      sessionLabelSlugs: ['manual_class'],
+    });
+    expect(cols.filter((c) => c.slug === 'manual_class')).toHaveLength(1);
+  });
+});

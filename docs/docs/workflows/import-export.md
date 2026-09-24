@@ -502,9 +502,9 @@ need to pick fields or keep other scalars.
     - **Intensity** is present in every LAS point format, so it cannot be
       removed — unchecking it could only write zeros. Both are shown locked.
 
-    Unchecking **colour** is a real omission: it selects LAS point format 1,
-    which has no RGB dimension. (Because the point format is a fixed menu rather
-    than a free choice of dimensions, dropping RGB also drops GPS time.)
+    Unchecking **colour** is a real omission: it selects LAS point format 6
+    instead of 7, which has no RGB dimension. Both carry GPS time and a full
+    classification byte (classes 0–255).
 
 | Format | Carries |
 |---|---|

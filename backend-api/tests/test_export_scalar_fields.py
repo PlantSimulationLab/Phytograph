@@ -256,21 +256,20 @@ def test_las_writes_scalars_as_extra_dimensions(client, scalar_session, tmp_path
 
 
 def test_las_point_format_matches_the_importer(client, scalar_session, tmp_path):
-    """Export must pick the same point format the importer writes.
+    """Export writes the LAS 1.4 records: 7 with colour, 6 without.
 
-    `_xyz_to_las` uses 3-with-colour / 1-without; those two carry GPS time (a
-    scan's per-point timestamp needs it) where 0/2 do not. Worth pinning because
-    it is otherwise invisible: `intensity` lives in the core point record of
-    EVERY format and laspy accepts extra dimensions on any of them, so a wrong
-    format here loses only GPS time and nothing in this file's other assertions
-    would notice.
+    Both carry GPS time (a scan's per-point timestamp needs it) and a full
+    classification byte; the legacy 1/3 held only 5 bits of class, so a user
+    class (64+) failed the export. Worth pinning because it is otherwise
+    invisible: `intensity` lives in the core point record of EVERY format and
+    laspy accepts extra dimensions on any of them.
     """
     laspy = pytest.importorskip("laspy")
     dest = tmp_path / "fmt.las"
     _export(client, scalar_session, "las", dest)
     las = laspy.read(str(dest))
-    # No colour in this fixture -> format 1.
-    assert las.point_format.id == 1, f"expected format 1, got {las.point_format.id}"
+    # No colour in this fixture -> format 6.
+    assert las.point_format.id == 6, f"expected format 6, got {las.point_format.id}"
     assert "gps_time" in set(las.point_format.dimension_names)
 
 
@@ -335,7 +334,7 @@ def test_las_deselecting_every_scalar_writes_none(client, scalar_session, tmp_pa
 
 
 def test_las_omitting_rgb_drops_the_colour_dimensions(client, make_file_session, tmp_path):
-    """Deselecting r/g/b picks point format 1, which has no RGB dimension.
+    """Deselecting r/g/b picks point format 6, which has no RGB dimension.
 
     This is the one standard dimension that IS omittable — but only as a bundle:
     the point format menu couples RGB with GPS time, so dropping RGB drops both.
@@ -351,13 +350,13 @@ def test_las_omitting_rgb_drops_the_colour_dimensions(client, make_file_session,
     _export(client, sid, "las", with_rgb, columns=["x", "y", "z", "r", "g", "b"])
     las = laspy.read(str(with_rgb))
     assert "red" in set(las.point_format.dimension_names)
-    assert las.point_format.id == 3
+    assert las.point_format.id == 7
 
     without = tmp_path / "without.las"
     _export(client, sid, "las", without, columns=["x", "y", "z"])
     las2 = laspy.read(str(without))
     assert "red" not in set(las2.point_format.dimension_names)
-    assert las2.point_format.id == 1
+    assert las2.point_format.id == 6
     # Geometry unaffected by dropping colour.
     np.testing.assert_allclose(las2.x, [0, 1, 2], atol=1e-3)
 

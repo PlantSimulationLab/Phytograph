@@ -10879,8 +10879,16 @@ export default function PointCloudViewer({
       // PotreeConverter invents for a bare XYZ source (intensity, classification,
       // gps-time…) don't show up as exportable fields.
       octreeAttributeRanges: c.data.octree?.attributeRanges,
+      // …and the label columns painted in this session, which the octree only
+      // learns about when a commit's rebuild lands. A column with pending
+      // strokes, or one a commit bound a palette to, exists in the session.
+      sessionLabelSlugs: [
+        ...[...(labelPending.get(c.id)?.entries() ?? [])]
+          .filter(([, e]) => e.strokes.length > 0 || e.dirty).map(([slug]) => slug),
+        ...Object.keys(c.data.octree?.classPalettes ?? {}),
+      ],
     });
-  }, [clouds, selectedIds]);
+  }, [clouds, selectedIds, labelPending]);
 
   const exportScanXmlBundle = useCallback(async (scanIds: string[], includeMisses: boolean, writeXml: boolean, columns?: string[], dataFormat: string = 'xyz', gridIds: string[] = [], baseName: string = 'scans') => {
     const entries: ScanExportEntry[] = [];

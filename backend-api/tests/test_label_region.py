@@ -474,6 +474,59 @@ def test_export_writes_classes_into_the_las_classification_byte(
     assert body["class_counts"].get("5") == painted
 
 
+@pytest.mark.parametrize("fmt", ["las", "laz"])
+@pytest.mark.parametrize("to_file", [True, False], ids=["streamed", "generic"])
+def test_export_writes_user_classes_above_31(
+    client, cache_root, grid_xyz, tmp_path, fmt, to_file,
+):
+    """User classes start at 64, and the legacy point formats (0-5) hold only a
+    5-bit classification: exporting any painted cloud raised OverflowError.
+
+    Classes 64 and 255 deliberately, not 5 — the test above uses a class below
+    32 and so could never see this. Both writers: `dest_path` streams through
+    `_export_session_to_las`, while no `dest_path` takes the generic path.
+    """
+    import base64
+    import io
+    import laspy
+
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    big = _box_mask(sess.positions, BOX_BIG)
+    small = _box_mask(sess.positions, BOX_SMALL)
+    _paint(client, sid, [_stroke(BOX_BIG, 64, "s1"), _stroke(BOX_SMALL, 255, "s2")])
+    n64 = int((big & ~small).sum())
+    n255 = int(small.sum())
+    assert n64 > 0 and n255 > 0
+
+    body = {"source": {"kind": "session", "session_id": sid}, "format": fmt}
+    out = tmp_path / f"labelled.{fmt}"
+    if to_file:
+        body["dest_path"] = str(out)
+    res = client.post("/api/pointcloud/export", json=body)
+    assert res.status_code == 200, res.text
+    payload = decode_streamed_json(res.content)
+    assert payload["success"] is True, payload.get("error")
+    if not to_file:
+        out.write_bytes(base64.b64decode(payload["data"]))
+
+    las = laspy.read(io.BytesIO(out.read_bytes()))
+    assert las.point_format.id in (6, 7)
+    written = np.asarray(las.classification)
+    assert int((written == 64).sum()) == n64
+    assert int((written == 255).sum()) == n255
+    assert int((written == 0).sum()) == len(written) - n64 - n255
+    # The full label value still rides its extra dim.
+    np.testing.assert_array_equal(np.rint(np.asarray(las[SLUG])), written)
+
+    # Our own importer (and PotreeConverter behind it) accepts format 6/7.
+    sid2 = _create(client, out, fmt=None)
+    counts = client.get(
+        f"/api/cloud/session/{sid2}/label_summary?slug=las_classification"
+    ).json()["class_counts"]
+    assert counts.get("64") == n64 and counts.get("255") == n255
+
+
 # ── Validation ───────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("slug", ["classification", "intensity", "gps_time"])

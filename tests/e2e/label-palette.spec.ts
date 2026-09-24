@@ -1,9 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
+import { readLasClasses } from './helpers/lasClasses';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 
@@ -407,4 +411,39 @@ test('uncommitted strokes stay with their column when the column is switched', a
   await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
   await expect(panel).toHaveAttribute('data-pending-strokes', '1');
   await expect(page.getByTestId('label-undo')).toBeEnabled();
+});
+
+test('a user class (64+) survives a LAS export in the classification byte', async () => {
+  // Every user class starts at 64, and the legacy LAS point formats hold only
+  // five bits of class: the export raised OverflowError on any painted cloud.
+  const { app } = session;
+  const { page, panel } = await openLabelTool();
+  const editor = await openEditor(page);
+  await page.getByTestId('palette-add-class').click();
+  const newRow = page.getByTestId('palette-class-row').last();
+  const value = Number(await newRow.getAttribute('data-class-value'));
+  expect(value).toBeGreaterThanOrEqual(64);
+  await newRow.getByTestId('palette-class-label').fill('Mistletoe');
+  await page.getByTestId('palette-save').click();
+  await expect(editor).toHaveCount(0);
+
+  await panel.getByTestId(`label-class-${value}`).click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))[String(value)], { timeout: 30_000 })
+    .toBe(60);
+
+  const savePath = join(mkdtempSync(join(tmpdir(), 'phytograph-label-las-')), 'labelled.las');
+  await stubSaveDialog(app, savePath);
+  await page.evaluate(() => (window as any).__openExportPanel?.());
+  await expect(page.getByTestId('export-modal')).toBeVisible();
+  await page.getByTestId('export-format-las').click();
+  await page.getByTestId('export-cloud-go').click();
+  await expect(
+    page.getByTestId('toast-success').filter({ hasText: 'Export Complete' }),
+  ).toBeVisible({ timeout: 30_000 });
+
+  const { format, classes } = readLasClasses(savePath);
+  expect([6, 7]).toContain(format);
+  expect(classes).toHaveLength(60);
+  expect(classes.every((c) => c === value)).toBe(true);
 });
