@@ -2611,6 +2611,30 @@ export default function PointCloudViewer({
       setLabelPending((prev) => updatePending(prev, cloudId, slug, fn)),
     [],
   );
+  /**
+   * A tool just OVERWROTE a whole column (a segmentation re-run, a DEM's
+   * height-above-ground, a computed or managed scalar field). The backend drops
+   * that column's label history when it does, so this drops the renderer's half:
+   * the column's pending strokes (the overlay would otherwise paint the old
+   * strokes over the new result) and its label undo steps. Without it, hand-
+   * correcting `wood_class`, re-running wood segmentation and pressing Undo
+   * reverse-applied the old deltas onto the NEW segmentation.
+   */
+  const retireLabelColumn = useCallback((cloudId: string, slug: string) => {
+    setLabelPending((prev) => updatePending(prev, cloudId, slug, (e) =>
+      (e.strokes.length === 0 && !e.dirty ? e : { ...e, strokes: [], dirty: false })));
+    // Through the ref: stable identity, so the tool callbacks that call this
+    // need not list it (their dependency lists predate it).
+    sceneRef.current.labelBoundary(cloudId, slug);
+    // The tool runs in the background, so the label panel can be open on this
+    // very column while the new result lands: re-read its counts, or it goes on
+    // showing the old result's.
+    const sessionId = cloudsRef.current.find((c) => c.id === cloudId)?.data.octree?.sessionId;
+    if (sessionId && labelTargetCloudRef.current?.id === cloudId
+        && labelPaletteRef.current?.slug === slug) {
+      void refreshLabelCounts(sessionId, slug);
+    }
+  }, []);
   const [labelClassCounts, setLabelClassCounts] = useState<Record<number, number>>({});
   // Label requests run one at a time PER CLOUD, in the order they were drawn
   // (lib/keyedSerialQueue): strokes are order-dependent and painted before
@@ -12514,6 +12538,7 @@ export default function PointCloudViewer({
           throw new Error('Octree cloud is missing its editable session.');
         }
         const meta = await sessionDenoise(octreeInfo.sessionId, params, abort.signal);
+        retireLabelColumn(cloud.id, NOISE_CLASS_ATTRIBUTE);
         // No `{diverged: true}` — classifying is not a destructive edit.
         onUpdateCloud(cloud.id, buildSessionOctreeData(meta, octreeInfo, cloud.data.fileName ?? cloud.id));
         return meta;
@@ -12713,6 +12738,7 @@ export default function PointCloudViewer({
       const willDefer = shouldDeferOctreeRebuild(cloud.data.pointCount);
       const meta = await sessionComputeNormals(
         sessionId, { ...params, defer_octree: willDefer }, abort.signal);
+      for (const slug of NORMAL_ATTRIBUTES) retireLabelColumn(id, slug);
 
       if (!meta.octree_deferred) {
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
@@ -13047,6 +13073,7 @@ export default function PointCloudViewer({
           // than having a categorical scheme invented for it from its value range.
           registerContinuousSlug(result.slug);
           setCloudColorMode(id, { mode: 'scalar', field: result.slug });
+          retireLabelColumn(id, result.slug);
 
           // The cloud's data changed, so this is a destructive boundary — the point
           // arrays are never snapshotted into the undo stack (see sceneActions).
@@ -13306,6 +13333,9 @@ export default function PointCloudViewer({
             // correct, not a bug to "fix" into N-way duplication.
             migrateScalarSlug(id, renamed, result.slug);
           }
+          // Renamed, deleted or rewritten: strokes pending on the old column no
+          // longer describe anything the session holds under that name.
+          retireLabelColumn(id, slug);
 
           scene.boundary([id]);
           if (result.octree_deferred) octreeRefreshQueueRef.current?.enqueue(id, sessionId);
@@ -13445,6 +13475,7 @@ export default function PointCloudViewer({
         const meta = await sessionSegmentGround(
           sessionId, { ...csfParams, defer_octree: willSplit, acknowledge_cost: acknowledgeCost },
           abort.signal);
+        retireLabelColumn(id, GROUND_CLASS_ATTRIBUTE);
         // The parent keeps ALL points, classified + coloured by ground_class.
         // A deferred run carries no octree fields — adopting them would hand the
         // renderer a pre-column octree it would treat as current — so the update
@@ -13776,6 +13807,7 @@ export default function PointCloudViewer({
           add_height_column: wantHAG,
         }, abort.signal, onDemProgress, onDemRunId);
         if (!result.success) throw new Error(result.error || `${labelFor(surface)} generation failed`);
+        if (wantHAG) retireLabelColumn(id, HEIGHT_ABOVE_GROUND_ATTRIBUTE);
         finishMesh(result, surface);
         // The HAG column was baked into the rebuilt octree; refresh + recolour.
         if (wantHAG && result.cacheId && result.rawMeta) {
@@ -14196,6 +14228,7 @@ export default function PointCloudViewer({
           showToast({ type: 'info', title: 'Wood / Leaf Segmentation', message: meta.warnings.join(' ') });
         }
 
+        retireLabelColumn(id, WOOD_CLASS_ATTRIBUTE);
         if (woodMode === 'remove') {
           // Keep only leaf points (delete wood) on the same session.
           const r = await sessionFilter(sessionId, {
@@ -14443,6 +14476,7 @@ export default function PointCloudViewer({
           ...(seeds ? { seed_points: seeds } : {}),
         }, abort.signal);
         // The parent keeps ALL points, coloured by tree_instance.
+        retireLabelColumn(id, TREE_INSTANCE_ATTRIBUTE);
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
         setCloudColorMode(id, { mode: 'scalar', field: TREE_INSTANCE_ATTRIBUTE });
         setShowTreeSegmentPanel(false);

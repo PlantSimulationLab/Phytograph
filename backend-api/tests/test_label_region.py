@@ -913,3 +913,44 @@ def test_an_edit_during_a_commit_build_leaves_the_octree_stale(
     survivors = int((~sess.deleted).sum())
     assert body["point_count"] == survivors < 1000
 
+
+@pytest.mark.parametrize("undo", ["stroke_ids", "edit_count"])
+def test_rerunning_a_segmentation_ends_that_columns_undo(
+    client, cache_root, grid_xyz, undo,
+):
+    """Hand-correct `wood_class`, re-run wood segmentation, Undo: the NEW
+    segmentation must be untouched.
+
+    The re-run overwrites the whole column but left its label history in place,
+    so the undo reverse-applied the old stroke's deltas (the values from BEFORE
+    the hand-correction) onto the fresh segmentation.
+    """
+    wood = main.WOOD_CLASS_SLUG
+    body = {"method": "geometric", "wood_bias": 0.6, "k_max": 40, "reg_iters": 1}
+    # The re-run uses different settings: an identical re-run reproduces the
+    # first result, and reverse-applying its deltas would then change nothing.
+    body2 = {"method": "geometric", "wood_bias": 0.05, "k_max": 10, "reg_iters": 1}
+    sid = _create(client, grid_xyz)
+    res = client.post(f"/api/cloud/session/{sid}/segment_wood", json=body)
+    assert res.status_code == 200, res.text
+    assert decode_streamed_json(res.content).get("error") is None
+    first = main._cloud_sessions[sid].extras[wood].copy()
+
+    # Hand-correct: a class the segmentation never writes, so any reversal shows.
+    res = client.post(f"/api/cloud/session/{sid}/label_region",
+                      json={"strokes": [_stroke(BOX_BIG, 64, "fix")], "slug": wood})
+    assert res.status_code == 200, res.text
+    assert main._cloud_sessions[sid].label_history.get(wood)
+
+    res = client.post(f"/api/cloud/session/{sid}/segment_wood", json=body2)
+    assert res.status_code == 200, res.text
+    fresh = main._cloud_sessions[sid].extras[wood].copy()
+    assert not (fresh == 64).any()
+    box = _box_mask(main._cloud_sessions[sid].positions, BOX_BIG)
+    assert (fresh[box] != first[box]).sum() > 50, "re-run must differ where corrected"
+
+    req = ({"undo_after_stroke_ids": [], "slug": wood} if undo == "stroke_ids"
+           else {"edit_count": 0, "slug": wood})
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits", json=req)
+    assert res.status_code == 200, res.text
+    np.testing.assert_array_equal(main._cloud_sessions[sid].extras[wood], fresh)

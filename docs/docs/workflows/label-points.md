@@ -117,6 +117,13 @@ opens on that column with its real classes and counts already listed.
     class continues that column's own numbering (Tree 3 after Tree 2) rather
     than starting a separate custom range.
 
+!!! warning "Re-running a tool replaces its column"
+    Running a segmentation again (or recomputing a scalar field) rewrites its
+    whole column, so hand corrections on it, committed or not, are replaced by
+    the new result. Uncommitted strokes on that column are dropped and **Undo**
+    can no longer step back into them. [Export](import-export.md) first if you
+    want to keep the corrected version.
+
 !!! note "Class 0 is always available"
     Every column offers **Unclassified** (class 0), even when the data has no
     zeros in it — a tree segmentation numbers its trees from 1. It is how you

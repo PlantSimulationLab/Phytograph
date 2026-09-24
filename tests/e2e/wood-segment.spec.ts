@@ -199,3 +199,60 @@ test('machine-learning method splits a real tree close to its hand labels', asyn
   expect(woodN).toBeGreaterThan(5500);
   expect(woodN).toBeLessThan(9500);
 });
+
+test('re-running the segmentation retires hand corrections to wood_class', async () => {
+  // A re-run overwrites the whole column. Hand corrections still pending on it
+  // were painted over the OLD result: the overlay kept drawing them over the
+  // new one, and Undo reverse-applied their deltas onto the fresh labels.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-point-cloud', FIXTURE);
+  await completeImportWizard(page);
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tree_wood_leaf"]');
+  await expect(cloudRow).toHaveAttribute('data-point-count', '4240', { timeout: 20_000 });
+
+  const segment = async () => {
+    await page.getByTestId('tool-wood-segment').click();
+    await expect(page.getByTestId('wood-segment-panel')).toBeVisible();
+    await page.getByTestId('wood-method').selectOption('sota');
+    await page.getByTestId('wood-mode').selectOption('label');
+    await page.getByTestId('wood-segment-run-button').click();
+    await expect(page.getByTestId('class-legend'))
+      .toHaveAttribute('data-legend-attribute', 'wood_class', { timeout: 60_000 });
+  };
+  await segment();
+
+  // Hand-correct: paint the WHOLE cloud as leaf on wood_class.
+  await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
+  await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
+  await page.getByTestId('tool-label').click();
+  const panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('label-column-select').selectOption('wood_class');
+  await expect(panel).toHaveAttribute('data-label-slug', 'wood_class');
+  await panel.getByTestId('label-class-2').click();
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay.locator('circle')).toHaveCount(0, { timeout: 10_000 });
+  const box = (await overlay.boundingBox())!;
+  for (const [fx, fy] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+    await page.mouse.click(box.x + 8 + fx * (box.width - 16), box.y + 8 + fy * (box.height - 16));
+  }
+  await page.keyboard.press('Enter');
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+  const counts = async () => JSON.parse(
+    (await panel.getAttribute('data-label-counts')) ?? '{}') as Record<string, number>;
+  await expect.poll(async () => (await counts())['1'] ?? 0, { timeout: 15_000 }).toBe(0);
+  await panel.getByRole('button', { name: 'Close' }).click();
+
+  await segment();
+
+  await page.getByTestId('tool-label').click();
+  await expect(panel).toBeVisible();
+  await page.getByTestId('label-column-select').selectOption('wood_class');
+  await expect(panel).toHaveAttribute('data-label-slug', 'wood_class');
+  // The stale correction is gone, and nothing on this column is undoable.
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0');
+  await expect(page.getByTestId('label-undo')).toBeDisabled();
+  // The counts are the NEW segmentation's: wood is back, a real minority.
+  await expect.poll(async () => (await counts())['1'] ?? 0, { timeout: 15_000 })
+    .toBeGreaterThan(700);
+});

@@ -35995,6 +35995,10 @@ def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, value
     full = np.zeros(len(sess.positions), dtype=np.float32)
     full[~sess.deleted] = values.astype(np.float32)
     sess.extras[slug] = full
+    # The column was replaced wholesale, so its label deltas (hand edits made
+    # against the OLD values) describe nothing that exists any more; an undo
+    # would reverse-apply them onto the new result.
+    sess.label_history.pop(slug, None)
     if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
         sess.extra_dims_meta.append({"slug": slug, "label": label})
 
@@ -36036,6 +36040,7 @@ def _session_set_full_column_locked(sess: "CloudSession", slug: str, label: str,
                     f"session has {n} points"),
         )
     sess.extras[slug] = arr.astype(np.float32, copy=False)
+    sess.label_history.pop(slug, None)   # replaced wholesale; see the sibling
     if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
         sess.extra_dims_meta.append({"slug": slug, "label": label})
     else:
