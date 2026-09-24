@@ -87,13 +87,22 @@ describe('buildPointSource is the compute barrier', () => {
 describe('screen-space regions refresh the octree first', () => {
   it('ensureOctreeFrameCurrent is async and reports failure', async () => {
     const src = await viewerSource();
-    expect(src).toMatch(/const ensureOctreeFrameCurrent = useCallback\(async \(cloudId: string\): Promise<boolean>/);
+    expect(src).toMatch(/const ensureOctreeFrameCurrent = \(cloudId: string\): Promise<boolean>/);
+    expect(src).toMatch(/const refreshOctreeFrame = async \(cloudId: string\): Promise<boolean>/);
     // A refresh that FAILED must report false so the caller aborts rather than
     // shipping a region into a mismatched frame. Scoped to the function body —
     // `/return false;/` against the whole file matches anything, anywhere.
-    const at = src.indexOf('const ensureOctreeFrameCurrent = useCallback');
+    const at = src.indexOf('const refreshOctreeFrame = async');
     const body = src.slice(at, src.indexOf('ensureOctreeFrameCurrentRef', at));
     expect(body).toMatch(/catch \(err\)[\s\S]{0,600}?return false;/);
+  });
+
+  it('concurrent callers on one cloud share a single refresh', async () => {
+    const src = await viewerSource();
+    const at = src.indexOf('const ensureOctreeFrameCurrent = (cloudId');
+    const body = src.slice(at, src.indexOf('const refreshOctreeFrame', at));
+    expect(body).toMatch(/frameRefreshInFlightRef\.current\.get\(cloudId\);\s*if \(inflight\) return inflight;/);
+    expect(body).toContain('frameRefreshInFlightRef.current.delete(cloudId)');
   });
 
   it('guards every path that still needs one', async () => {

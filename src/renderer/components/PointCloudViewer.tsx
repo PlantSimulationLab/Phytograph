@@ -95,6 +95,7 @@ import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
+import { createKeyedSerialQueue, type KeyedSerialQueue } from '../lib/keyedSerialQueue';
 import {
   pendingFor, prunePending, totalPendingStrokes, updatePending,
   type LabelPendingEntry, type LabelPendingMap,
@@ -2611,7 +2612,18 @@ export default function PointCloudViewer({
     [],
   );
   const [labelClassCounts, setLabelClassCounts] = useState<Record<number, number>>({});
-  const [labelBusy, setLabelBusy] = useState(false);
+  // Label requests run one at a time PER CLOUD, in the order they were drawn
+  // (lib/keyedSerialQueue): strokes are order-dependent and painted before
+  // their request is sent, so two in flight could otherwise reach the backend
+  // in the opposite order to the preview. Undo/redo replays share the queue,
+  // and the panel is `busy` while its cloud's queue is non-empty.
+  // Bumped on every enqueue/settle so `busy` re-renders.
+  const [, setLabelQueueTick] = useState(0);
+  const labelQueueRef = useRef<KeyedSerialQueue | null>(null);
+  if (!labelQueueRef.current) {
+    labelQueueRef.current = createKeyedSerialQueue(() => setLabelQueueTick((n) => n + 1));
+  }
+  const labelQueue = labelQueueRef.current;
   /**
    * Strokes that have been COMMITTED but whose octree rebuild has not landed.
    *
@@ -3357,22 +3369,31 @@ export default function PointCloudViewer({
     (tx: HistoryTransaction | undefined, direction: 'undo' | 'redo') => void
   >(() => {});
 
+  // Both wait for in-flight label requests first. A stroke still in flight is
+  // not in the history yet, so undoing then would undo the stroke BEFORE it
+  // while the backend went on to apply it.
   const handleUndo = useCallback(() => {
-    isUndoingRef.current = true;
-    const tx = sceneRef.current?.state.past[sceneRef.current.state.past.length - 1];
-    scene.undo();
-    syncSessionEditsRef.current(tx, 'undo');
-    setTimeout(() => { isUndoingRef.current = false; }, 0);
-  }, [scene]);
+    const go = () => {
+      isUndoingRef.current = true;
+      const tx = sceneRef.current?.state.past[sceneRef.current.state.past.length - 1];
+      scene.undo();
+      syncSessionEditsRef.current(tx, 'undo');
+      setTimeout(() => { isUndoingRef.current = false; }, 0);
+    };
+    if (labelQueue.pending() > 0) void labelQueue.idle().then(go); else go();
+  }, [scene, labelQueue]);
 
   // Redo
   const handleRedo = useCallback(() => {
-    isUndoingRef.current = true;
-    const tx = sceneRef.current?.state.future[0];
-    scene.redo();
-    syncSessionEditsRef.current(tx, 'redo');
-    setTimeout(() => { isUndoingRef.current = false; }, 0);
-  }, [scene]);
+    const go = () => {
+      isUndoingRef.current = true;
+      const tx = sceneRef.current?.state.future[0];
+      scene.redo();
+      syncSessionEditsRef.current(tx, 'redo');
+      setTimeout(() => { isUndoingRef.current = false; }, 0);
+    };
+    if (labelQueue.pending() > 0) void labelQueue.idle().then(go); else go();
+  }, [scene, labelQueue]);
 
   // Forward ref to the cloud being labelled — declared here because the window
   // seams above are registered before labelTargetCloud exists.
@@ -3858,7 +3879,21 @@ export default function PointCloudViewer({
   // case. Returns false if the refresh failed, so the caller can abort rather
   // than ship a region into a mismatched frame.
   const [refreshingOctreeIds, setRefreshingOctreeIds] = useState<string[]>([]);
-  const ensureOctreeFrameCurrent = useCallback(async (cloudId: string): Promise<boolean> => {
+  // One refresh per posed cloud, however many callers ask at once: two strokes
+  // (or an erase and a stroke) on a posed cloud each started their own
+  // PotreeConverter run, and the second one converted the same session again.
+  const frameRefreshInFlightRef = useRef(new Map<string, Promise<boolean>>());
+  // A plain per-render function (callers reach it through the ref below, which
+  // is re-pointed every render), so the refresh always sees current props.
+  const ensureOctreeFrameCurrent = (cloudId: string): Promise<boolean> => {
+    const inflight = frameRefreshInFlightRef.current.get(cloudId);
+    if (inflight) return inflight;
+    const run = refreshOctreeFrame(cloudId)
+      .finally(() => frameRefreshInFlightRef.current.delete(cloudId));
+    frameRefreshInFlightRef.current.set(cloudId, run);
+    return run;
+  };
+  const refreshOctreeFrame = async (cloudId: string): Promise<boolean> => {
     const cloud = cloudsRef.current.find(c => c.id === cloudId);
     const octreeInfo = cloud?.data.octree;
     if (!cloud || !octreeInfo?.sessionId) return true;
@@ -3893,7 +3928,7 @@ export default function PointCloudViewer({
     } finally {
       setRefreshingOctreeIds(prev => prev.filter(id => id !== cloudId));
     }
-  }, [onUpdateCloud, buildSessionOctreeData, setEditStates]);
+  };
   const ensureOctreeFrameCurrentRef = useRef(ensureOctreeFrameCurrent);
   ensureOctreeFrameCurrentRef.current = ensureOctreeFrameCurrent;
 
@@ -5232,12 +5267,13 @@ export default function PointCloudViewer({
             // last one could match nothing; the backend keeps up to the first id
             // it recognises, which is exactly "everything the user still has".
             const ids = op.surviving.map(s => s.strokeId).reverse();
-            void resetCloudLabelEdits(sessionId, undefined, op.slug, ids).then(apply).catch(fail);
+            void labelQueue.run(op.cloudId,
+              () => resetCloudLabelEdits(sessionId, undefined, op.slug, ids)).then(apply).catch(fail);
           } else {
-            void (async () => {
+            void labelQueue.run(op.cloudId, async () => {
               if (!(await ensureOctreeFrameCurrentRef.current(op.cloudId))) return;
               apply(await labelCloudRegion(sessionId, op.strokes.map(labelStrokeRequest), op.slug));
-            })().catch(fail);
+            }).catch(fail);
           }
         }
       }
@@ -5349,11 +5385,11 @@ export default function PointCloudViewer({
   // After a stroke lands, re-arm the lasso so the user can paint again without
   // re-entering the tool.
   useEffect(() => {
-    // Deliberately NOT gated on `labelBusy`: the paint is already on screen
-    // (optimistic), so making the user wait for the in-flight request before
-    // they can start the next lasso would put the round trip back into the
-    // interaction, just one step later. Strokes are applied in order server-side
-    // and each carries its own id, so overlapping requests reconcile correctly.
+    // Deliberately NOT gated on in-flight requests: the paint is already on
+    // screen (optimistic), so making the user wait for the request before they
+    // can start the next lasso would put the round trip back into the
+    // interaction, just one step later. The per-cloud label queue applies the
+    // strokes in the order they were drawn.
     // Only the LASSO arms the polygon overlay. In brush mode the overlay would
     // sit over the canvas swallowing every mousedown, so the brush would never
     // receive one.
@@ -5774,7 +5810,6 @@ export default function PointCloudViewer({
     updateLabelPending(cloud.id, slug, (e) => ({
       strokes: [...e.strokes, stroke], dirty: true, palette,
     }));
-    setLabelBusy(true);
     // Roll the optimistic paint back so the viewport can never show a stroke
     // the session does not actually carry. Every path that ends without the
     // backend applying the stroke goes through here.
@@ -5784,47 +5819,48 @@ export default function PointCloudViewer({
     // Screen-space stroke: the octree must be in the session's frame first. A
     // failed refresh has already said "the edit was not applied", so the paint
     // must go too — it used to stay on screen as if it had.
-    if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) {
-      rollbackStroke();
-      setLabelBusy(false);
-      return;
-    }
-    try {
-      // `label` names the column in extra_dims_meta when the backend CREATES
-      // it. Without it every hand-made column exported as "Manual Class",
-      // whatever the user called it.
-      const res = await labelCloudRegion(
-        sessionId, [labelStrokeRequest(stroke)], palette.slug, palette.name);
+    // Queued behind this cloud's earlier strokes, so the backend applies them
+    // in the order they were drawn (and scene.commit records them in it too).
+    await labelQueue.run(cloud.id, async () => {
+      if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) {
+        rollbackStroke();
+        return;
+      }
+      try {
+        // `label` names the column in extra_dims_meta when the backend CREATES
+        // it. Without it every hand-made column exported as "Manual Class",
+        // whatever the user called it.
+        const res = await labelCloudRegion(
+          sessionId, [labelStrokeRequest(stroke)], palette.slug, palette.name);
 
-      const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
-      labelCountsSeqRef.current++;   // any in-flight summary read is now stale
-      setLabelClassCounts(
-        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
-      );
-      // Do NOT reconcile the stroke list against `label_edit_count` here.
-      //
-      // The two counts measure different things: the renderer's list is USER
-      // GESTURES, the backend's history is UNDOABLE CHANGES. A stroke that
-      // changes nothing — e.g. the From-class gate matched no points — is
-      // correctly not recorded server-side, so the counts legitimately diverge
-      // by one. Truncating on that difference deleted the user's own stroke
-      // right after they drew it, and made the next lasso appear to do nothing.
-      //
-      // Eviction (the byte-bounded history dropping OLD entries) is a real case,
-      // but it trims the FRONT of the stack, so comparing lengths cannot detect
-      // it and slicing the tail is the wrong repair regardless.
-      scene.commit({
-        label: 'label points',
-        actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
-      });
-    } catch (err) {
-      rollbackStroke();
-      showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
-    } finally {
-      setLabelBusy(false);
-    }
+        const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
+        labelCountsSeqRef.current++;   // any in-flight summary read is now stale
+        setLabelClassCounts(
+          Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
+        );
+        // Do NOT reconcile the stroke list against `label_edit_count` here.
+        //
+        // The two counts measure different things: the renderer's list is USER
+        // GESTURES, the backend's history is UNDOABLE CHANGES. A stroke that
+        // changes nothing — e.g. the From-class gate matched no points — is
+        // correctly not recorded server-side, so the counts legitimately diverge
+        // by one. Truncating on that difference deleted the user's own stroke
+        // right after they drew it, and made the next lasso appear to do nothing.
+        //
+        // Eviction (the byte-bounded history dropping OLD entries) is a real case,
+        // but it trims the FRONT of the stack, so comparing lengths cannot detect
+        // it and slicing the tail is the wrong repair regardless.
+        scene.commit({
+          label: 'label points',
+          actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
+        });
+      } catch (err) {
+        rollbackStroke();
+        showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
+      }
+    });
   }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
-      labelVisibleClasses, labelDirty, scene, showToast, updateLabelPending,
+      labelVisibleClasses, labelDirty, scene, showToast, updateLabelPending, labelQueue,
       // `slab`/`sectionTargetCloud` are READ in the body (activeSlab), so they
       // must be dependencies. Omitting them froze `slab` at its first-render
       // value — null — so every stroke drawn inside a section shipped WITHOUT
@@ -24726,7 +24762,8 @@ export default function PointCloudViewer({
           dirty={labelDirty || labelHold.failed}
           baking={labelHold.baking}
           bakeFailed={labelHold.failed}
-          busy={labelBusy}
+          // Undo and Commit wait for this cloud's queued strokes to land.
+          busy={labelTargetCloud ? labelQueue.pending(labelTargetCloud.id) > 0 : false}
           onSelectClass={setLabelActiveClass}
           onToggleVisible={(v) => setLabelVisibleClasses(prev => {
             const next = new Set(prev);
