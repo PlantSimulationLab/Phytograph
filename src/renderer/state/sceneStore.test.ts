@@ -419,6 +419,45 @@ describe('boundary command', () => {
   });
 });
 
+describe('labelBoundary command', () => {
+  const label = (id: string, slug: string, strokeIds: string[]): SceneAction => ({
+    t: 'labelEdit', id, slug,
+    before: { strokes: [], activeClass: 64, visibleClasses: [], paletteId: 'p' },
+    after: {
+      strokes: strokeIds.map((strokeId) => ({ strokeId, region: {} as never, toClass: 64 })),
+      activeClass: 64, visibleClasses: [], paletteId: 'p',
+    },
+  });
+
+  it('drops only that cloud+column label history, keeping crops and other columns', () => {
+    let s = makeInitialSceneState();
+    s = run(
+      s,
+      { c: 'commit', tx: tx('crop s1', [{ t: 'maskEdit', id: 's1', before: {} as never, after: {} as never }]) },
+      { c: 'commit', tx: tx('paint s1', [label('s1', 'manual_class', ['a'])]) },
+      { c: 'commit', tx: tx('paint s1 wood', [label('s1', 'wood_class', ['b'])]) },
+      { c: 'commit', tx: tx('paint s2', [label('s2', 'manual_class', ['c'])]) },
+    );
+    s = run(s, { c: 'labelBoundary', id: 's1', slug: 'manual_class' });
+    expect(s.past.map((t) => t.label)).toEqual(['crop s1', 'paint s1 wood', 'paint s2']);
+  });
+
+  it('a stroke painted after the boundary undoes back to the boundary, not past it', () => {
+    let s = makeInitialSceneState();
+    s = run(
+      s,
+      { c: 'commit', tx: tx('s1', [label('c', 'manual_class', ['s1'])]) },
+      { c: 'commit', tx: tx('s2', [label('c', 'manual_class', ['s1', 's2'])]) },
+      { c: 'labelBoundary', id: 'c', slug: 'manual_class' },
+      { c: 'commit', tx: tx('s3', [label('c', 'manual_class', ['s3'])]) },
+      { c: 'undo' },
+    );
+    expect(s.labelStates.get('c')?.strokes).toEqual([]);
+    // Nothing left: a second undo cannot reach the committed strokes.
+    expect(s.past).toHaveLength(0);
+  });
+});
+
 // ── cap + eviction ───────────────────────────────────────────────────────────
 
 describe('history cap + session eviction', () => {

@@ -24,6 +24,10 @@ label anything you like.
 6. Repeat with different classes as needed. **Undo** removes the last stroke.
 7. Click **Commit** to save the labels into the point cloud.
 
+Undo stops at a Commit: once you commit, **Undo** and `Cmd+Z` step back
+through the strokes you painted since then, but never past the commit into
+the labels it saved.
+
 Each class row shows how many points currently carry it, so you can see the
 counts move as you work.
 

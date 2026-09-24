@@ -35475,16 +35475,18 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
     """Rebuild the derived octree so the label column is baked into octree.bin.
     The slow step (a PotreeConverter run).
 
-    THIS IS PURELY A DISPLAY OPERATION, which is counterintuitive enough to be
-    worth stating plainly: every backend op already reads the in-RAM session
-    arrays, so `split`, `filter`, `extract`, `extract_by_column` and LAS/LAZ
-    export ALL see fresh labels with no commit at all. Do not insert a defensive
-    commit before those paths. The only thing a commit changes is that the
-    renderer no longer needs its client-side overlay to show the labels.
+    For the LABELS this is a display operation: every backend op already reads
+    the in-RAM session arrays, so `split`, `filter`, `extract`,
+    `extract_by_column` and LAS/LAZ export ALL see fresh labels with no commit
+    at all. Do not insert a defensive commit before those paths.
 
-    Unlike `bake` this does NOT compact arrays, clear deletions, or clear the
-    label history — an undo after a commit still works; it just needs another
-    commit to become visible in the baked octree."""
+    It is also an UNDO BOUNDARY for this column: `label_history[slug]` is
+    dropped when the request arrives, not when the build finishes. The renderer
+    clears its stroke list at commit, so its next undo after a new stroke says
+    "keep nothing"; with the older deltas still here that reverse-applied every
+    committed stroke and the labels were lost. Dropping them here also frees the
+    history's memory. Unlike `bake` it does NOT compact arrays or clear
+    deletions, and other columns' histories are untouched."""
     sess = _get_cloud_session(session_id)
     slug = _validate_label_slug(request.slug)
     with _cloud_session_lock:
@@ -35493,6 +35495,7 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
                 status_code=400,
                 detail=f"session has no label column {slug!r} to commit",
             )
+        sess.label_history.pop(slug, None)
     # _session_rebuild takes the lock itself (and must not be called holding it —
     # PotreeConverter is slow).
     cache_key, cache_dir, meta = _session_rebuild(sess)

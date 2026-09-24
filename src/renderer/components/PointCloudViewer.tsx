@@ -6162,10 +6162,15 @@ export default function PointCloudViewer({
       return next;
     });
     // The tool is free again: no pending strokes, nothing to undo, and the
-    // column/cloud guards stop blocking. The strokes are no longer undoable
-    // because they are no longer PENDING — undo across a commit has always
-    // needed a fresh commit to become visible.
+    // column/cloud guards stop blocking.
+    //
+    // A commit is an UNDO BOUNDARY. The backend drops this column's label
+    // history when the commit arrives, so the committed strokes have no delta
+    // left to reverse; Cmd+Z must not be able to reach their `labelEdit`
+    // entries either. Before this, an undo after a commit resolved to "keep
+    // nothing" and rolled every committed label back.
     updateLabelPending(cloud.id, palette.slug, (e) => ({ ...e, strokes: [], dirty: false }));
+    scene.labelBoundary(cloud.id, palette.slug);
     // The per-cloud palette binding and the categorical registration describe
     // the COLUMN, which the session already has; only octree.bin is behind. Do
     // them now so the picker, the legend and the by-name resolvers are right
@@ -6193,7 +6198,7 @@ export default function PointCloudViewer({
       message: 'The display finishes rebuilding in the background.',
       type: 'success',
     });
-  }, [labelTargetCloud, labelStrokes, onUpdateCloud, showToast, updateLabelPending]);
+  }, [labelTargetCloud, labelStrokes, onUpdateCloud, scene, showToast, updateLabelPending]);
 
   // Permanently apply (bake) a session cloud's pending deletions: rebuild the
   // octree from the survivors and clear the in-session mask + the accumulated

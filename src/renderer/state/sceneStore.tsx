@@ -104,6 +104,7 @@ export type SceneCommand =
   | { c: 'undo' }
   | { c: 'redo' }
   | { c: 'boundary'; ids: string[] }
+  | { c: 'labelBoundary'; id: string; slug: string }
   | { c: 'replaceCollection'; apply: (s: SceneState) => Partial<SceneState> };
 
 // Apply ONE action to the collections (no history bookkeeping). Used by `commit`
@@ -454,6 +455,21 @@ export function sceneReducer(
         future: state.future.filter((tx) => !touches(tx)),
       };
     }
+    case 'labelBoundary': {
+      // A label Commit ends the undo history of ONE column on ONE cloud: the
+      // backend drops that column's `label_history` when the commit arrives,
+      // so a `labelEdit` from before it has no delta left to reverse. Leaving it
+      // reachable made Cmd+Z after a commit resolve to "keep nothing" and roll
+      // the committed labels back. Narrower than `boundary`, which would also
+      // take the cloud's crop and transform history with it.
+      const hits = (tx: HistoryTransaction) => tx.actions.some(
+        (a) => a.t === 'labelEdit' && a.id === command.id && a.slug === command.slug);
+      return {
+        ...state,
+        past: state.past.filter((tx) => !hits(tx)),
+        future: state.future.filter((tx) => !hits(tx)),
+      };
+    }
   }
 }
 
@@ -466,6 +482,7 @@ export interface SceneContextValue {
   undo: () => void;
   redo: () => void;
   boundary: (ids: string[]) => void;
+  labelBoundary: (id: string, slug: string) => void;
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -497,6 +514,7 @@ export function SceneProvider({
       undo: () => rawDispatch({ c: 'undo' }),
       redo: () => rawDispatch({ c: 'redo' }),
       boundary: (ids) => rawDispatch({ c: 'boundary', ids }),
+      labelBoundary: (id, slug) => rawDispatch({ c: 'labelBoundary', id, slug }),
       canUndo: state.past.length > 0,
       canRedo: state.future.length > 0,
     }),

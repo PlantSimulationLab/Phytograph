@@ -419,8 +419,42 @@ def test_commit_labels_rebuilds_and_exposes_the_column(client, cache_root, grid_
     assert sess.label_dirty.get(SLUG) is False
     # The label column reaches the octree as a colourable attribute.
     assert any(a.get("name") == SLUG for a in body.get("attributes", []))
-    # Commit does NOT clear the undo history (unlike bake).
-    assert len(sess.label_history[SLUG]) == 1
+    # A commit is an undo boundary: the column's history is gone.
+    assert sess.label_history.get(SLUG, []) == []
+
+
+@pytest.mark.parametrize("undo", ["stroke_ids", "edit_count"])
+def test_undo_after_a_commit_keeps_the_committed_labels(
+    client, cache_root, grid_xyz, undo,
+):
+    """Paint s1, s2, commit, paint s3, undo: s1 and s2 must survive.
+
+    The renderer clears its stroke list at commit, so after s3 it holds only
+    [s3] and an undo keeps nothing. While the backend still held s1/s2 in its
+    history, "keep nothing" reverse-applied them too and the committed labels
+    vanished. Both undo paths the renderer uses: by stroke id (Cmd+Z) and by
+    count (the panel button).
+    """
+    sid = _create(client, grid_xyz)
+    _paint(client, sid, [_stroke(BOX_BIG, 64, "s1")])
+    _paint(client, sid, [_stroke(BOX_SMALL, 65, "s2")])
+    committed = _labels(sid).copy()
+    assert set(np.unique(committed)) == {0.0, 64.0, 65.0}
+
+    res = client.post(f"/api/cloud/session/{sid}/commit_labels", json={})
+    assert res.status_code == 200, res.text
+
+    far = {"kind": "box", "min": [0.75, 0.75, 0.75], "max": [0.95, 0.95, 0.95],
+           "invert": False}
+    _paint(client, sid, [_stroke(far, 255, "s3")])
+    assert (_labels(sid) == 255).any()
+
+    body = ({"undo_after_stroke_ids": []} if undo == "stroke_ids"
+            else {"edit_count": 0})
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits", json=body)
+    assert res.status_code == 200, res.text
+    np.testing.assert_array_equal(_labels(sid), committed)
+    assert res.json()["class_counts"].get("64", 0) > 0
 
 
 def test_commit_without_a_label_column_is_a_400(client, cache_root, grid_xyz):

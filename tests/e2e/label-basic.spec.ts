@@ -1,9 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { stubSaveDialog } from './helpers/stubSaveDialog';
+import { readLasClasses } from './helpers/lasClasses';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz');
@@ -592,6 +596,65 @@ test('uncommitted strokes are flagged in the panel and before File > New', async
   // The strokes survived the near-miss.
   await expect(panel).toHaveAttribute('data-pending-strokes', '1');
 });
+
+/** The first real class that is not `exclude`, read from the panel's rows. */
+async function otherClass(page: LaunchedApp['page'], exclude: number): Promise<number> {
+  const rows = page.getByTestId('label-class-list').locator('[data-testid^="label-class-"]');
+  const n = await rows.count();
+  for (let i = 0; i < n; i++) {
+    const v = Number((await rows.nth(i).getAttribute('data-testid'))!.replace('label-class-', ''));
+    if (v > 0 && v !== exclude) return v;
+  }
+  throw new Error('no second class in the palette');
+}
+
+for (const how of ['panel button'] as const) {
+  test(`undo after a commit keeps the committed labels (${how})`, async () => {
+    // Commit cleared the renderer's strokes but the backend kept its history,
+    // so the first undo after a commit resolved to "keep nothing" and reverse-
+    // applied every delta: the committed labels vanished, from the display AND
+    // from the session export reads. A commit is now an undo boundary.
+    const { app } = session;
+    const { page, panel } = await openLabelTool();
+    const first = Number(await panel.getAttribute('data-active-class'));
+    await paintWholeViewport(page);
+    await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+
+    await page.getByTestId('label-commit').click();
+    await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
+
+    const second = await otherClass(page, first);
+    await page.getByTestId(`label-class-${second}`).click();
+    await paintWholeViewport(page);
+    await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+      { timeout: 15_000 }).toBe(60);
+
+    await page.getByTestId('label-undo').click();
+
+    // Back to the committed state — not to nothing.
+    await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
+      { timeout: 15_000 }).toBe(60);
+    expect((await counts(panel))[String(second)] ?? 0).toBe(0);
+    await expect(panel).toHaveAttribute('data-pending-strokes', '0');
+
+    // Nothing left to undo: the panel cannot reach past the commit.
+    await expect(page.getByTestId('label-undo')).toBeDisabled();
+
+    // And the file says so too: export reads the session, not the display.
+    const savePath = join(mkdtempSync(join(tmpdir(), 'phytograph-label-undo-')), 'undo.las');
+    await stubSaveDialog(app, savePath);
+    await page.evaluate(() => (window as any).__openExportPanel?.());
+    await expect(page.getByTestId('export-modal')).toBeVisible();
+    await page.getByTestId('export-format-las').click();
+    await page.getByTestId('export-cloud-go').click();
+    await expect(
+      page.getByTestId('toast-success').filter({ hasText: 'Export Complete' }),
+    ).toBeVisible({ timeout: 30_000 });
+    const { classes } = readLasClasses(savePath);
+    expect(classes).toHaveLength(60);
+    expect(classes.every((c) => c === first)).toBe(true);
+  });
+}
 
 test('pending strokes belong to their cloud, not to the tool', async () => {
   // The tool held ONE stroke list, cleared only by Commit. Selecting another
