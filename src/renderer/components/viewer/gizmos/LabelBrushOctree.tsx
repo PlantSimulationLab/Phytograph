@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import type { PointCloudOctree } from 'potree-core';
 import { pickPixelForNdc, rayForNdc, worldPerPixelAt } from '../../../lib/cameraRay';
 import { isSceneOverlay } from '../../../lib/sceneOverlay';
+import { brushAnchorAt, type PickableOctree } from '../../../lib/brushAnchor';
 
 // Same bound DepthProbe uses: above this the CPU raycast is too slow, and a
 // cloud this dense is one where the GPU pick works anyway.
@@ -164,82 +165,18 @@ export function LabelBrushOctree({
      * (a cross-section) the camera is still a PerspectiveCamera instance, and
      * setFromCamera would collapse every pick toward the view centre.
      */
-    const anchorAt = (ndc: THREE.Vector2): THREE.Vector3 | null => {
-      const ray = rayForNdc(camera, ndc);
-      const oct = getOctreeRef.current();
-      if (oct) {
-        try {
-          const hit = oct.pick(gl, camera, ray, {
-            pickWindowSize: 17, pickOutsideClipRegion: true,
-            // The pick window, given rather than left to potree to derive from
-            // the ray — its derivation collapses to the view centre under the
-            // cross-section's ortho override. See `pickPixelForNdc`.
-            pixelPosition: pickPixelForNdc(gl, ndc),
-          });
-          if (hit?.position) {
-            return new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z);
-          }
-        } catch { /* fall through to the CPU pass */ }
-      }
-
-      // CPU raycast fallback, bounded by point count exactly as DepthProbe does.
-      // The GPU pick renders a small window and reads it back, and on a SPARSE
-      // cloud it can simply not land on anything — measured at 0 hits across 30
-      // wheel notches. That is the same condition that makes this CPU pass
-      // cheap, so the two cover each other.
-      let loadedPoints = 0;
-      scene.traverseVisible((o) => {
-        if (loadedPoints > CPU_RAYCAST_POINT_BUDGET) return;
-        const pts = o as THREE.Points;
-        if (pts.isPoints && pts.geometry) {
-          loadedPoints += pts.geometry.getAttribute('position')?.count ?? 0;
-        }
-      });
-      if (loadedPoints <= CPU_RAYCAST_POINT_BUDGET) try {
-        const raycaster = new THREE.Raycaster();
-        raycaster.ray.copy(ray);
-        // `camera` is REQUIRED even though the ray is set directly. three's fat
-        // lines (LineSegments2, used by scene overlays) read raycaster.camera
-        // during raycast and throw "Cannot read properties of null (reading
-        // 'near')" without it — an uncaught throw here unmounts the whole
-        // renderer, which presents as a blank window rather than as a brush
-        // problem. Assigned rather than passed to setFromCamera, which would
-        // rebuild the ray with perspective math and break the ortho override.
-        raycaster.camera = camera;
-        const viewDist = camera.position.distanceTo(
-          new THREE.Vector3(centerRef.current.x, centerRef.current.y, centerRef.current.z),
-        );
-        for (const frac of [0.02, 0.15]) {
-          raycaster.params.Points = { threshold: Math.max(viewDist * frac, 1e-9) };
-          // Only point clouds. Intersecting the whole scene drags in overlay
-          // meshes and fat lines that this brush can never anchor on, and any
-          // one of them throwing takes the renderer down with it.
-          const targets: THREE.Object3D[] = [];
-          scene.traverseVisible((o) => {
-            if ((o as THREE.Points).isPoints && !isSceneOverlay(o)) targets.push(o);
-          });
-          const hits = raycaster.intersectObjects(targets, false);
-          for (const h of hits) {
-            if (!h.object.visible) continue;
-            // Skip our own cursor sphere and every other overlay, or the brush
-            // would anchor on its own indicator.
-            if (isSceneOverlay(h.object)) continue;
-            if (!(h.object as THREE.Points).isPoints) continue;
-            return h.point.clone();
-          }
-        }
-      } catch { /* a raycast failure must not take the renderer down */ }
-
-      // Nothing under the cursor at all — empty sky.
-      //
-      // Returning NULL rather than a ray-to-centre guess is deliberate. That
-      // guess lands halfway between whatever surfaces happen to be in view: on
-      // a two-layer canopy it sits in the gap BETWEEN the layers, so the stroke
-      // succeeds, reports zero points, and leaves the user with a brush that
-      // silently does nothing. Refusing to stamp is honest — the cursor
-      // disappears, which says "there is nothing here to paint".
-      return null;
-    };
+    const anchorAt = (ndc: THREE.Vector2): THREE.Vector3 | null => brushAnchorAt({
+      octree: getOctreeRef.current() as unknown as PickableOctree | null,
+      gl, camera, ray: rayForNdc(camera, ndc),
+      // The pick window, given rather than left to potree to derive from the
+      // ray — its derivation collapses to the view centre under the
+      // cross-section's ortho override. See `pickPixelForNdc`.
+      pixelPosition: pickPixelForNdc(gl, ndc),
+      viewDist: camera.position.distanceTo(
+        new THREE.Vector3(centerRef.current.x, centerRef.current.y, centerRef.current.z)),
+      cpuPointBudget: CPU_RAYCAST_POINT_BUDGET,
+      isOverlay: isSceneOverlay,
+    });
 
     /** Pixel radius → world radius AT THE STAMP'S DEPTH. */
     const worldRadiusAt = (world: THREE.Vector3): number => {
