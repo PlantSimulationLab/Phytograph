@@ -29485,6 +29485,7 @@ def _mark_octree_stale_locked(sess: "CloudSession") -> None:
 
     Caller holds `_cloud_session_lock`. Idempotent: a second delete before any
     rebuild keeps the FIRST id, which is the one still being drawn."""
+    sess.octree_stale_gen += 1
     if sess.octree_cache_id:
         sess.rendered_octree_cache_id = sess.octree_cache_id
     sess.octree_cache_id = None
@@ -32656,6 +32657,12 @@ class CloudSession:
     # claiming the cache is servable as the session's current geometry.
     # Cleared whenever a rebuild installs a fresh `octree_cache_id`.
     rendered_octree_cache_id: Optional[str] = None
+    # Bumped by `_mark_octree_stale_locked`, i.e. by every edit that leaves the
+    # derived octree behind the session (delete, undo, filter/split commit,
+    # transform). `_session_rebuild` snapshots it before it writes and compares
+    # after the converter: a changed value means an edit landed mid-build, so
+    # the new octree must not be claimed as current.
+    octree_stale_gen: int = 0
     # True when the stored normal columns predate a geometry edit.
     #
     # A normal is a NEIGHBOURHOOD statistic, so deleting or cropping points
@@ -36090,6 +36097,9 @@ def _session_rebuild(
     # documents.
     with (contextlib.nullcontext() if private else _cloud_session_lock):
         built_point_count = int((~np.asarray(sess.deleted)).sum())
+        # Taken before the write: a non-private write drops the lock between
+        # blocks, so an edit can land anywhere from here to the converter's end.
+        built_gen = sess.octree_stale_gen
     with tempfile.TemporaryDirectory() as _tmp:
         las_path = _Path(_tmp) / "rebuilt.las"
         # Octree is hits-only (misses stay in the session for LAD/overlay). A
@@ -36108,17 +36118,28 @@ def _session_rebuild(
             progress=progress, cancel_event=cancel_event, span=span,
         )
     with _cloud_session_lock:
-        sess.octree_cache_id = cache_key
+        current = sess.octree_stale_gen == built_gen
+        if current:
+            sess.octree_cache_id = cache_key
+            sess.rendered_octree_cache_id = None   # see _mark_octree_stale_locked
+            # The octree was just built FROM the current arrays, so any posed
+            # transform is now folded into it. Cleared here rather than at each
+            # of the ~10 callers (filter, split, segment, crop-apply, extract,
+            # DEM, commit_labels, bake, refresh, transform) because this is the
+            # one function all of them go through — a per-caller clear is a rule
+            # someone eventually forgets, and forgetting leaves the renderer
+            # posing an octree that already has the transform baked in.
+            sess.octree_pose = None
+        else:
+            # An edit (a delete, an undo, a transform) landed during the build,
+            # so this octree is already behind the session. Claiming it as
+            # current made the next refresh take bake's no-rebuild fast path and
+            # keep the stale octree for good. Publish it as RENDERED (pinned
+            # against eviction, installable by the renderer, which keeps masking
+            # the newer edit) and leave the session stale, as bake does when a
+            # delete races its build; the renderer's refresh queue rebuilds.
+            sess.rendered_octree_cache_id = cache_key
         sess.octree_point_count = built_point_count
-        sess.rendered_octree_cache_id = None   # see _mark_octree_stale_locked
-        # The octree was just built FROM the current arrays, so any posed
-        # transform is now folded into it. Cleared here rather than at each of
-        # the ~10 callers (filter, split, segment, crop-apply, extract, DEM,
-        # commit_labels, bake, refresh, transform) because this is the one
-        # function all of them go through — a per-caller clear is a rule someone
-        # eventually forgets, and forgetting leaves the renderer posing an octree
-        # that already has the transform baked in.
-        sess.octree_pose = None
         # Exact class lists, attached HERE for the same reason the pose is
         # cleared here: every edit that changes which points exist (filter,
         # split, segment, extract, bake, commit_labels) funnels through this one
@@ -36133,6 +36154,7 @@ def _session_rebuild(
             **meta,
             "observed_classes": _session_observed_classes_locked(sess),
             **_session_robust_color_stats_locked(sess),
+            "octree_stale": not current,
         }
     return cache_key, cache_dir, meta
 

@@ -856,3 +856,60 @@ def test_a_reserved_slug_is_refused_rather_than_crashing_the_writer(
                       json={"strokes": [_stroke(BOX_BIG, 1, "s1")],
                             "slug": "classification"})
     assert res.status_code == 400
+
+
+def test_an_edit_during_a_commit_build_leaves_the_octree_stale(
+    client, cache_root, grid_xyz, monkeypatch,
+):
+    """A commit's octree build must not claim to be current if an edit landed
+    while it ran.
+
+    `_session_rebuild` set `octree_cache_id` unconditionally when the converter
+    returned. A delete arriving mid-build had already cleared it (the octree is
+    behind the mask), and the rebuild then put the pre-delete octree back as
+    current, so the renderer's follow-up refresh (`bake?compact=false`) took the
+    no-rebuild fast path and kept the deleted points in the octree for good.
+    """
+    import threading
+
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    _paint(client, sid, [_stroke(BOX_BIG, 64, "s1")])
+
+    entered, release = threading.Event(), threading.Event()
+    real_build = main._build_octree_from_las
+
+    def held_build(*a, **k):
+        entered.set()
+        assert release.wait(30), "test never released the build"
+        return real_build(*a, **k)
+
+    monkeypatch.setattr(main, "_build_octree_from_las", held_build)
+    result = {}
+    t = threading.Thread(target=lambda: result.update(
+        res=client.post(f"/api/cloud/session/{sid}/commit_labels", json={})))
+    t.start()
+    assert entered.wait(30), "commit never reached the converter"
+
+    res = client.post(f"/api/cloud/session/{sid}/delete_region", json={"region": BOX_SMALL})
+    assert res.status_code == 200 and res.json()["deleted_count"] > 0
+    release.set()
+    t.join(60)
+    assert result["res"].status_code == 200, result["res"].text
+    committed = result["res"].json()
+    assert committed["octree_stale"] is True
+    monkeypatch.setattr(main, "_build_octree_from_las", real_build)
+
+    # The session is still behind: nothing claims the pre-delete octree...
+    assert sess.octree_cache_id is None
+    # ...but it is pinned as the one on screen.
+    assert sess.rendered_octree_cache_id == committed["cache_id"]
+
+    # So the refresh really rebuilds, and its octree excludes the deleted points.
+    res = client.post(f"/api/cloud/session/{sid}/bake?compact=false")
+    assert res.status_code == 200, res.text
+    body = decode_streamed_json(res.content)
+    assert body["cache_id"] != committed["cache_id"]
+    survivors = int((~sess.deleted).sum())
+    assert body["point_count"] == survivors < 1000
+
