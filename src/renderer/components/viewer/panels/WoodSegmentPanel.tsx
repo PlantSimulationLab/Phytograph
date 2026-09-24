@@ -1,7 +1,15 @@
-import { Loader2, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Cpu, Loader2, X, Zap } from 'lucide-react';
 import { WoodLeafIcon } from '../../icons/WoodLeafIcon';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
+import {
+  getMlDevice,
+  listMlModels,
+  type MlDeviceInfo,
+  type MlModelSummary,
+  type WoodSegMethod,
+} from '../../../utils/backendApi';
 
 // Output mode for wood/leaf segmentation:
 //  - 'label': keep all points, write the wood_class column, colour by it.
@@ -15,11 +23,118 @@ export type WoodSegmentMode = 'label' | 'split' | 'remove';
 export type WoodMultiMode = 'aggregate' | 'per-scan';
 
 // Classification method:
+//  - 'ml': a trained PointNeXt model (backend-api/ml/). No tuning knobs; the
+//    model is chosen from the installed ones (bundled + user-imported).
+//  - 'sota': branch segments classified by cylinder fit.
 //  - 'connectivity': roots a geodesic skeleton at the trunk base and recovers
 //    the woody backbone (thin branches/twigs the point-wise method misses).
 //    Needs the ground removed.
 //  - 'geometric': the original point-wise classifier (local shape only).
-export type WoodMethod = 'sota' | 'connectivity' | 'geometric';
+export type WoodMethod = WoodSegMethod;
+
+// The installed models and the ML device cannot change under a running
+// backend (an import adds a model, but only through a flow that reloads this),
+// so fetch once per session and share across panel openings.
+type MlState = { models: MlModelSummary[]; device: MlDeviceInfo | null };
+let mlCache: MlState | null = null;
+let mlInflight: Promise<MlState> | null = null;
+
+function loadMl(): Promise<MlState> {
+  if (mlCache) return Promise.resolve(mlCache);
+  if (!mlInflight) {
+    mlInflight = Promise.all([
+      listMlModels('wood_leaf'),
+      // The device probe spawns a worker that imports torch (a few seconds, once);
+      // a failure only hides the pill, it never blocks running the model.
+      getMlDevice().catch(() => null),
+    ])
+      .then(([models, device]) => {
+        mlCache = { models, device };
+        return mlCache;
+      })
+      .finally(() => { mlInflight = null; });
+  }
+  return mlInflight;
+}
+
+/** Exposed for tests: drop the session cache. */
+export function __resetWoodMlCache() {
+  mlCache = null;
+  mlInflight = null;
+}
+
+function MlModelControls({
+  modelId,
+  onModelIdChange,
+  disabled,
+}: {
+  modelId: string | null;
+  onModelIdChange: (id: string | null) => void;
+  disabled: boolean;
+}) {
+  const [ml, setMl] = useState<MlState | null>(mlCache);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (ml) return;
+    let cancelled = false;
+    loadMl()
+      .then((r) => { if (!cancelled) setMl(r); })
+      .catch((e) => { if (!cancelled) setError(String(e?.message ?? e)); });
+    return () => { cancelled = true; };
+  }, [ml]);
+
+  if (error) {
+    return <div className="text-[9px] text-red-300 mt-1">Could not list models: {error}</div>;
+  }
+  if (!ml) {
+    return <div className="text-[9px] text-neutral-500 mt-1">Loading models…</div>;
+  }
+  const { models, device } = ml;
+  const selected = models.find((m) => m.id === modelId) ?? models.find((m) => m.is_default) ?? models[0];
+  const accel = device && device.device !== 'cpu';
+  return (
+    <div className="mt-2" data-testid="wood-ml-controls">
+      {models.length > 1 && (
+        <select
+          data-testid="wood-ml-model"
+          value={selected?.id ?? ''}
+          onChange={(e) => onModelIdChange(e.target.value)}
+          disabled={disabled}
+          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600 mb-1"
+        >
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}{m.origin === 'user' ? ' (imported)' : ''}
+            </option>
+          ))}
+        </select>
+      )}
+      {models.length === 0 && (
+        <div className="text-[9px] text-red-300">No wood/leaf model is installed.</div>
+      )}
+      {device && (
+        <span
+          data-testid="wood-ml-device"
+          data-device={device.device}
+          title={device.deviceName ?? device.reason ?? ''}
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
+            accel
+              ? 'bg-green-500/15 text-green-300 border-green-500/30'
+              : 'bg-neutral-700/60 text-neutral-300 border-neutral-600/50'
+          }`}
+        >
+          {accel ? <Zap className="w-3 h-3" /> : <Cpu className="w-3 h-3" />}
+          {accel ? 'GPU' : 'CPU'}
+        </span>
+      )}
+      {device && !accel && (
+        <div className="text-[9px] text-neutral-500 mt-1 leading-snug">
+          No usable GPU, so this runs on the CPU: about a minute per 2 million points.
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Presentational tool panel for wood/leaf segmentation. The `onSegment` handler
 // and all state live in PointCloudViewer; the parent gates rendering on
@@ -31,6 +146,8 @@ interface WoodSegmentPanelProps {
   mode: WoodSegmentMode;
   multiMode: WoodMultiMode;
   method: WoodMethod;
+  // The ML model to run (null = the bundled default). Only used when method is 'ml'.
+  modelId: string | null;
   selectedCount: number;
   inProgress: boolean;
   error: string | null;
@@ -48,6 +165,7 @@ interface WoodSegmentPanelProps {
   onModeChange: (m: WoodSegmentMode) => void;
   onMultiModeChange: (m: WoodMultiMode) => void;
   onMethodChange: (m: WoodMethod) => void;
+  onModelIdChange: (id: string | null) => void;
   onUseReflectanceChange: (b: boolean) => void;
   onSegment: () => void;
   onCancel: () => void;
@@ -60,6 +178,7 @@ export function WoodSegmentPanel({
   mode,
   multiMode,
   method,
+  modelId,
   selectedCount,
   inProgress,
   error,
@@ -72,6 +191,7 @@ export function WoodSegmentPanel({
   onModeChange,
   onMultiModeChange,
   onMethodChange,
+  onModelIdChange,
   onUseReflectanceChange,
   onSegment,
   onCancel,
@@ -101,7 +221,7 @@ export function WoodSegmentPanel({
           <InfoHint
             data-testid="wood-method-help"
             label="Method"
-            text="Which classifier separates wood from leaf. Branch-segment fits cylinders to whole branch segments (best on real trees, needs the ground removed); Connectivity traces branches back to the trunk to recover thin twigs (also needs ground removed); Geometric judges each point from its local shape alone — use it when the cloud can't be cleanly ground-removed or is partial/disconnected."
+            text="Which classifier separates wood from leaf. Machine learning (the default) runs a network trained on hand-labelled real trees and Helios synthetic scans; it is the most accurate and has no tuning knobs. Branch-segment fits cylinders to whole branch segments (the best of the geometric methods, needs the ground removed); Connectivity traces branches back to the trunk to recover thin twigs (also needs ground removed); Geometric judges each point from its local shape alone — use it when the cloud can't be cleanly ground-removed or is partial/disconnected."
           />
         </label>
         <select
@@ -111,17 +231,23 @@ export function WoodSegmentPanel({
           disabled={inProgress}
           className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
         >
-          <option value="sota">Branch-segment (recommended)</option>
+          <option value="ml">Machine learning (recommended)</option>
+          <option value="sota">Branch-segment (cylinder fit)</option>
           <option value="connectivity">Connectivity (skeleton backbone)</option>
           <option value="geometric">Geometric (local shape)</option>
         </select>
         <div className="text-[9px] text-neutral-500 mt-1 leading-snug">
-          {method === 'sota'
+          {method === 'ml'
+            ? 'A trained point-classification network. Works best with the ground removed.'
+            : method === 'sota'
             ? 'Classifies whole branch segments by cylinder fit — recovers thin branches without over-segmenting leaves. Requires ground removal.'
             : method === 'connectivity'
             ? 'Traces branches back to the trunk base — recovers thin twigs the local method drops. Requires ground removal.'
             : 'Classifies each point from its local 3-D shape only.'}
         </div>
+        {method === 'ml' && (
+          <MlModelControls modelId={modelId} onModelIdChange={onModelIdChange} disabled={inProgress} />
+        )}
       </div>
 
       {/* Multi-scan mode: segment selected scans together (denser, for multi-
@@ -169,94 +295,100 @@ export function WoodSegmentPanel({
         </div>
       )}
 
-      {/* Wood sensitivity (wood_bias, inverted for intuition: higher slider →
-          more wood → lower wood_bias). */}
-      <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-          Wood sensitivity (0–1)
-          <InfoHint
-            data-testid="wood-bias-help"
-            label="Wood sensitivity"
-            text="The wood/leaf decision threshold. Raise it to classify more points as wood — catches thin twigs at the cost of some leaf bleed; lower it to be stricter about what counts as wood. The default works across broadleaf and conifer scans."
-          />
-        </label>
-        <DebouncedNumberInput
-          data-testid="wood-bias"
-          value={woodBias}
-          onCommit={(n) => onWoodBiasChange(Math.max(0.05, Math.min(0.95, n)))}
-          min={0.05}
-          max={0.95}
-          step={0.05}
-          disabled={inProgress}
-          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-        />
-      </div>
+      {/* The tuning knobs belong to the geometric methods; a model has none. */}
+      {method !== 'ml' && (
+        <>
+          {/* Wood sensitivity (wood_bias, inverted for intuition: higher slider →
+              more wood → lower wood_bias). */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+              Wood sensitivity (0–1)
+              <InfoHint
+                data-testid="wood-bias-help"
+                label="Wood sensitivity"
+                text="The wood/leaf decision threshold. Raise it to classify more points as wood — catches thin twigs at the cost of some leaf bleed; lower it to be stricter about what counts as wood. The default works across broadleaf and conifer scans."
+              />
+            </label>
+            <DebouncedNumberInput
+              data-testid="wood-bias"
+              value={woodBias}
+              onCommit={(n) => onWoodBiasChange(Math.max(0.05, Math.min(0.95, n)))}
+              min={0.05}
+              max={0.95}
+              step={0.05}
+              disabled={inProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
 
-      {/* Neighbourhood scale (k_max) — larger = smoother / slower. */}
-      <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-          Neighbourhood size
-          <InfoHint
-            data-testid="wood-kmax-help"
-            label="Neighbourhood size"
-            text="How many neighbouring points define each point's local geometry. Larger is smoother but slower; the default suits typical terrestrial-LiDAR densities. Increase it for noisy or sparse clouds, decrease it to preserve fine detail."
-          />
-        </label>
-        <DebouncedNumberInput
-          data-testid="wood-kmax"
-          value={kMax}
-          onCommit={(n) => onKMaxChange(Math.max(20, Math.min(200, Math.round(n))))}
-          min={20}
-          max={200}
-          step={10}
-          disabled={inProgress}
-          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-        />
-      </div>
+          {/* Neighbourhood scale (k_max) — larger = smoother / slower. */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+              Neighbourhood size
+              <InfoHint
+                data-testid="wood-kmax-help"
+                label="Neighbourhood size"
+                text="How many neighbouring points define each point's local geometry. Larger is smoother but slower; the default suits typical terrestrial-LiDAR densities. Increase it for noisy or sparse clouds, decrease it to preserve fine detail."
+              />
+            </label>
+            <DebouncedNumberInput
+              data-testid="wood-kmax"
+              value={kMax}
+              onCommit={(n) => onKMaxChange(Math.max(20, Math.min(200, Math.round(n))))}
+              min={20}
+              max={200}
+              step={10}
+              disabled={inProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
 
-      {/* Smoothing (reg_iters). */}
-      <div className="mb-3">
-        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-          Smoothing (0–8)
-          <InfoHint
-            data-testid="wood-reg-iters-help"
-            label="Smoothing"
-            text="How aggressively isolated misclassifications are cleaned up by a majority vote over each point's neighbours. Higher values remove more speckle but can erode thin structures; 0 disables it entirely."
-          />
-        </label>
-        <DebouncedNumberInput
-          data-testid="wood-reg-iters"
-          value={regIters}
-          onCommit={(n) => onRegItersChange(Math.max(0, Math.min(8, Math.round(n))))}
-          min={0}
-          max={8}
-          step={1}
-          disabled={inProgress}
-          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
-        />
-      </div>
+          {/* Smoothing (reg_iters). */}
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+              Smoothing (0–8)
+              <InfoHint
+                data-testid="wood-reg-iters-help"
+                label="Smoothing"
+                text="How aggressively isolated misclassifications are cleaned up by a majority vote over each point's neighbours. Higher values remove more speckle but can erode thin structures; 0 disables it entirely."
+              />
+            </label>
+            <DebouncedNumberInput
+              data-testid="wood-reg-iters"
+              value={regIters}
+              onCommit={(n) => onRegItersChange(Math.max(0, Math.min(8, Math.round(n))))}
+              min={0}
+              max={8}
+              step={1}
+              disabled={inProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
 
-      {/* Reflectance assist — only when the cloud carries a reflectance/intensity
-          scalar. Auto-weighted per cloud, so on a low-contrast species it's a
-          no-op; ticked on by default when available. */}
-      {reflectanceAvailable && (
-        <label className="flex items-start gap-2 mb-3 cursor-pointer">
-          <input
-            data-testid="wood-use-reflectance"
-            type="checkbox"
-            checked={useReflectance}
-            onChange={(e) => onUseReflectanceChange(e.target.checked)}
-            disabled={inProgress}
-            className="mt-0.5 accent-green-500"
-          />
-          <span className="text-[10px] text-neutral-300 leading-snug">
-            Use reflectance assist
-            <span className="block text-neutral-500">
-              Supplement geometry with the cloud's reflectance, weighted by how
-              well it separates wood from leaf (no effect on low-contrast species).
-            </span>
-          </span>
-        </label>
+          {/* Reflectance assist — only when the cloud carries a reflectance/intensity
+              scalar. Auto-weighted per cloud, so on a low-contrast species it's a
+              no-op; ticked on by default when available. */}
+          {reflectanceAvailable && (
+            <label className="flex items-start gap-2 mb-3 cursor-pointer">
+              <input
+                data-testid="wood-use-reflectance"
+                type="checkbox"
+                checked={useReflectance}
+                onChange={(e) => onUseReflectanceChange(e.target.checked)}
+                disabled={inProgress}
+                className="mt-0.5 accent-green-500"
+              />
+              <span className="text-[10px] text-neutral-300 leading-snug">
+                Use reflectance assist
+                <span className="block text-neutral-500">
+                  Supplement geometry with the cloud's reflectance, weighted by how
+                  well it separates wood from leaf (no effect on low-contrast species).
+                </span>
+              </span>
+            </label>
+          )}
+
+        </>
       )}
 
       {/* Output mode. In aggregate mode the labels are scattered back to each

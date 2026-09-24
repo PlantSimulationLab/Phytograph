@@ -153,6 +153,7 @@ nav:
           - Backend sidecar: developers/architecture/backend.md
           - Version lock: developers/architecture/version-lock.md
           - Large clouds: developers/architecture/large-clouds.md
+          - ML point classification: developers/architecture/ml.md
       - Development:
           - developers/development/index.md
           - Dev loop: developers/development/dev-loop.md

@@ -250,7 +250,7 @@ if str(_VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_DIR))
 
 # Backend version - bump this when making backend changes that require restart
-BACKEND_VERSION = "0.91.0"
+BACKEND_VERSION = "0.92.0"
 
 import logging
 logger = logging.getLogger("phytograph")
@@ -566,6 +566,75 @@ def device_info():
         "effective_path": path,
         "reason": reason,
     }
+
+
+# ==================== ML MODELS ====================
+# Trained point-classification models (backend-api/ml/). Torch is only ever
+# imported inside a seg worker (`_run_killable` tools "wood", "ml_device",
+# "ml_import"), never in this server process: importing it costs ~0.5 GB of RSS
+# for the life of the backend, and most sessions never touch ML.
+
+_ML_DEVICE_CACHE: "Optional[dict]" = None
+
+
+@app.get("/api/ml/device")
+async def ml_device(http_request: Request):
+    """Which device ML inference will use: {device: cuda|mps|cpu, device_name,
+    vram_gb, torch, reason}. Answered by torch itself, in a worker, then cached
+    (the hardware cannot change under a running backend). Distinct from
+    /api/device-info, which reports Helios ray tracing: an old NVIDIA card can
+    serve one and not the other."""
+    global _ML_DEVICE_CACHE
+    if _ML_DEVICE_CACHE is None:
+        _ML_DEVICE_CACHE = await _run_killable(
+            "ml_device", np.empty((0, 3)), {}, http_request=http_request)
+    return _ML_DEVICE_CACHE
+
+
+@app.get("/api/ml/models")
+def ml_models(task: Optional[str] = None):
+    """Installed models (bundled + user-imported), optionally for one task."""
+    from ml import registry
+    models = []
+    for pkg, origin in registry.list_models():
+        if task and pkg.task != task:
+            continue
+        models.append({**pkg.summary(), "origin": origin,
+                       "is_default": pkg.id == registry.DEFAULT_WOOD_MODEL})
+    return {"models": models, "default_wood_model": registry.DEFAULT_WOOD_MODEL}
+
+
+class MlModelImportRequest(BaseModel):
+    path: str  # a model package directory (model.json + weights.pt), or its model.json
+
+
+@app.post("/api/ml/models/import")
+async def ml_models_import(request: MlModelImportRequest, http_request: Request):
+    """Validate a model package and install it into the user model directory.
+    The weights are loaded against the declared architecture before the copy,
+    so a package that would only fail at first use is refused here."""
+    src = Path(request.path)
+    if src.name == "model.json":
+        src = src.parent
+    if not (src / "model.json").is_file():
+        raise HTTPException(status_code=400, detail=f"{src} is not a model package (no model.json).")
+    result = await _run_killable("ml_import", np.empty((0, 3)), {"path": str(src)},
+                                 http_request=http_request)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.delete("/api/ml/models/{model_id}")
+def ml_models_delete(model_id: str):
+    """Remove a user-imported model. Built-in models cannot be removed."""
+    from ml import registry
+    from ml.package import PackageError
+    try:
+        registry.delete_user_model(model_id)
+    except PackageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True}
 
 
 class _SpawnResult:
@@ -7499,8 +7568,12 @@ class WoodSegmentationRequest(BaseModel):
     #  'connectivity' = geodesic-skeleton backbone recovery (the prior default).
     #  'geometric' = the original point-wise classifier (local PCA + GMM).
     # `backbone_support` (0 = auto) tunes the connectivity support floor.
-    method: Literal["sota", "connectivity", "geometric"] = "sota"
+    #  'ml' = a trained point-classification model (backend-api/ml/). None of
+    #     the geometric tuning fields apply; `model_id` picks the model (None =
+    #     the bundled default, see GET /api/ml/models).
+    method: Literal["sota", "connectivity", "geometric", "ml"] = "sota"
     backbone_support: float = 0.0
+    model_id: Optional[str] = None
 
 
 class WoodSegmentationResponse(BaseModel):
@@ -7537,7 +7610,22 @@ def _wood_segment_kwargs(request: "WoodSegmentationRequest") -> dict:
         reflectance_weight_max=request.reflectance_weight_max,
         method=request.method,
         backbone_support=request.backbone_support,
+        model_id=request.model_id,
     )
+
+
+def _require_wood_ml_model(request: "WoodSegmentationRequest") -> None:
+    """For method="ml", check the model is installed and is a wood/leaf model
+    BEFORE spawning a worker: a missing model is the user's to fix (400 with a
+    readable reason), not a worker traceback after a ~4 s startup."""
+    if request.method != "ml":
+        return
+    from ml import registry
+    from ml.package import PackageError
+    try:
+        registry.find(request.model_id, task="wood_leaf")
+    except PackageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/segment/wood", response_model=WoodSegmentationResponse)
@@ -7595,6 +7683,7 @@ async def segment_wood_points(request: WoodSegmentationRequest, http_request: Re
         # The compute runs in a KILLABLE subprocess (see `_run_killable`); the
         # worker collects `segment_wood`'s warnings and ships them back so the
         # endpoint can still surface advisories (e.g. ground-not-removed).
+        _require_wood_ml_model(request)
         try:
             labels, wood_meta = await _run_killable(
                 "wood", points, _wood_segment_kwargs(request),
@@ -17873,6 +17962,31 @@ def _segment_wood_sota(
     return _wood_regularize(labels, nbr_idx, reg_k, reg_iters)
 
 
+def _segment_wood_ml(points: np.ndarray, model_id: Optional[str],
+                     reflectance: Optional[np.ndarray]) -> np.ndarray:
+    """Wood/leaf labels from a trained model package (see `ml/`).
+
+    The model's output classes are mapped onto `wood_class` by NAME ("Wood" ->
+    WOOD_CLASS_WOOD, anything else -> WOOD_CLASS_LEAF), so a result is
+    interchangeable with the geometric methods' for LAD, export, split and
+    remove. Runs inside the killable seg worker, so Cancel kills it outright.
+    """
+    from ml import registry
+    from ml.device import best_device
+    from ml.infer import predict
+    from ml.package import load_model
+
+    pkg = registry.find(model_id, task="wood_leaf")
+    device = best_device()
+    model = load_model(pkg, device)
+    if "reflectance" not in pkg.channels:
+        reflectance = None
+    values = predict(model, pkg, points, reflectance=reflectance, device=device)
+    wood_values = [c["value"] for c in pkg.classes if c["name"].lower() == "wood"]
+    labels = np.where(np.isin(values, wood_values), WOOD_CLASS_WOOD, WOOD_CLASS_LEAF)
+    return labels.astype(np.int32)
+
+
 def segment_wood(
     points: np.ndarray,
     k_min: int = 10,
@@ -17890,9 +18004,14 @@ def segment_wood(
     method: str = "geometric",
     backbone_support: float = 0.0,
     warnings: Optional[list] = None,
+    model_id: Optional[str] = None,
 ) -> np.ndarray:
     """Classify each point as wood (1) or leaf (2) from geometry (+ optional
     reflectance assist), via one of two `method`s.
+
+    `method="ml"` is different in kind: a trained PointNeXt model
+    (`backend-api/ml/`, chosen by `model_id`, default the bundled one) runs
+    through `_segment_wood_ml`. None of the tuning kwargs below apply to it.
 
     `method="geometric"` (the original) is purely point-wise. `method="connectivity"`
     additionally roots a geodesic skeleton at the trunk base and recovers the woody
@@ -17971,6 +18090,13 @@ def segment_wood(
         refl_full = np.asarray(reflectance, dtype=np.float64).ravel()
         if refl_full.shape[0] != n_full or not np.isfinite(refl_full).any():
             refl_full = None
+
+    if method == "ml":
+        # Before the safety downsample below: the model grid-samples at its
+        # own base voxel, which is the density normalisation it was trained on.
+        # A second, coarser downsample would feed it sparser crowns than any
+        # it saw.
+        return _segment_wood_ml(pts_full, model_id, refl_full)
 
     cap = int(max_points) if max_points is not None else _WOOD_SEGMENT_MAX_POINTS
 
@@ -25794,13 +25920,13 @@ async def _run_killable_admitted(
             if os.path.exists(res_path):
                 with open(res_path, "r") as f:
                     rd = json.load(f)
-            if tool == "skeleton":
+            if tool in ("skeleton", "ml_device", "ml_import"):
                 return rd, None
             return rd, np.load(os.path.join(workdir, "output.npy"))
 
         result_dict, labels = await run_in_threadpool(_collect)
 
-        if tool == "skeleton":
+        if tool in ("skeleton", "ml_device", "ml_import"):
             return result_dict if result_dict is not None else {}
         if tool == "anchors":
             # Landmark extraction returns two arrays (positions + per-plant
@@ -37879,6 +38005,7 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
             reflectance = refl_surv[hit] if refl_surv is not None else None
     if len(pts) < 3:
         raise HTTPException(status_code=400, detail="Need at least 3 points for wood/leaf segmentation.")
+    _require_wood_ml_model(request)
     try:
         hit_labels, wood_meta = await _run_killable(
             "wood", pts, _wood_segment_kwargs(request),

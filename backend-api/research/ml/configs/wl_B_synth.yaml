@@ -1,0 +1,17 @@
+name: wl_B_synth
+description: "Leaf/wood PointNeXt-B (30000 steps). Benchmark run, see research/ml/README.md."
+task: wood_leaf
+cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache
+out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs
+model: {variant: B}
+hierarchy: {voxel: 0.01, levels: 5, k: 16}
+channels: [dxyz]
+crop: {max_points: 24000}
+train:
+  - {name: synthetic, weight: 1.0, domain: synthetic, splits: [train]}
+val: {splits: [val, val_synth], max_points_per_item: 400000}
+optim: {steps: 30000, batch: 8, lr: 0.002, weight_decay: 0.05, warmup: 1000, label_smoothing: 0.1}
+eval_every: 2500
+checkpoint_every: 500
+workers: 14
+seed: 0

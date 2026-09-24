@@ -141,7 +141,17 @@ backend `cut_pursuit_py` is bundled via `collectAll` in
 
 | Method | Path | Source | Purpose |
 |---|---|---|---|
-| POST | `/api/segment/wood` | `main.py` | Classify points into wood (1) / leaf (2) from local geometry. Aggregates multiple `sources` at full resolution (concatenated in order so labels slice back per source) and accepts optional per-point reflectance. Returns per-point `labels` aligned to input order. Session clouds use `/api/cloud/session/{id}/segment_wood` instead |
+| POST | `/api/segment/wood` | `main.py` | Classify points into wood (1) / leaf (2) from local geometry, or with a trained model (`method: "ml"`, optional `model_id`; see [ML models](../architecture/ml.md)). Aggregates multiple `sources` at full resolution (concatenated in order so labels slice back per source) and accepts optional per-point reflectance. Returns per-point `labels` aligned to input order. Session clouds use `/api/cloud/session/{id}/segment_wood` instead |
+
+
+## ML models
+
+| Method | Path | Source | Purpose |
+|---|---|---|---|
+| GET | `/api/ml/models` | `main.py` | Installed point-classification models (bundled + user-imported), optionally `?task=wood_leaf`. Each carries its class schema, input channels, origin and metrics |
+| GET | `/api/ml/device` | `main.py` | Where ML inference runs (`cuda` / `mps` / `cpu`), as torch reports it. Probed once in a worker (torch never loads into the server process), then cached |
+| POST | `/api/ml/models/import` | `main.py` | Validate a model package directory (`{path}`) and install it into the user model directory. Weights are loaded against the declared architecture first; a package reusing a built-in id is refused |
+| DELETE | `/api/ml/models/{id}` | `main.py` | Remove a user-imported model (built-ins cannot be removed) |
 
 ## DEM (digital elevation model)
 

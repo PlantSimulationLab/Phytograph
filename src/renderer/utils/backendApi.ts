@@ -378,6 +378,53 @@ export async function getDeviceInfo(signal?: AbortSignal): Promise<DeviceInfo> {
   };
 }
 
+// ==================== ML MODELS ====================
+
+/** One installed point-classification model (GET /api/ml/models). */
+export interface MlModelSummary {
+  id: string;
+  name: string;
+  description: string;
+  task: string;
+  arch: string;
+  variant?: string | null;
+  channels: string[];
+  classes: { value: number; name: string; color: string }[];
+  output_slug: string;
+  metrics: Record<string, unknown>;
+  origin: 'bundled' | 'user';
+  is_default: boolean;
+}
+
+export async function listMlModels(task?: string, signal?: AbortSignal): Promise<MlModelSummary[]> {
+  const q = task ? `?task=${encodeURIComponent(task)}` : '';
+  const res = await fetch(`${getBackendUrl()}/api/ml/models${q}`, { signal });
+  if (!res.ok) throw new Error(`ml/models failed: ${res.status}`);
+  return ((await res.json()) as { models: MlModelSummary[] }).models;
+}
+
+/** Where ML inference runs on this machine, as torch itself reports it.
+ * Distinct from getDeviceInfo (Helios ray tracing): the two can disagree. */
+export interface MlDeviceInfo {
+  device: 'cuda' | 'mps' | 'cpu';
+  deviceName: string | null;
+  vramGb: number | null;
+  reason: string | null;
+}
+
+export async function getMlDevice(signal?: AbortSignal): Promise<MlDeviceInfo> {
+  const res = await fetch(`${getBackendUrl()}/api/ml/device`, { signal });
+  if (!res.ok) throw new Error(`ml/device failed: ${res.status}`);
+  const j = (await res.json()) as Record<string, unknown>;
+  const device = j.device === 'cuda' || j.device === 'mps' ? j.device : 'cpu';
+  return {
+    device,
+    deviceName: typeof j.device_name === 'string' ? j.device_name : null,
+    vramGb: typeof j.vram_gb === 'number' ? j.vram_gb : null,
+    reason: typeof j.reason === 'string' ? j.reason : null,
+  };
+}
+
 /**
  * What the backend's memory budget actually resolved to, for the Settings
  * readout. `source` is 'env' when the user pinned a value (Settings → Memory
@@ -1370,9 +1417,15 @@ export interface WoodSegmentationRequest {
   // leaves; 'connectivity' = geodesic-skeleton backbone recovery; 'geometric' =
   // original point-wise classifier. 'sota'/'connectivity' need the ground removed.
   // `backbone_support` (0 = auto) tunes connectivity's isolated-false-wood pruning.
-  method?: 'sota' | 'connectivity' | 'geometric';
+  // 'ml' = a trained point-classification model (see listMlModels); none of
+  // the geometric tuning fields apply, and `model_id` picks the model
+  // (omitted = the bundled default).
+  method?: WoodSegMethod;
   backbone_support?: number;
+  model_id?: string;
 }
+
+export type WoodSegMethod = 'ml' | 'sota' | 'connectivity' | 'geometric';
 
 export interface WoodSegmentationResponse {
   success: boolean;
@@ -5223,7 +5276,7 @@ export async function sessionSegmentGround(
  * (no file read). Pass segment_wood tuning params. */
 export async function sessionSegmentWood(
   sessionId: string,
-  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: 'sota' | 'connectivity' | 'geometric'; backbone_support?: number; reflectance_weight_max?: number; scalar_slug?: string; defer_octree?: boolean },
+  params: { k_min?: number; k_max?: number; k_step?: number; wood_bias?: number; reg_k?: number; reg_iters?: number; min_speckle?: number; voxel_size?: number; method?: WoodSegMethod; backbone_support?: number; model_id?: string; reflectance_weight_max?: number; scalar_slug?: string; defer_octree?: boolean },
   signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult & { octree_deferred?: boolean }> {
   return postSegment<CloudSessionBakeResult & { octree_deferred?: boolean }>(`/api/cloud/session/${sessionId}/segment_wood`, params, signal, 600000);
