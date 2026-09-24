@@ -4,6 +4,7 @@ import {
   LABEL_ATTRIBUTE,
   ensureLabelAttribute,
   applyStrokesToGeometry,
+  strokesAlreadyApplied,
   swapLabelIntoIntensity,
   clearLabelOverlayFromGeometry,
   applyLabelOverlayToVisibleNodes,
@@ -376,5 +377,50 @@ describe('publishLabelOverlayStats', () => {
   it('is a no-op with no octree', () => {
     publishLabelOverlayStats(null, state([]));
     expect((globalThis as any).__labelOverlay).toBeUndefined();
+  });
+});
+
+describe('incremental replay', () => {
+  const st = (ids: string[], strokes: LabelStrokeRender[]): LabelOverlayState =>
+    ({ ...state(strokes), key: `p|${ids.join(',')}` });
+
+  it('recognises a key that extends the old one by whole strokes only', () => {
+    const next = st(['a', 'b'], [lowX(1), lowX(2)]);
+    expect(strokesAlreadyApplied('p|a', 1, next)).toBe(1);
+    // `a` -> `ab` is not an extension of the stroke list, just of the text.
+    expect(strokesAlreadyApplied('p|a', 1, st(['ab'], [lowX(1)]))).toBe(0);
+    expect(strokesAlreadyApplied('q|a', 1, next)).toBe(0);           // other palette
+    expect(strokesAlreadyApplied('p|a,b', 2, st(['a'], [lowX(1)]))).toBe(0);  // an undo
+    expect(strokesAlreadyApplied(undefined, undefined, next)).toBe(0);
+  });
+
+  it('applying only the new stroke gives the same buffer as a full replay', () => {
+    const pts: Array<[number, number, number]> = [[0, 0, 0], [0.3, 0, 0], [0.6, 0, 0], [0.9, 0, 0]];
+    const s1 = { predicate: (x: number) => x < 0.5, aabb: null, toIndex: 1, fromIndices: null };
+    const s2 = { predicate: (x: number) => x > 0.2, aabb: null, toIndex: 2, fromIndices: new Set([1]) };
+    const full = makeGeometry(pts);
+    applyStrokesToGeometry(full, identity, undefined, null, st(['a', 'b'], [s1, s2]));
+    const step = makeGeometry(pts);
+    applyStrokesToGeometry(step, identity, undefined, null, st(['a'], [s1]));
+    applyStrokesToGeometry(step, identity, undefined, null, st(['a', 'b'], [s1, s2]), 1);
+    expect(labels(step)).toEqual(labels(full));
+    expect(labels(full)).toEqual([1, 2, 0, 0]);
+  });
+
+  it('a stroke whose tile test says no leaves the tile untouched', () => {
+    const geom = makeGeometry([[0, 0, 0]]);
+    const never = { ...lowX(1), tileMayHit: () => false };
+    applyStrokesToGeometry(geom, identity, undefined, null, state([never]));
+    expect(labels(geom)).toEqual([0]);
+  });
+
+  it('publishes stats only in a pass that changed a tile', () => {
+    const geom = makeGeometry([[0, 0, 0]]);
+    const octree = makeOctree([makeNode(geom)]);
+    applyLabelOverlayToVisibleNodes(octree, undefined, state([lowX(1)]));
+    expect((globalThis as any).__labelOverlay?.painted).toBe(1);
+    (globalThis as any).__labelOverlay = 'sentinel';
+    applyLabelOverlayToVisibleNodes(octree, undefined, state([lowX(1)]));   // nothing new
+    expect((globalThis as any).__labelOverlay).toBe('sentinel');
   });
 });

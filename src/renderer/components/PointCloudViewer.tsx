@@ -95,6 +95,7 @@ import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
+import { screenStrokeTileTest } from '../lib/strokeTileTest';
 import { createKeyedSerialQueue, type KeyedSerialQueue } from '../lib/keyedSerialQueue';
 import {
   pendingFor, prunePending, updatePending,
@@ -6086,7 +6087,10 @@ export default function PointCloudViewer({
       const fromIndices = s.fromClasses
         ? new Set(s.fromClasses.map((v) => valueToIndex.get(v) ?? -1))
         : null;
-      return { predicate, aabb: strokeAabb(s.region), toIndex, fromIndices };
+      return {
+        predicate, aabb: strokeAabb(s.region), tileMayHit: screenStrokeTileTest(s.region),
+        toIndex, fromIndices,
+      };
     });
     return {
       strokes,

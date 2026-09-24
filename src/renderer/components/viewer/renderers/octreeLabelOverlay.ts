@@ -40,6 +40,8 @@ import { composeTileWorldMatrix } from './octreeCropMask';
 export const LABEL_ATTRIBUTE = '__phytographLabel';
 /** Stroke-list key a tile's labels were last built for. */
 const LABEL_KEY = '__phytographLabelKey';
+/** How many of that key's strokes the tile's buffer holds (see incremental replay). */
+const LABEL_COUNT = '__phytographLabelCount';
 /** Whatever occupied the `intensity` slot before we aliased over it. */
 const LABEL_BASE = '__phytographLabelBase';
 
@@ -58,6 +60,12 @@ export interface LabelStrokeRender {
    * keeps a long session affordable. Omit only if the region is unbounded.
    */
   aabb?: THREE.Box3 | null;
+  /**
+   * For a SCREEN-space stroke (a lasso), which has no world AABB: false when a
+   * tile with this world box cannot contain a selected point. Without it every
+   * lasso stroke was replayed over every loaded tile.
+   */
+  tileMayHit?: (worldBox: THREE.Box3) => boolean;
   /**
    * DENSE PALETTE INDEX to write, not the class value. potree bakes the step
    * gradient into a 64-texel canvas, so a palette using values 64, 65, 66…
@@ -129,6 +137,9 @@ export function applyStrokesToGeometry(
   displayOffset: { x: number; y: number; z: number } | undefined,
   baseLabels: ArrayLike<number> | null,
   state: LabelOverlayState,
+  /** Replay from this stroke on, over the buffer as it is (the strokes before
+   *  it are already applied). 0 = from scratch. */
+  fromStroke = 0,
 ): void {
   const position = geometry?.attributes?.position;
   if (!position) return;
@@ -136,6 +147,11 @@ export function applyStrokesToGeometry(
   if (!attr) return;
   const out = attr.array as Float32Array;
   const count = position.count;
+  if (fromStroke > 0) {
+    replayStrokes(geometry, matrixWorld, displayOffset, state, fromStroke, out);
+    attr.needsUpdate = true;
+    return;
+  }
 
   // Reset to the committed baseline (or unlabelled) before replaying, in
   // palette INDEX space like everything else in this buffer. Class values come
@@ -160,16 +176,30 @@ export function applyStrokesToGeometry(
     return;
   }
 
+  replayStrokes(geometry, matrixWorld, displayOffset, state, 0, out);
+  attr.needsUpdate = true;
+}
+
+/** Apply `state.strokes[fromStroke..]`, in order, onto `out`. */
+function replayStrokes(
+  geometry: any, matrixWorld: THREE.Matrix4,
+  displayOffset: { x: number; y: number; z: number } | undefined,
+  state: LabelOverlayState, fromStroke: number, out: Float32Array,
+): void {
+  const position = geometry.attributes.position;
+  const count = position.count;
   const ox = displayOffset?.x ?? 0;
   const oy = displayOffset?.y ?? 0;
   const oz = displayOffset?.z ?? 0;
   const v = new THREE.Vector3();
 
-  // Tile bounds in WORLD space, for per-stroke AABB rejection.
+  // Tile bounds in WORLD space, for per-stroke rejection.
   const tileBox = geometryWorldBox(geometry, matrixWorld, ox, oy, oz);
 
-  for (const stroke of state.strokes) {
-    if (stroke.aabb && tileBox && !stroke.aabb.intersectsBox(tileBox)) continue;
+  for (let s = fromStroke; s < state.strokes.length; s++) {
+    const stroke = state.strokes[s];
+    if (tileBox && stroke.aabb && !stroke.aabb.intersectsBox(tileBox)) continue;
+    if (tileBox && stroke.tileMayHit && !stroke.tileMayHit(tileBox)) continue;
     const from = stroke.fromIndices;
     for (let i = 0; i < count; i++) {
       if (from && !from.has(out[i])) continue;
@@ -178,7 +208,22 @@ export function applyStrokesToGeometry(
       if (stroke.predicate(v.x + ox, v.y + oy, v.z + oz)) out[i] = stroke.toIndex;
     }
   }
-  attr.needsUpdate = true;
+}
+
+/**
+ * How many strokes of `state` a tile built for `oldKey` (holding `oldCount`
+ * strokes) already has, or 0 when it must be rebuilt. A key is
+ * `<base>|<id>,<id>,...`; the new key EXTENDING the old one by whole ids means
+ * the old strokes are unchanged and only the new ones need applying, so a
+ * stroke costs one pass per tile instead of a replay of the whole session.
+ */
+export function strokesAlreadyApplied(
+  oldKey: unknown, oldCount: unknown, state: LabelOverlayState,
+): number {
+  if (typeof oldKey !== 'string' || typeof oldCount !== 'number' || oldCount <= 0) return 0;
+  if (oldCount > state.strokes.length || !state.key.startsWith(oldKey)) return 0;
+  const next = state.key.charAt(oldKey.length);
+  return next === ',' ? oldCount : 0;
 }
 
 /** World-space bounds of a tile, or null when it has none to compute from. */
@@ -223,6 +268,7 @@ export function clearLabelOverlayFromGeometry(geometry: any): void {
     geometry.deleteAttribute(LABEL_ATTRIBUTE);
   }
   delete geometry[LABEL_KEY];
+  delete geometry[LABEL_COUNT];
 }
 
 /**
@@ -248,6 +294,7 @@ export function applyLabelOverlayToVisibleNodes(
   // The root DOES use position/quaternion, so refresh it once per pass — see
   // composeTileWorldMatrix's docstring.
   octree.updateWorldMatrix?.(true, false);
+  let rebuilt = false;
   for (const node of visible) {
     const sn = node?.sceneNode;
     const geom = sn?.geometry;
@@ -259,11 +306,16 @@ export function applyLabelOverlayToVisibleNodes(
     }
     composeTileWorldMatrix(octree, sn, _tileWorld);
     const committed = committedSlug ? geom.attributes?.[committedSlug]?.array : null;
-    applyStrokesToGeometry(geom, _tileWorld, displayOffset, committed ?? null, state);
+    const done = strokesAlreadyApplied(geom[LABEL_KEY], geom[LABEL_COUNT], state);
+    applyStrokesToGeometry(geom, _tileWorld, displayOffset, committed ?? null, state, done);
     swapLabelIntoIntensity(geom);
     geom[LABEL_KEY] = state.key;
+    geom[LABEL_COUNT] = state.strokes.length;
+    rebuilt = true;
   }
-  publishLabelOverlayStats(octree, state, statsId);
+  // Counting walks every loaded label value, so it runs only in a pass that
+  // changed one, not on every frame at steady state.
+  if (rebuilt) publishLabelOverlayStats(octree, state, statsId);
 }
 
 /**
