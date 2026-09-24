@@ -508,6 +508,9 @@ interface PointCloudViewerProps {
   // App can warn before quit (the deletions live only in the backend session's
   // in-RAM mask until baked; closing without baking discards them).
   onPendingDeletesChange?: (count: number) => void;
+  /** Uncommitted label strokes across every cloud, whenever it changes, so the
+   *  quit confirmation (main process) states the real number. */
+  onPendingLabelStrokesChange?: (count: number) => void;
   // Fired when the set of viewer-owned content (meshes, skeletons) changes
   // between empty and non-empty. App uses this to dismiss the empty-state hint
   // when content arrives that isn't a scan — e.g. a generated Helios plant,
@@ -642,6 +645,7 @@ export default function PointCloudViewer({
   className = '',
   importRefsCallback,
   onPendingDeletesChange,
+  onPendingLabelStrokesChange,
   onViewerContentChange,
   onRequestImportWizard,
   onOpenSettings,
@@ -5364,8 +5368,9 @@ export default function PointCloudViewer({
   const labelPendingTotal = totalPendingStrokes(labelPending);
   useEffect(() => {
     (window as any).__uncommittedLabelStrokes = labelPendingTotal;
+    onPendingLabelStrokesChange?.(labelPendingTotal);
     return () => { (window as any).__uncommittedLabelStrokes = 0; };
-  }, [labelPendingTotal]);
+  }, [labelPendingTotal, onPendingLabelStrokesChange]);
   // Drop the pending strokes of clouds that no longer exist (deleted, File >
   // New), the same rule as `labelCommitHolds` below.
   useEffect(() => {

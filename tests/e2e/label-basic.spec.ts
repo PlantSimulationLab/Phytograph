@@ -774,3 +774,21 @@ test('Cmd+Z and Cmd+Shift+Z undo and redo a label stroke on the backend', async 
   await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
     { timeout: 15_000 }).toBe(60);
 });
+
+test('the quit confirmation knows how many strokes are uncommitted', async () => {
+  // The count reached main only when the SCENE changed (a cloud added or
+  // removed), never when a stroke was painted, so closing the window after
+  // painting warned about 0 strokes. Read what main actually holds.
+  const mainStrokes = () => session.app.evaluate(
+    () => ((globalThis as any).__sceneDirty as { strokes: number } | undefined)?.strokes ?? -1);
+  const { page, panel } = await openLabelTool();
+  await expect.poll(mainStrokes, { timeout: 10_000 }).toBe(0);
+
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+  await expect.poll(mainStrokes, { timeout: 10_000 }).toBe(1);
+
+  await page.getByTestId('label-undo').click();
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 15_000 });
+  await expect.poll(mainStrokes, { timeout: 10_000 }).toBe(0);
+});

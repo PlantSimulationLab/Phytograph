@@ -2016,16 +2016,17 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     scene.state.skeletons.length +
     scene.state.qsms.length +
     scene.state.ladResults.length;
+  // Pushed by the viewer whenever it changes. It used to be read from the
+  // viewer's window global at push time, and pushes happen on SCENE changes,
+  // so painting never updated it: the quit dialog named whatever count was
+  // current the last time a cloud was added or removed (usually 0).
+  const [pendingLabelStrokes, setPendingLabelStrokes] = useState(0);
   useEffect(() => {
     window.electronAPI?.setSceneDirty?.({
       dirty: sceneObjectCount > 0,
-      // Read at push time rather than subscribed: the viewer owns this global
-      // and rewrites it on every stroke, and a stroke only ever exists
-      // alongside a loaded cloud (so `dirty` is already true and the count is
-      // refined on the next scene change).
-      strokes: (window as any).__uncommittedLabelStrokes ?? 0,
+      strokes: pendingLabelStrokes,
     });
-  }, [sceneObjectCount]);
+  }, [sceneObjectCount, pendingLabelStrokes]);
 
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
   // Most menu items map to existing handlers; File → Import routes through the
@@ -2295,6 +2296,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onStitchScans={handleStitchScans}
           importRefsCallback={handleImportRefsCallback}
           onPendingDeletesChange={handlePendingDeletesChange}
+          onPendingLabelStrokesChange={setPendingLabelStrokes}
           onViewerContentChange={setViewerHasContent}
           onRequestImportWizard={openImportWizard}
           onOpenSettings={() => setSettingsOpen(true)}
