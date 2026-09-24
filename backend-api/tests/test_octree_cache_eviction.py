@@ -80,6 +80,8 @@ class _FakeSession:
                  rendered_octree_cache_id=None):
         self.octree_cache_id = octree_cache_id
         self.miss_octree_cache_id = miss_octree_cache_id
+        # Bumped by `_mark_octree_stale_locked` (see CloudSession).
+        self.octree_stale_gen = 0
         self.rendered_octree_cache_id = rendered_octree_cache_id
 
 
