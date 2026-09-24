@@ -31148,6 +31148,43 @@ def _region_mask(
     return mask
 
 
+def _region_candidates(positions: "np.ndarray", region: dict, pixels_for=None) -> "np.ndarray":
+    """ASCENDING indices of the points `region` selects. Same answer as
+    `np.flatnonzero(_region_mask(positions, region))`, without an exact test
+    over the whole cloud where the region is bounded in world space.
+
+    A brush stroke is a union of small spheres, and testing every stamp against
+    every point was the cost of a stroke (12 stamps on 30 M points: 3.4 s of
+    3.6). Culling to the stamps' bounding box first, by one axis over the cloud
+    and the other two over the survivors, leaves the exact test a few thousand
+    points. Unbounded kinds (the screen-space lasso, an inverted region) take
+    the full mask. `pixels_for(region)` supplies cached projected pixels for the
+    screen-space kinds, as `_region_mask(pixels=...)` does."""
+    kind = region.get("kind")
+    if kind in ("spheres_union", "box") and not bool(region.get("invert", False)):
+        if kind == "box":
+            lo = np.asarray(region["min"], dtype=np.float64)
+            hi = np.asarray(region["max"], dtype=np.float64)
+        else:
+            centers = np.asarray(region["centers"], dtype=np.float64).reshape(-1, 3)
+            radii = np.asarray(region["radii"], dtype=np.float64).reshape(-1, 1)
+            if centers.shape[0] == 0:
+                return np.zeros(0, dtype=np.int64)
+            lo = (centers - radii).min(axis=0)
+            hi = (centers + radii).max(axis=0)
+        x = positions[:, 0]
+        idx = np.flatnonzero((x >= lo[0]) & (x <= hi[0]))
+        if idx.size:
+            sub = positions[idx]
+            idx = idx[(sub[:, 1] >= lo[1]) & (sub[:, 1] <= hi[1])
+                      & (sub[:, 2] >= lo[2]) & (sub[:, 2] <= hi[2])]
+        if kind == "spheres_union" and idx.size:
+            idx = idx[_region_mask(positions[idx], region)]
+        return idx.astype(np.int64, copy=False)
+    pixels = pixels_for(region) if pixels_for is not None else None
+    return np.flatnonzero(_region_mask(positions, region, pixels=pixels)).astype(np.int64)
+
+
 def _project_world_to_pixel(
     positions: np.ndarray,
     projection: np.ndarray,
@@ -35198,6 +35235,20 @@ def delete_cloud_region(session_id: str, request: DeleteRegionRequest):
     }
 
 
+def _label_class_summary(col: "Optional[np.ndarray]", editable: np.ndarray) -> tuple[dict, list]:
+    """(class_counts, value_range) of `col` over the EDITABLE points only. See
+    `_label_class_summary_locked`; this takes the arrays so a caller can run it
+    outside the session lock on references it captured under it."""
+    if col is None or not editable.any():
+        return {}, [0.0, 0.0]
+    vals = np.rint(col[editable]).astype(np.int64)
+    uniq, counts = np.unique(vals, return_counts=True)
+    return (
+        {int(v): int(c) for v, c in zip(uniq, counts)},
+        [float(uniq.min()), float(uniq.max())],
+    )
+
+
 def _label_class_summary_locked(
     sess: "CloudSession", slug: str, editable: np.ndarray,
 ) -> tuple[dict, list]:
@@ -35208,15 +35259,7 @@ def _label_class_summary_locked(
     that is 40% misses would report a huge phantom "Unclassified" tally and the
     user's "how much have I labelled?" readout would be meaningless. Caller
     holds the lock."""
-    col = sess.extras.get(slug)
-    if col is None or not editable.any():
-        return {}, [0.0, 0.0]
-    vals = np.rint(col[editable]).astype(np.int64)
-    uniq, counts = np.unique(vals, return_counts=True)
-    return (
-        {int(v): int(c) for v, c in zip(uniq, counts)},
-        [float(uniq.min()), float(uniq.max())],
-    )
+    return _label_class_summary(sess.extras.get(slug), editable)
 
 
 @app.post("/api/cloud/session/{session_id}/label_region")
@@ -35267,17 +35310,27 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
                 )
         region_dicts.append(rd)
 
+    # The SELECTION is geometry only, so it is computed WITHOUT the global lock:
+    # it was the whole cost of a stroke (a 12-stamp brush on 30 M points took
+    # 4.2 s, every millisecond of it holding the lock every other session
+    # request waits on). Array references are captured under the lock and the
+    # result is checked against them after re-acquiring it: an edit that moved
+    # the geometry in between (a delete, an undo, a transform bump
+    # `octree_stale_gen`; a bake's compaction replaces `positions`) means the
+    # selection is recomputed under the lock, as before. Everything that
+    # depends on the COLUMN (the From gate, "already that class", the history
+    # delta and the write) stays under the lock and runs in stroke order,
+    # because strokes are order-dependent.
     with _cloud_session_lock:
         created = _ensure_label_column_locked(sess, slug, request.label)
-        col = sess.extras[slug]
-        # Loop-invariant: alive AND not a sky/miss point. Hoisted so a 12-stamp
-        # drag computes it once.
-        editable = _session_editable_mask_locked(sess)
-        history = sess.label_history.setdefault(slug, [])
+        positions = sess.positions
+        deleted = sess.deleted
+        miss_arr = sess.extras.get(_MISS_SLUG)
+        gen = sess.octree_stale_gen
 
-        # Project ONCE per distinct frozen camera. Every stamp of one drag shares
-        # the camera, and the projection is a full O(N) pass over the cloud, so
-        # this turns k passes into one on the dominant path.
+    def select_all(positions, deleted, miss_arr):
+        # Project ONCE per distinct frozen camera. Every stamp of one drag
+        # shares the camera, and the projection is a full O(N) pass.
         pixel_cache: dict = {}
 
         def pixels_for(rd: dict):
@@ -35289,29 +35342,45 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
             )
             cached = pixel_cache.get(key)
             if cached is None:
-                cached = _region_pixels(sess.positions, rd)
+                cached = _region_pixels(positions, rd)
                 pixel_cache[key] = cached
             return cached
 
-        applied = []
+        out = []
         for stroke, rd in zip(request.strokes, region_dicts):
-            select = _region_mask(sess.positions, rd, pixels=pixels_for(rd))
-            select &= editable
-            if stroke.slab is not None:
+            idx = _region_candidates(positions, rd, pixels_for)
+            if stroke.slab is not None and idx.size:
                 # Depth bound from the cross-section. Closed-form and
                 # camera-free, so this matches the renderer's preview exactly.
-                select &= _region_mask(sess.positions, stroke.slab.model_dump())
-            if stroke.from_classes is not None:
+                idx = idx[_region_mask(positions[idx], stroke.slab.model_dump())]
+            # Editable: alive AND not a sky/miss point.
+            keep = ~deleted[idx]
+            if miss_arr is not None:
+                keep &= miss_arr[idx] == 0
+            out.append(idx[keep])
+        return out
+
+    selections = select_all(positions, deleted, miss_arr)
+
+    with _cloud_session_lock:
+        if sess.positions is not positions or sess.octree_stale_gen != gen:
+            positions, deleted = sess.positions, sess.deleted
+            miss_arr = sess.extras.get(_MISS_SLUG)
+            selections = select_all(positions, deleted, miss_arr)
+        col = sess.extras[slug]
+        history = sess.label_history.setdefault(slug, [])
+        applied = []
+        for stroke, idx in zip(request.strokes, selections):
+            if stroke.from_classes is not None and idx.size:
                 # np.rint before comparing: the column is float32 on disk and a
                 # LAS round-trip can leave an integer class as 4.999999. Same
-                # convention as _scalar_filter_mask.
-                current = np.rint(col).astype(np.int64)
-                select &= np.isin(current, list(stroke.from_classes))
-            selected_count = int(select.sum())
+                # convention as _scalar_filter_mask. Candidates only.
+                idx = idx[np.isin(np.rint(col[idx]).astype(np.int64),
+                                  list(stroke.from_classes))]
+            selected_count = int(idx.size)
             # Exclude no-ops so `changed_count` means what it says and the delta
             # carries no dead weight for points already in the target class.
-            changed = select & (np.rint(col).astype(np.int64) != stroke.to_class)
-            changed_idx = np.flatnonzero(changed)
+            changed_idx = idx[np.rint(col[idx]).astype(np.int64) != stroke.to_class]
             if changed_idx.size:
                 history.append(_encode_label_delta(
                     stroke.stroke_id, changed_idx, col[changed_idx].copy(),
@@ -35322,10 +35391,15 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
                 "selected_count": selected_count,
                 "changed_count": int(changed_idx.size),
             })
-
         kept = _trim_label_history_locked(sess, slug)
-        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
         sess.last_accessed = time.time()
+        col_ref, deleted, miss_arr = col, sess.deleted, sess.extras.get(_MISS_SLUG)
+
+    # The per-class counts are a full pass over the column, so they too are
+    # read after the lock is released. They describe the column as of this
+    # stroke (strokes on one cloud arrive one at a time from the renderer).
+    editable = ~deleted if miss_arr is None else (~deleted) & (miss_arr == 0)
+    class_counts, value_range = _label_class_summary(col_ref, editable)
 
     return {
         "session_id": session_id,

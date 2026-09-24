@@ -1041,3 +1041,48 @@ def test_commit_labels_is_cancellable_and_leaves_the_octree_alone(
     assert seen["event"] is cancel_event, "the converter got no live cancel event"
     assert sess.octree_cache_id == current, "a cancelled commit claimed an octree"
     assert current != before
+
+
+@pytest.mark.parametrize("region", [
+    {"kind": "spheres_union", "centers": [[0.3, 0.3, 0.3], [0.62, 0.5, 0.41]],
+     "radii": [0.17, 0.2], "invert": False},
+    {"kind": "box", "min": [0.15, 0.2, 0.0], "max": [0.55, 0.9, 0.35], "invert": False},
+    {"kind": "box", "min": [0.15, 0.2, 0.0], "max": [0.55, 0.9, 0.35], "invert": True},
+    {"kind": "spheres_union", "centers": [], "radii": [], "invert": False},
+])
+def test_region_candidates_equal_the_full_mask(region):
+    """The culled selection a stroke now uses must be exactly the full mask's."""
+    rng = np.random.default_rng(3)
+    pts = rng.uniform(0, 1, size=(20_000, 3))
+    want = np.flatnonzero(main._region_mask(pts, region))
+    got = main._region_candidates(pts, region)
+    np.testing.assert_array_equal(got, want)
+
+
+def test_a_compaction_during_the_unlocked_selection_is_respected(
+    client, cache_root, grid_xyz, monkeypatch,
+):
+    """A stroke's selection is computed outside the session lock, as indices
+    into the arrays it captured. A bake that compacts the session in that window
+    replaces those arrays and shifts every index after the removed rows, so
+    writing the stale selection would paint the wrong points. The stroke must
+    re-select under the lock when the geometry moved."""
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    real = main._region_candidates
+    fired = []
+
+    def candidates_then_compact(*a, **k):
+        out = real(*a, **k)
+        if not fired:
+            fired.append(1)
+            assert client.post(f"/api/cloud/session/{sid}/delete_region",
+                               json={"region": BOX_SMALL}).status_code == 200
+            assert client.post(f"/api/cloud/session/{sid}/bake").status_code == 200
+        return out
+
+    monkeypatch.setattr(main, "_region_candidates", candidates_then_compact)
+    _paint(client, sid, [_stroke(BOX_BIG, 64, "s1")])
+    assert fired and len(sess.positions) < 1000, "the bake did not compact"
+    want = _box_mask(sess.positions, BOX_BIG)
+    np.testing.assert_array_equal(_labels(sid) == 64, want)
