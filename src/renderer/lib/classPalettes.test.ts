@@ -298,7 +298,7 @@ import {
   labelableColumnsFor, derivePaletteForColumn, withRequiredUnclassified,
   slugifyLabelColumn, validateLabelColumn, isValidLabelSlug,
   LAS_RESERVED_SLUGS, LABEL_SLUG_RE,
-  INSTANCE_CLASS_VALUE_MAX, isInstanceColumnSlug, classValueMaxFor,
+  INSTANCE_CLASS_VALUE_MAX, isInstanceColumnSlug, classValueMaxFor, forkPaletteForSave,
 } from './classPalettes';
 import {
   categoricalSchemeForRange, buildGenericCategoricalSchemeFromValues,
@@ -688,5 +688,28 @@ describe('per-column class range', () => {
     expect(isInstanceColumnSlug('organ_instance')).toBe(true);
     expect(isInstanceColumnSlug('manual_class')).toBe(false);
     expect(classValueMaxFor('row_qc')).toBe(255);
+  });
+});
+
+describe('forkPaletteForSave', () => {
+  it('gives an edited preset its own id, so it cannot overwrite another save', () => {
+    const preset = makePreset('wood_leaf', 'manual_class', 0);
+    const a = forkPaletteForSave(preset, 'plot A', 1);
+    const b = forkPaletteForSave(preset, 'plot B', 2);
+    expect(a.id).not.toBe(preset.id);
+    expect(a.id).not.toBe(b.id);
+    expect(a.preset).toBeUndefined();
+    expect(a.name).toBe(preset.name);
+  });
+
+  it('names a derived palette by its cloud and column', () => {
+    const derived: ClassPalette = {
+      id: 'derived-tree_instance', name: 'Tree instance', slug: 'tree_instance',
+      classes: [{ value: 0, label: 'Unassigned', color: [0, 0, 0] }], derived: true, updatedAt: 0,
+    };
+    const f = forkPaletteForSave(derived, 'orchard.laz', 5);
+    expect(f.name).toBe('orchard.laz — Tree instance');
+    expect(f.derived).toBe(true);
+    expect(forkPaletteForSave(f, 'orchard.laz', 6)).toBe(f);   // already the user's
   });
 });

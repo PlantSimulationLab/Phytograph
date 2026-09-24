@@ -656,3 +656,26 @@ test('a class value can be cleared and retyped', async () => {
   await expect(row).toHaveAttribute('data-class-value', '77');
   await expect(field).toHaveValue('77');
 });
+
+test('editing the stock preset in two projects keeps both in the library', async () => {
+  // Saved palettes are keyed by id, and an edited preset kept the preset's
+  // fixed id (`preset-wood-leaf`). Editing the stock preset again on the next
+  // project and saving replaced the first project's palette in the library.
+  for (const [cls, name] of [['Mistletoe', 'Project one'], ['Deadwood', 'Project two']]) {
+    await resetToFreshScene(session.app, session.page);   // a new project
+    const { page } = await openLabelTool();
+    await openEditor(page);
+    await page.getByTestId('palette-add-class').click();
+    await page.getByTestId('palette-class-row').last()
+      .getByTestId('palette-class-label').fill(cls);
+    await page.getByTestId('palette-name').fill(name);
+    await page.getByTestId('palette-save').click();
+    await expect(page.getByTestId('class-palette-editor')).toHaveCount(0);
+  }
+  const { page } = session;
+  await openEditor(page);
+  await expect(page.getByTestId('palette-library-row').filter({ hasText: 'Project one' }))
+    .toBeVisible();
+  await expect(page.getByTestId('palette-library-row').filter({ hasText: 'Project two' }))
+    .toBeVisible();
+});

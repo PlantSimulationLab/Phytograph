@@ -124,7 +124,7 @@ import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
   makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
   labelableColumnsFor, withPendingLabelColumn, derivePaletteForColumn, makeEmptyPalette,
-  validatePalette, type ClassPalette, type LabelableColumn, type PalettePreset,
+  validatePalette, forkPaletteForSave, type ClassPalette, type LabelableColumn, type PalettePreset,
 } from '../lib/classPalettes';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
 import { LabelPanel } from './viewer/panels/LabelPanel';
@@ -5663,7 +5663,9 @@ export default function PointCloudViewer({
    * library copy is the reusable asset (TerraScan's `.PTC` idea): the same
    * classes on the next cloud, or shared with a collaborator.
    */
-  const handleSavePalette = useCallback(async (next: ClassPalette) => {
+  const handleSavePalette = useCallback(async (edited: ClassPalette) => {
+    const next = forkPaletteForSave(
+      edited, labelTargetCloud?.data.fileName ?? null, Date.now());
     setNewColumnDraft(null);
     applyLabelPalette(next);
     // A brand-new column exists only in this palette until the first stroke, so

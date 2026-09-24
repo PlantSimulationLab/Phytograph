@@ -381,6 +381,32 @@ export function makePreset(
   }
 }
 
+/**
+ * The palette to SAVE when the user saves `palette` from the editor.
+ *
+ * The library is keyed by id, and a stock palette's id is fixed: every edited
+ * wood/leaf preset was `preset-wood-leaf`, and every palette derived from a
+ * cloud's tree_instance column was `derived-tree_instance`. Saving one replaced
+ * whatever the library already held under that id, so the vocabulary saved for
+ * one project silently overwrote another's. A stock palette therefore FORKS on
+ * its first save: a fresh id makes it the user's own entry, and later saves
+ * update that entry. A derived palette is also named by its cloud and column,
+ * since "Tree instance" alone says nothing about which plot it came from.
+ */
+export function forkPaletteForSave(
+  palette: ClassPalette, cloudName: string | null, now: number,
+): ClassPalette {
+  const derived = palette.id.startsWith('derived-');
+  if (!derived && !palette.id.startsWith('preset-')) return palette;
+  const id = `custom-${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const name = derived && cloudName && !palette.name.includes(cloudName)
+    ? `${cloudName} — ${palette.name}`
+    : palette.name;
+  // No longer one of the four stock vocabularies, so Preset must not treat it
+  // as one; `derived` stays, since it decides how Add class numbers.
+  return { ...palette, id, name, preset: undefined };
+}
+
 /** A minimal starting palette for a user who wants to define their own. */
 export function makeEmptyPalette(slug: string, now: number, id: string): ClassPalette {
   return {

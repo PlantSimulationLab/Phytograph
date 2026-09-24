@@ -184,7 +184,10 @@ the result as a palette of your own.
   name ends in `_instance`), take ids up to 16,777,216, so a plot with hundreds
   of trees can still be split and renumbered by hand.
 - **Save palette** applies it, binds it to the cloud (so it is still there when
-  you reopen the tool), and adds it to your saved palettes.
+  you reopen the tool), and adds it to your saved palettes. Saving an edited
+  built-in set, or a column's own classes, stores a copy of your own, so it
+  never replaces a palette you saved for another project. A copy of a column's
+  classes is named after its cloud and column.
 - **Export / Import** move palettes between projects or collaborators as a JSON
   file, so a labelling scheme agreed once can be reused by everyone.
 
