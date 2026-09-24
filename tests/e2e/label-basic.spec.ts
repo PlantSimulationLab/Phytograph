@@ -792,3 +792,31 @@ test('the quit confirmation knows how many strokes are uncommitted', async () =>
   await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 15_000 });
   await expect.poll(mainStrokes, { timeout: 10_000 }).toBe(0);
 });
+
+test('with two clouds selected the Label button says why it will not open', async () => {
+  // Label Points paints ONE cloud, but the button only required "a cloud": with
+  // two selected it stayed live, and the click opened a panel that rendered
+  // nothing, with no word about why.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+  await importFiles(app, page, 'import-auto', TINY_OFFSET);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset"]');
+  await expect(rowB).toHaveAttribute('data-selected', 'true', { timeout: 20_000 });
+  await rowA.getByTestId('scan-row-name').click({ modifiers: ['ControlOrMeta'] });
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(rowB).toHaveAttribute('data-selected', 'true');
+
+  const button = page.getByTestId('tool-label');
+  await expect(button).toBeDisabled();
+  await expect(button).toHaveAttribute('title', /one point cloud at a time/);
+
+  // One cloud selected again: the button works.
+  await rowA.getByTestId('scan-row-name').click();
+  await expect(rowB).toHaveAttribute('data-selected', 'false');
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect(page.getByTestId('label-panel')).toBeVisible();
+});

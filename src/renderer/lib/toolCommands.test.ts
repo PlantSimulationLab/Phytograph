@@ -157,3 +157,15 @@ describe('CREATE_GROUPS / SIMULATE_GROUPS', () => {
     expect(SIMULATE_GROUPS.map(g => g.id)).toEqual(['simulate']);
   });
 });
+
+describe('blockedReason', () => {
+  const ONE_CLOUD: SelectionState = { ...EMPTY, hasCloud: true, cloudCount: 1, totalScanCount: 1 };
+
+  it('a stated reason makes a command unavailable even when its selection is met', () => {
+    expect(isCommandAvailable(cmd({ requires: 'cloud' }), ONE_CLOUD)).toBe(true);
+    expect(isCommandAvailable(
+      cmd({ requires: 'cloud', blockedReason: () => 'select just one' }), ONE_CLOUD)).toBe(false);
+    expect(isCommandAvailable(
+      cmd({ requires: 'cloud', blockedReason: () => null }), ONE_CLOUD)).toBe(true);
+  });
+});

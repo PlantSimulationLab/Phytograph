@@ -52,10 +52,13 @@ export function Toolbar({ commands, selection, title = 'Tools', groups = TOOL_GR
                 const busy = cmd.isBusy?.() ?? false;
                 const active = cmd.isActive?.() ?? false;
                 const Icon = cmd.icon;
+                const blocked = cmd.blockedReason?.() ?? null;
                 const title = busy
                   ? cmd.name
                   : available
                     ? cmd.name
+                    : blocked
+                      ? `${cmd.name} — ${blocked}`
                     : cmd.multiInput
                       ? `${cmd.name} — import a point cloud first`
                       : `${cmd.name} — select ${requiresText(cmd.requires ?? null)} first`;

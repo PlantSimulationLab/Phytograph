@@ -110,4 +110,14 @@ describe('Toolbar', () => {
     screen.getByTestId('tool-cloud-stitch').click();
     expect(stitchAction).toHaveBeenCalledOnce();
   });
+
+  it('a blocked tool is disabled and its tooltip says why', () => {
+    const sel = { ...EMPTY, hasCloud: true, cloudCount: 2, totalScanCount: 2 };
+    render(<Toolbar commands={makeCommands([
+      { id: 'cloud-crop', blockedReason: () => 'select just one' },
+    ])} selection={sel} />);
+    const btn = screen.getByTestId('tool-crop') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toBe('Crop — select just one');
+  });
 });

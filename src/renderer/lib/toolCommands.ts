@@ -65,6 +65,14 @@ export interface ToolCommand {
    */
   isDisabled?: () => boolean;
   /**
+   * Why the command cannot act although `requires` is met, or null when it
+   * can. For a tool whose own panel is stricter than `requires` (Label Points
+   * works on exactly ONE cloud with an editable session): without this the
+   * button stayed live, the click opened a panel that then rendered nothing,
+   * and the user got no feedback at all. The reason becomes the tooltip.
+   */
+  blockedReason?: () => string | null;
+  /**
    * Running-state predicate for a long async action. When true the toolbar shows
    * the icon spinning and ignores clicks, mirroring the synthetic-scan run
    * button's inline busy state (no toast). Distinct from `isActive`, which is a
@@ -104,6 +112,7 @@ export function isCommandAvailable(cmd: ToolCommand, sel: SelectionState): boole
   // Translate draft is pending). Checked first so even always-available
   // (`requires: null`) and multi-input tools are gated.
   if (cmd.isDisabled?.()) return false;
+  if (cmd.blockedReason?.()) return false;
   if (cmd.multiInput) {
     switch (cmd.multiInputKind) {
       case 'mesh': return sel.totalMeshCount >= 1;
