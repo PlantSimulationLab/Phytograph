@@ -6,6 +6,7 @@ import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
+const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz');
 
 // Manual point labelling, end to end against the live backend.
 //
@@ -590,4 +591,52 @@ test('uncommitted strokes are flagged in the panel and before File > New', async
   await expect(page.getByTestId('new-confirm-dialog')).toHaveCount(0);
   // The strokes survived the near-miss.
   await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+});
+
+test('pending strokes belong to their cloud, not to the tool', async () => {
+  // The tool held ONE stroke list, cleared only by Commit. Selecting another
+  // cloud handed it cloud A's strokes: B's overlay replayed them over B's
+  // points, and B's Undo sent A's stroke ids to B's session.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+  await importFiles(app, page, 'import-auto', TINY_OFFSET);
+  await completeImportWizard(page);
+  const rowA = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const rowB = page.locator('[data-testid="scan-row"][data-scan-name="tiny-offset"]');
+  await expect(rowA).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  await expect(rowB).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  const idA = (await rowA.getAttribute('data-scan-id'))!;
+  const idB = (await rowB.getAttribute('data-scan-id'))!;
+
+  await rowA.getByTestId('scan-row-name').click();
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
+  await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
+  await page.getByTestId('tool-label').click();
+  const panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+  const overlay = (id: string) => page.evaluate(
+    (cid) => (window as any).__labelOverlayByCloud?.[cid]?.painted ?? 0, id);
+  await expect.poll(() => overlay(idA), { timeout: 15_000 }).toBe(60);
+
+  await rowB.getByTestId('scan-row-name').click();
+  await expect(rowB).toHaveAttribute('data-selected', 'true');
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 10_000 });
+  await expect(page.getByTestId('label-undo')).toBeDisabled();
+  await expect(panel).toHaveAttribute('data-labelled-count', '0', { timeout: 15_000 });
+  // B paints nothing of A's; A's paint stays on screen (it is in A's session).
+  await page.waitForTimeout(500);
+  expect(await overlay(idB)).toBe(0);
+  expect(await overlay(idA)).toBe(60);
+
+  await rowA.getByTestId('scan-row-name').click();
+  await expect(rowA).toHaveAttribute('data-selected', 'true');
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 10_000 });
+  await expect(page.getByTestId('label-undo')).toBeEnabled();
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
 });

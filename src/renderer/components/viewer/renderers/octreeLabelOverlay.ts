@@ -220,6 +220,7 @@ export function applyLabelOverlayToVisibleNodes(
   displayOffset: { x: number; y: number; z: number } | undefined,
   state: LabelOverlayState,
   committedSlug?: string | null,
+  statsId?: string,
 ): void {
   const visible = octree?.visibleNodes;
   if (!Array.isArray(visible)) return;
@@ -241,11 +242,11 @@ export function applyLabelOverlayToVisibleNodes(
     swapLabelIntoIntensity(geom);
     geom[LABEL_KEY] = state.key;
   }
-  publishLabelOverlayStats(octree, state);
+  publishLabelOverlayStats(octree, state, statsId);
 }
 
 /** Remove the overlay from every loaded tile (tool close / commit rebuild). */
-export function clearLabelOverlayFromVisibleNodes(octree: any): void {
+export function clearLabelOverlayFromVisibleNodes(octree: any, statsId?: string): void {
   const visible = octree?.visibleNodes;
   if (!Array.isArray(visible)) return;
   for (const node of visible) {
@@ -255,6 +256,7 @@ export function clearLabelOverlayFromVisibleNodes(octree: any): void {
   // Always clear, even if the octree is already gone — a stale global would
   // otherwise report counts for a cloud that no longer exists.
   (globalThis as any).__labelOverlay = undefined;
+  if (statsId) delete (globalThis as any).__labelOverlayByCloud?.[statsId];
 }
 
 /**
@@ -265,8 +267,14 @@ export function clearLabelOverlayFromVisibleNodes(octree: any): void {
  * `publishCropMaskStats` set: expose a NARROW FACT, never the scene graph.
  * `painted` counts points whose index differs from unlabelled, over the loaded
  * tiles.
+ *
+ * `__labelOverlay` is whichever cloud painted last, which is ambiguous once two
+ * clouds carry an overlay, so `statsId` (the cloud id) also files the same fact
+ * under `__labelOverlayByCloud[statsId]`.
  */
-export function publishLabelOverlayStats(octree: any, state: LabelOverlayState): void {
+export function publishLabelOverlayStats(
+  octree: any, state: LabelOverlayState, statsId?: string,
+): void {
   if (!octree) return;
   let painted = 0;
   let total = 0;
@@ -282,5 +290,10 @@ export function publishLabelOverlayStats(octree: any, state: LabelOverlayState):
       if (arr[i] !== state.unlabeledIndex) painted++;
     }
   });
-  (globalThis as any).__labelOverlay = { painted, total, tiles, key: state.key };
+  const stats = { painted, total, tiles, key: state.key };
+  (globalThis as any).__labelOverlay = stats;
+  if (statsId) {
+    const g = globalThis as any;
+    g.__labelOverlayByCloud = { ...(g.__labelOverlayByCloud ?? {}), [statsId]: stats };
+  }
 }

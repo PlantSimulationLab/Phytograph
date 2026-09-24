@@ -151,6 +151,8 @@ export interface OctreePointCloudProps {
   /** Octree attribute holding COMMITTED labels, so a post-commit tile starts
    *  from the baked values rather than blank. */
   labelCommittedSlug?: string | null;
+  /** Cloud id the overlay's E2E stats are filed under (`__labelOverlayByCloud`). */
+  labelStatsId?: string;
   /** Categorical scheme for the overlay's dense INDEX values, so the points and
    *  the legend agree while previewing. Null when not labelling. */
   labelIndexScheme?: { attribute: string; classes: Array<{ value: number; label: string; color: [number, number, number] }> } | null;
@@ -363,6 +365,7 @@ export function OctreePointCloud({
   clipBoxes = null,
   labelOverlayRef = null,
   labelCommittedSlug = null,
+  labelStatsId,
   labelIndexScheme = null,
   slabBoxMatrix = null,
   cropMask = null,
@@ -1266,14 +1269,14 @@ export function OctreePointCloud({
   const frameStateRef = useRef({
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
-    filterSpec, cacheId,
+    labelStatsId, filterSpec, cacheId,
   });
   frameStateRef.current = {
     // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
     // emptiness for a rotated cloud (see cropClipsEverything).
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
-    filterSpec, cacheId,
+    labelStatsId, filterSpec, cacheId,
   };
 
   useEffect(() => {
@@ -1361,11 +1364,12 @@ export function OctreePointCloud({
         if (overlay) {
           applyLabelOverlayToVisibleNodes(
             octree, offset, overlay, frameStateRef.current.labelCommittedSlug ?? null,
+            frameStateRef.current.labelStatsId,
           );
         } else if (labelOverlayWasActiveRef.current) {
           // Tool closed / committed: drop the overlay so the octree's own
           // attribute (or whatever scalar the user picked) colours again.
-          clearLabelOverlayFromVisibleNodes(octree);
+          clearLabelOverlayFromVisibleNodes(octree, frameStateRef.current.labelStatsId);
         }
         labelOverlayWasActiveRef.current = !!overlay;
 

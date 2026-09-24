@@ -95,6 +95,10 @@ import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction } from '../state/sceneActions';
 import {
+  pendingFor, prunePending, totalPendingStrokes, updatePending,
+  type LabelPendingEntry, type LabelPendingMap,
+} from '../lib/labelPending';
+import {
   pointInPolygon,
   projectWorldToCanvasPixel,
   worldBoundsUnion,
@@ -2596,9 +2600,16 @@ export default function PointCloudViewer({
   const [labelVisibleClasses, setLabelVisibleClasses] = useState<Set<number>>(new Set());
   // null = "Any visible" (no class gate) — see LabelPanel.
   const [labelFromClasses, setLabelFromClasses] = useState<Set<number> | null>(null);
-  const [labelStrokes, setLabelStrokes] = useState<LabelStroke[]>([]);
+  // Uncommitted strokes and the dirty flag, per (cloud, column) — see
+  // lib/labelPending. `labelStrokes`/`labelDirty` below are the entry for the
+  // tool's current target, derived once the target is known.
+  const [labelPending, setLabelPending] = useState<LabelPendingMap>(() => new Map());
+  const updateLabelPending = useCallback(
+    (cloudId: string, slug: string, fn: (e: LabelPendingEntry) => LabelPendingEntry) =>
+      setLabelPending((prev) => updatePending(prev, cloudId, slug, fn)),
+    [],
+  );
   const [labelClassCounts, setLabelClassCounts] = useState<Record<number, number>>({});
-  const [labelDirty, setLabelDirty] = useState(false);
   const [labelBusy, setLabelBusy] = useState(false);
   /**
    * Strokes that have been COMMITTED but whose octree rebuild has not landed.
@@ -5119,6 +5130,9 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => selectedIds.has(c.id));
     return cloud?.data.octree?.sessionId ? cloud : null;
   }, [showLabelPanel, selectedIds, clouds]);
+  const labelPendingEntry = pendingFor(labelPending, labelTargetCloud?.id, labelPalette?.slug);
+  const labelStrokes = labelPendingEntry.strokes;
+  const labelDirty = labelPendingEntry.dirty;
 
   /**
    * The columns of the labelled cloud the tool can paint into.
@@ -5213,12 +5227,13 @@ export default function PointCloudViewer({
             .then((res) => {
               // Trust the BACKEND's surviving count: its history is byte-bounded
               // and may have evicted older entries (same rule as handleLabelUndo).
-              setLabelStrokes(prev => prev.slice(0, Math.min(keep, res.label_edit_count)));
+              updateLabelPending(action.id, action.slug, (e) => ({
+                ...e, strokes: e.strokes.slice(0, Math.min(keep, res.label_edit_count)), dirty: true,
+              }));
               labelCountsSeqRef.current++;
               setLabelClassCounts(Object.fromEntries(
                 Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
               ) as Record<number, number>);
-              setLabelDirty(true);
             })
             .catch((err) => showToast({
               title: describeBackendError(err, 'Undo').message, type: 'error',
@@ -5273,10 +5288,16 @@ export default function PointCloudViewer({
   //
   // The File>New confirm dialog, the quit confirmation and E2E read this to
   // know whether work is at risk.
+  const labelPendingTotal = totalPendingStrokes(labelPending);
   useEffect(() => {
-    (window as any).__uncommittedLabelStrokes = labelStrokes.length;
+    (window as any).__uncommittedLabelStrokes = labelPendingTotal;
     return () => { (window as any).__uncommittedLabelStrokes = 0; };
-  }, [labelStrokes.length]);
+  }, [labelPendingTotal]);
+  // Drop the pending strokes of clouds that no longer exist (deleted, File >
+  // New), the same rule as `labelCommitHolds` below.
+  useEffect(() => {
+    setLabelPending((prev) => prunePending(prev, new Set(clouds.map((c) => c.id))));
+  }, [clouds]);
 
   // Opening the label tool arms the POLYGON LASSO. Phase 1 has no selection
   // machinery of its own: it drives the crop tool's draw state, and
@@ -5504,18 +5525,9 @@ export default function PointCloudViewer({
    * so an unnamed draft can never be applied.
    */
   const handleNewLabelColumn = useCallback(() => {
-    if (labelDirty || labelStrokes.length > 0) {
-      showToast({
-        title: 'Commit or undo first',
-        message: 'Uncommitted strokes belong to the current column. Commit them '
-          + 'or undo them before starting a new classification.',
-        type: 'error',
-      });
-      return;
-    }
     setNewColumnDraft(makeEmptyPalette('', Date.now(), `custom-${Date.now().toString(36)}`));
     setShowPaletteEditor(true);
-  }, [labelDirty, labelStrokes.length, showToast]);
+  }, []);
 
   /**
    * The stock vocabularies that describe the column currently being labelled.
@@ -5537,34 +5549,21 @@ export default function PointCloudViewer({
   /**
    * Switch which COLUMN the tool paints into.
    *
-   * Blocked while there are uncommitted strokes, and that is a correctness
-   * guard rather than tidiness: the backend keys `label_history` per slug but
-   * the renderer holds ONE `labelStrokes` list, so switching mid-stroke would
-   * make Undo issue `reset_label_edits` against the new column carrying the old
-   * column's stroke ids — a silent no-op that loses the undo rather than
-   * erroring. Committing or undoing first empties the list and removes the
-   * ambiguity entirely.
+   * Free even with uncommitted strokes: they are kept per (cloud, column), as
+   * the backend keeps `label_history` per column, so Undo on the new column
+   * never sees the old column's stroke ids and switching back finds them still
+   * pending. (This used to be blocked, when the renderer held one list.)
    */
   const handleSelectLabelColumn = useCallback((slug: string) => {
     if (!labelTargetCloud) return;
     if (slug === labelPalette?.slug) return;
-    if (labelDirty || labelStrokes.length > 0) {
-      showToast({
-        title: 'Commit or undo first',
-        message: 'Uncommitted strokes belong to the current column. Commit them '
-          + 'or undo them before switching to another one.',
-        type: 'error',
-      });
-      return;
-    }
     const column = labelColumns.find(c => c.slug === slug);
     if (!column) return;
     const bound = labelTargetCloud.data.octree?.classPalettes?.[slug];
     const next = bound ?? paletteForColumn(column, slug);
     labelColumnByCloudRef.current.set(labelTargetCloud.id, slug);
     applyLabelPalette(next);
-  }, [labelTargetCloud, labelPalette?.slug, labelDirty, labelStrokes.length,
-      labelColumns, applyLabelPalette, paletteForColumn, showToast]);
+  }, [labelTargetCloud, labelPalette?.slug, labelColumns, applyLabelPalette, paletteForColumn]);
 
   // Load the saved-palette library when the editor opens. On demand rather than
   // at mount: it is a disk read that only this panel needs.
@@ -5768,8 +5767,12 @@ export default function PointCloudViewer({
     //
     // The backend stays the source of truth: its reply supplies the authoritative
     // class counts, and a failure rolls the stroke back below.
-    setLabelStrokes(nextStrokes);
-    setLabelDirty(true);
+    // Keyed by the cloud and column captured HERE, so a reply that lands after
+    // the user moved to another cloud still updates the one it belongs to.
+    const slug = palette.slug;
+    updateLabelPending(cloud.id, slug, (e) => ({
+      strokes: [...e.strokes, stroke], dirty: true, palette,
+    }));
     setLabelBusy(true);
     // Screen-space stroke: the octree must be in the session's frame first.
     if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) { setLabelBusy(false); return; }
@@ -5809,14 +5812,15 @@ export default function PointCloudViewer({
     } catch (err) {
       // Roll the optimistic paint back so the viewport can never show a stroke
       // the session does not actually carry.
-      setLabelStrokes((prev) => prev.filter((x) => x.strokeId !== strokeId));
-      setLabelDirty(before.dirty ?? false);
+      updateLabelPending(cloud.id, slug, (e) => ({
+        ...e, strokes: e.strokes.filter((x) => x.strokeId !== strokeId), dirty: before.dirty ?? false,
+      }));
       showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
     } finally {
       setLabelBusy(false);
     }
   }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
-      labelVisibleClasses, labelDirty, scene, showToast,
+      labelVisibleClasses, labelDirty, scene, showToast, updateLabelPending,
       // `slab`/`sectionTargetCloud` are READ in the body (activeSlab), so they
       // must be dependencies. Omitting them froze `slab` at its first-render
       // value — null — so every stroke drawn inside a section shipped WITHOUT
@@ -5998,12 +6002,25 @@ export default function PointCloudViewer({
       scheme: ReturnType<typeof paletteToIndexScheme>;
       slug: string;
     }>();
-    for (const [cloudId, hold] of labelCommitHolds) {
+    // Clouds the tool is NOT on: their held (committed, converting) strokes plus
+    // any still pending. Pending strokes are already in that cloud's session,
+    // so moving the tool to another cloud must not make them vanish. One column
+    // per cloud: the held one, else the column the user last painted there.
+    const others = new Set([...labelCommitHolds.keys(), ...labelPending.keys()]);
+    for (const cloudId of others) {
       if (labelTargetCloud?.id === cloudId) continue;   // merged below
+      const hold = labelCommitHolds.get(cloudId);
+      const bySlug = labelPending.get(cloudId);
+      const slug = hold?.palette.slug ?? labelColumnByCloudRef.current.get(cloudId)
+        ?? [...(bySlug?.keys() ?? [])][0];
+      const pending = slug ? bySlug?.get(slug) : undefined;
+      const palette = hold?.palette ?? pending?.palette;
+      const strokes = [...(hold?.strokes ?? []), ...(pending?.strokes ?? [])];
+      if (!slug || !palette || strokes.length === 0) continue;
       out.set(cloudId, {
-        state: buildLabelOverlayState(hold.palette, hold.strokes),
-        scheme: paletteToIndexScheme(hold.palette),
-        slug: hold.palette.slug,
+        state: buildLabelOverlayState(palette, strokes),
+        scheme: paletteToIndexScheme(palette),
+        slug,
       });
     }
     if (labelTargetCloud && labelPalette) {
@@ -6016,7 +6033,7 @@ export default function PointCloudViewer({
       });
     }
     return out;
-  }, [labelCommitHolds, labelTargetCloud, labelPalette, labelStrokes, buildLabelOverlayState]);
+  }, [labelCommitHolds, labelPending, labelTargetCloud, labelPalette, labelStrokes, buildLabelOverlayState]);
 
   /**
    * Stable per-cloud ref boxes for the overlay the renderer reads each frame.
@@ -6082,25 +6099,28 @@ export default function PointCloudViewer({
     const cloud = labelTargetCloud;
     const sessionId = cloud?.data.octree?.sessionId;
     if (!cloud || !sessionId || labelStrokes.length === 0) return;
+    const slug = labelPaletteRef.current?.slug;
+    if (!slug) return;
     const keep = labelStrokes.length - 1;
     setLabelBusy(true);
     try {
-      const res = await resetCloudLabelEdits(sessionId, keep, labelPaletteRef.current?.slug);
+      const res = await resetCloudLabelEdits(sessionId, keep, slug);
       // Trust the BACKEND's surviving count: its history is byte-bounded and may
       // have evicted older entries, in which case the renderer's list is longer
       // than anything it can still undo.
-      setLabelStrokes(prev => prev.slice(0, Math.min(keep, res.label_edit_count)));
+      updateLabelPending(cloud.id, slug, (e) => ({
+        ...e, strokes: e.strokes.slice(0, Math.min(keep, res.label_edit_count)), dirty: true,
+      }));
       labelCountsSeqRef.current++;
       setLabelClassCounts(
         Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
       );
-      setLabelDirty(true);
     } catch (err) {
       showToast({ title: describeBackendError(err, 'Undo').message, type: 'error' });
     } finally {
       setLabelBusy(false);
     }
-  }, [labelTargetCloud, labelStrokes, showToast]);
+  }, [labelTargetCloud, labelStrokes, showToast, updateLabelPending]);
 
   /**
    * Commit: bake the label column into the octree so it colours without the
@@ -6145,8 +6165,7 @@ export default function PointCloudViewer({
     // column/cloud guards stop blocking. The strokes are no longer undoable
     // because they are no longer PENDING — undo across a commit has always
     // needed a fresh commit to become visible.
-    setLabelStrokes([]);
-    setLabelDirty(false);
+    updateLabelPending(cloud.id, palette.slug, (e) => ({ ...e, strokes: [], dirty: false }));
     // The per-cloud palette binding and the categorical registration describe
     // the COLUMN, which the session already has; only octree.bin is behind. Do
     // them now so the picker, the legend and the by-name resolvers are right
@@ -6174,7 +6193,7 @@ export default function PointCloudViewer({
       message: 'The display finishes rebuilding in the background.',
       type: 'success',
     });
-  }, [labelTargetCloud, labelStrokes, onUpdateCloud, showToast]);
+  }, [labelTargetCloud, labelStrokes, onUpdateCloud, showToast, updateLabelPending]);
 
   // Permanently apply (bake) a session cloud's pending deletions: rebuild the
   // octree from the survivors and clear the in-session mask + the accumulated
@@ -20823,6 +20842,7 @@ export default function PointCloudViewer({
                   // which is what stops the labels reverting the moment the
                   // user hits Save. See `labelOverlayByCloud`.
                   labelOverlayRef={labelOverlayBoxesRef.current.get(cloud.id) ?? null}
+                  labelStatsId={cloud.id}
                   labelCommittedSlug={
                     labelOverlayByCloud.get(cloud.id)?.slug
                     ?? labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE

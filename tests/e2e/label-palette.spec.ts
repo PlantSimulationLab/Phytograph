@@ -384,17 +384,27 @@ test('a column name that collides with a LAS dimension is refused', async () => 
   await expect(page.getByTestId('palette-save')).toBeEnabled();
 });
 
-test('switching column with uncommitted strokes is blocked', async () => {
+test('uncommitted strokes stay with their column when the column is switched', async () => {
+  // Switching column used to be BLOCKED with strokes pending, because the
+  // renderer held one stroke list while the backend keys its undo history per
+  // column. The renderer now keys pending strokes per (cloud, column) too, so a
+  // switch is free: the new column starts clean and the old one's strokes are
+  // still pending when the user comes back.
   const { page, panel } = await openLabelToolOnTreeCloud();
 
   await panel.getByTestId('label-class-1').click();
   await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-label-dirty', 'true', { timeout: 30_000 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 30_000 });
+  await expect(panel).toHaveAttribute('data-label-dirty', 'true');
 
-  // The backend keys its undo history per column but the renderer holds ONE
-  // stroke list, so switching here would make Undo target the new column with
-  // the old column's stroke ids — a silent no-op that loses the undo.
   await page.getByTestId('label-column-select').selectOption('manual_class');
+  await expect(panel).toHaveAttribute('data-label-slug', 'manual_class');
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0');
+  await expect(panel).toHaveAttribute('data-label-dirty', 'false');
+  await expect(page.getByTestId('label-undo')).toBeDisabled();
+
+  await page.getByTestId('label-column-select').selectOption('tree_instance');
   await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
-  await expect(page.getByTestId('label-column-select')).toHaveValue('tree_instance');
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+  await expect(page.getByTestId('label-undo')).toBeEnabled();
 });

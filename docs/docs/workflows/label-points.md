@@ -116,10 +116,11 @@ opens on that column with its real classes and counts already listed.
     take a classification *away* from points that should not have had one, and
     it reads 0 points until you use it.
 
-!!! warning "Commit before switching columns"
-    Uncommitted strokes belong to the column you painted them in, so the
-    dropdown refuses to move while any are pending. **Commit** them or
-    **Undo** them first.
+!!! note "Uncommitted strokes stay with their column and cloud"
+    Strokes you have not committed belong to the column and the cloud you
+    painted them on. Switching column, or selecting another cloud, starts that
+    one clean; switching back finds your strokes still pending, and **Undo**
+    only ever undoes strokes on the column and cloud in front of you.
 
 ## Class sets
 
