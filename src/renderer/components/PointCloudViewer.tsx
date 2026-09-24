@@ -16710,6 +16710,18 @@ export default function PointCloudViewer({
     if (!range) lastSelectedQSMIdRef.current = qsmId;
   }, [qsms]);
 
+  // A QSM clicked in the VIEWPORT. Same modifier semantics as the panel row, but
+  // a plain click is single-focus like a viewport mesh click: it drops the mesh,
+  // skeleton and cloud selection so only the clicked object stays outlined.
+  const handleViewportSelectQSM = useCallback((qsmId: string, additive: boolean, range: boolean) => {
+    handleToggleQSMSelection(qsmId, additive, range);
+    if (!additive && !range) {
+      setSelectedMeshIds(new Set());
+      setSelectedSkeletonIds(new Set());
+      onDeselectAll();
+    }
+  }, [handleToggleQSMSelection, onDeselectAll]);
+
   // Clear mesh/skeleton selection when point cloud is selected (unless shift held for mixed selection)
   useEffect(() => {
     if (selectedIds.size > 0 && !isShiftHeldRef.current) {
@@ -20701,6 +20713,7 @@ export default function PointCloudViewer({
           setOriginSelected(false);
           if (!meshSelectionEnabled) return;
           setSelectedMeshIds(new Set());
+          setSelectedQSMIds(new Set());
         }}
       >
         <ambientLight intensity={lightIntensity * LIGHT_INTENSITY_SCALE} />
@@ -21124,7 +21137,11 @@ export default function PointCloudViewer({
                   if (others.length > 0) return; // let the enclosed object take it
                 }
                 e.stopPropagation();
-                handleSelectMesh(mesh.id, e.ctrlKey || e.metaKey, e.shiftKey);
+                const additive = e.ctrlKey || e.metaKey;
+                handleSelectMesh(mesh.id, additive, e.shiftKey);
+                // Single-focus in the viewport: a plain click also drops any
+                // outlined QSM (the panel row keeps its multi-panel semantics).
+                if (!additive && !e.shiftKey) setSelectedQSMIds(new Set());
               }}
             >
               {/* Wrap the rendered mesh in <OutlineSelect> so the JFA outline
@@ -21272,7 +21289,22 @@ export default function PointCloudViewer({
           // carries its own (resolved at import from the scene it lands in).
           const qsmWs = qsmWorldShift(qsm);
           return (
-            <group key={qsm.id} position={[-qsmWs[0], -qsmWs[1], -qsmWs[2]]}>
+            <group
+              key={qsm.id}
+              position={[-qsmWs[0], -qsmWs[1], -qsmWs[2]]}
+              // Viewport click-to-select, mirroring the mesh groups above
+              // (drag guard via e.delta; stopPropagation keeps the click from
+              // reaching onPointerMissed). Leaves count as part of the QSM.
+              onClick={(e) => {
+                if (!meshSelectionEnabled) return;
+                if (e.delta > 4) return;
+                e.stopPropagation();
+                handleViewportSelectQSM(qsm.id, e.ctrlKey || e.metaKey, e.shiftKey);
+              }}
+            >
+              {/* Selected QSMs (tubes + leaves) get the same JFA outline as
+                  selected meshes. */}
+              <OutlineSelect enabled={selectedQSMIds.has(qsm.id)}>
               {/* QSM3D subtracts displayOffset in its own float64 vertex build
                   (recovers precision), so its group stays at the origin. The
                   leaves mesh is built at world coords, so it gets the offset via
@@ -21294,6 +21326,7 @@ export default function PointCloudViewer({
                   />
                 </group>
               )}
+              </OutlineSelect>
             </group>
           );
         })}
@@ -22192,7 +22225,7 @@ export default function PointCloudViewer({
             composite a uniform-width silhouette outline of the selected meshes.
             When nothing is selected it just renders the scene and returns. */}
         <JFAOutline
-          active={selectedMeshIds.size > 0 || (trajectoryEditor?.selectedIndex != null)}
+          active={selectedMeshIds.size > 0 || selectedQSMIds.size > 0 || (trajectoryEditor?.selectedIndex != null)}
           color="#a3e635"
           width={4}
         />

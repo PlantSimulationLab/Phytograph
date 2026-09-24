@@ -8,6 +8,7 @@ import {
 } from '../../../lib/qsmTube';
 import type { ShootPolyline as PlainShootPolyline } from '../../../lib/qsmTube';
 import { useImageTexture } from './useImageTexture';
+import { buildBoundsTree, freeBoundsTree } from '../../../lib/bvhRaycast';
 import { RANK_COLOR_HEXES, rankColorLinear, shootColorRgb } from '../../../lib/qsmColors';
 import type { QSMColorMode } from '../../../lib/qsmColors';
 
@@ -341,7 +342,14 @@ export function QSM3D({
     return mat;
   }, [opacity, colorMode, textured, texture]);
 
-  useEffect(() => () => geometry?.dispose(), [geometry]);
+  // Build the picking BVH in the same effect that frees it (StrictMode-safe; see
+  // TriangleMesh). QSMs are viewport click-to-select targets, and a dense QSM is
+  // tens of thousands of tube triangles to brute-force on every click.
+  useEffect(() => {
+    if (!geometry) return;
+    buildBoundsTree(geometry);
+    return () => { freeBoundsTree(geometry); geometry.dispose(); };
+  }, [geometry]);
   useEffect(() => () => material.dispose(), [material]);
 
   if (!geometry) return null;
