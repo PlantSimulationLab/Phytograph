@@ -6041,6 +6041,7 @@ export default function PointCloudViewer({
       // per-tile replay. Stroke ids are unique and ordered, so this is enough.
       key: `${palette.id}|${strokeList.map((s) => s.strokeId).join(',')}`,
       unlabeledIndex,
+      valueToIndex,
     };
   }, [buildRegionPredicate]);
 

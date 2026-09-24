@@ -56,8 +56,14 @@ function lowX(toIndex: number, fromIndices: Set<number> | null = null): LabelStr
   return { predicate: (x) => x < 0.5, aabb: null, toIndex, fromIndices };
 }
 
-function state(strokes: LabelStrokeRender[], key = 'k1', unlabeledIndex = 0): LabelOverlayState {
-  return { strokes, key, unlabeledIndex };
+/** Palette {0, 64, 65}: gapped values, so a value/index mix-up cannot hide. */
+const GAPPED = new Map([[0, 0], [64, 1], [65, 2]]);
+
+function state(
+  strokes: LabelStrokeRender[], key = 'k1', unlabeledIndex = 0,
+  valueToIndex: ReadonlyMap<number, number> = GAPPED,
+): LabelOverlayState {
+  return { strokes, key, unlabeledIndex, valueToIndex };
 }
 
 function labels(geom: any): number[] {
@@ -152,11 +158,26 @@ describe('applyStrokesToGeometry', () => {
   it('starts from committed labels when the octree carries them', () => {
     // After a commit rebuild the baked column is the baseline, so previously
     // saved work does not vanish while new strokes are pending.
+    // The octree holds class VALUES; the buffer holds palette INDICES.
     const geom = makeGeometry([[0, 0, 0], [1, 0, 0]]);
-    applyStrokesToGeometry(geom, identity, undefined, [8, 8], state([]));
-    expect(labels(geom)).toEqual([8, 8]);
-    applyStrokesToGeometry(geom, identity, undefined, [8, 8], state([lowX(3)]));
-    expect(labels(geom)).toEqual([3, 8]);
+    applyStrokesToGeometry(geom, identity, undefined, [64, 65], state([]));
+    expect(labels(geom)).toEqual([1, 2]);
+    applyStrokesToGeometry(geom, identity, undefined, [64, 65], state([lowX(2)]));
+    expect(labels(geom)).toEqual([2, 2]);
+  });
+
+  it('a class value the palette lacks reads as unlabelled, and float noise rounds', () => {
+    const geom = makeGeometry([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
+    applyStrokesToGeometry(geom, identity, undefined, [7, 64.00001, 63.99999], state([]));
+    expect(labels(geom)).toEqual([0, 1, 1]);
+  });
+
+  it('the From gate matches committed points by their class, not their raw value', () => {
+    // Gate on class 64 (index 1): only the committed-64 point may be repainted.
+    const geom = makeGeometry([[0, 0, 0], [0.1, 0, 0]]);
+    applyStrokesToGeometry(geom, identity, undefined, [64, 0],
+      state([lowX(2, new Set([1]))]));
+    expect(labels(geom)).toEqual([2, 0]);
   });
 
   it('ignores a committed array whose length does not match the tile', () => {
@@ -290,11 +311,11 @@ describe('applyLabelOverlayToVisibleNodes', () => {
 
   it('starts a post-commit tile from the octree\'s own committed column', () => {
     const geom = makeGeometry([[0, 0, 0], [1, 0, 0]], {
-      manual_class: new THREE.BufferAttribute(new Float32Array([4, 4]), 1),
+      manual_class: new THREE.BufferAttribute(new Float32Array([65, 0]), 1),
     });
     const octree = makeOctree([makeNode(geom)]);
     applyLabelOverlayToVisibleNodes(octree, undefined, state([]), 'manual_class');
-    expect(labels(geom)).toEqual([4, 4]);
+    expect(labels(geom)).toEqual([2, 0]);
   });
 
   it('clears the overlay from every tile', () => {

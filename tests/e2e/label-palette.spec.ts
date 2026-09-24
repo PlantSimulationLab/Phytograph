@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
@@ -446,4 +446,99 @@ test('a user class (64+) survives a LAS export in the classification byte', asyn
   expect([6, 7]).toContain(format);
   expect(classes).toHaveLength(60);
   expect(classes.every((c) => c === value)).toBe(true);
+});
+
+/**
+ * The colour each of the fixture's points is DRAWN in, read from a screenshot
+ * at the point's own projected position (so the label panel's and the legend's
+ * swatches of the same colours cannot be counted). Points under the label panel
+ * are skipped. Returns how many points read as magenta and as cyan.
+ */
+async function pointHues(page: LaunchedApp['page']) {
+  const pts = readFileSync(TINY, 'utf8').split('\n')
+    .filter((l) => l.trim() && !l.startsWith('#'))
+    .map((l) => l.trim().split(/\s+/).slice(0, 3).map(Number) as [number, number, number]);
+  const canvas = page.locator('canvas').first();
+  const box = (await canvas.boundingBox())!;
+  const png = await canvas.screenshot();
+  return page.evaluate(async ({ src, box, pts }) => {
+    const img = new Image();
+    await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(); img.src = src; });
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const ctx = c.getContext('2d')!;
+    ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    const sx = c.width / box.width; const sy = c.height / box.height;
+    const panel = document.querySelector('[data-testid="label-panel"]')?.getBoundingClientRect();
+    let magenta = 0; let cyan = 0;
+    for (const w of pts) {
+      const p = (window as any).__worldToScreen(w);
+      if (!p.visible) continue;
+      if (panel && p.x >= panel.left - 4 && p.x <= panel.right + 4
+          && p.y >= panel.top - 4 && p.y <= panel.bottom + 4) continue;
+      const cx = Math.round((p.x - box.x) * sx); const cy = Math.round((p.y - box.y) * sy);
+      let m = false; let cy_ = false;
+      for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+        const x = cx + dx; const y = cy + dy;
+        if (x < 0 || y < 0 || x >= c.width || y >= c.height) continue;
+        const i = (y * c.width + x) * 4;
+        const [r, g, b] = [d[i], d[i + 1], d[i + 2]];
+        if (r > 120 && b > 120 && g < 0.5 * Math.min(r, b)) m = true;
+        if (g > 120 && b > 120 && r < 0.5 * Math.min(g, b)) cy_ = true;
+      }
+      if (m) magenta++;
+      if (cy_) cyan++;
+    }
+    return { magenta, cyan };
+  }, { src: `data:image/png;base64,${png.toString('base64')}`, box, pts });
+}
+
+test('committed labels keep their colour when the class numbers have gaps', async () => {
+  // The overlay's buffer holds palette POSITIONS (0, 1, 2…) but a commit's
+  // octree holds class VALUES (0, 64, 65). Copied straight in, a committed 64
+  // was drawn as position 64 — past the end of a 3-class gradient, so as the
+  // LAST class's colour. Painted as 64 (magenta) it must stay magenta, not
+  // turn into 65's cyan.
+  const { page, panel } = await openLabelTool();
+  const editor = await openEditor(page);
+  await page.getByTestId('palette-add-class').click();
+  await page.getByTestId('palette-add-class').click();
+  const rows = page.getByTestId('palette-class-row');
+  const n = await rows.count();
+  const r64 = rows.nth(n - 2); const r65 = rows.nth(n - 1);
+  await expect(r64).toHaveAttribute('data-class-value', '64');
+  await expect(r65).toHaveAttribute('data-class-value', '65');
+  await r64.getByTestId('palette-class-label').fill('Magenta');
+  await r64.getByTestId('palette-class-color').fill('#ff00ff');
+  await r65.getByTestId('palette-class-label').fill('Cyan');
+  await r65.getByTestId('palette-class-color').fill('#00ffff');
+  // Only {0, 64, 65}: remove the preset's own classes so the palette is gapped.
+  for (;;) {
+    const values = await rows.evaluateAll(
+      (els) => els.map((e) => Number(e.getAttribute('data-class-value'))));
+    const i = values.findIndex((v) => v !== 0 && v !== 64 && v !== 65);
+    if (i < 0) break;
+    await rows.nth(i).getByTestId('palette-class-remove').click();
+  }
+  await page.getByTestId('palette-save').click();
+  await expect(editor).toHaveCount(0);
+
+  await panel.getByTestId('label-class-64').click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))['64'], { timeout: 30_000 }).toBe(60);
+  // Before the commit the overlay draws the stroke itself: magenta.
+  await expect.poll(async () => (await pointHues(page)).magenta, { timeout: 15_000 })
+    .toBeGreaterThan(40);
+
+  await page.getByTestId('label-commit').click();
+  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
+  // `baking` clears only once the rebuilt octree (which carries the column) is
+  // on screen, so from here the overlay's baseline is the committed column.
+  await expect(panel).toHaveAttribute('data-label-baking', 'false', { timeout: 90_000 });
+  // After it, the overlay draws the COMMITTED column: still magenta, no cyan.
+  await expect.poll(async () => {
+    const h = await pointHues(page);
+    return h.magenta > 40 && h.cyan === 0;
+  }, { timeout: 20_000 }).toBe(true);
 });

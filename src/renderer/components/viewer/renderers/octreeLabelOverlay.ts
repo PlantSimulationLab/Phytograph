@@ -78,6 +78,15 @@ export interface LabelOverlayState {
   key: string;
   /** Index written where nothing has been painted (normally 0/Unclassified). */
   unlabeledIndex: number;
+  /**
+   * Class VALUE -> palette INDEX, for the committed baseline. The octree stores
+   * real class values (0, 64, 65…) while this buffer holds palette positions
+   * (0, 1, 2…); copying values straight in painted a committed 64 as whatever
+   * sat at position 64 (or off the end of the gradient), and made the From gate
+   * compare positions with values. A value the palette lacks reads as
+   * unlabelled.
+   */
+  valueToIndex: ReadonlyMap<number, number>;
 }
 
 /**
@@ -128,9 +137,21 @@ export function applyStrokesToGeometry(
   const out = attr.array as Float32Array;
   const count = position.count;
 
-  // Reset to the committed baseline (or unlabelled) before replaying.
+  // Reset to the committed baseline (or unlabelled) before replaying, in
+  // palette INDEX space like everything else in this buffer. Class values come
+  // in runs (the octree groups points spatially), so remember the last lookup.
   if (baseLabels && baseLabels.length === count) {
-    for (let i = 0; i < count; i++) out[i] = baseLabels[i];
+    const map = state.valueToIndex;
+    let lastValue = NaN;
+    let lastIndex = state.unlabeledIndex;
+    for (let i = 0; i < count; i++) {
+      const value = Math.round(baseLabels[i]);
+      if (value !== lastValue) {
+        lastValue = value;
+        lastIndex = map.get(value) ?? state.unlabeledIndex;
+      }
+      out[i] = lastIndex;
+    }
   } else {
     out.fill(state.unlabeledIndex);
   }
