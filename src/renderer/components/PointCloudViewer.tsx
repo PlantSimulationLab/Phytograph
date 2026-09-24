@@ -20788,10 +20788,19 @@ export default function PointCloudViewer({
           // The user's own colour choice is SUSPENDED, not overwritten — closing
           // the tool restores it, because this is a render-time override rather
           // than a write to the cloud's stored mode.
+          //
+          // Any cloud CARRYING an overlay gets it, not only the tool's target:
+          // a closed panel's uncommitted strokes and a commit still rebuilding
+          // are overlays on a cloud the tool is not open on, and under the
+          // user's own colour mode they were uploaded and never drawn, so the
+          // labels looked undone the moment the panel closed.
           const isLabelTarget = labelTargetCloud?.id === cloud.id;
+          const overlaySlug = labelOverlayByCloud.get(cloud.id)?.slug;
           const { mode: cloudColorMode, field: cloudScalarField } = isLabelTarget
             ? { mode: 'scalar' as const, field: labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE }
-            : rawColorMode;
+            : overlaySlug
+              ? { mode: 'scalar' as const, field: overlaySlug }
+              : rawColorMode;
           // Keep the crop preview (hidden to-be-cropped points) alive while
           // the apply's backend round-trip is in flight. handleApplyCrop
           // flips editMode to 'none' immediately (to hide the box handles +

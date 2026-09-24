@@ -8,6 +8,7 @@ import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 import { stubSaveDialog } from './helpers/stubSaveDialog';
 import { readLasClasses } from './helpers/lasClasses';
+import { fixturePoints, pointsDrawnIn } from './helpers/pointColors';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
 const TINY_OFFSET = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-offset.xyz');
@@ -485,6 +486,9 @@ test('the labels stay on screen when the tool is closed mid-bake', async () => {
   // looking at a cloud with their work apparently undone, for the length of a
   // PotreeConverter run.
   const { page, panel } = await openLabelTool();
+  const active = await panel.getAttribute('data-active-class');
+  const colour = (await page.getByTestId(`label-class-${active}`).getAttribute('data-color'))!;
+  const pts = fixturePoints(TINY);
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
 
@@ -492,6 +496,9 @@ test('the labels stay on screen when the tool is closed mid-bake', async () => {
   await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
   await panel.getByRole('button', { name: 'Close' }).click();
   await expect(panel).toHaveCount(0);
+  // The COLOUR on screen, not the overlay's own stat, which is refreshed only
+  // while it draws and so read "60" after the paint had already gone.
+  expect((await pointsDrawnIn(page, pts, colour)).matched).toBeGreaterThan(30);
 
   // With the panel gone there is no `data-label-baking` to watch, so the
   // invariant is stated over the two things that can legitimately be drawing
@@ -819,4 +826,30 @@ test('with two clouds selected the Label button says why it will not open', asyn
   await expect(button).toBeEnabled();
   await button.click();
   await expect(page.getByTestId('label-panel')).toBeVisible();
+});
+
+test('uncommitted strokes stay on screen when the panel is closed', async () => {
+  // They are already in the session (export and every tool read them), so
+  // closing the panel must not make them look undone. Read the COLOUR the
+  // points are drawn in: the overlay's own published stat is refreshed only
+  // while it draws, so it would read the same whether or not the paint stayed.
+  const { page, panel } = await openLabelTool();
+  const active = await panel.getAttribute('data-active-class');
+  const colour = (await page.getByTestId(`label-class-${active}`).getAttribute('data-color'))!;
+  const pts = fixturePoints(TINY);
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+  await expect.poll(async () => (await pointsDrawnIn(page, pts, colour)).matched,
+    { timeout: 15_000 }).toBeGreaterThan(30);
+
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  await page.waitForTimeout(1000);
+  const after = await pointsDrawnIn(page, pts, colour);
+  expect(after.sampled).toBeGreaterThan(40);
+  expect(after.matched).toBeGreaterThan(30);
+
+  await page.getByTestId('tool-label').click();
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+  await expect(page.getByTestId('label-undo')).toBeEnabled();
 });
