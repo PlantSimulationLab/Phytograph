@@ -12,7 +12,10 @@ function plane(y: number): THREE.Points {
 }
 
 /** An "octree" whose GPU pick misses (the sparse-cloud case), holding `tiles`. */
-function octreeOf(tiles: THREE.Object3D[], pick = vi.fn(() => null)): PickableOctree {
+type Pick = PickableOctree['pick'];
+function octreeOf(
+  tiles: THREE.Object3D[], pick = vi.fn<Pick>(() => null),
+): PickableOctree {
   const g = new THREE.Group() as unknown as PickableOctree;
   tiles.forEach((t) => g.add(t));
   (g as any).pick = pick;
@@ -30,7 +33,7 @@ const args = (octree: PickableOctree | null) => ({
 
 describe('brushAnchorAt', () => {
   it('asks the GPU pick for visible points only, and uses its hit', () => {
-    const pick = vi.fn(() => ({ position: { x: 0, y: 3, z: 0 } }));
+    const pick = vi.fn<Pick>(() => ({ position: { x: 0, y: 3, z: 0 } }));
     const hit = brushAnchorAt(args(octreeOf([plane(0)], pick)));
     expect(pick.mock.calls[0][3]).toMatchObject({ pickOutsideClipRegion: false });
     expect(hit?.y).toBe(3);
