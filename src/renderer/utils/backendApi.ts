@@ -4863,28 +4863,23 @@ export async function resetCloudLabelEdits(
 export async function commitCloudLabels(
   sessionId: string,
   slug?: string,
+  options?: {
+    // Cancellable like bake: the refresh queue's Cancel aborts the fetch and
+    // POSTs /api/cancel/{run_id}, which kills the PotreeConverter child.
+    signal?: AbortSignal;
+    onRunId?: (runId: string) => void;
+  },
 ): Promise<OctreeMetadata & { slug: string; class_counts: Record<string, number> }> {
-  const baseUrl = getBackendUrl();
-  const controller = new AbortController();
-  const timeoutId = abortOnTimeout(controller, 600000, '/api/cloud/session/commit_labels');
   try {
-    const response = await fetch(
-      `${baseUrl}/api/cloud/session/${sessionId}/commit_labels`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(slug ? { slug } : {}),
-        signal: controller.signal,
-      },
+    return await fetchJsonWithProgress(
+      `/api/cloud/session/${sessionId}/commit_labels`,
+      slug ? { slug } : {},
+      options?.signal,
+      600000,
+      undefined,
+      options?.onRunId,
     );
-    clearTimeout(timeoutId);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
-    }
-    return await response.json();
   } catch (error) {
-    clearTimeout(timeoutId);
     console.error('commit_cloud_labels failed:', error);
     throw error;
   }

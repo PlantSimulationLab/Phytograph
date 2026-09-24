@@ -3987,12 +3987,23 @@ export default function PointCloudViewer({
     // (survivors and every column), so the bake that follows costs a metadata
     // read rather than a second converter run — while still doing the
     // delete-stack bookkeeping below, which commit_labels knows nothing about.
+    // One abort for the whole run, created BEFORE the label commit so the pill's
+    // Cancel stops the commit's converter too (it used to reach only the bake).
+    const abort = new AbortController();
+    octreeRefreshAbortRef.current = abort;
+    octreeRefreshRunIdRef.current = null;
+    const onRunId = (runId: string) => { octreeRefreshRunIdRef.current = runId; };
     if (reason.labelSlug) {
       try {
-        await commitCloudLabels(sessionId, reason.labelSlug);
+        await commitCloudLabels(sessionId, reason.labelSlug, { signal: abort.signal, onRunId });
       } catch (err) {
+        if (octreeRefreshAbortRef.current === abort) {
+          octreeRefreshAbortRef.current = null;
+          octreeRefreshRunIdRef.current = null;
+        }
         // Flag the hold rather than dropping it: the strokes are still the only
         // painted copy on screen, and the user needs the Commit button back.
+        // Same for a cancel, which is not a failure and so says nothing.
         setLabelCommitHolds((prev) => {
           const hold = prev.get(cloudId);
           if (!hold || hold.seq !== reason.labelSeq) return prev;
@@ -4000,18 +4011,19 @@ export default function PointCloudViewer({
           next.set(cloudId, { ...hold, failed: true });
           return next;
         });
-        showToast({
-          title: describeBackendError(err, 'Commit labels').message,
-          message: 'The labels are still on the cloud — commit again to bake them in.',
-          type: 'error',
-        });
+        const cancelled = (err instanceof DOMException && err.name === 'AbortError')
+          || err instanceof ScanCancelledError;
+        if (!cancelled) {
+          showToast({
+            title: describeBackendError(err, 'Commit labels').message,
+            message: 'The labels are still on the cloud — commit again to bake them in.',
+            type: 'error',
+          });
+        }
         throw err;
       }
     }
 
-    const abort = new AbortController();
-    octreeRefreshAbortRef.current = abort;
-    octreeRefreshRunIdRef.current = null;
     let baked;
     try {
       // `compact: false`: a display refresh must not delete rows. LAD restores
@@ -4021,7 +4033,7 @@ export default function PointCloudViewer({
       baked = await bakeCloudSession(sessionId, {
         compact: false,
         signal: abort.signal,
-        onRunId: (runId) => { octreeRefreshRunIdRef.current = runId; },
+        onRunId,
       });
     } finally {
       if (octreeRefreshAbortRef.current === abort) {

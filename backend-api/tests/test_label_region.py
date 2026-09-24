@@ -413,7 +413,7 @@ def test_commit_labels_rebuilds_and_exposes_the_column(client, cache_root, grid_
 
     res = client.post(f"/api/cloud/session/{sid}/commit_labels", json={})
     assert res.status_code == 200, res.text
-    body = res.json()
+    body = decode_streamed_json(res.content)
     assert body["cache_id"] != before, "commit should rebuild the octree"
     # The label column reaches the octree as a colourable attribute.
     assert any(a.get("name") == SLUG for a in body.get("attributes", []))
@@ -894,7 +894,7 @@ def test_an_edit_during_a_commit_build_leaves_the_octree_stale(
     release.set()
     t.join(60)
     assert result["res"].status_code == 200, result["res"].text
-    committed = result["res"].json()
+    committed = decode_streamed_json(result["res"].content)
     assert committed["octree_stale"] is True
     monkeypatch.setattr(main, "_build_octree_from_las", real_build)
 
@@ -1000,3 +1000,44 @@ def test_class_range_is_per_column(client, cache_root, grid_xyz, slug, cls, ok):
     assert (res.status_code == 200) == ok, res.text
     if ok:
         assert float(main._cloud_sessions[sid].extras[slug].max()) == cls
+
+
+def test_commit_labels_is_cancellable_and_leaves_the_octree_alone(
+    client, cache_root, grid_xyz, monkeypatch,
+):
+    """The renderer runs a label commit in its background refresh queue, whose
+    Cancel stopped the bake after it but not the commit's own converter run:
+    the route minted no run_id and passed no cancel event down. Now the route
+    streams a run_id, the converter gets that run's live event, and a cancelled
+    commit claims nothing: the session keeps the octree it had."""
+    import json as _json
+    import queue
+    import threading
+
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    _paint(client, sid, [_stroke(BOX_BIG, 64, "s1")])
+    before = sess.octree_cache_id
+
+    # 1. The streamed route names its run.
+    raw = client.post(f"/api/cloud/session/{sid}/commit_labels", json={}).content
+    assert b'"run_id"' in raw[:raw.index(b'{"session_id"')]
+    assert decode_streamed_json(raw)["cache_id"]
+
+    # 2. The converter polls THIS run's event, and a cancel stops the commit.
+    _paint(client, sid, [_stroke(BOX_SMALL, 65, "s2")])
+    current = sess.octree_cache_id
+    seen = {}
+
+    def cancelled_converter(input_las, out_dir, cancel_event=None, poll=0.2):
+        seen["event"] = cancel_event
+        raise main.ScanCancelled()
+
+    monkeypatch.setattr(main, "_run_potree_converter", cancelled_converter)
+    run_id, cancel_event = main._new_cancel_token()
+    reporter = main._ProgressReporter(queue.Queue(), cancel_event)
+    with pytest.raises(main.ScanCancelled):
+        main._do_commit_labels(sess, sid, SLUG, reporter)
+    assert seen["event"] is cancel_event, "the converter got no live cancel event"
+    assert sess.octree_cache_id == current, "a cancelled commit claimed an octree"
+    assert current != before

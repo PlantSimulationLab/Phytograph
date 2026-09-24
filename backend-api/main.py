@@ -35486,8 +35486,36 @@ class CommitLabelsRequest(BaseModel):
     slug: str = MANUAL_CLASS_SLUG
 
 
+def _do_commit_labels(sess: "CloudSession", session_id: str, slug: str,
+                      progress=None) -> dict:
+    """Worker for POST .../commit_labels — see the endpoint docstring.
+
+    The rebuild is handed the run's cancel event, so `/api/cancel/{run_id}`
+    SIGKILLs the PotreeConverter child. A cancel raises out of here before
+    anything is claimed: `_session_rebuild` only touches the session after the
+    converter returns, so the session keeps its current octree."""
+    cancel_event = getattr(progress, "cancel_event", None)
+    # _session_rebuild takes the lock itself (and must not be called holding it —
+    # PotreeConverter is slow).
+    cache_key, cache_dir, meta = _session_rebuild(
+        sess, progress=progress, cancel_event=cancel_event)
+    with _cloud_session_lock:
+        editable = _session_editable_mask_locked(sess)
+        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
+    return {
+        "session_id": session_id,
+        "slug": slug,
+        "cache_id": cache_key,
+        "cache_dir": str(cache_dir),
+        "class_counts": class_counts,
+        "value_range": value_range,
+        **meta,
+    }
+
+
 @app.post("/api/cloud/session/{session_id}/commit_labels")
-def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
+def commit_cloud_labels(session_id: str, request: CommitLabelsRequest,
+                        http_request: Request):
     """Rebuild the derived octree so the label column is baked into octree.bin.
     The slow step (a PotreeConverter run).
 
@@ -35502,9 +35530,16 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
     "keep nothing"; with the older deltas still here that reverse-applied every
     committed stroke and the labels were lost. Dropping them here also frees the
     history's memory. Unlike `bake` it does NOT compact arrays or clear
-    deletions, and other columns' histories are untouched."""
+    deletions, and other columns' histories are untouched.
+
+    Streams PHP1 progress markers ahead of the JSON tail and is **cancellable**
+    via `/api/cancel/{run_id}`, like `bake`: the renderer runs it in its
+    background refresh queue, whose Cancel used to stop the bake that follows it
+    but not this converter run."""
     sess = _get_cloud_session(session_id)
     slug = _validate_label_slug(request.slug)
+    # Validated before the stream opens: once the 200 + first chunk is out, an
+    # HTTPException can only reach the client as a truncated body.
     with _cloud_session_lock:
         if slug not in sess.extras:
             raise HTTPException(
@@ -35512,21 +35547,12 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
                 detail=f"session has no label column {slug!r} to commit",
             )
         sess.label_history.pop(slug, None)
-    # _session_rebuild takes the lock itself (and must not be called holding it —
-    # PotreeConverter is slow).
-    cache_key, cache_dir, meta = _session_rebuild(sess)
-    with _cloud_session_lock:
-        editable = _session_editable_mask_locked(sess)
-        class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
-    return {
-        "session_id": session_id,
-        "slug": slug,
-        "cache_id": cache_key,
-        "cache_dir": str(cache_dir),
-        "class_counts": class_counts,
-        "value_range": value_range,
-        **meta,
-    }
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(
+            _do_commit_labels(sess, session_id, slug, progress)
+        ).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 def _bake_display_stats_locked(sess: "CloudSession") -> dict:
