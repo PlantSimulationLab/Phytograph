@@ -355,13 +355,15 @@ test('a brand-new classification column can be created, painted and committed', 
   await expect.poll(async () => (await counts(panel))[String(qcValue)], { timeout: 30_000 })
     .toBe(60);
 
-  // Commit bakes it into the cloud, and the column becomes a real one the rest
-  // of the app can see — which is what makes it a CLASSIFICATION rather than a
-  // scratch buffer inside the tool.
-  await page.getByTestId('label-commit').click();
-  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 120_000 });
+  // Closing the panel bakes it into the cloud, and the column becomes a real
+  // one the rest of the app can see — which is what makes it a CLASSIFICATION
+  // rather than a scratch buffer inside the tool.
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  await page.getByTestId('tool-label').click();
+  await expect(panel).toBeVisible();
   await expect(page.getByTestId('label-column-select').locator('option[value="row_qc"]'))
-    .toHaveCount(1);
+    .toHaveCount(1, { timeout: 120_000 });
 
   // The original tree_instance column is untouched and still selectable.
   await expect(page.getByTestId('label-column-select').locator('option[value="tree_instance"]'))
@@ -533,12 +535,16 @@ test('committed labels keep their colour when the class numbers have gaps', asyn
   await expect.poll(async () => (await pointHues(page)).magenta, { timeout: 15_000 })
     .toBeGreaterThan(40);
 
-  await page.getByTestId('label-commit').click();
-  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
-  // `baking` clears only once the rebuilt octree (which carries the column) is
-  // on screen, so from here the overlay's baseline is the committed column.
-  await expect(panel).toHaveAttribute('data-label-baking', 'false', { timeout: 90_000 });
-  // After it, the overlay draws the COMMITTED column: still magenta, no cyan.
+  // Closing the panel bakes the column into a rebuilt octree (a new cache id).
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const before = await row.getAttribute('data-octree-cache-id');
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(row).not.toHaveAttribute('data-octree-cache-id', before ?? '', { timeout: 90_000 });
+  // Reopened, the overlay's baseline is the BAKED column, read from the octree:
+  // still magenta, no cyan.
+  await page.getByTestId('tool-label').click();
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0');
   await expect.poll(async () => {
     const h = await pointHues(page);
     return h.magenta > 40 && h.cyan === 0;

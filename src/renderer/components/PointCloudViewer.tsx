@@ -620,6 +620,13 @@ function rectCornersOf(a: { x: number; y: number }, b: { x: number; y: number })
   ];
 }
 
+/**
+ * How long without a label stroke before the column's display is rebuilt on
+ * its own (see `bakeLabelColumn`). Long enough that a pause to look around does
+ * not end the undo history the user is still working in.
+ */
+const LABEL_IDLE_BAKE_MS = 120_000;
+
 export default function PointCloudViewer({
   scans,
   selectedScanIds,
@@ -6201,82 +6208,113 @@ export default function PointCloudViewer({
   }, [labelUndoAvailable, handleUndo]);
 
   /**
-   * Commit: bake the label column into the octree so it colours without the
-   * client-side overlay.
+   * Bake one column's labels into its cloud's display octree, in the background.
    *
-   * Returns immediately. The bake is one PotreeConverter run — tens of seconds
-   * on a real scan, minutes on a big one — and it is the ONLY thing a commit
-   * does: the labels have been in the session since the stroke that painted
-   * them (`label_cloud_region` writes the in-RAM arrays), so export, filter,
-   * split and every compute path have been reading them all along. Nothing the
-   * user might do next needs to wait for a render cache to catch up, so the run
-   * goes to the same background queue a crop's rebuild uses, and the tool is
-   * free again on the next frame.
+   * There is no Commit button: the labels are in the session from the stroke
+   * that painted them (export and every compute path read them), so the only
+   * thing this changes is the display, and the app decides when. It runs when
+   * the label panel closes and after `LABEL_IDLE_BAKE_MS` without a stroke
+   * (see the effects below). The rebuild is one PotreeConverter run, handed to
+   * the same background queue a crop's rebuild uses.
    *
-   * What must NOT be dropped in the meantime is the overlay, and this is where
-   * that used to be enforced by simply not returning until the rebuild landed.
-   * The strokes move to `labelCommitHolds` instead, which keeps painting them
-   * — across closing the tool, switching cloud, everything — until the rebuild
-   * that carries them installs its octree. Clearing them here with nothing else
-   * drawing them would revert every painted point the instant the user clicked
-   * Save, which is the exact failure the old blocking version existed to avoid.
+   * What must NOT be dropped in the meantime is the overlay: the strokes move
+   * to `labelCommitHolds`, which keeps painting them (tool closed or not) until
+   * the rebuild that carries them is on screen.
+   *
+   * A bake is an UNDO BOUNDARY. The backend drops the column's label history
+   * when `commit_labels` arrives, so the baked strokes have no delta left to
+   * reverse, and Cmd+Z must not reach their `labelEdit` entries either.
+   *
+   * Waits for the cloud's queued strokes first: one still in flight would
+   * otherwise land after the boundary it belongs before.
    */
-  const handleLabelCommit = useCallback(() => {
-    const cloud = labelTargetCloud;
+  const labelPendingRef = useRef(labelPending);
+  labelPendingRef.current = labelPending;
+  const labelCommitHoldsRef = useRef(labelCommitHolds);
+  labelCommitHoldsRef.current = labelCommitHolds;
+  const bakeLabelColumn = useCallback(async (cloudId: string, slug: string) => {
+    await labelQueue.idle(cloudId);
+    const cloud = cloudsRef.current.find(c => c.id === cloudId);
     const octreeInfo = cloud?.data.octree;
     const sessionId = octreeInfo?.sessionId;
-    const palette = labelPaletteRef.current;
+    const entry = pendingFor(labelPendingRef.current, cloudId, slug);
+    const hold = labelCommitHoldsRef.current.get(cloudId);
+    const heldHere = hold && hold.palette.slug === slug ? hold : null;
+    // Something to bake: new strokes, an undo since the last bake, or a bake
+    // that failed (retried here, since there is no button to ask again).
+    if (entry.strokes.length === 0 && !entry.dirty && !heldHere?.failed) return;
+    const palette = entry.palette ?? heldHere?.palette
+      ?? (labelTargetCloudRef.current?.id === cloudId && labelPaletteRef.current?.slug === slug
+        ? labelPaletteRef.current : null);
     if (!cloud || !octreeInfo || !sessionId || !palette) return;
     const seq = ++labelCommitSeqRef.current;
     setLabelCommitHolds((prev) => {
       const next = new Map(prev);
-      const existing = prev.get(cloud.id);
-      // A re-commit while the first is still converting: keep both sets of
+      const existing = prev.get(cloudId);
+      // A re-bake while the first is still converting: keep both sets of
       // strokes on screen under the NEW seq, so the older run leaves them be.
-      const strokes = existing && existing.palette.slug === palette.slug
-        ? [...existing.strokes, ...labelStrokes]
-        : labelStrokes;
-      next.set(cloud.id, { palette, strokes, seq });
+      const strokes = existing && existing.palette.slug === slug
+        ? [...existing.strokes, ...entry.strokes]
+        : entry.strokes;
+      next.set(cloudId, { palette, strokes, seq });
       return next;
     });
-    // The tool is free again: no pending strokes, nothing to undo, and the
-    // column/cloud guards stop blocking.
-    //
-    // A commit is an UNDO BOUNDARY. The backend drops this column's label
-    // history when the commit arrives, so the committed strokes have no delta
-    // left to reverse; Cmd+Z must not be able to reach their `labelEdit`
-    // entries either. Before this, an undo after a commit resolved to "keep
-    // nothing" and rolled every committed label back.
-    updateLabelPending(cloud.id, palette.slug, (e) => ({ ...e, strokes: [], dirty: false }));
-    scene.labelBoundary(cloud.id, palette.slug);
+    updateLabelPending(cloudId, slug, (e) => ({ ...e, strokes: [], dirty: false }));
+    sceneRef.current.labelBoundary(cloudId, slug);
     // The per-cloud palette binding and the categorical registration describe
     // the COLUMN, which the session already has; only octree.bin is behind. Do
     // them now so the picker, the legend and the by-name resolvers are right
     // immediately rather than after the converter.
-    registerCategoricalSlug(palette.slug);
-    onUpdateCloud(cloud.id, {
+    registerCategoricalSlug(slug);
+    onUpdateCloud(cloudId, {
       ...cloud.data,
       octree: {
         ...octreeInfo,
-        classPalettes: { ...(octreeInfo.classPalettes ?? {}), [palette.slug]: palette },
+        classPalettes: { ...(octreeInfo.classPalettes ?? {}), [slug]: palette },
         categoricalAttributes: Array.from(
-          new Set([...(octreeInfo.categoricalAttributes ?? []), palette.slug]),
+          new Set([...(octreeInfo.categoricalAttributes ?? []), slug]),
         ),
       },
     });
-    octreeRefreshQueueRef.current?.enqueue(cloud.id, sessionId, {
-      labelSlug: palette.slug, labelSeq: seq,
-    });
-    // The one moment worth a word, and a transient one: it confirms the save
-    // and quietly accounts for the cloud re-streaming a little later when the
-    // rebuilt octree is swapped in. Nothing persistent follows it — see the
-    // pill below and LabelPanel's `baking`.
-    showToast({
-      title: 'Labels saved to the point cloud',
-      message: 'The display finishes rebuilding in the background.',
-      type: 'success',
-    });
-  }, [labelTargetCloud, labelStrokes, onUpdateCloud, scene, showToast, updateLabelPending]);
+    octreeRefreshQueueRef.current?.enqueue(cloudId, sessionId, { labelSlug: slug, labelSeq: seq });
+  }, [labelQueue, onUpdateCloud, updateLabelPending]);
+
+  /** Bake every column that needs it, on every cloud. */
+  const bakeAllLabels = useCallback(() => {
+    const todo = new Set<string>();
+    for (const [cloudId, bySlug] of labelPendingRef.current) {
+      for (const slug of bySlug.keys()) todo.add(`${cloudId}\u0000${slug}`);
+    }
+    for (const [cloudId, hold] of labelCommitHoldsRef.current) {
+      if (hold.failed) todo.add(`${cloudId}\u0000${hold.palette.slug}`);
+    }
+    for (const key of todo) {
+      const [cloudId, slug] = key.split('\u0000');
+      void bakeLabelColumn(cloudId, slug);
+    }
+  }, [bakeLabelColumn]);
+
+  // Closing the label panel bakes. Also covers the panel closing because
+  // another tool opened.
+  const labelPanelWasOpenRef = useRef(false);
+  useEffect(() => {
+    if (labelPanelWasOpenRef.current && !showLabelPanel) bakeAllLabels();
+    labelPanelWasOpenRef.current = showLabelPanel;
+  }, [showLabelPanel, bakeAllLabels]);
+
+  // ...and so does a pause in painting, so a long session is not left drawing
+  // hundreds of strokes through the overlay. Restarted by every change to the
+  // column's pending strokes.
+  useEffect(() => {
+    const cloudId = labelTargetCloud?.id;
+    const slug = labelPalette?.slug;
+    if (!cloudId || !slug) return;
+    if (labelPendingEntry.strokes.length === 0 && !labelPendingEntry.dirty) return;
+    // E2E shortens the wait through `__labelIdleBakeMs`; the behaviour is the same.
+    const ms = Number((window as any).__labelIdleBakeMs) || LABEL_IDLE_BAKE_MS;
+    const t = setTimeout(() => { void bakeLabelColumn(cloudId, slug); }, ms);
+    return () => clearTimeout(t);
+  }, [labelTargetCloud?.id, labelPalette?.slug, labelPendingEntry, bakeLabelColumn]);
 
   // Permanently apply (bake) a session cloud's pending deletions: rebuild the
   // octree from the survivors and clear the in-session mask + the accumulated
@@ -24890,7 +24928,6 @@ export default function PointCloudViewer({
           })}
           onSetFromAnyVisible={() => setLabelFromClasses(null)}
           onUndoStroke={handleLabelUndo}
-          onCommit={handleLabelCommit}
           // Two distinct controls: cycle through the built-in preset
           // vocabularies, or open the editor to build one of your own.
           columns={labelColumns}

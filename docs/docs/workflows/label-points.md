@@ -23,24 +23,22 @@ label anything you like.
    selected take the active class and recolour straight away.
 6. Repeat with different classes as needed. **Undo** (or `Cmd+Z`) removes
    the last stroke, and `Shift+Cmd+Z` puts it back.
-7. Click **Commit** to save the labels into the point cloud.
+7. Close the panel when you are done.
+
+The labels are on the point cloud from the moment you paint them: export and
+every other tool read them straight away. What catches up in the background is
+the cloud's display index, which is rebuilt when you close the panel, and also
+after two minutes without a stroke. There is nothing to press and nothing to
+wait for; the labels stay on screen throughout.
 
 **Undo** in the panel is the app's own Undo, so the two always agree. It is
 available when the most recent edit is a stroke on the column in front of you;
-if you cropped or moved something since, `Cmd+Z` undoes that first. Undo also
-stops at a Commit: it steps back through the strokes painted since, but never
-past the commit into the labels it saved.
+if you cropped or moved something since, `Cmd+Z` undoes that first. Undo stops
+where the display was last rebuilt: it steps back through the strokes painted
+since, but not into the ones before it.
 
 Each class row shows how many points currently carry it, so you can see the
 counts move as you work.
-
-!!! tip "Commit does not make you wait"
-    **Commit** returns immediately. Rebuilding the cloud's display index takes
-    a while on a large scan, so it finishes in the background with nothing for
-    you to watch — carry on painting, commit again, switch column, or close the
-    tool. The labels stay on screen throughout, and every other tool (export,
-    filters, the compute tools) can read them the moment you paint them, not
-    when the rebuild finishes.
 
 !!! tip "Press `L` to look around"
     While the lasso is armed every viewport click places a corner, so you can't
@@ -55,11 +53,10 @@ The panel states what the next stroke will do in words, e.g.
 *"Painting **Leaf** over **any visible class**"*. Read that line if a stroke
 does not do what you expect.
 
-!!! warning "Commit before you close"
-    Strokes are not saved until you press **Commit**. The panel shows a count of
-    unsaved strokes, and **File › New** warns you before discarding them.
-    Phytograph has no project file, so uncommitted labelling is lost when the app
-    closes — commit, then [export](import-export.md) if you want it on disk.
+!!! warning "Export to keep your labels"
+    Phytograph has no project file: labels live on the point cloud while the app
+    is open, and are lost when it closes unless you
+    [export](import-export.md) the cloud.
 
 ## Lasso or brush?
 
@@ -112,17 +109,16 @@ opens on that column with its real classes and counts already listed.
     splits one across two ids. Select the cloud, open **Label Points**, and it
     opens on **Tree instance** showing the trees the segmentation actually
     found. Pick the tree you want a region to belong to, lasso the points that
-    were assigned wrongly, and **Commit**. To split a merged tree, use **Edit →
+    were assigned wrongly, and close the panel. To split a merged tree, use **Edit →
     Add class** first: on a classification the cloud already carries, a new
     class continues that column's own numbering (Tree 3 after Tree 2) rather
     than starting a separate custom range.
 
 !!! warning "Re-running a tool replaces its column"
     Running a segmentation again (or recomputing a scalar field) rewrites its
-    whole column, so hand corrections on it, committed or not, are replaced by
-    the new result. Uncommitted strokes on that column are dropped and **Undo**
-    can no longer step back into them. [Export](import-export.md) first if you
-    want to keep the corrected version.
+    whole column, so your hand corrections on it are replaced by the new
+    result, and **Undo** can no longer step back into them.
+    [Export](import-export.md) first if you want to keep the corrected version.
 
 !!! note "Class 0 is always available"
     Every column offers **Unclassified** (class 0), even when the data has no
@@ -130,9 +126,8 @@ opens on that column with its real classes and counts already listed.
     take a classification *away* from points that should not have had one, and
     it reads 0 points until you use it.
 
-!!! note "Uncommitted strokes stay with their column and cloud"
-    Strokes you have not committed belong to the column and the cloud you
-    painted them on. Switching column, or selecting another cloud, starts that
+!!! note "Strokes stay with their column and cloud"
+    Strokes belong to the column and the cloud you painted them on. Switching column, or selecting another cloud, starts that
     one clean; switching back finds your strokes still pending, and **Undo**
     only ever undoes strokes on the column and cloud in front of you.
 
@@ -214,7 +209,7 @@ column this cloud already has; **Create classification** stays disabled until it
 is usable, so a name that could not be written is caught before you paint rather
 than after.
 
-Once you paint and **Commit**, it is a real column like any other: it appears in
+Once you paint it, it is a real column like any other: it appears in
 **Color by**, in the scalar filter, in split-by-class, and in an
 [export](import-export.md).
 
@@ -250,8 +245,7 @@ it while you work on the rest.
 
 Labels are stored in whichever column you picked: the hand-labelling column
 (`manual_class`) by default, the cloud's own classification when you chose one,
-or a column you created. Either way, once committed they behave like any other
-scalar:
+or a column you created. Either way they behave like any other scalar:
 
 - colour the cloud by them (they appear in the colour-by list with your class
   names and colours),
@@ -259,8 +253,7 @@ scalar:
 - split the cloud into one cloud per class,
 - [export](import-export.md) them to LAS/LAZ, where they are written both as
   their own named column and into the standard LAS classification byte (classes
-  0–255), so other LiDAR software sees them too. You do not need to commit
-  before exporting: export reads the labels you have painted.
+  0–255), so other LiDAR software sees them too.
 
 ## Work in a cross-section
 

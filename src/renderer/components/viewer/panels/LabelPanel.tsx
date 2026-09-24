@@ -1,4 +1,4 @@
-import { Brush, X, Undo2, Check, Eye, EyeOff, Palette, Shuffle, Lasso } from 'lucide-react';
+import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso } from 'lucide-react';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 import type { LabelableColumn } from '../../../lib/classPalettes';
@@ -44,27 +44,22 @@ export interface LabelPanelProps {
    * sloppy selection safe (overspray onto a class you didn't name is a no-op).
    */
   fromClasses: Set<number> | null;
-  /** Uncommitted strokes (the undo depth, and what a commit would bake). */
+  /** Strokes the display octree does not carry yet (baked when the panel
+   *  closes, or after a pause in painting). */
   pendingStrokes: number;
   /** Whether the next undo is a stroke on this cloud and column. */
   canUndo: boolean;
   /** True when the octree is behind the label column. */
   dirty: boolean;
   /**
-   * A commit for this column is baking in the background.
-   *
-   * Exposed as a data attribute for E2E and NOT drawn: the commit toast has
-   * already said the labels are saved, and a second, persistent "still
-   * working" line is what turns an unblocking change back into a wait. The
-   * user has nothing to decide and nothing to do.
+   * The display is rebuilding for this column in the background. Exposed as a
+   * data attribute for E2E and NOT drawn: the user has nothing to decide and
+   * nothing to wait for (the labels are already on the cloud).
    */
   baking?: boolean;
   /**
-   * The background bake failed. Actionable, unlike `baking`, and therefore
-   * shown: the labels are still on the cloud but the display index does not
-   * carry them, and the only way to ask again is the Commit button — which,
-   * with no strokes pending, would otherwise sit disabled with nothing
-   * explaining why it matters.
+   * The background rebuild failed. Shown, because the display is then behind
+   * the labels until the next attempt (when the panel closes).
    */
   bakeFailed?: boolean;
   /** True while the lasso is armed (clicks place vertices, view is frozen). */
@@ -83,7 +78,6 @@ export interface LabelPanelProps {
   onToggleFromClass: (value: number) => void;
   onSetFromAnyVisible: () => void;
   onUndoStroke: () => void;
-  onCommit: () => void;
   /** Selection primitive: lasso outline, or sphere brush. */
   tool: 'lasso' | 'brush';
   onToolChange: (t: 'lasso' | 'brush') => void;
@@ -138,7 +132,6 @@ export function LabelPanel({
   onToggleFromClass,
   onSetFromAnyVisible,
   onUndoStroke,
-  onCommit,
   tool,
   onToolChange,
   brushPx,
@@ -473,31 +466,12 @@ export function LabelPanel({
           <Undo2 className="w-3 h-3" />
           Undo
         </button>
-        <button
-          data-testid="label-commit"
-          onClick={onCommit}
-          // Deliberately NOT disabled while a bake is running. Strokes painted
-          // during one are new work, and the queue gives them their own run —
-          // blocking the button until the previous rebuild lands would put the
-          // wait back, one step later and with no way to see it ending.
-          disabled={!dirty || busy}
-          title="Bake the labels into the point cloud"
-          className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <Check className="w-3 h-3" />
-          {busy ? 'Saving…' : 'Commit'}
-        </button>
       </div>
-
-      {pendingStrokes > 0 && (
-        <div data-testid="label-pending-hint" className="mt-2 text-[10px] text-amber-400">
-          {pendingStrokes} unsaved {pendingStrokes === 1 ? 'stroke' : 'strokes'} — commit to keep them.
-        </div>
-      )}
 
       {bakeFailed && (
         <div data-testid="label-bake-failed-hint" className="mt-2 text-[10px] text-amber-400">
-          The labels are saved but the display could not be rebuilt — commit again.
+          The labels are on the cloud, but the display could not be rebuilt. It
+          tries again when you close this panel.
         </div>
       )}
     </div>

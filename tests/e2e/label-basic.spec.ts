@@ -95,6 +95,43 @@ async function counts(panel: ReturnType<LaunchedApp['page']['getByTestId']>) {
   return JSON.parse(raw ?? '{}') as Record<string, number>;
 }
 
+/**
+ * Close the label panel (which bakes its labels into the display octree) and
+ * wait for the rebuilt octree to take over, checking at every sample that the
+ * painted points are still DRAWN in `colour`: between the close and the swap
+ * the only thing drawing them is the overlay, and a gap there reads as the
+ * work being lost. Returns the samples taken.
+ */
+async function closeAndAwaitBake(page: LaunchedApp['page'], colour: string) {
+  const panel = page.getByTestId('label-panel');
+  const pts = fixturePoints(TINY);
+  // The rebuilt octree has a new cache id. Read per cloud, from its row: ids
+  // are content-addressed, so a global "any new id" check is fooled by an
+  // earlier test that built the same content.
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const before = await row.getAttribute('data-octree-cache-id');
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  const samples: Array<{ matched: number; landed: boolean; pill: boolean }> = [];
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    const landed = (await row.getAttribute('data-octree-cache-id')) !== before;
+    const drawn = await pointsDrawnIn(page, pts, colour, 40, '[data-testid="scalar-overlay"]');
+    const pill = await page.getByTestId('octree-refresh-running').count() > 0;
+    samples.push({ matched: drawn.matched, landed, pill });
+    expect(drawn.matched, `labels vanished at sample ${samples.length}`).toBeGreaterThan(30);
+    if (landed) break;
+    if (Date.now() > deadline) throw new Error('the background bake never landed');
+    await page.waitForTimeout(100);
+  }
+  return samples;
+}
+
+/** The colour the panel shows for class `value`. */
+async function classColour(page: LaunchedApp['page'], value: number | string) {
+  return (await page.getByTestId(`label-class-${value}`).getAttribute('data-color'))!;
+}
+
 test('a cloud with no classification of its own still opens on the hand-labelling column', async () => {
   // The no-regression guard for the column picker. `manual_class` does not
   // exist on a freshly imported cloud — the backend creates it on the first
@@ -355,170 +392,55 @@ test('the From-class gate makes a non-matching repaint a no-op', async () => {
   expect(await counts(panel)).toEqual(before);
 });
 
-test('commit bakes the labels into the cloud and clears the dirty flag', async () => {
+test('closing the panel bakes the labels, and they never leave the screen', async () => {
+  // There is no Commit button: the labels are in the session from the stroke,
+  // and closing the panel rebuilds the display octree in the background. The
+  // paint must never disappear on the way: until the rebuild lands the only
+  // thing drawing it is the overlay.
   const { page, panel } = await openLabelTool();
+  const active = await panel.getAttribute('data-active-class');
+  const colour = await classColour(page, active!);
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
-  await expect(panel).toHaveAttribute('data-label-dirty', 'true');
-  await expect.poll(() => page.evaluate(
-    () => (globalThis as any).__labelOverlay?.painted ?? -1), { timeout: 15_000 }).toBe(60);
 
-  // THE PAINT MUST NEVER DISAPPEAR. Between the click and the rebuild landing
-  // the octree still does not carry the column, so the only thing drawing the
-  // labels is the client-side overlay — which the commit clears the pending
-  // strokes out from under. A hold dropped one step too early shows up as a
-  // window where the overlay paints nothing, and by the time the rebuild lands
-  // the evidence is gone. Once it HAS landed the overlay reads the committed
-  // column back out of the octree as its baseline, so 60 stays 60 either side
-  // of the swap.
-  //
-  // So the window is sampled INSIDE the page, once per frame, from before the
-  // click. Polling from the test process can't see it reliably: a Playwright
-  // click takes ~2 s on the Linux CI runner, and a 60-point bake is over before
-  // the click returns — the old poll loop then read the frame the swap landed
-  // on (a -1) or never saw `data-label-baking="true"` at all.
-  await page.evaluate(() => {
-    const w = globalThis as any;
-    const samples: Array<{ painted: number; baking: string | null; pill: boolean }> = [];
-    w.__labelCommitSamples = samples;
-    w.__labelCommitSampling = true;
-    const tick = () => {
-      if (!w.__labelCommitSampling) return;
-      samples.push({
-        painted: w.__labelOverlay?.painted ?? -1,
-        baking: document.querySelector('[data-testid="label-panel"]')
-          ?.getAttribute('data-label-baking') ?? null,
-        pill: !!document.querySelector('[data-testid="octree-refresh-running"]'),
-      });
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  });
+  const samples = await closeAndAwaitBake(page, colour);
+  // Nothing on screen asked the user to wait: the rebuild is the app's business.
+  expect(samples.filter((x) => x.pill).length, 'a progress pill appeared').toBe(0);
 
-  await page.getByTestId('label-commit').click();
-
-  // The tool comes straight back: the bake is a display rebuild handed to the
-  // background queue, and the labels have been on the backend since the stroke
-  // itself. (This fixture is 60 points, so the timeout is a regression guard,
-  // not the proof — the wait this replaced was minutes on a real scan.)
-  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
+  // Reopening finds nothing pending (it is baked) and the labels as real data.
+  await page.getByTestId('tool-label').click();
   await expect(panel).toHaveAttribute('data-pending-strokes', '0');
-
-  // Wait for a sampled frame showing the bake running, then one showing it done.
-  await expect.poll(() => page.evaluate(() => {
-    const s = (globalThis as any).__labelCommitSamples as Array<{ baking: string | null }>;
-    const started = s.findIndex(x => x.baking === 'true');
-    return started >= 0 && s.slice(started).some(x => x.baking === 'false');
-  }), { message: 'the background bake never ran and finished', timeout: 90_000 }).toBe(true);
-  const samples = await page.evaluate(() => {
-    const w = globalThis as any;
-    w.__labelCommitSampling = false;
-    return w.__labelCommitSamples as Array<{ painted: number; baking: string | null; pill: boolean }>;
-  });
-  const baked = samples.filter(s => s.baking === 'true').length;
-  expect(baked, 'no sampled frame caught the bake running').toBeGreaterThan(0);
-  // Every frame, before, during and after the swap, drew all 60 labels.
-  const dropped = samples.filter(s => s.painted !== 60);
-  expect(dropped, `${dropped.length}/${samples.length} frames did not paint all 60 labels`
-    + ` (first: ${JSON.stringify(dropped[0])})`).toEqual([]);
-  // ...and nothing on screen asked the user to wait for it. A progress
-  // indicator here would offer no decision and no action — the labels are saved
-  // and the tool is free — so it would only re-create the wait this change
-  // removed. Sampled per frame, so the baking window is actually observed.
-  expect(samples.filter(s => s.pill).length, 'a progress pill appeared during the bake').toBe(0);
-
-  // The labels survived the rebuild as real data, and the cloud kept its points.
-  await expect(panel).toHaveAttribute('data-labelled-count', '60');
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
   const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
   await expect(row).toHaveAttribute('data-point-count', '60');
 });
 
-test('you can keep painting and commit again while a bake is still running', async () => {
-  // The instinct this guards against is the one that made Commit blocking in
-  // the first place: treating the background rebuild as something the user
-  // owes a wait to. Strokes painted during a bake are new work, and the queue
-  // gives them their own run — so the button must stay live. Disabling it
-  // "until the last one finishes" would put the wait back one step later, in
-  // the one place the user cannot see it ending.
+test('you can reopen and keep painting while a bake is still running', async () => {
+  // A bake runs in the background, so the tool must be free straight away:
+  // new strokes are new work and get their own rebuild, and the NEWER one wins.
   const { page, panel } = await openLabelTool();
   const first = Number(await panel.getAttribute('data-active-class'));
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
-
-  await page.getByTestId('label-commit').click();
-  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
-
-  // Straight back in: a different class over the same region, committed again
-  // without waiting for anything.
-  const rows = page.getByTestId('label-class-list').locator('[data-testid^="label-class-"]');
-  const n = await rows.count();
-  let second = -1;
-  for (let i = 0; i < n; i++) {
-    const v = Number((await rows.nth(i).getAttribute('data-testid'))!.replace('label-class-', ''));
-    if (v > 0 && v !== first) { second = v; break; }
-  }
-  expect(second).toBeGreaterThan(0);
-  await page.getByTestId(`label-class-${second}`).click();
-  await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-label-dirty', 'true', { timeout: 15_000 });
-  await expect(page.getByTestId('label-commit')).toBeEnabled();
-  await page.getByTestId('label-commit').click();
-  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
-
-  // Both bakes land, and the SECOND one wins — the repaint moved every point
-  // to the new class rather than the older rebuild resurrecting the first.
-  await expect(panel).toHaveAttribute('data-label-baking', 'false', { timeout: 90_000 });
-  const c = await counts(panel);
-  expect(c[String(second)]).toBe(60);
-  expect(c[String(first)] ?? 0).toBe(0);
-  // Polled: the swapped-in octree publishes its overlay count on its first
-  // frame, which on a slow software-GL renderer lands after data-label-baking
-  // flips. A drop to nothing is caught by the per-frame test above.
-  await expect.poll(() => page.evaluate(
-    () => (globalThis as any).__labelOverlay?.painted ?? -1), { timeout: 15_000 }).toBe(60);
-});
-
-test('the labels stay on screen when the tool is closed mid-bake', async () => {
-  // The case that makes the background bake load-bearing rather than a tidy-up.
-  // "Save and close" is the obvious thing to do with a finished classification,
-  // and the overlay that draws the labels used to belong to the OPEN tool — so
-  // closing the panel before the rebuild landed would have left the user
-  // looking at a cloud with their work apparently undone, for the length of a
-  // PotreeConverter run.
-  const { page, panel } = await openLabelTool();
-  const active = await panel.getAttribute('data-active-class');
-  const colour = (await page.getByTestId(`label-class-${active}`).getAttribute('data-color'))!;
-  const pts = fixturePoints(TINY);
-  await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
-
-  await page.getByTestId('label-commit').click();
-  await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
   await panel.getByRole('button', { name: 'Close' }).click();
   await expect(panel).toHaveCount(0);
-  // The COLOUR on screen, not the overlay's own stat, which is refreshed only
-  // while it draws and so read "60" after the paint had already gone.
-  expect((await pointsDrawnIn(page, pts, colour)).matched).toBeGreaterThan(30);
 
-  // With the panel gone there is no `data-label-baking` to watch, so the
-  // invariant is stated over the two things that can legitimately be drawing
-  // the labels: the overlay (still painting 60) BEFORE the swap, and the
-  // rebuilt octree coloured by the column AFTER it. Neither being true is the
-  // failure — that is the window where the work looks lost.
-  const legend = page.getByTestId('scalar-overlay');
-  const deadline = Date.now() + 90_000;
-  for (;;) {
-    const state = await page.evaluate(() => ({
-      painted: (globalThis as any).__labelOverlay?.painted ?? -1,
-      scalar: document.querySelector('[data-testid="scalar-overlay"]')
-        ?.getAttribute('data-active-scalar') ?? '',
-    }));
-    expect(state.painted === 60 || state.scalar === 'manual_class').toBe(true);
-    if (state.scalar === 'manual_class') break;
-    if (Date.now() > deadline) throw new Error('the background bake never landed');
-    await page.waitForTimeout(100);
-  }
-  await expect(legend).toHaveAttribute('data-active-scalar', 'manual_class');
+  // Straight back in: a different class over the same region.
+  await page.getByTestId('tool-label').click();
+  await expect(panel).toBeVisible();
+  const second = await otherClass(page, first);
+  await page.getByTestId(`label-class-${second}`).click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+
+  await closeAndAwaitBake(page, await classColour(page, second));
+
+  // Both bakes landed, and the second one won.
+  await page.getByTestId('tool-label').click();
+  await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+  expect((await counts(panel))[String(first)] ?? 0).toBe(0);
 });
 
 test('the lasso can be disarmed to orbit, by button and by L', async () => {
@@ -583,9 +505,6 @@ test('uncommitted strokes are flagged in the panel and before File > New', async
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
 
-  // The panel says so where the user is already looking.
-  await expect(page.getByTestId('label-pending-hint')).toBeVisible();
-
   // ...and File > New calls it out specifically, rather than relying on its
   // generic "this clears everything" line. Fire the same menu:command IPC the
   // native menu sends (see helpers/resetApp.ts).
@@ -616,7 +535,7 @@ async function otherClass(page: LaunchedApp['page'], exclude: number): Promise<n
 }
 
 for (const how of ['panel button', 'Cmd+Z'] as const) {
-  test(`undo after a commit keeps the committed labels (${how})`, async () => {
+  test(`undo after a bake keeps the baked labels (${how})`, async () => {
     // Commit cleared the renderer's strokes but the backend kept its history,
     // so the first undo after a commit resolved to "keep nothing" and reverse-
     // applied every delta: the committed labels vanished, from the display AND
@@ -627,8 +546,10 @@ for (const how of ['panel button', 'Cmd+Z'] as const) {
     await paintWholeViewport(page);
     await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
 
-    await page.getByTestId('label-commit').click();
-    await expect(panel).toHaveAttribute('data-label-dirty', 'false', { timeout: 10_000 });
+    // Closing the panel bakes, and a bake is an undo boundary.
+    await closeAndAwaitBake(page, await classColour(page, first));
+    await page.getByTestId('tool-label').click();
+    await expect(panel).toBeVisible();
 
     const second = await otherClass(page, first);
     await page.getByTestId(`label-class-${second}`).click();
@@ -828,28 +749,20 @@ test('with two clouds selected the Label button says why it will not open', asyn
   await expect(page.getByTestId('label-panel')).toBeVisible();
 });
 
-test('uncommitted strokes stay on screen when the panel is closed', async () => {
-  // They are already in the session (export and every tool read them), so
-  // closing the panel must not make them look undone. Read the COLOUR the
-  // points are drawn in: the overlay's own published stat is refreshed only
-  // while it draws, so it would read the same whether or not the paint stayed.
+
+test('a pause in painting bakes the column on its own', async () => {
+  // With the panel left open, the display still catches up: after a pause the
+  // column is rebuilt, the strokes stop being pending, and (a bake being an
+  // undo boundary) they can no longer be undone. The pause is shortened here.
   const { page, panel } = await openLabelTool();
-  const active = await panel.getAttribute('data-active-class');
-  const colour = (await page.getByTestId(`label-class-${active}`).getAttribute('data-color'))!;
-  const pts = fixturePoints(TINY);
-  await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
-  await expect.poll(async () => (await pointsDrawnIn(page, pts, colour)).matched,
-    { timeout: 15_000 }).toBeGreaterThan(30);
-
-  await panel.getByRole('button', { name: 'Close' }).click();
-  await expect(panel).toHaveCount(0);
-  await page.waitForTimeout(1000);
-  const after = await pointsDrawnIn(page, pts, colour);
-  expect(after.sampled).toBeGreaterThan(40);
-  expect(after.matched).toBeGreaterThan(30);
-
-  await page.getByTestId('tool-label').click();
-  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
-  await expect(page.getByTestId('label-undo')).toBeEnabled();
+  await page.evaluate(() => { (window as any).__labelIdleBakeMs = 1500; });
+  try {
+    await paintWholeViewport(page);
+    await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+    await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 30_000 });
+    await expect(page.getByTestId('label-undo')).toBeDisabled();
+    await expect(panel).toHaveAttribute('data-labelled-count', '60');
+  } finally {
+    await page.evaluate(() => { delete (window as any).__labelIdleBakeMs; });
+  }
 });
