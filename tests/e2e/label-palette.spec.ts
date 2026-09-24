@@ -224,9 +224,11 @@ test('saved palettes are reusable from the library', async () => {
 
 const TREE_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny-treeinstance.xyz');
 
-async function openLabelToolOnTreeCloud() {
+async function openLabelToolOnTreeCloud(
+  fixture = TREE_FIXTURE, name = 'tiny-treeinstance', points = 60,
+) {
   const { app, page } = session;
-  await importFiles(app, page, 'import-auto', TREE_FIXTURE);
+  await importFiles(app, page, 'import-auto', fixture);
 
   // Name the 4th column and mark it a Label, exactly as a user would — this is
   // what makes it `tree_instance` on the cloud rather than an anonymous scalar.
@@ -240,9 +242,9 @@ async function openLabelToolOnTreeCloud() {
   await page.getByTestId('import-wizard-name').last().fill('tree_instance');
   await completeImportWizard(page);
 
-  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny-treeinstance"]');
+  const row = page.locator(`[data-testid="scan-row"][data-scan-name="${name}"]`);
   await expect(row).toBeVisible({ timeout: 20_000 });
-  await expect(row).toHaveAttribute('data-point-count', '60');
+  await expect(row).toHaveAttribute('data-point-count', String(points));
 
   await page.waitForFunction(() => typeof (window as any).__orientToAxis === 'function');
   await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
@@ -573,4 +575,66 @@ test('tree ids above 255 can be added and painted, 300 then 301', async () => {
   await expect.poll(async () => (await counts(panel))['301'], { timeout: 30_000 }).toBe(60);
   expect((await counts(panel))['300'] ?? 0).toBe(0);
   await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
+});
+
+test('a hundred trees each draw in their own colour', async () => {
+  // potree-core bakes class colours into a 64-pixel, linearly filtered
+  // gradient. Past ~64 classes, neighbouring trees shared a pixel and drew as
+  // an averaged colour that belongs to neither. The fixture's 100 trees sit in
+  // a 10x10 grid; each must be drawn in the colour its class row shows.
+  const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'hundred-trees.xyz');
+  const { page, panel } = await openLabelToolOnTreeCloud(fixture, 'hundred-trees', 500);
+  await expect(panel).toHaveAttribute('data-label-slug', 'tree_instance');
+  await expect(page.getByTestId('label-class-100')).toBeVisible();
+  // A palette this size is still hard to read by eye, and the panel says so
+  // (a derived palette never passes through the editor, which used to be the
+  // only place the warning appeared).
+  await expect(page.getByTestId('label-palette-warning')).toContainText('101 classes');
+
+  const expected: Record<number, string> = {};
+  for (let k = 1; k <= 100; k++) {
+    expected[k] = (await page.getByTestId(`label-class-${k}`).getAttribute('data-color'))!;
+  }
+  const centres = Array.from({ length: 100 }, (_, k) =>
+    ({ id: k + 1, w: [(k % 10) * 0.3, 0, Math.floor(k / 10) * 0.3] as [number, number, number] }));
+
+  const canvas = page.locator('canvas').first();
+  const read = async () => {
+    const box = (await canvas.boundingBox())!;
+    const png = await canvas.screenshot();
+    return page.evaluate(async ({ src, box, centres, expected }) => {
+      const img = new Image();
+      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(); img.src = src; });
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      const sx = c.width / box.width; const sy = c.height / box.height;
+      const hex = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+      const panel = document.querySelector('[data-testid="label-panel"]')?.getBoundingClientRect();
+      let checked = 0; const wrong: number[] = [];
+      for (const { id, w } of centres) {
+        const p = (window as any).__worldToScreen(w);
+        if (!p.visible) continue;
+        if (panel && p.x >= panel.left - 6 && p.x <= panel.right + 6
+            && p.y >= panel.top - 6 && p.y <= panel.bottom + 6) continue;
+        const [er, eg, eb] = hex(expected[id]);
+        const cx = Math.round((p.x - box.x) * sx); const cy = Math.round((p.y - box.y) * sy);
+        let best = Infinity;
+        for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+          const i = ((cy + dy) * c.width + (cx + dx)) * 4;
+          best = Math.min(best, Math.hypot(d[i] - er, d[i + 1] - eg, d[i + 2] - eb));
+        }
+        checked++;
+        if (best > 40) wrong.push(id);
+      }
+      return { checked, wrong };
+    }, { src: `data:image/png;base64,${png.toString('base64')}`, box, centres, expected });
+  };
+
+  await expect.poll(async () => {
+    const r = await read();
+    return r.checked >= 60 && r.wrong.length === 0 ? 'ok' : JSON.stringify(r);
+  }, { timeout: 20_000 }).toBe('ok');
 });

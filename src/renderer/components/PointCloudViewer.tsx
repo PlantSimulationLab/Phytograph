@@ -124,7 +124,7 @@ import { CrossSectionPanel } from './viewer/panels/CrossSectionPanel';
 import {
   makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
   labelableColumnsFor, withPendingLabelColumn, derivePaletteForColumn, makeEmptyPalette,
-  type ClassPalette, type LabelableColumn, type PalettePreset,
+  validatePalette, type ClassPalette, type LabelableColumn, type PalettePreset,
 } from '../lib/classPalettes';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
 import { LabelPanel } from './viewer/panels/LabelPanel';
@@ -24821,6 +24821,9 @@ export default function PointCloudViewer({
         <LabelPanel
           classes={labelPalette.classes}
           paletteName={labelPalette.name}
+          // Size only: the per-class notes (reserved range…) belong to the editor.
+          paletteWarning={validatePalette(labelPalette)
+            .find((i) => i.level === 'warning' && i.value === undefined)?.message ?? null}
           activeClass={labelActiveClass}
           classCounts={labelClassCounts}
           visibleClasses={labelVisibleClasses}

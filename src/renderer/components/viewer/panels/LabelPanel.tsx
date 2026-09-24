@@ -29,6 +29,10 @@ export interface LabelPanelProps {
   /** Classes from the cloud's bound palette, in display order. */
   classes: ClassDef[];
   paletteName: string;
+  /** The palette's size warning (validatePalette), shown under its name. A
+   *  derived palette never passes through the editor, so this is the only
+   *  place a 300-class tree palette would say so. */
+  paletteWarning?: string | null;
   activeClass: number;
   /** value -> count of currently-labelled points, from the backend. */
   classCounts: Record<number, number>;
@@ -114,6 +118,7 @@ export interface LabelPanelProps {
 export function LabelPanel({
   classes,
   paletteName,
+  paletteWarning,
   activeClass,
   classCounts,
   visibleClasses,
@@ -347,6 +352,11 @@ export function LabelPanel({
           </button>
         </div>
       </div>
+      {paletteWarning && (
+        <p data-testid="label-palette-warning" className="-mt-1 mb-2 text-[10px] text-amber-400">
+          {paletteWarning}
+        </p>
+      )}
 
       {/* Class list. Clicking a row makes it the active class (1-9 do the same
           for the first nine); the eye toggles visibility; the dot toggles the
@@ -375,6 +385,7 @@ export function LabelPanel({
               data-visible={visible ? 'true' : 'false'}
               data-in-from={inFrom ? 'true' : 'false'}
               data-count={classCounts[c.value] ?? 0}
+              data-color={rgbToHex(c.color)}
               className={`flex items-center gap-1.5 px-1.5 py-1 text-[11px] cursor-pointer ${
                 active ? 'bg-blue-600/40' : 'hover:bg-neutral-700/60'
               }`}

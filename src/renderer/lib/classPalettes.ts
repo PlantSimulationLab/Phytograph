@@ -90,15 +90,20 @@ export const ASPRS_RESERVED_MAX = 63;
 export const USER_CLASS_MIN = 64;
 
 /**
- * The potree step gradient bakes into a 64-texel canvas
- * (`GRADIENT_TEXELS` in classification.ts), so classes packed closer than a
- * texel apart blend into each other on screen. The overlay works around this by
- * rendering a DENSE palette index rather than the raw class value, but a
- * palette this large is still hard to read, so warn.
+ * Each class renders in its own texel (lib/categoricalTexture), so no palette
+ * size blends colours any more; past this many classes the colours are still
+ * hard to tell apart by eye, so warn.
  */
 export const PALETTE_SOFT_MAX = 48;
-/** Hard ceiling, matching GENERIC_CATEGORICAL_MAX_CLASSES. */
+/** Hard ceiling for a class column, matching GENERIC_CATEGORICAL_MAX_CLASSES. */
 export const PALETTE_HARD_MAX = 256;
+/** An instance column numbers objects (a plot's trees), so its ceiling is the
+ *  class texture's width: beyond it two ids would share a texel. */
+export const INSTANCE_PALETTE_HARD_MAX = 16384;
+
+export function paletteHardMaxFor(slug: string): number {
+  return isInstanceColumnSlug(slug) ? INSTANCE_PALETTE_HARD_MAX : PALETTE_HARD_MAX;
+}
 
 /**
  * The slug rule, MIRRORED from `_LABEL_SLUG_RE` in backend-api/main.py.
@@ -167,10 +172,11 @@ export function validatePalette(palette: ClassPalette): PaletteIssue[] {
   if (classes.length === 0) {
     issues.push({ level: 'error', message: 'Palette needs at least one class.' });
   }
-  if (classes.length > PALETTE_HARD_MAX) {
+  const hardMax = paletteHardMaxFor(palette.slug);
+  if (classes.length > hardMax) {
     issues.push({
       level: 'error',
-      message: `Too many classes (${classes.length}); the maximum is ${PALETTE_HARD_MAX}.`,
+      message: `Too many classes (${classes.length}); the maximum is ${hardMax}.`,
     });
   } else if (classes.length > PALETTE_SOFT_MAX) {
     issues.push({
@@ -420,7 +426,7 @@ function humaniseSlug(slug: string): string {
 /** True when every observed value is an integer inside the column's class range. */
 function looksLikeClassValues(observed: readonly number[] | undefined, slug: string): boolean {
   if (!observed || observed.length === 0) return false;
-  if (observed.length > PALETTE_HARD_MAX) return false;
+  if (observed.length > paletteHardMaxFor(slug)) return false;
   const max = classValueMaxFor(slug);
   return observed.every((v) => Number.isInteger(v) && v >= CLASS_VALUE_MIN && v <= max);
 }

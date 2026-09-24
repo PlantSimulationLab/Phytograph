@@ -202,6 +202,11 @@ export function buildTreeInstanceSchemeFromValues(values: readonly number[]): Ca
 // neutral "Class N" labels (we have no domain names for an arbitrary field).
 // Guards the span so a pathological range can't allocate a huge class list.
 const GENERIC_CATEGORICAL_MAX_CLASSES = 256;
+// An `<name>_instance` column numbers objects, so it may hold far more; the cap
+// there is the class texture's width (lib/categoricalTexture).
+const INSTANCE_CATEGORICAL_MAX_CLASSES = 16384;
+const maxClassesFor = (attribute: string) => (
+  attribute.endsWith('_instance') ? INSTANCE_CATEGORICAL_MAX_CLASSES : GENERIC_CATEGORICAL_MAX_CLASSES);
 
 export function buildGenericCategoricalScheme(
   attribute: string,
@@ -209,7 +214,7 @@ export function buildGenericCategoricalScheme(
 ): CategoricalScheme {
   const lo = range ? Math.floor(range[0]) : 0;
   const hiRaw = range ? Math.ceil(range[1]) : 0;
-  const hi = Math.min(hiRaw, lo + GENERIC_CATEGORICAL_MAX_CLASSES - 1);
+  const hi = Math.min(hiRaw, lo + maxClassesFor(attribute) - 1);
   const classes: ClassDef[] = [];
   for (let v = lo; v <= hi; v++) {
     classes.push({
@@ -232,7 +237,7 @@ export function buildGenericCategoricalSchemeFromValues(
 ): CategoricalScheme {
   const vals = Array.from(new Set(values.map((v) => Math.round(v))))
     .sort((a, b) => a - b)
-    .slice(0, GENERIC_CATEGORICAL_MAX_CLASSES);
+    .slice(0, maxClassesFor(attribute));
   return {
     attribute,
     classes: vals.map((v) => ({
@@ -525,7 +530,7 @@ export function categoricalSchemeForCloud(
   return categoricalSchemeForRange(attribute, range, observed);
 }
 
-const UNKNOWN_CLASS_COLOR: RGB = [0.6, 0.6, 0.6];
+export const UNKNOWN_CLASS_COLOR: RGB = [0.6, 0.6, 0.6];
 
 // Map a (possibly non-integer, due to float32 round-trip) attribute value to
 // its class color. Rounds to the nearest integer class value; unknown values

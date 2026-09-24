@@ -3,7 +3,8 @@ import { useThree } from '@react-three/fiber';
 import { PointCloudOctree, PointColorType, PointSizeType, ClipMode, createClipBox } from 'potree-core';
 import * as THREE from 'three';
 import { ColormapName, sampleColormap } from '../../../lib/colormaps';
-import { categoricalSchemeForCloud, buildCategoricalGradientStops } from '../../../lib/classification';
+import { categoricalSchemeForCloud, buildCategoricalGradientStops, UNKNOWN_CLASS_COLOR } from '../../../lib/classification';
+import { categoricalTexels } from '../../../lib/categoricalTexture';
 import type { CloudFilters, PointCloudData } from '../../../lib/pointCloudTypes';
 import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC } from '../../../lib/octreeFilterSpec';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
@@ -405,7 +406,11 @@ export function OctreePointCloud({
   // crop preview is active would drop the ClipBox.
   const [materialVersion, setMaterialVersion] = useState(0);
   const manager = getPotreeManager();
-  const { scene } = useThree();
+  const { scene, gl } = useThree();
+  // The class-colour texture this cloud's material samples (see below); kept
+  // so a replacement or unmount frees the previous one.
+  const categoricalTexRef = useRef<THREE.DataTexture | null>(null);
+  useEffect(() => () => { categoricalTexRef.current?.dispose(); }, []);
 
   // Keep the latest onOctreeReady in a ref so the load effect (keyed on
   // cacheId) doesn't re-run when the parent passes a new callback identity.
@@ -969,6 +974,19 @@ export function OctreePointCloud({
       if (categorical && bandRange) {
         const stops = buildCategoricalGradientStops(categorical, [bandRange[0], bandRange[1]]);
         (m as any).gradient = stops.map(([t, [r, g, b]]) => [t, new THREE.Color(r, g, b)]);
+        // ...but SAMPLE our own texture. potree-core bakes those stops into a
+        // 64-pixel, linearly filtered canvas, so past ~64 classes neighbours
+        // shared a pixel and drew as one averaged colour (lib/categoricalTexture).
+        const { width, data } = categoricalTexels(
+          categorical, [bandRange[0], bandRange[1]], UNKNOWN_CLASS_COLOR,
+          gl.capabilities.maxTextureSize);
+        const tex = new THREE.DataTexture(data, width, 1, THREE.RGBAFormat);
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestFilter;
+        tex.needsUpdate = true;
+        (m as any).uniforms.gradient.value = tex;
+        categoricalTexRef.current?.dispose();
+        categoricalTexRef.current = tex;
       } else {
         const stopCount = 32;
         const gradient: Array<[number, THREE.Color]> = [];

@@ -663,6 +663,15 @@ describe('per-column class range', () => {
     expect(paletteErrors(tree([0, 300], 'manual_class')).map((i) => i.value)).toEqual([300]);
   });
 
+  it('an instance palette may hold more than 256 classes, with the size warning', () => {
+    const many = tree(Array.from({ length: 400 }, (_, i) => i));
+    expect(paletteErrors(many)).toEqual([]);
+    expect(validatePalette(many).some((i) => i.level === 'warning' && /400 classes/.test(i.message)))
+      .toBe(true);
+    expect(paletteErrors(tree(Array.from({ length: 257 }, (_, i) => i), 'manual_class'))
+      .some((i) => /Too many classes/.test(i.message))).toBe(true);
+  });
+
   it('Add class continues an instance column past 255', () => {
     expect(nextFreeClassValue(tree([0, 254, 255]), 255)).toBe(256);
     expect(nextFreeClassValue(tree([0, 300]), 300)).toBe(301);
