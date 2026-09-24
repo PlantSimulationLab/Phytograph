@@ -129,7 +129,6 @@ def test_label_region_writes_expected_points_without_touching_the_octree(
     # The divergence from delete_region: a label edit leaves the derived octree
     # ALONE (it is behind, not stale) so the renderer keeps streaming tiles.
     assert sess.octree_cache_id == cache_before
-    assert sess.label_dirty.get(SLUG) is True
 
 
 def test_labels_survive_a_delete_and_its_undo(client, cache_root, grid_xyz):
@@ -416,7 +415,6 @@ def test_commit_labels_rebuilds_and_exposes_the_column(client, cache_root, grid_
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["cache_id"] != before, "commit should rebuild the octree"
-    assert sess.label_dirty.get(SLUG) is False
     # The label column reaches the octree as a colourable attribute.
     assert any(a.get("name") == SLUG for a in body.get("attributes", []))
     # A commit is an undo boundary: the column's history is gone.

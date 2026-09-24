@@ -32633,14 +32633,6 @@ class CloudSession:
     # absolute index these deltas hold. Defaulted so existing direct
     # CloudSession(...) constructions need no change.
     label_history: Dict[str, List["_LabelDelta"]] = field(default_factory=dict)
-    # Per-slug flag: the in-RAM label column has edits the DERIVED OCTREE does not
-    # carry yet, so the renderer must overlay them client-side until an explicit
-    # `commit_labels` rebuild. Distinct from `octree_cache_id = None` ("the octree
-    # is stale"), which label edits deliberately do NOT set — see
-    # `label_cloud_region`'s docstring. Purely a DISPLAY concern: every backend op
-    # reads the in-RAM arrays, so split/filter/extract/export already see fresh
-    # labels with no commit.
-    label_dirty: Dict[str, bool] = field(default_factory=dict)
     # The DERIVED OCTREE is in an older frame than `positions`.
     #
     # Set by `session_transform` with octree_mode="pose":
@@ -32650,8 +32642,8 @@ class CloudSession:
     # PotreeConverter to reindex costs ~83 s on a 10 M-point scan. The renderer
     # closes the gap by composing the matrix onto the octree object.
     #
-    # This is the same "octree is BEHIND, not WRONG" arrangement `label_dirty`
-    # describes for labels, and it is deliberately NOT `octree_cache_id = None`
+    # This is the same "octree is BEHIND, not WRONG" arrangement label edits
+    # have (see `label_cloud_region`), and it is deliberately NOT `octree_cache_id = None`
     # (which means "stale, must rebuild before use"): the cached octree is still
     # servable and still renders correctly once posed.
     #
@@ -35334,9 +35326,6 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
         kept = _trim_label_history_locked(sess, slug)
         class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
         sess.last_accessed = time.time()
-        # Mark the derived octree as behind for this column (NOT stale — see the
-        # docstring); the renderer overlays until commit.
-        sess.label_dirty[slug] = True
 
     return {
         "session_id": session_id,
@@ -35483,7 +35472,6 @@ def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
         sess.label_history[slug] = hist[:k]
         editable = _session_editable_mask_locked(sess)
         class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
-        sess.label_dirty[slug] = True
         sess.last_accessed = time.time()
     return {
         "session_id": session_id,
@@ -35528,7 +35516,6 @@ def commit_cloud_labels(session_id: str, request: CommitLabelsRequest):
     # PotreeConverter is slow).
     cache_key, cache_dir, meta = _session_rebuild(sess)
     with _cloud_session_lock:
-        sess.label_dirty[slug] = False
         editable = _session_editable_mask_locked(sess)
         class_counts, value_range = _label_class_summary_locked(sess, slug, editable)
     return {
@@ -35711,7 +35698,6 @@ def _compact_baked_session(sess: "CloudSession", cache_key: str) -> int:
         # impossible, not merely undesirable — clear it. (The label COLUMN
         # itself rides the extras compaction loop above and survives intact.)
         sess.label_history = {}
-        sess.label_dirty = {}
         sess.octree_cache_id = cache_key
         # This IS now the octree being drawn, so the stale-but-rendered pin is
         # discharged. See _mark_octree_stale_locked.
