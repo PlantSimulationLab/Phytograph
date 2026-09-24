@@ -608,7 +608,7 @@ async function otherClass(page: LaunchedApp['page'], exclude: number): Promise<n
   throw new Error('no second class in the palette');
 }
 
-for (const how of ['panel button'] as const) {
+for (const how of ['panel button', 'Cmd+Z'] as const) {
   test(`undo after a commit keeps the committed labels (${how})`, async () => {
     // Commit cleared the renderer's strokes but the backend kept its history,
     // so the first undo after a commit resolved to "keep nothing" and reverse-
@@ -629,7 +629,8 @@ for (const how of ['panel button'] as const) {
     await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
       { timeout: 15_000 }).toBe(60);
 
-    await page.getByTestId('label-undo').click();
+    if (how === 'panel button') await page.getByTestId('label-undo').click();
+    else await page.keyboard.press('ControlOrMeta+z');
 
     // Back to the committed state — not to nothing.
     await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
@@ -637,7 +638,8 @@ for (const how of ['panel button'] as const) {
     expect((await counts(panel))[String(second)] ?? 0).toBe(0);
     await expect(panel).toHaveAttribute('data-pending-strokes', '0');
 
-    // Nothing left to undo: the panel cannot reach past the commit.
+    // Nothing left to undo: the next step in the history is no longer a label
+    // stroke (a further Cmd+Z undoes the IMPORT, which is correct).
     await expect(page.getByTestId('label-undo')).toBeDisabled();
 
     // And the file says so too: export reads the session, not the display.
@@ -702,4 +704,73 @@ test('pending strokes belong to their cloud, not to the tool', async () => {
   await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 10_000 });
   await expect(page.getByTestId('label-undo')).toBeEnabled();
   await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+});
+
+const painted = (page: LaunchedApp['page']) => page.evaluate(
+  () => (window as any).__labelOverlay?.painted ?? 0);
+
+test('the panel Undo undoes the LAST stroke even after a stroke that labelled nothing', async () => {
+  // The panel Undo undid by COUNT (keep = strokes - 1), but the backend only
+  // records strokes that changed something. After a From-gated stroke that
+  // matched nothing, "keep 1" kept the real stroke and the Undo did nothing.
+  const { page, panel } = await openLabelTool();
+  const first = Number(await panel.getAttribute('data-active-class'));
+
+  // Gate on the active class itself: nothing is that class yet, so this
+  // stroke is recorded by the renderer but changes no point.
+  await page.getByTestId(`label-from-${first}`).click();
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+  await expect.poll(async () => (await counts(panel))['0'] ?? 0, { timeout: 15_000 }).toBe(60);
+
+  // Clear the gate and paint for real.
+  await page.getByTestId(`label-from-${first}`).click();
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect.poll(() => painted(page), { timeout: 15_000 }).toBe(60);
+
+  await page.getByTestId('label-undo').click();
+  await expect(panel).toHaveAttribute('data-labelled-count', '0', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+  // The overlay agrees with the backend.
+  await expect.poll(() => painted(page), { timeout: 15_000 }).toBe(0);
+});
+
+test('Cmd+Z and Cmd+Shift+Z undo and redo a label stroke on the backend', async () => {
+  // Cmd+Z read the store before the undo re-rendered, so it told the session
+  // to keep the stroke it was undoing: the viewport reverted and the counts
+  // (and any export) did not. There was no redo at all.
+  const { page, panel } = await openLabelTool();
+  const first = Number(await panel.getAttribute('data-active-class'));
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  const second = await otherClass(page, first);
+  await page.getByTestId(`label-class-${second}`).click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(panel).toHaveAttribute('data-labelled-count', '0', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0');
+  await expect.poll(() => painted(page), { timeout: 15_000 }).toBe(0);
+
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+  await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+  await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '2');
+  await expect.poll(() => painted(page), { timeout: 15_000 }).toBe(60);
+
+  // The redone strokes kept their ids, so undo still finds them.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(async () => (await counts(panel))[String(first)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
 });

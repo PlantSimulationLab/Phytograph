@@ -4724,6 +4724,8 @@ export interface LabelStrokeRequest {
   to_class: number;
   /** Omit for "any visible" — no class gate. */
   from_classes?: number[];
+  /** Cross-section the stroke was drawn in; ANDed with `region`. */
+  slab?: CropOctreeRegion;
   stroke_id: string;
 }
 

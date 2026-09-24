@@ -42,6 +42,8 @@ export interface LabelPanelProps {
   fromClasses: Set<number> | null;
   /** Uncommitted strokes (the undo depth, and what a commit would bake). */
   pendingStrokes: number;
+  /** Whether the next undo is a stroke on this cloud and column. */
+  canUndo: boolean;
   /** True when the octree is behind the label column. */
   dirty: boolean;
   /**
@@ -117,6 +119,7 @@ export function LabelPanel({
   visibleClasses,
   fromClasses,
   pendingStrokes,
+  canUndo,
   dirty,
   drawing,
   onToggleDrawing,
@@ -453,7 +456,7 @@ export function LabelPanel({
         <button
           data-testid="label-undo"
           onClick={onUndoStroke}
-          disabled={pendingStrokes === 0 || busy}
+          disabled={!canUndo || busy}
           className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <Undo2 className="w-3 h-3" />

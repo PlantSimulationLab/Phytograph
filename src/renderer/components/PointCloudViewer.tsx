@@ -94,6 +94,7 @@ import type { WizardScanInput, WizardResult } from './PointCloudImportWizard';
 import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction } from '../state/sceneActions';
+import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
 import {
   pendingFor, prunePending, totalPendingStrokes, updatePending,
   type LabelPendingEntry, type LabelPendingMap,
@@ -3352,13 +3353,15 @@ export default function PointCloudViewer({
   // desyncing the stack `reset_edits` indexes BY LENGTH, so the next panel undo
   // rolled back the wrong number of steps. Re-point per render so the stable
   // handleUndo/handleRedo below never capture a stale implementation.
-  const syncSessionEditsRef = useRef<(tx: HistoryTransaction | undefined) => void>(() => {});
+  const syncSessionEditsRef = useRef<
+    (tx: HistoryTransaction | undefined, direction: 'undo' | 'redo') => void
+  >(() => {});
 
   const handleUndo = useCallback(() => {
     isUndoingRef.current = true;
     const tx = sceneRef.current?.state.past[sceneRef.current.state.past.length - 1];
     scene.undo();
-    syncSessionEditsRef.current(tx);
+    syncSessionEditsRef.current(tx, 'undo');
     setTimeout(() => { isUndoingRef.current = false; }, 0);
   }, [scene]);
 
@@ -3367,7 +3370,7 @@ export default function PointCloudViewer({
     isUndoingRef.current = true;
     const tx = sceneRef.current?.state.future[0];
     scene.redo();
-    syncSessionEditsRef.current(tx);
+    syncSessionEditsRef.current(tx, 'redo');
     setTimeout(() => { isUndoingRef.current = false; }, 0);
   }, [scene]);
 
@@ -5168,76 +5171,74 @@ export default function PointCloudViewer({
     } : null);
   }, [labelTargetCloud, labelCommitHolds]);
 
-  // Wire the undo/redo backend sync declared near handleUndo. Runs AFTER the
-  // reducer has applied the inverse, so the store's post-undo state is the
-  // target the session must be rolled to.
-  //
-  // Neither is a replay: each tells the session which edits survive. The two
-  // address that differently, and the difference matters. `pendingDeletes`
-  // mirrors `deleted_history` ONE-FOR-ONE, so a count is exact there. The label
-  // stroke list does NOT — it counts user gestures while the history counts
-  // recorded changes — so labels are addressed by stroke id instead.
+  // Wire the undo/redo backend sync declared near handleUndo. What the session
+  // must do is decided by `planSessionSync` from the transaction itself (see
+  // lib/sessionEditSync for why never from the store); this only carries it out.
   useEffect(() => {
-    syncSessionEditsRef.current = (tx) => {
+    syncSessionEditsRef.current = (tx, direction) => {
       if (!tx) return;
-      for (const action of tx.actions) {
-        if (action.t !== 'maskEdit' && action.t !== 'labelEdit') continue;
-        const cloud = cloudsRef.current.find(c => c.id === action.id);
+      for (const op of planSessionSync(tx.actions, direction)) {
+        const cloud = cloudsRef.current.find(c => c.id === op.cloudId);
         const sessionId = cloud?.data.octree?.sessionId;
         if (!sessionId) continue;
+        const what = direction === 'undo' ? 'Undo' : 'Redo';
+        const fail = (err: unknown) => showToast({
+          title: describeBackendError(err, what).message, type: 'error',
+        });
+        const setDeletedCount = (n: number) => setEditStates(prev => {
+          const m = new Map(prev);
+          const cur = m.get(op.cloudId);
+          if (cur) m.set(op.cloudId, { ...cur, pendingDeletedCount: n });
+          return m;
+        });
 
-        if (action.t === 'maskEdit') {
-          // Only the DELETE stack needs the backend; a pure translation change
-          // (the other thing maskEdit carries) is render-only and already done.
-          const next = sceneRef.current.state.editStates.get(action.id);
-          const before = action.before.pendingDeletes?.length ?? 0;
-          const after = action.after.pendingDeletes?.length ?? 0;
-          if (before === after) continue;
-          const keep = next?.pendingDeletes?.length ?? 0;
-          void resetCloudEdits(sessionId, keep)
+        if (op.op === 'resetDeletes') {
+          void resetCloudEdits(sessionId, op.keep)
             .then((r) => {
-              setEditStates(prev => {
-                const m = new Map(prev);
-                const cur = m.get(action.id);
-                if (cur) m.set(action.id, {
-                  ...cur,
-                  pendingDeletedCount: r.pending_deleted_count ?? r.deleted_count,
-                });
-                return m;
-              });
-              octreeRefreshQueueRef.current?.enqueue(action.id, sessionId);
+              setDeletedCount(r.pending_deleted_count ?? r.deleted_count);
+              octreeRefreshQueueRef.current?.enqueue(op.cloudId, sessionId);
             })
-            .catch((err) => showToast({
-              title: describeBackendError(err, 'Undo').message, type: 'error',
-            }));
+            .catch(fail);
+        } else if (op.op === 'redoDeletes') {
+          void (async () => {
+            // Frame-dependent regions (a frozen-camera erase) replay against
+            // session positions, exactly as the original stroke did.
+            if (!(await ensureOctreeFrameCurrentRef.current(op.cloudId))) return;
+            let last: Awaited<ReturnType<typeof deleteCloudRegion>> | null = null;
+            for (const region of op.regions) {
+              last = await deleteCloudRegion(sessionId, region as CropOctreeRegion);
+            }
+            if (last) setDeletedCount(last.pending_deleted_count ?? last.deleted_count);
+            octreeRefreshQueueRef.current?.enqueue(op.cloudId, sessionId);
+          })().catch(fail);
         } else {
-          // Undo by the STROKE ID the backend joins on, never by a count: the
-          // renderer's list counts user gestures and the history counts recorded
-          // changes, so a no-op gesture makes the two diverge and a count would
-          // roll back the wrong number of edits.
-          const next = sceneRef.current.state.labelStates.get(action.id);
-          const surviving = next?.strokes ?? [];
-          const keep = surviving.length;
-          // Send the WHOLE surviving id list, newest first. A gesture that
-          // recorded nothing is absent from the history, so naming only the last
-          // one could match nothing; the backend keeps up to the first id it
-          // recognises, which is exactly "everything the user still has".
-          const ids = surviving.map(s => s.strokeId).reverse();
-          void resetCloudLabelEdits(sessionId, undefined, action.slug, ids)
-            .then((res) => {
-              // Trust the BACKEND's surviving count: its history is byte-bounded
-              // and may have evicted older entries (same rule as handleLabelUndo).
-              updateLabelPending(action.id, action.slug, (e) => ({
-                ...e, strokes: e.strokes.slice(0, Math.min(keep, res.label_edit_count)), dirty: true,
-              }));
-              labelCountsSeqRef.current++;
-              setLabelClassCounts(Object.fromEntries(
-                Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
-              ) as Record<number, number>);
-            })
-            .catch((err) => showToast({
-              title: describeBackendError(err, 'Undo').message, type: 'error',
+          const apply = (res: { class_counts: Record<string, number> }) => {
+            updateLabelPending(op.cloudId, op.slug, (e) => ({
+              ...e, strokes: op.surviving, dirty: true,
             }));
+            // The panel's counts describe the column it is showing; a replay on
+            // another cloud or column must not overwrite them.
+            const shown = labelTargetCloudRef.current?.id === op.cloudId
+              && labelPaletteRef.current?.slug === op.slug;
+            if (!shown) return;
+            labelCountsSeqRef.current++;
+            setLabelClassCounts(Object.fromEntries(
+              Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)]),
+            ) as Record<number, number>);
+          };
+          if (op.op === 'resetLabels') {
+            // Send the WHOLE surviving id list, newest first. A gesture that
+            // recorded nothing is absent from the history, so naming only the
+            // last one could match nothing; the backend keeps up to the first id
+            // it recognises, which is exactly "everything the user still has".
+            const ids = op.surviving.map(s => s.strokeId).reverse();
+            void resetCloudLabelEdits(sessionId, undefined, op.slug, ids).then(apply).catch(fail);
+          } else {
+            void (async () => {
+              if (!(await ensureOctreeFrameCurrentRef.current(op.cloudId))) return;
+              apply(await labelCloudRegion(sessionId, op.strokes.map(labelStrokeRequest), op.slug));
+            })().catch(fail);
+          }
         }
       }
     };
@@ -5777,16 +5778,11 @@ export default function PointCloudViewer({
     // Screen-space stroke: the octree must be in the session's frame first.
     if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) { setLabelBusy(false); return; }
     try {
-      const res = await labelCloudRegion(sessionId, [{
-        region: region as CropOctreeRegion,
-        to_class: stroke.toClass,
-        ...(stroke.fromClasses ? { from_classes: stroke.fromClasses } : {}),
-        ...(stroke.slab ? { slab: stroke.slab as unknown as CropOctreeRegion } : {}),
-        stroke_id: strokeId,
-        // `label` names the column in extra_dims_meta when the backend CREATES
-        // it. Without it every hand-made column exported as "Manual Class",
-        // whatever the user called it.
-      }], palette.slug, palette.name);
+      // `label` names the column in extra_dims_meta when the backend CREATES
+      // it. Without it every hand-made column exported as "Manual Class",
+      // whatever the user called it.
+      const res = await labelCloudRegion(
+        sessionId, [labelStrokeRequest(stroke)], palette.slug, palette.name);
 
       const after: LabelEditState = { ...before, strokes: nextStrokes, dirty: true };
       labelCountsSeqRef.current++;   // any in-flight summary read is now stale
@@ -6094,33 +6090,27 @@ export default function PointCloudViewer({
     return { baking: !!mine && !mine.failed, failed: !!mine?.failed };
   }, [labelTargetCloud, labelPalette, labelCommitHolds]);
 
-  /** Undo the most recent stroke, keeping renderer and backend in lock-step. */
-  const handleLabelUndo = useCallback(async () => {
-    const cloud = labelTargetCloud;
-    const sessionId = cloud?.data.octree?.sessionId;
-    if (!cloud || !sessionId || labelStrokes.length === 0) return;
-    const slug = labelPaletteRef.current?.slug;
-    if (!slug) return;
-    const keep = labelStrokes.length - 1;
-    setLabelBusy(true);
-    try {
-      const res = await resetCloudLabelEdits(sessionId, keep, slug);
-      // Trust the BACKEND's surviving count: its history is byte-bounded and may
-      // have evicted older entries, in which case the renderer's list is longer
-      // than anything it can still undo.
-      updateLabelPending(cloud.id, slug, (e) => ({
-        ...e, strokes: e.strokes.slice(0, Math.min(keep, res.label_edit_count)), dirty: true,
-      }));
-      labelCountsSeqRef.current++;
-      setLabelClassCounts(
-        Object.fromEntries(Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>,
-      );
-    } catch (err) {
-      showToast({ title: describeBackendError(err, 'Undo').message, type: 'error' });
-    } finally {
-      setLabelBusy(false);
-    }
-  }, [labelTargetCloud, labelStrokes, showToast, updateLabelPending]);
+  /**
+   * The panel's Undo is Cmd+Z: ONE undo system, not two that disagree.
+   *
+   * It used to be a separate path that undid by COUNT (`keep = strokes - 1`),
+   * while the history counts recorded changes, not gestures: after a stroke
+   * whose From gate matched nothing, it rolled back the wrong edit. Routing it
+   * through `handleUndo` makes it undo by stroke id like Cmd+Z, and keeps the
+   * scene history and the session in step.
+   *
+   * Enabled only when the next global undo IS a stroke on this cloud and
+   * column. Anything else on top (a crop, a move) would be undone by a button
+   * that reads as "undo my last stroke".
+   */
+  const labelUndoAvailable = useMemo(() => {
+    const top = scene.state.past[scene.state.past.length - 1];
+    return !!top && !!labelTargetCloud && !!labelPalette && top.actions.some(
+      (a) => a.t === 'labelEdit' && a.id === labelTargetCloud.id && a.slug === labelPalette.slug);
+  }, [scene.state.past, labelTargetCloud, labelPalette]);
+  const handleLabelUndo = useCallback(() => {
+    if (labelUndoAvailable) handleUndo();
+  }, [labelUndoAvailable, handleUndo]);
 
   /**
    * Commit: bake the label column into the octree so it colours without the
@@ -24724,6 +24714,7 @@ export default function PointCloudViewer({
           visibleClasses={labelVisibleClasses}
           fromClasses={labelFromClasses}
           pendingStrokes={labelStrokes.length}
+          canUndo={labelUndoAvailable}
           dirty={labelDirty || labelHold.failed}
           baking={labelHold.baking}
           bakeFailed={labelHold.failed}

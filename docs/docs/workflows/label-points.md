@@ -21,12 +21,15 @@ label anything you like.
 5. Paint. With the lasso, click to place each corner of an outline, then press
    `Enter` (or double-click) to close it. With the brush, just drag. Points
    selected take the active class and recolour straight away.
-6. Repeat with different classes as needed. **Undo** removes the last stroke.
+6. Repeat with different classes as needed. **Undo** (or `Cmd+Z`) removes
+   the last stroke, and `Shift+Cmd+Z` puts it back.
 7. Click **Commit** to save the labels into the point cloud.
 
-Undo stops at a Commit: once you commit, **Undo** and `Cmd+Z` step back
-through the strokes you painted since then, but never past the commit into
-the labels it saved.
+**Undo** in the panel is the app's own Undo, so the two always agree. It is
+available when the most recent edit is a stroke on the column in front of you;
+if you cropped or moved something since, `Cmd+Z` undoes that first. Undo also
+stops at a Commit: it steps back through the strokes painted since, but never
+past the commit into the labels it saved.
 
 Each class row shows how many points currently carry it, so you can see the
 counts move as you work.

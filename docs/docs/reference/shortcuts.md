@@ -73,6 +73,7 @@ apply to them.)
 | Right-click | Remove the last lasso corner |
 | <kbd>Esc</kbd> | Cancel the lasso in progress |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo the last stroke |
+| <kbd>Shift</kbd>+<kbd>Ctrl</kbd>+<kbd>Z</kbd> | Redo the stroke you just undid |
 
 ## Crop polygon
 

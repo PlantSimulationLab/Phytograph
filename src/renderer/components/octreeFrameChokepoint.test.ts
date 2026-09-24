@@ -168,12 +168,19 @@ describe('screen-space regions refresh the octree first', () => {
     const src = await viewerSource();
     // The erase brush's squares_union and the label stroke both carry a frozen
     // camera; assert the guard is upstream of the request in each case.
-    for (const call of ['deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion)',
-                        'labelCloudRegion(sessionId, [{']) {
-      const at = src.indexOf(call);
-      expect(at, `missing call site: ${call}`).toBeGreaterThan(-1);
+    // Every label request (the first paint AND a redo's replay) and the redo of
+    // an erase replay a frozen camera just as the original stroke did.
+    const sites = [
+      src.indexOf('deleteCloudRegion(sessionId, deleteRegion as CropOctreeRegion)'),
+      src.indexOf('deleteCloudRegion(sessionId, region as CropOctreeRegion)'),
+      ...[...src.matchAll(/\blabelCloudRegion\(\s*sessionId/g)].map(m => m.index!),
+    ];
+    expect(sites.filter(i => i > -1).length, 'expected erase, erase-redo and 2 label sites')
+      .toBe(4);
+    for (const at of sites) {
+      expect(at, 'missing call site').toBeGreaterThan(-1);
       const before = src.slice(Math.max(0, at - 1200), at);
-      expect(before, `guard missing before ${call}`)
+      expect(before, `guard missing before ${src.slice(at, at + 60)}`)
         .toMatch(/await ensureOctreeFrameCurrentRef\.current\(/);
     }
   });
