@@ -56,7 +56,10 @@ does not do what you expect.
 !!! warning "Export to keep your labels"
     Phytograph has no project file: labels live on the point cloud while the app
     is open, and are lost when it closes unless you
-    [export](import-export.md) the cloud.
+    [export](import-export.md) the cloud. Until you do, the panel says *Labels
+    changed since this cloud was last exported*, and closing the app or
+    **File › New** names how many clouds have labels that would be lost. An
+    export clears it for the label columns it wrote.
 
 ## Lasso or brush?
 

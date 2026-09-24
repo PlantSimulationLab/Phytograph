@@ -18,7 +18,7 @@ import type { SceneDirtyPayload } from '../shared/ipc.js';
 /** The scene state main last heard about. Starts clean: a window closed before
  *  the renderer ever reported (splash still up, backend failed) has nothing to
  *  lose, and prompting there would be pure obstruction. */
-const CLEAN: SceneDirtyPayload = { dirty: false, strokes: 0 };
+const CLEAN: SceneDirtyPayload = { dirty: false, unexportedLabelClouds: 0 };
 
 let sceneState: SceneDirtyPayload = { ...CLEAN };
 
@@ -26,7 +26,8 @@ let sceneState: SceneDirtyPayload = { ...CLEAN };
 export function setSceneDirty(payload: SceneDirtyPayload): void {
   sceneState = {
     dirty: !!payload?.dirty,
-    strokes: Number.isFinite(payload?.strokes) ? Math.max(0, Math.trunc(payload.strokes)) : 0,
+    unexportedLabelClouds: Number.isFinite(payload?.unexportedLabelClouds)
+      ? Math.max(0, Math.trunc(payload.unexportedLabelClouds)) : 0,
   };
 }
 
@@ -42,21 +43,24 @@ export function resetSceneDirty(): void {
   sceneState = { ...CLEAN };
 }
 
-/** Text of the confirmation, split out so a test can assert the strokes line
- *  appears exactly when there are uncommitted strokes. */
+/** Text of the confirmation, split out so a test can assert the labels line
+ *  appears exactly when some cloud has unexported labels. */
 export function confirmDetail(state: SceneDirtyPayload): string {
   const base =
     'Everything in this session — point clouds, meshes, skeletons, plant models, ' +
     'scans, and analysis results — is held in memory and is not saved anywhere. ' +
     'Closing discards it, including any edits made since import. Export anything ' +
     'you want to keep first.';
-  if (state.strokes > 0) {
+  const n = state.unexportedLabelClouds;
+  if (n > 0) {
     // Hand-made labels are the one thing that cannot be recomputed by
     // re-importing the source file, so name them specifically — the same
     // reasoning as the File → New confirmation.
     return (
-      `${base}\n\nYou also have ${state.strokes} uncommitted labelling ` +
-      `stroke(s), which cannot be recreated by re-importing.`
+      `${base}\n\n${n === 1
+        ? '1 point cloud has hand labels changed since it was last exported'
+        : `${n} point clouds have hand labels changed since they were last exported`}` +
+      ', which cannot be recreated by re-importing.'
     );
   }
   return base;

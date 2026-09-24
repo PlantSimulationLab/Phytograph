@@ -2016,17 +2016,17 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     scene.state.skeletons.length +
     scene.state.qsms.length +
     scene.state.ladResults.length;
-  // Pushed by the viewer whenever it changes. It used to be read from the
-  // viewer's window global at push time, and pushes happen on SCENE changes,
-  // so painting never updated it: the quit dialog named whatever count was
-  // current the last time a cloud was added or removed (usually 0).
-  const [pendingLabelStrokes, setPendingLabelStrokes] = useState(0);
+  // Clouds whose hand labels changed since they were last exported, pushed by
+  // the viewer whenever it changes (for this confirmation and File > New's).
+  // Labels are on the cloud from the stroke that paints them, so what is at
+  // risk on close is not "uncommitted strokes" but labels never written out.
+  const [unexportedLabelClouds, setUnexportedLabelClouds] = useState(0);
   useEffect(() => {
     window.electronAPI?.setSceneDirty?.({
       dirty: sceneObjectCount > 0,
-      strokes: pendingLabelStrokes,
+      unexportedLabelClouds,
     });
-  }, [sceneObjectCount, pendingLabelStrokes]);
+  }, [sceneObjectCount, unexportedLabelClouds]);
 
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
   // Most menu items map to existing handlers; File → Import routes through the
@@ -2296,7 +2296,7 @@ function App({ onResetScene }: { onResetScene: () => void }) {
           onStitchScans={handleStitchScans}
           importRefsCallback={handleImportRefsCallback}
           onPendingDeletesChange={handlePendingDeletesChange}
-          onPendingLabelStrokesChange={setPendingLabelStrokes}
+          onUnexportedLabelsChange={setUnexportedLabelClouds}
           onViewerContentChange={setViewerHasContent}
           onRequestImportWizard={openImportWizard}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -2421,14 +2421,16 @@ function App({ onResetScene }: { onResetScene: () => void }) {
             {/* Hand-made labels are the one thing here that cannot be recomputed,
                 so call them out specifically rather than relying on the generic
                 "clears everything" line. */}
-            {((window as any).__uncommittedLabelStrokes ?? 0) > 0 && (
+            {unexportedLabelClouds > 0 && (
               <p
                 data-testid="new-confirm-label-warning"
+                data-count={unexportedLabelClouds}
                 className="text-sm text-amber-400 mb-6"
               >
-                You have {(window as any).__uncommittedLabelStrokes} unsaved
-                labelling stroke(s). They will be lost — commit them first to keep
-                them.
+                {unexportedLabelClouds === 1
+                  ? '1 point cloud has hand labels that have not been exported.'
+                  : `${unexportedLabelClouds} point clouds have hand labels that have not been exported.`}
+                {' '}They will be lost — export first to keep them.
               </p>
             )}
             <div className="flex justify-end gap-2">

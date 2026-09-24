@@ -49,6 +49,9 @@ export interface LabelPanelProps {
   pendingStrokes: number;
   /** Whether the next undo is a stroke on this cloud and column. */
   canUndo: boolean;
+  /** This cloud's labels changed since it was last exported. There is no
+   *  project file, so they are lost on quit until they are written out. */
+  unexported?: boolean;
   /** True when the octree is behind the label column. */
   dirty: boolean;
   /**
@@ -119,6 +122,7 @@ export function LabelPanel({
   fromClasses,
   pendingStrokes,
   canUndo,
+  unexported = false,
   dirty,
   drawing,
   onToggleDrawing,
@@ -163,6 +167,7 @@ export function LabelPanel({
       data-active-class={activeClass}
       data-pending-strokes={pendingStrokes}
       data-label-dirty={dirty ? 'true' : 'false'}
+      data-label-unexported={unexported ? 'true' : 'false'}
       data-label-baking={baking ? 'true' : 'false'}
       data-label-drawing={drawing ? 'true' : 'false'}
       data-section-active={sectionActive ? 'true' : 'false'}
@@ -467,6 +472,13 @@ export function LabelPanel({
           Undo
         </button>
       </div>
+
+      {unexported && (
+        <div data-testid="label-unexported" className="mt-2 text-[10px] text-amber-400">
+          Labels changed since this cloud was last exported. Export it to keep
+          them: they are not saved when the app closes.
+        </div>
+      )}
 
       {bakeFailed && (
         <div data-testid="label-bake-failed-hint" className="mt-2 text-[10px] text-amber-400">

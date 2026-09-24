@@ -498,29 +498,49 @@ test('closing the panel disarms the tool — the lasso stops accepting clicks', 
   await expect(page.getByTestId('crop-polygon-overlay')).toHaveCount(0);
 });
 
-test('uncommitted strokes are flagged in the panel and before File > New', async () => {
-  // There is no project save/load, so hand-made labels are irreplaceable —
-  // the guard is the difference between "lost an hour" and "didn't".
-  const { page, panel } = await openLabelTool();
-  await paintWholeViewport(page);
-  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+/** Export the selected cloud to LAS through the real Export window. */
+async function exportLas(name: string) {
+  const { app, page } = session;
+  const savePath = join(mkdtempSync(join(tmpdir(), 'phytograph-label-export-')), name);
+  await stubSaveDialog(app, savePath);
+  await page.evaluate(() => (window as any).__openExportPanel?.());
+  await expect(page.getByTestId('export-modal')).toBeVisible();
+  await page.getByTestId('export-format-las').click();
+  await page.getByTestId('export-cloud-go').click();
+  await expect(page.getByTestId('toast-success').filter({ hasText: 'Export Complete' }).last())
+    .toBeVisible({ timeout: 30_000 });
+  return savePath;
+}
 
-  // ...and File > New calls it out specifically, rather than relying on its
-  // generic "this clears everything" line. Fire the same menu:command IPC the
-  // native menu sends (see helpers/resetApp.ts).
+/** Fire File > New the way the native menu does, and report its label line. */
+async function fileNewLabelWarning() {
+  const { page } = session;
   await session.app.evaluate(({ BrowserWindow }) => {
     BrowserWindow.getAllWindows()[0]?.webContents.send('menu:command', { kind: 'new' });
   });
+  await expect(page.getByTestId('new-confirm-dialog')).toBeVisible({ timeout: 10_000 });
   const warning = page.getByTestId('new-confirm-label-warning');
-  await expect(warning).toBeVisible({ timeout: 10_000 });
-  await expect(warning).toContainText('1');
-
-  // Cancel rather than confirming — this test must not destroy the scene for
-  // whatever runs next in the shared session.
+  const text = await warning.count() > 0 ? await warning.textContent() : null;
+  // Cancel: this test must not destroy the scene for whatever runs next.
   await page.getByTestId('new-confirm-cancel').click();
   await expect(page.getByTestId('new-confirm-dialog')).toHaveCount(0);
-  // The strokes survived the near-miss.
-  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+  return text;
+}
+
+test('unexported labels are flagged in the panel and before File > New, until exported', async () => {
+  // There is no project file, so hand-made labels are lost on quit or File >
+  // New unless they have been exported. That is what the warnings are about:
+  // not "uncommitted strokes", which the display catches up on by itself.
+  const { page, panel } = await openLabelTool();
+  await expect(page.getByTestId('label-unexported')).toHaveCount(0);
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(page.getByTestId('label-unexported')).toBeVisible();
+  expect(await fileNewLabelWarning()).toContain('1 point cloud has hand labels');
+
+  await exportLas('flagged.las');
+  await expect(page.getByTestId('label-unexported')).toHaveCount(0);
+  expect(await fileNewLabelWarning()).toBeNull();
 });
 
 /** The first real class that is not `exclude`, read from the panel's rows. */
@@ -703,22 +723,27 @@ test('Cmd+Z and Cmd+Shift+Z undo and redo a label stroke on the backend', async 
     { timeout: 15_000 }).toBe(60);
 });
 
-test('the quit confirmation knows how many strokes are uncommitted', async () => {
-  // The count reached main only when the SCENE changed (a cloud added or
-  // removed), never when a stroke was painted, so closing the window after
-  // painting warned about 0 strokes. Read what main actually holds.
-  const mainStrokes = () => session.app.evaluate(
-    () => ((globalThis as any).__sceneDirty as { strokes: number } | undefined)?.strokes ?? -1);
+test('the quit confirmation knows which clouds have unexported labels', async () => {
+  // Read what MAIN holds. It is a count of clouds with labels changed since
+  // their last export, so rebuilding the display (closing the panel) must not
+  // clear it: the labels are still only in this session.
+  const mainCount = () => session.app.evaluate(() =>
+    ((globalThis as any).__sceneDirty as { unexportedLabelClouds: number } | undefined)
+      ?.unexportedLabelClouds ?? -1);
   const { page, panel } = await openLabelTool();
-  await expect.poll(mainStrokes, { timeout: 10_000 }).toBe(0);
+  await expect.poll(mainCount, { timeout: 10_000 }).toBe(0);
 
   await paintWholeViewport(page);
   await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
-  await expect.poll(mainStrokes, { timeout: 10_000 }).toBe(1);
+  await expect.poll(mainCount, { timeout: 10_000 }).toBe(1);
 
-  await page.getByTestId('label-undo').click();
-  await expect(panel).toHaveAttribute('data-pending-strokes', '0', { timeout: 15_000 });
-  await expect.poll(mainStrokes, { timeout: 10_000 }).toBe(0);
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  await page.waitForTimeout(1000);
+  expect(await mainCount()).toBe(1);
+
+  await exportLas('quit.las');
+  await expect.poll(mainCount, { timeout: 10_000 }).toBe(0);
 });
 
 test('with two clouds selected the Label button says why it will not open', async () => {

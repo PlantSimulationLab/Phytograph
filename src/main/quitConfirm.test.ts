@@ -34,13 +34,13 @@ describe('quit confirmation', () => {
     // A window closed while the splash is still up (backend failed, user gave
     // up) has nothing to lose; prompting there is pure obstruction.
     const confirm = stubConfirm(0);
-    expect(currentSceneDirty()).toEqual({ dirty: false, strokes: 0 });
+    expect(currentSceneDirty()).toEqual({ dirty: false, unexportedLabelClouds: 0 });
     expect(shouldAllowClose(confirm)).toBe(true);
     expect(confirm.calls).toHaveLength(0);
   });
 
   it('prompts once the scene holds something, and CANCELS the close by default', () => {
-    setSceneDirty({ dirty: true, strokes: 0 });
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
     // Button 0 is Cancel — what Return and Escape both select.
     const confirm = stubConfirm(0);
     expect(shouldAllowClose(confirm)).toBe(false);
@@ -48,12 +48,12 @@ describe('quit confirmation', () => {
   });
 
   it('allows the close only when the discard button is chosen', () => {
-    setSceneDirty({ dirty: true, strokes: 0 });
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
     expect(shouldAllowClose(stubConfirm(1))).toBe(true);
   });
 
   it('makes the safe answer the default and the cancel action', () => {
-    setSceneDirty({ dirty: true, strokes: 0 });
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
     const confirm = stubConfirm(0);
     shouldAllowClose(confirm);
     const opts = confirm.calls[0];
@@ -65,37 +65,39 @@ describe('quit confirmation', () => {
     expect(opts.buttons[1]).toMatch(/discard|close/i);
   });
 
-  it('calls out uncommitted labelling strokes, which cannot be recomputed', () => {
-    setSceneDirty({ dirty: true, strokes: 7 });
-    expect(confirmDetail(currentSceneDirty())).toContain('7 uncommitted labelling');
+  it('calls out clouds with unexported hand labels, which cannot be recomputed', () => {
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 2 });
+    expect(confirmDetail(currentSceneDirty())).toContain('2 point clouds have hand labels');
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 1 });
+    expect(confirmDetail(currentSceneDirty())).toContain('1 point cloud has hand labels');
   });
 
-  it('omits the stroke line when there are none', () => {
-    setSceneDirty({ dirty: true, strokes: 0 });
+  it('omits the labels line when there are none', () => {
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
     expect(confirmDetail(currentSceneDirty())).not.toMatch(/labelling/i);
   });
 
   it('says the session is unsaved, since that is the reason to warn at all', () => {
-    setSceneDirty({ dirty: true, strokes: 0 });
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 0 });
     const detail = confirmDetail(currentSceneDirty());
     expect(detail).toMatch(/not saved|memory/i);
     expect(detail).toMatch(/export/i);
   });
 
   it('reverts to clean when the window goes away', () => {
-    setSceneDirty({ dirty: true, strokes: 3 });
+    setSceneDirty({ dirty: true, unexportedLabelClouds: 3 });
     resetSceneDirty();
-    expect(currentSceneDirty()).toEqual({ dirty: false, strokes: 0 });
+    expect(currentSceneDirty()).toEqual({ dirty: false, unexportedLabelClouds: 0 });
     // A macOS app that outlives its window must not prompt about a scene that
     // no longer exists.
     expect(shouldAllowClose(stubConfirm(0))).toBe(true);
   });
 
   it('tolerates a malformed payload rather than prompting on garbage', () => {
-    setSceneDirty({ dirty: true, strokes: Number.NaN } as never);
-    expect(currentSceneDirty().strokes).toBe(0);
+    setSceneDirty({ dirty: true, unexportedLabelClouds: Number.NaN } as never);
+    expect(currentSceneDirty().unexportedLabelClouds).toBe(0);
     setSceneDirty(undefined as never);
-    expect(currentSceneDirty()).toEqual({ dirty: false, strokes: 0 });
+    expect(currentSceneDirty()).toEqual({ dirty: false, unexportedLabelClouds: 0 });
   });
 });
 

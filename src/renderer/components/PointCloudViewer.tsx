@@ -97,7 +97,7 @@ import type { TransformState, HistoryTransaction } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
 import { createKeyedSerialQueue, type KeyedSerialQueue } from '../lib/keyedSerialQueue';
 import {
-  pendingFor, prunePending, totalPendingStrokes, updatePending,
+  pendingFor, prunePending, updatePending,
   type LabelPendingEntry, type LabelPendingMap,
 } from '../lib/labelPending';
 import {
@@ -508,9 +508,9 @@ interface PointCloudViewerProps {
   // App can warn before quit (the deletions live only in the backend session's
   // in-RAM mask until baked; closing without baking discards them).
   onPendingDeletesChange?: (count: number) => void;
-  /** Uncommitted label strokes across every cloud, whenever it changes, so the
-   *  quit confirmation (main process) states the real number. */
-  onPendingLabelStrokesChange?: (count: number) => void;
+  /** How many clouds have hand labels changed since they were last exported,
+   *  whenever it changes, for the quit and File > New confirmations. */
+  onUnexportedLabelsChange?: (count: number) => void;
   // Fired when the set of viewer-owned content (meshes, skeletons) changes
   // between empty and non-empty. App uses this to dismiss the empty-state hint
   // when content arrives that isn't a scan — e.g. a generated Helios plant,
@@ -652,7 +652,7 @@ export default function PointCloudViewer({
   className = '',
   importRefsCallback,
   onPendingDeletesChange,
-  onPendingLabelStrokesChange,
+  onUnexportedLabelsChange,
   onViewerContentChange,
   onRequestImportWizard,
   onOpenSettings,
@@ -2622,6 +2622,30 @@ export default function PointCloudViewer({
       setLabelPending((prev) => updatePending(prev, cloudId, slug, fn)),
     [],
   );
+  // The label columns of each cloud changed since the cloud was last exported.
+  // There is no project file, so these are what closing the app would lose; the
+  // quit and File > New confirmations and the panel all read this.
+  const [labelsUnexported, setLabelsUnexported] =
+    useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
+  const markLabelsChanged = useCallback((cloudId: string, slug: string) => {
+    setLabelsUnexported((prev) => {
+      if (prev.get(cloudId)?.has(slug)) return prev;
+      const next = new Map(prev);
+      next.set(cloudId, new Set([...(prev.get(cloudId) ?? []), slug]));
+      return next;
+    });
+  }, []);
+  /** An export of `cloudId` succeeded, writing `columns` (null = every column). */
+  const markLabelsExported = useCallback((cloudId: string, columns: string[] | null) => {
+    setLabelsUnexported((prev) => {
+      const had = prev.get(cloudId);
+      if (!had || had.size === 0) return prev;
+      const left = columns ? [...had].filter((slug) => !columns.includes(slug)) : [];
+      const next = new Map(prev);
+      next.set(cloudId, new Set(left));
+      return next;
+    });
+  }, []);
   /**
    * A tool just OVERWROTE a whole column (a segmentation re-run, a DEM's
    * height-above-ground, a computed or managed scalar field). The backend drops
@@ -5298,6 +5322,7 @@ export default function PointCloudViewer({
             updateLabelPending(op.cloudId, op.slug, (e) => ({
               ...e, strokes: op.surviving, dirty: true,
             }));
+            markLabelsChanged(op.cloudId, op.slug);
             // The panel's counts describe the column it is showing; a replay on
             // another cloud or column must not overwrite them.
             const shown = labelTargetCloudRef.current?.id === op.cloudId
@@ -5372,16 +5397,17 @@ export default function PointCloudViewer({
   //
   // The File>New confirm dialog, the quit confirmation and E2E read this to
   // know whether work is at risk.
-  const labelPendingTotal = totalPendingStrokes(labelPending);
+  const unexportedLabelClouds = [...labelsUnexported.values()].filter((s) => s.size > 0).length;
   useEffect(() => {
-    (window as any).__uncommittedLabelStrokes = labelPendingTotal;
-    onPendingLabelStrokesChange?.(labelPendingTotal);
-    return () => { (window as any).__uncommittedLabelStrokes = 0; };
-  }, [labelPendingTotal, onPendingLabelStrokesChange]);
+    onUnexportedLabelsChange?.(unexportedLabelClouds);
+  }, [unexportedLabelClouds, onUnexportedLabelsChange]);
   // Drop the pending strokes of clouds that no longer exist (deleted, File >
   // New), the same rule as `labelCommitHolds` below.
   useEffect(() => {
-    setLabelPending((prev) => prunePending(prev, new Set(clouds.map((c) => c.id))));
+    const live = new Set(clouds.map((c) => c.id));
+    setLabelPending((prev) => prunePending(prev, live));
+    setLabelsUnexported((prev) => ([...prev.keys()].every((id) => live.has(id))
+      ? prev : new Map([...prev].filter(([id]) => live.has(id)))));
   }, [clouds]);
 
   // Opening the label tool arms the POLYGON LASSO. Phase 1 has no selection
@@ -5904,6 +5930,7 @@ export default function PointCloudViewer({
           label: 'label points',
           actions: [{ t: 'labelEdit', id: cloud.id, slug: res.slug, before, after }],
         });
+        markLabelsChanged(cloud.id, res.slug);
       } catch (err) {
         rollbackStroke();
         showToast({ title: describeBackendError(err, 'Labelling').message, type: 'error' });
@@ -10845,6 +10872,7 @@ export default function PointCloudViewer({
         onRunId: (runId) => { exportRunIdRef.current = runId; },
       });
       if (result) {
+        markLabelsExported(cloud.id, columns);
         showToast({
           title: 'Export Complete',
           type: 'success',
@@ -11115,6 +11143,7 @@ export default function PointCloudViewer({
         const target = `${dir}${sep}${f.name}`;
         await window.electronAPI?.fs.writeBinary(target, bytes.buffer.slice(0) as ArrayBuffer);
       }
+      for (const id of scanIds) markLabelsExported(id, columns && columns.length ? columns : null);
       showToast({ title: 'Export Complete', type: 'success',
         message: `Wrote ${resp.files.length} file(s) (${resp.point_count?.toLocaleString() ?? '?'} points).` });
     } catch (error) {
@@ -24909,6 +24938,7 @@ export default function PointCloudViewer({
           fromClasses={labelFromClasses}
           pendingStrokes={labelStrokes.length}
           canUndo={labelUndoAvailable}
+          unexported={(labelsUnexported.get(labelTargetCloud.id)?.size ?? 0) > 0}
           dirty={labelDirty || labelHold.failed}
           baking={labelHold.baking}
           bakeFailed={labelHold.failed}

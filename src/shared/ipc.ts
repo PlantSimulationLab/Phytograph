@@ -216,6 +216,6 @@ export interface MenuStatePayload {
 export interface SceneDirtyPayload {
   /** True when the scene holds at least one object worth warning about. */
   dirty: boolean;
-  /** Uncommitted hand-labelling strokes, or 0 when there are none. */
-  strokes: number;
+  /** Point clouds whose hand labels changed since they were last exported. */
+  unexportedLabelClouds: number;
 }

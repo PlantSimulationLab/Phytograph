@@ -93,7 +93,7 @@ test('a close is CANCELLED when the user declines, and the session survives inta
   // scene is clean first (the same IPC the renderer sends after File → New).
   await app.page.evaluate(() => {
     (window as unknown as { electronAPI: { setSceneDirty: (p: unknown) => void } })
-      .electronAPI.setSceneDirty({ dirty: false, strokes: 0 });
+      .electronAPI.setSceneDirty({ dirty: false, unexportedLabelClouds: 0 });
   });
   await app.close().catch(() => {});
 });
