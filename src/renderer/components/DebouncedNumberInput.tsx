@@ -10,6 +10,9 @@ interface DebouncedNumberInputProps {
   step?: number | string;
   debounceMs?: number;
   disabled?: boolean;
+  // Shown and focusable but not editable (e.g. a value other data depends on).
+  readOnly?: boolean;
+  title?: string;
   placeholder?: string;
   className?: string;
   // Test/automation hooks copied through to the underlying <input>.
@@ -44,6 +47,8 @@ export function DebouncedNumberInput({
   step,
   debounceMs = 400,
   disabled,
+  readOnly,
+  title,
   placeholder,
   className,
   id,
@@ -88,6 +93,7 @@ export function DebouncedNumberInput({
   }, [cancelDebounce, max, min, onCommit, parse, value]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (readOnly) return;
     const raw = e.target.value;
     setDraft(raw);
     cancelDebounce();
@@ -136,6 +142,8 @@ export function DebouncedNumberInput({
       onKeyDown={handleKeyDown}
       step={step}
       disabled={disabled}
+      readOnly={readOnly}
+      title={title}
       placeholder={placeholder}
       className={className}
       data-testid={rest['data-testid']}

@@ -638,3 +638,21 @@ test('a hundred trees each draw in their own colour', async () => {
     return r.checked >= 60 && r.wrong.length === 0 ? 'ok' : JSON.stringify(r);
   }, { timeout: 20_000 }).toBe('ok');
 });
+
+test('a class value can be cleared and retyped', async () => {
+  // The value field was a number input bound to the parsed number, so clearing
+  // it snapped straight back and the next keystrokes appended to the old value:
+  // retyping 64 as 77 produced 6477.
+  const { page } = await openLabelTool();
+  await openEditor(page);
+  await page.getByTestId('palette-add-class').click();
+  const row = page.getByTestId('palette-class-row').last();
+  await expect(row).toHaveAttribute('data-class-value', '64');
+  const field = row.getByTestId('palette-class-value');
+  await field.fill('');
+  await expect(field).toHaveValue('');
+  await field.pressSequentially('77');
+  await field.press('Tab');
+  await expect(row).toHaveAttribute('data-class-value', '77');
+  await expect(field).toHaveValue('77');
+});

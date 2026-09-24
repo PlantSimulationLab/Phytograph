@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Palette, X, Plus, Trash2, Save, Download, Upload, AlertTriangle } from 'lucide-react';
+import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import type { ClassPalette } from '../../../lib/classPalettes';
 import {
   validatePalette,
@@ -264,13 +265,13 @@ export function ClassPaletteEditor({
                 title="Class colour"
                 className="w-6 h-6 shrink-0 bg-transparent border border-neutral-700 rounded cursor-pointer"
               />
-              <input
+              <DebouncedNumberInput
                 data-testid="palette-class-value"
-                // A raw string draft would be needed for a free-typed number,
-                // but the value is committed on change and clamped here, and a
-                // locked row is read-only — so the partial-keystroke problem
-                // DebouncedNumberInput exists for does not arise.
-                type="number"
+                // Not a raw <input type="number"> bound to the parsed number:
+                // that ate every keystroke that was not yet a whole number, so
+                // the field could not be cleared and retyped (clearing snapped
+                // back, and typing then appended to the old value).
+                parse={(raw) => (/^\s*\d+\s*$/.test(raw) ? parseInt(raw, 10) : NaN)}
                 min={CLASS_VALUE_MIN}
                 max={valueMax}
                 value={c.value}
@@ -281,10 +282,7 @@ export function ClassPaletteEditor({
                       : `${painted.toLocaleString()} points already carry this class — `
                         + 'changing its value would orphan them')
                   : 'Class value stored in the file'}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10);
-                  if (Number.isFinite(v)) patchClass(i, { value: v });
-                }}
+                onCommit={(v) => patchClass(i, { value: v })}
                 className={`${valueMax > CLASS_VALUE_MAX ? 'w-16' : 'w-12'} shrink-0 border rounded px-1 py-1 text-[10px] tabular-nums ${
                   valueLocked
                     ? 'bg-neutral-800 border-neutral-800 text-neutral-500 cursor-not-allowed'
