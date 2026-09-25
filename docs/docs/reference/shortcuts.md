@@ -79,6 +79,15 @@ apply to them.)
 | <kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd> | Go to the next / previous area of unlabelled points |
 | <kbd>Alt</kbd>+click a class | Show only that class (again: show every class) |
 
+## Cross-section
+
+Active whenever a section exists, with or without its panel open.
+
+| Shortcut | Action |
+|---|---|
+| <kbd>.</kbd> or <kbd>→</kbd> | Step the section forward by the panel's step size |
+| <kbd>,</kbd> or <kbd>←</kbd> | Step the section back |
+
 ## Crop polygon
 
 The view is locked for as long as a closed polygon is set, so the outline

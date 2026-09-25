@@ -4,6 +4,7 @@ import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
+import { fixturePoints, pointsDrawnGrey } from './helpers/pointColors';
 
 const DEPTH_LAYERS = join(repoRoot, 'tests', 'e2e', 'fixtures', 'depth-layers.xyz');
 
@@ -548,4 +549,105 @@ test('the scene-origin marker keeps its on-screen size in a section', async () =
   // math under an ortho matrix) must be materially different from the correct
   // one, or agreement above would be meaningless.
   expect(Math.abs(during.cameraDistance)).toBeGreaterThan(1);
+});
+
+test('the keyboard steps the section: , and ← back, . and → forward', async () => {
+  // Paging through a cloud is the workflow, and reaching for the panel's step
+  // button between every slice takes the eyes off the section.
+  const { page } = await importDepthLayers();
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await setSlab(page, 0, 2);
+  await expect(panel).toHaveAttribute('data-has-slab', 'true');
+  const start = await panel.getAttribute('data-coverage');
+  const index = async () => Number((await panel.getAttribute('data-coverage'))!.split('/')[0]);
+  const i0 = await index();
+
+  await page.keyboard.press('.');
+  await expect.poll(index).toBe(i0 + 1);
+  await page.keyboard.press('ArrowRight');
+  await expect.poll(index).toBe(i0 + 2);
+  await page.keyboard.press(',');
+  await expect.poll(index).toBe(i0 + 1);
+  await page.keyboard.press('ArrowLeft');
+  await expect.poll(async () => panel.getAttribute('data-coverage')).toBe(start);
+
+  // Not while typing: a `.` in the thickness field is a decimal point.
+  const field = panel.locator('input').first();
+  await field.focus();
+  await page.keyboard.press('.');
+  await page.keyboard.press('ArrowRight');
+  await expect(panel).toHaveAttribute('data-coverage', start!);
+  await field.blur();
+
+  // And with the panel closed, while the section is still in effect — the
+  // Label tool shares that slot and pages through the section too.
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  const hudIndex = async () => page.getByTestId('section-hud').textContent();
+  const before = await hudIndex();
+  await page.keyboard.press('.');
+  await expect.poll(hudIndex).not.toBe(before);
+});
+
+test('"Show full cloud" greys the points outside the section instead of hiding it', async () => {
+  // Suspending used to show the whole cloud with no trace of the section, so
+  // the context view could not show where the slice was. Now the slab keeps its
+  // colours and everything outside it goes grey.
+  const { page } = await importDepthLayers();
+  await page.getByTestId('tool-cross-section').click();
+  const panel = page.getByTestId('cross-section-panel');
+  await setSlab(page, 0, 1);
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 }).toBeLessThan(TOTAL);
+
+  await page.getByTestId('section-suspend').click();
+  await expect(panel).toHaveAttribute('data-suspended', 'true');
+  // Every point draws again — grey is not hidden.
+  await expect.poll(async () => await drawnPoints(page), { timeout: 20_000 }).toBe(TOTAL);
+  // Out of the way: where the planes land on screen depends on the view the
+  // previous test left, and the panel must not be what hides them. The section
+  // (and its HUD) outlive the panel.
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  await page.evaluate(() => (window as any).__frameSelection?.());
+
+  const pts = fixturePoints(DEPTH_LAYERS);
+  const near = pts.filter((p) => p[1] === 0);
+  const far = pts.filter((p) => p[1] === 8);
+  const skip = '[data-testid="section-inset"], [data-testid="section-hud"]';
+  await expect.poll(async () => {
+    const f = await pointsDrawnGrey(page, far, 12, 60, skip);
+    return f.sampled > 0 ? f.matched / f.sampled : -1;
+  }, { timeout: 20_000 }).toBeGreaterThan(0.9);
+  const n = await pointsDrawnGrey(page, near, 12, 60, skip);
+  expect(n.sampled).toBeGreaterThan(0);
+  expect(n.matched / n.sampled).toBeLessThan(0.1);
+
+  // Clearing the section drops the ghost: nothing is grey any more.
+  await page.getByTestId('section-hud-clear').click();
+  await expect.poll(async () => {
+    const f = await pointsDrawnGrey(page, far, 12, 60, skip);
+    return f.matched / Math.max(f.sampled, 1);
+  }, { timeout: 20_000 }).toBeLessThan(0.1);
+});
+
+test('an inset map shows where the section sits, and follows it as it steps', async () => {
+  const { page } = await importDepthLayers();
+  await page.getByTestId('tool-cross-section').click();
+  await setSlab(page, 0, 1);
+  const inset = page.getByTestId('section-inset');
+  await expect(inset).toBeVisible();
+  // The cloud's footprint is on the map, sampled from the octree.
+  await expect.poll(async () => Number(await inset.getAttribute('data-footprint-points')), { timeout: 20_000 })
+    .toBeGreaterThan(100);
+
+  // The slab starts on the near plane (y = 0, the bottom edge of the cloud's
+  // extent) and moves UP the map as it steps toward y = 8.
+  const slabY = async () => Number((await inset.getAttribute('data-slab-px'))!.split(',')[1]);
+  const y0 = await slabY();
+  for (let i = 0; i < 16; i++) await page.keyboard.press('.');
+  await expect.poll(slabY).toBeLessThan(y0 - 40);
+
+  await page.getByTestId('section-clear').click();
+  await expect(inset).toHaveCount(0);
 });

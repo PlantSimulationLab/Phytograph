@@ -298,13 +298,21 @@ normally done.
 3. Set **Thickness** thin enough that nothing hides behind anything.
 4. Open **Label Points** — the section stays active, and the panel says so.
    Paint normally; strokes only affect points inside the section.
-5. Step through the cloud with **◀ ▶**. The default half-thickness step makes
+5. Step through the cloud with **◀ ▶**, or from the keyboard with
+   <kbd>,</kbd> / <kbd>←</kbd> (back) and <kbd>.</kbd> / <kbd>→</kbd>
+   (forward) — the keys work with the Label panel open, so you can page and
+   paint without reaching for the section panel. They step by the panel's
+   **Step size**. The default half-thickness step makes
    consecutive sections overlap, so no point is skipped, and the
    *"Section 7 of 42"* readout tells you when you have covered everything.
 
 The section is drawn as a thin, vertical-walled box: bounded by your two clicks
 along the line, half the thickness either side of it, and spanning the full
 height of the cloud.
+
+A small **map** in the lower-left corner of the viewport shows the cloud from
+above with the section as a blue band, so you can tell where you are while every
+face-on slice looks alike. The band moves as you step.
 
 ### Getting back to the whole cloud
 
@@ -316,9 +324,11 @@ panel slot, would silently switch off the section you set up to paint inside.
 While a section is active a small indicator sits at the top of the viewport with
 two ways out, so you never have to remember which tool put it there:
 
-- **Show full cloud** — stop clipping temporarily. The section, its thickness
-  and its place in the traverse are all kept, so you can look around and drop
-  straight back into it.
+- **Show full cloud** — stop clipping temporarily. The section keeps its
+  colours and every point outside it is drawn **grey**, so you see the whole
+  cloud and still see where the section sits. Its thickness and its place in
+  the traverse are all kept, so you can look around and drop straight back
+  into it.
 - **Clear** — remove the section and return to a normal view.
 
 Both are also in the Cross-section panel, and the Label panel's

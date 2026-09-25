@@ -133,6 +133,8 @@ import { LabelPanel } from './viewer/panels/LabelPanel';
 import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
+import { SectionInset } from './viewer/overlays/SectionInset';
+import { sampleOctreeFootprint } from '../lib/sectionInset';
 import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules, splitDeletesByClipBudget, MAX_CLIP_BOXES } from '../lib/deletePreview';
 import { stepCounter, stepReporter } from '../lib/stepProgress';
 import {
@@ -5163,6 +5165,18 @@ export default function PointCloudViewer({
     () => (sectionTargetCloud && slab && !slabSuspended ? slabToBox(slab).matrix : null),
     [sectionTargetCloud, slab, slabSuspended],
   );
+  /**
+   * The suspended section, drawn as a ghost: the whole cloud is visible, with
+   * the slab in its own colours and everything outside it grey — so "Show full
+   * cloud" gives context without losing sight of where the section is. Not
+   * while a new centreline is being placed: the old section is about to be
+   * replaced, and highlighting it would point at the wrong place.
+   */
+  const slabGhostMatrix = useMemo(
+    () => (sectionTargetCloud && slab && slabSuspended && slabDrawState === 'idle'
+      ? slabToBox(slab).matrix : null),
+    [sectionTargetCloud, slab, slabSuspended, slabDrawState],
+  );
 
   const slabCoverageInfo = useMemo(
     () => (slab && sectionBounds
@@ -5238,6 +5252,51 @@ export default function PointCloudViewer({
       return next;
     });
   }, [slabStepMode, slabFixedStep, slabLocked, viewSlabFaceOn]);
+
+  // Step the section from the keyboard: `,` / ← back, `.` / → forward, by the
+  // panel's step size. Live whenever a section exists, not only while its panel
+  // is open — the Label tool shares that slot, and paging through the cloud
+  // while painting is the workflow. Not while typing, and not with a modifier
+  // (those belong to the app's own shortcuts).
+  const hasSection = !!(slab && sectionTargetCloud);
+  useEffect(() => {
+    if (!hasSection) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      const dir = e.key === ',' || e.key === 'ArrowLeft' ? -1
+        : e.key === '.' || e.key === 'ArrowRight' ? 1 : 0;
+      if (!dir) return;
+      e.preventDefault();
+      handleSlabStep(dir);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hasSection, handleSlabStep]);
+
+  // Top-down footprint of the sectioned cloud, for the inset map. Read from the
+  // octree's always-resident coarse levels; retried briefly because the section
+  // can exist before the root tile has landed. Re-sampled when the cloud is
+  // moved (a committed transform moves every point on the map).
+  const [sectionFootprint, setSectionFootprint] = useState<Float32Array>(() => new Float32Array(0));
+  const sectionTargetId = hasSection ? sectionTargetCloud!.id : null;
+  const sectionEditKey = sectionTargetId ? JSON.stringify(getEditState(sectionTargetId)) : '';
+  useEffect(() => {
+    setSectionFootprint(new Float32Array(0));
+    if (!sectionTargetId) return;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = () => {
+      const oct = octreeRegistryRef.current.get(sectionTargetId);
+      const sample = oct ? sampleOctreeFootprint((oct as any).root, displayOffsetRef.current) : null;
+      if (sample && sample.length) setSectionFootprint(sample);
+      else if (++tries < 40) timer = setTimeout(attempt, 250);
+    };
+    // After a frame, so matrixWorld reflects the transform just committed.
+    timer = setTimeout(attempt, 50);
+    return () => clearTimeout(timer);
+  }, [sectionTargetId, sectionEditKey]);
 
   // ── Manual labelling ──────────────────────────────────────────────────────
 
@@ -21205,6 +21264,7 @@ export default function PointCloudViewer({
                     ?? labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE
                   }
                   slabBoxMatrix={sectionTargetCloud?.id === cloud.id ? slabBoxMatrix : null}
+                  slabGhostMatrix={sectionTargetCloud?.id === cloud.id ? slabGhostMatrix : null}
                   labelIndexScheme={labelOverlayByCloud.get(cloud.id)?.scheme ?? null}
                   // GPU clip-volume union (CLIP_INSIDE) combining:
                   //  - committed but unbaked deletes for THIS cloud (the
@@ -23052,6 +23112,14 @@ export default function PointCloudViewer({
 
           So: always visible while a section is in effect, and it carries its own
           way out rather than only naming the tool to go back to. */}
+      {slab && sectionTargetCloud && sectionBounds && (
+        <SectionInset
+          slab={slab}
+          bounds={{ minX: sectionBounds.min.x, minY: sectionBounds.min.y, maxX: sectionBounds.max.x, maxY: sectionBounds.max.y }}
+          footprint={sectionFootprint}
+          suspended={slabSuspended}
+        />
+      )}
       {slab && sectionTargetCloud && (
         <div
           data-testid="section-hud"

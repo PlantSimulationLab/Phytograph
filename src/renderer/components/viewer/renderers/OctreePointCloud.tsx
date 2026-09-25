@@ -175,6 +175,14 @@ export interface OctreePointCloudProps {
    * count (this is what ArcGIS does), so degrading it would defeat the purpose.
    */
   slabBoxMatrix?: THREE.Matrix4 | null;
+  /**
+   * The same slab box, but GHOSTING instead of clipping: points inside draw in
+   * their own colour and points outside draw grey. Used while a section is
+   * suspended ("Show full cloud"), so the whole cloud is visible for context
+   * and the user can still see where the section sits. Ignored when
+   * `slabBoxMatrix` is set — a clipping slab wins.
+   */
+  slabGhostMatrix?: THREE.Matrix4 | null;
   // World-space translation for this cloud (the Translate tool / T-modal value).
   // The PointCloudOctree is attached directly to the scene root (not inside the
   // parent's React `<group position>`), so the group transform does NOT reach it
@@ -358,6 +366,24 @@ function cropClipsEverything(
          max.z < bminz || min.z > bmaxz;
 }
 
+/**
+ * Rewrites potree's HIGHLIGHT_INSIDE clip mode into "grey out the outside".
+ *
+ * potree's own highlight adds red to the points INSIDE the clip volumes, which
+ * is the opposite of what a suspended section wants: the slab should keep its
+ * real colours and everything around it recede. The line only exists under
+ * `#if defined clip_highlight_inside`, so installing this on a material in any
+ * other clip mode changes nothing. Module-level on purpose: three.js keys the
+ * program cache on `onBeforeCompile.toString()`, so one shared function means
+ * one extra program, not one per cloud.
+ */
+function ghostOutsideShader(shader: { vertexShader: string }) {
+  shader.vertexShader = shader.vertexShader.replace(
+    'if (insideAny) { vColor.r += 0.5; }',
+    'if (!insideAny) { vColor = vec3(0.3 + 0.2 * dot(vColor, vec3(0.299, 0.587, 0.114))); }',
+  );
+}
+
 export function OctreePointCloud({
   data,
   pointSize = 2,
@@ -375,6 +401,7 @@ export function OctreePointCloud({
   labelHiddenIndices = null,
   labelIndexScheme = null,
   slabBoxMatrix = null,
+  slabGhostMatrix = null,
   cropMask = null,
   filters = null,
   committedFilters = null,
@@ -1062,7 +1089,8 @@ export function OctreePointCloud({
     | { mode: 'none' }
     | { mode: 'crop-box'; boxes: any[]; invert: boolean }
     | { mode: 'delete-union'; boxes: any[] }
-    | { mode: 'slab'; boxes: any[] };
+    | { mode: 'slab'; boxes: any[] }
+    | { mode: 'slab-ghost'; boxes: any[] };
 
   // Identity key for the oriented-box union, so the effect re-runs only when
   // the boxes actually move (matrices are new objects every parent render).
@@ -1070,12 +1098,13 @@ export function OctreePointCloud({
     .map(b => b.matrix.elements.map(e => e.toFixed(4)).join(','))
     .join('|');
   // Same idea for the slab: planes are new objects each render, so key on value.
-  const slabPlanesKey = slabBoxMatrix
-    ? slabBoxMatrix.elements.map(e => e.toFixed(4)).join(',')
+  const slabMatrix = slabBoxMatrix ?? slabGhostMatrix;
+  const slabPlanesKey = slabMatrix
+    ? `${slabBoxMatrix ? 'clip' : 'ghost'}:${slabMatrix.elements.map(e => e.toFixed(4)).join(',')}`
     : '';
 
   const clipState = useMemo<ClipState>(() => {
-    if (slabBoxMatrix) {
+    if (slabMatrix) {
       // A slab as an oriented clip BOX, not clip planes.
       //
       // potree declares `uniform vec4 clipPlanes[max_clip_planes]` and the
@@ -1085,7 +1114,7 @@ export function OctreePointCloud({
       // successfully every day, and a slab is exactly an oriented box — so use
       // the mechanism that is known to work rather than keep pushing on one
       // that is not exercised anywhere else in the codebase.
-      const matrix = slabBoxMatrix.clone();
+      const matrix = slabMatrix.clone();
       // World → display frame, matching the crop box above.
       matrix.premultiply(new THREE.Matrix4().makeTranslation(
         -(displayOffset?.x ?? 0), -(displayOffset?.y ?? 0), -(displayOffset?.z ?? 0),
@@ -1093,7 +1122,7 @@ export function OctreePointCloud({
       const inverse = matrix.clone().invert();
       const position = new THREE.Vector3().setFromMatrixPosition(matrix);
       return {
-        mode: 'slab',
+        mode: slabBoxMatrix ? 'slab' : 'slab-ghost',
         boxes: [{
           box: new THREE.Box3(
             new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5),
@@ -1170,13 +1199,16 @@ export function OctreePointCloud({
       }
       return;
     }
-    if (clipState.mode === 'slab') {
+    if (clipState.mode === 'slab' || clipState.mode === 'slab-ghost') {
       // CLIP_OUTSIDE with the slab box: keep what is inside, cull the rest.
+      // Ghost: HIGHLIGHT_INSIDE, whose highlight is rewritten to grey out the
+      // OUTSIDE instead (see ghostOutsideShader).
+      m.onBeforeCompile = ghostOutsideShader;
       m.setClipBoxes(clipState.boxes);
-      m.clipMode = ClipMode.CLIP_OUTSIDE;
+      m.clipMode = clipState.mode === 'slab' ? ClipMode.CLIP_OUTSIDE : ClipMode.HIGHLIGHT_INSIDE;
       if (data.octree?.cacheId) {
         ((globalThis as any).__octreeClipState ??= {})[data.octree.cacheId] = {
-          mode: 'slab', numClipBoxes: m.numClipBoxes ?? null, clipMode: m.clipMode,
+          mode: clipState.mode, numClipBoxes: m.numClipBoxes ?? null, clipMode: m.clipMode,
         };
       }
       return;

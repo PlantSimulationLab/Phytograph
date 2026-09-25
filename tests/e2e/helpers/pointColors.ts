@@ -8,6 +8,11 @@ export function fixturePoints(path: string): Array<[number, number, number]> {
     .map((l) => l.trim().split(/\s+/).slice(0, 3).map(Number) as [number, number, number]);
 }
 
+/** What a drawn pixel must look like to count — see pointsDrawnIn / pointsDrawnGrey. */
+type PixelMatch =
+  | { kind: 'hex'; hex: string; tol: number }
+  | { kind: 'grey'; maxChroma: number; minLum: number };
+
 /**
  * How many of `points` are DRAWN in `hex`, read from a screenshot at each
  * point's own projected position (`__worldToScreen`), so swatches of the same
@@ -15,14 +20,32 @@ export function fixturePoints(path: string): Array<[number, number, number]> {
  * pixel within 3 px of it is within `tol` (RGB distance) of the colour. Points
  * under an element matching `skip` (e.g. an open panel) are not sampled.
  */
-export async function pointsDrawnIn(
+export function pointsDrawnIn(
   page: Page, points: Array<[number, number, number]>, hex: string,
   tol = 40, skip = '[data-testid="label-panel"]',
+): Promise<{ matched: number; sampled: number }> {
+  return pointsDrawnMatching(page, points, { kind: 'hex', hex, tol }, skip);
+}
+
+/**
+ * How many of `points` are drawn GREY: some pixel within 3 px is colourless
+ * (max − min channel ≤ `maxChroma`) yet bright enough (mean ≥ `minLum`) not to
+ * be the dark viewport background.
+ */
+export function pointsDrawnGrey(
+  page: Page, points: Array<[number, number, number]>,
+  maxChroma = 12, minLum = 60, skip = '[data-testid="label-panel"]',
+): Promise<{ matched: number; sampled: number }> {
+  return pointsDrawnMatching(page, points, { kind: 'grey', maxChroma, minLum }, skip);
+}
+
+async function pointsDrawnMatching(
+  page: Page, points: Array<[number, number, number]>, match: PixelMatch, skip: string,
 ): Promise<{ matched: number; sampled: number }> {
   const canvas = page.locator('canvas').first();
   const box = (await canvas.boundingBox())!;
   const png = await canvas.screenshot();
-  return page.evaluate(async ({ src, box, points, hex, tol, skip }) => {
+  return page.evaluate(async ({ src, box, points, match, skip }) => {
     const img = new Image();
     await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(); img.src = src; });
     const c = document.createElement('canvas');
@@ -31,7 +54,11 @@ export async function pointsDrawnIn(
     ctx.drawImage(img, 0, 0);
     const d = ctx.getImageData(0, 0, c.width, c.height).data;
     const sx = c.width / box.width; const sy = c.height / box.height;
-    const [er, eg, eb] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const [er, eg, eb] = match.kind === 'hex'
+      ? [1, 3, 5].map((i) => parseInt(match.hex.slice(i, i + 2), 16)) : [0, 0, 0];
+    const ok = (r: number, g: number, b: number) => (match.kind === 'hex'
+      ? Math.hypot(r - er, g - eg, b - eb) <= match.tol
+      : Math.max(r, g, b) - Math.min(r, g, b) <= match.maxChroma && (r + g + b) / 3 >= match.minLum);
     const covers = [...document.querySelectorAll(skip)].map((e) => e.getBoundingClientRect());
     let matched = 0; let sampled = 0;
     for (const w of points) {
@@ -41,15 +68,15 @@ export async function pointsDrawnIn(
           && p.y >= r.top - 6 && p.y <= r.bottom + 6)) continue;
       sampled++;
       const cx = Math.round((p.x - box.x) * sx); const cy = Math.round((p.y - box.y) * sy);
-      let best = Infinity;
-      for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+      let hit = false;
+      for (let dy = -3; dy <= 3 && !hit; dy++) for (let dx = -3; dx <= 3 && !hit; dx++) {
         const x = cx + dx; const y = cy + dy;
         if (x < 0 || y < 0 || x >= c.width || y >= c.height) continue;
         const i = (y * c.width + x) * 4;
-        best = Math.min(best, Math.hypot(d[i] - er, d[i + 1] - eg, d[i + 2] - eb));
+        hit = ok(d[i], d[i + 1], d[i + 2]);
       }
-      if (best <= tol) matched++;
+      if (hit) matched++;
     }
     return { matched, sampled };
-  }, { src: `data:image/png;base64,${png.toString('base64')}`, box, points, hex, tol, skip });
+  }, { src: `data:image/png;base64,${png.toString('base64')}`, box, points, match, skip });
 }
