@@ -78,6 +78,9 @@ export interface LabelStrokeRender {
    * From-class gate — what makes fast, sloppy painting safe). null = any.
    */
   fromIndices: Set<number> | null;
+  /** Never repaint points whose CURRENT index is in this set (hidden or locked
+   *  classes). Applied after the From gate. */
+  excludeIndices?: Set<number> | null;
 }
 
 export interface LabelOverlayState {
@@ -201,8 +204,10 @@ function replayStrokes(
     if (tileBox && stroke.aabb && !stroke.aabb.intersectsBox(tileBox)) continue;
     if (tileBox && stroke.tileMayHit && !stroke.tileMayHit(tileBox)) continue;
     const from = stroke.fromIndices;
+    const exclude = stroke.excludeIndices?.size ? stroke.excludeIndices : null;
     for (let i = 0; i < count; i++) {
       if (from && !from.has(out[i])) continue;
+      if (exclude && exclude.has(out[i])) continue;
       v.set(position.getX(i), position.getY(i), position.getZ(i))
         .applyMatrix4(matrixWorld);
       if (stroke.predicate(v.x + ox, v.y + oy, v.z + oz)) out[i] = stroke.toIndex;

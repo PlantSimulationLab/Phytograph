@@ -155,6 +155,24 @@ export function mergeOctreeFilterSpecs(a: OctreeFilterSpec, b: OctreeFilterSpec)
   return { clauses, key: filterSpecKey(clauses) };
 }
 
+/**
+ * `spec` plus a clause hiding the label overlay's classes at `hiddenIndices`
+ * (palette positions, which is what the overlay buffer `labelAttribute` holds).
+ * `overlayKey` is folded into the key because the clause reads a buffer that
+ * every stroke rewrites: a stroke painting points INTO a hidden class must
+ * re-mask the tiles it touched.
+ */
+export function withHiddenLabelClasses(
+  spec: OctreeFilterSpec, labelAttribute: string, hiddenIndices: readonly number[], overlayKey: string,
+): OctreeFilterSpec {
+  const clause: FilterClause = {
+    source: { kind: 'attribute', slug: labelAttribute },
+    range: { min: -Infinity, max: Infinity, enabled: true, excludedClasses: [...hiddenIndices] },
+  };
+  const clauses = [...spec.clauses, clause];
+  return { clauses, key: `${filterSpecKey(clauses)}|L${overlayKey}` };
+}
+
 function filterSpecKey(clauses: readonly FilterClause[]): string {
   return clauses
     .map(c => {
@@ -162,7 +180,9 @@ function filterSpecKey(clauses: readonly FilterClause[]): string {
         ? `p${c.source.axis}`
         : `a:${c.source.slug}`;
       const r = c.range;
-      const sel = r.selectedClasses ? `c[${[...r.selectedClasses].sort((a, b) => a - b).join(',')}]` : `${r.min}:${r.max}`;
+      const sel = r.selectedClasses ? `c[${[...r.selectedClasses].sort((a, b) => a - b).join(',')}]`
+        : r.excludedClasses ? `x[${[...r.excludedClasses].sort((a, b) => a - b).join(',')}]`
+          : `${r.min}:${r.max}`;
       return `${src}|${sel}`;
     })
     .join('&');

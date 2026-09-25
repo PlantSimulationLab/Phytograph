@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC } from './octreeFilterSpec';
+import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC, withHiddenLabelClasses } from './octreeFilterSpec';
 import { filterValueKeeps } from './pointCloudHelpers';
 import { ORIG_INTENSITY_ATTRIBUTE } from './pointPick';
 import type { CloudFilters } from './pointCloudTypes';
@@ -242,5 +242,20 @@ describe('mergeOctreeFilterSpecs', () => {
     expect(merged.clauses.every(c => filterValueKeeps(c.range, 3))).toBe(true);
     expect(merged.clauses.every(c => filterValueKeeps(c.range, 1))).toBe(false);
     expect(merged.clauses.every(c => filterValueKeeps(c.range, 7))).toBe(false);
+  });
+});
+
+describe('withHiddenLabelClasses', () => {
+  it('adds a clause dropping exactly the hidden label positions, keyed on the overlay', () => {
+    const spec = withHiddenLabelClasses(EMPTY_FILTER_SPEC, '__label', [2, 0], 'p|s1');
+    expect(spec.clauses).toHaveLength(1);
+    const range = spec.clauses[0].range;
+    expect(filterValueKeeps(range, 1)).toBe(true);
+    expect(filterValueKeeps(range, 2)).toBe(false);
+    expect(filterValueKeeps(range, 0)).toBe(false);
+    expect(filterValueKeeps(range, 7)).toBe(true);    // a class nobody listed still draws
+    // A new stroke changes the key, so tiles are re-masked.
+    expect(withHiddenLabelClasses(EMPTY_FILTER_SPEC, '__label', [2, 0], 'p|s1,s2').key)
+      .not.toBe(spec.key);
   });
 });

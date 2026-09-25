@@ -6,7 +6,7 @@ import { ColormapName, sampleColormap } from '../../../lib/colormaps';
 import { categoricalSchemeForCloud, buildCategoricalGradientStops, UNKNOWN_CLASS_COLOR } from '../../../lib/classification';
 import { categoricalTexels } from '../../../lib/categoricalTexture';
 import type { CloudFilters, PointCloudData } from '../../../lib/pointCloudTypes';
-import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC } from '../../../lib/octreeFilterSpec';
+import { resolveOctreeFilterSpec, mergeOctreeFilterSpecs, EMPTY_FILTER_SPEC, withHiddenLabelClasses } from '../../../lib/octreeFilterSpec';
 import { ORIG_INTENSITY_ATTRIBUTE } from '../../../lib/pointPick';
 import { isWideOctreeAttribute } from '../../../lib/octreeWideAttributes';
 import { getPotreeManager, OctreeRequestManager, registerOctreeForFrame } from '../potreeManager';
@@ -20,6 +20,7 @@ import {
 } from './octreeCropMask';
 import {
   applyLabelOverlayToVisibleNodes,
+  LABEL_ATTRIBUTE,
   clearLabelOverlayFromVisibleNodes,
   type LabelOverlayState,
 } from './octreeLabelOverlay';
@@ -154,6 +155,10 @@ export interface OctreePointCloudProps {
   labelCommittedSlug?: string | null;
   /** Cloud id the overlay's E2E stats are filed under (`__labelOverlayByCloud`). */
   labelStatsId?: string;
+  /** Palette positions of label classes the user has HIDDEN (the label tool's
+   *  eye). Their points are dropped by the per-point visibility mask, composed
+   *  with any crop or filter rather than written separately. */
+  labelHiddenIndices?: readonly number[] | null;
   /** Categorical scheme for the overlay's dense INDEX values, so the points and
    *  the legend agree while previewing. Null when not labelling. */
   labelIndexScheme?: { attribute: string; classes: Array<{ value: number; label: string; color: [number, number, number] }> } | null;
@@ -367,6 +372,7 @@ export function OctreePointCloud({
   labelOverlayRef = null,
   labelCommittedSlug = null,
   labelStatsId,
+  labelHiddenIndices = null,
   labelIndexScheme = null,
   slabBoxMatrix = null,
   cropMask = null,
@@ -1227,6 +1233,7 @@ export function OctreePointCloud({
   // density. The cleanup runs on unmount and on every key change, which is what
   // un-hides points rather than leaving an earlier mask behind.
   const cropMaskKey = visibilityMaskKey(cropMaskRules, filterSpec);
+  const labelMaskUsedRef = useRef(false);
   useEffect(() => {
     if (!octree) return;
     if (cropMaskRules.length === 0 && filterSpec.clauses.length === 0) {
@@ -1287,14 +1294,14 @@ export function OctreePointCloud({
   const frameStateRef = useRef({
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
-    labelStatsId, filterSpec, cacheId,
+    labelStatsId, labelHiddenIndices, filterSpec, cacheId,
   });
   frameStateRef.current = {
     // `rotation` rides along so the per-frame LOD-skip test can refuse to claim
     // emptiness for a rotated cloud (see cropClipsEverything).
     clipBox, translation, rotation, data, colorMode, selectedScalarField, onFirstTilesReady,
     cropMask: cropMaskRules, cropMaskKey, displayOffset, labelCommittedSlug, labelOverlayRef,
-    labelStatsId, filterSpec, cacheId,
+    labelStatsId, labelHiddenIndices, filterSpec, cacheId,
   };
 
   useEffect(() => {
@@ -1409,8 +1416,20 @@ export function OctreePointCloud({
         // A FILTER preview needs this just as much as a crop does, and for the
         // same reason: potree streams tiles in continuously, so an unmasked
         // arrival would render the points the filter is meant to hide.
-        if (mask.length > 0 || fspec.clauses.length > 0) {
-          applyCropMaskToVisibleNodes(octree, offset, mask, maskKey, fspec, cid);
+        // The label tool's hidden classes join the same mask. The clause reads
+        // the overlay buffer the block above just wrote, and its key carries the
+        // overlay's, so a stroke into a hidden class re-masks what it touched.
+        // Once used, the pass keeps running (a string compare per tile) so tiles
+        // masked while out of view drop the hide when they come back into view.
+        const hidden = frameStateRef.current.labelHiddenIndices;
+        const labelHide = !!overlay && !!hidden && hidden.length > 0;
+        if (labelHide) labelMaskUsedRef.current = true;
+        const spec = labelHide
+          ? withHiddenLabelClasses(fspec, LABEL_ATTRIBUTE, hidden!, overlay!.key)
+          : fspec;
+        const key = spec === fspec ? maskKey : visibilityMaskKey(mask, spec);
+        if (mask.length > 0 || spec.clauses.length > 0 || labelMaskUsedRef.current) {
+          applyCropMaskToVisibleNodes(octree, offset, mask, key, spec, cid);
           // Record whether THIS filter emptied the cloud, so shouldSkip can stop
           // potree refilling an unfillable budget next frame. Keyed by spec, so
           // the latch dies with the filter that caused it.

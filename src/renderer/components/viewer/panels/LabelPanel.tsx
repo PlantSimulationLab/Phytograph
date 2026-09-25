@@ -1,4 +1,4 @@
-import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso } from 'lucide-react';
+import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck } from 'lucide-react';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 import type { LabelableColumn } from '../../../lib/classPalettes';
@@ -78,6 +78,18 @@ export interface LabelPanelProps {
   busy: boolean;
   onSelectClass: (value: number) => void;
   onToggleVisible: (value: number) => void;
+  /** Show ONLY this class (Alt-click a row); again to show every class. */
+  onIsolateClass: (value: number) => void;
+  /** Classes no stroke may change (the padlocks). */
+  lockedClasses: Set<number>;
+  onToggleLocked: (value: number) => void;
+  /** Lock every labelled class (all but Unclassified), or unlock everything. */
+  onToggleProtect: () => void;
+  /** Where the camera is in the unlabelled-point finder (null until used):
+   *  place `index` of `places`, `here` points there, `total` unlabelled. */
+  finder?: { index: number; places: number; here: number; total: number; estimated?: boolean } | null;
+  /** Step the finder (N / Shift+N); the first step starts it. */
+  onFinderStep: (dir: 1 | -1) => void;
   onToggleFromClass: (value: number) => void;
   onSetFromAnyVisible: () => void;
   onUndoStroke: () => void;
@@ -133,6 +145,12 @@ export function LabelPanel({
   busy,
   onSelectClass,
   onToggleVisible,
+  onIsolateClass,
+  lockedClasses,
+  onToggleLocked,
+  onToggleProtect,
+  finder = null,
+  onFinderStep,
   onToggleFromClass,
   onSetFromAnyVisible,
   onUndoStroke,
@@ -153,6 +171,9 @@ export function LabelPanel({
     .reduce((n, [, c]) => n + c, 0);
 
   const nameOf = (v: number) => classes.find((c) => c.value === v)?.label ?? `Class ${v}`;
+  // Protect is on when every labelled class (all but Unclassified) is locked.
+  const labelledValues = classes.map((c) => c.value).filter((v) => v !== 0);
+  const protectOn = labelledValues.length > 0 && labelledValues.every((v) => lockedClasses.has(v));
   const activeName = nameOf(activeClass);
   const fromNames = fromClasses
     ? [...fromClasses].map(nameOf).join(', ')
@@ -365,6 +386,7 @@ export function LabelPanel({
         <span className="w-3" />
         <span className="flex-1">Click a class to paint it</span>
         <span title="Only paint over this class">over</span>
+        <span title="Lock: no stroke changes this class">lock</span>
         <span title="Show/hide this class">show</span>
       </div>
       <div
@@ -383,11 +405,13 @@ export function LabelPanel({
               data-visible={visible ? 'true' : 'false'}
               data-in-from={inFrom ? 'true' : 'false'}
               data-count={classCounts[c.value] ?? 0}
+              data-locked={lockedClasses.has(c.value) ? 'true' : 'false'}
               data-color={rgbToHex(c.color)}
               className={`flex items-center gap-1.5 px-1.5 py-1 text-[11px] cursor-pointer ${
                 active ? 'bg-blue-600/40' : 'hover:bg-neutral-700/60'
               }`}
-              onClick={() => onSelectClass(c.value)}
+              onClick={(e) => (e.altKey ? onIsolateClass(c.value) : onSelectClass(c.value))}
+              title="Click to paint this class; Alt-click to show only this class"
             >
               <span
                 className="w-3 h-3 rounded-sm shrink-0 border border-black/30"
@@ -408,6 +432,19 @@ export function LabelPanel({
                   inFrom ? 'bg-amber-400 border-amber-200' : 'border-neutral-500'
                 }`}
               />
+              <button
+                data-testid={`label-lock-${c.value}`}
+                aria-label={`${lockedClasses.has(c.value) ? 'Unlock' : 'Lock'} ${c.label}`}
+                title={lockedClasses.has(c.value)
+                  ? 'Locked: strokes never change this class'
+                  : 'Lock so no stroke changes this class'}
+                onClick={(e) => { e.stopPropagation(); onToggleLocked(c.value); }}
+                className="p-0.5 hover:bg-neutral-600 rounded shrink-0"
+              >
+                {lockedClasses.has(c.value)
+                  ? <Lock className="w-3 h-3 text-amber-400" />
+                  : <Unlock className="w-3 h-3 text-neutral-600" />}
+              </button>
               <button
                 data-testid={`label-visible-${c.value}`}
                 aria-label={`${visible ? 'Hide' : 'Show'} ${c.label}`}
@@ -452,6 +489,18 @@ export function LabelPanel({
             ? 'Paint over any visible class'
             : 'Reset — paint over any visible class'}
         </button>
+        <button
+          data-testid="label-protect"
+          data-active={protectOn ? 'true' : 'false'}
+          onClick={onToggleProtect}
+          title="Lock every labelled class, so strokes only label points that are still Unclassified"
+          className={`mt-1 w-full px-2 py-1 rounded text-left flex items-center gap-1 ${
+            protectOn ? 'bg-amber-600/30 text-amber-200' : 'bg-neutral-900 text-neutral-400 hover:bg-neutral-700'
+          }`}
+        >
+          <ShieldCheck className="w-3 h-3" />
+          {protectOn ? 'Protecting labelled points' : 'Protect labelled points'}
+        </button>
         {isNoOp && (
           <div data-testid="label-noop-warning" className="mt-1.5 text-amber-400">
             This paints {activeName} only over points that are already
@@ -472,6 +521,41 @@ export function LabelPanel({
           Undo
         </button>
       </div>
+
+      <div className="mt-2 flex items-center gap-1 text-[10px]">
+        <button
+          data-testid="label-find-unlabelled"
+          onClick={() => onFinderStep(1)}
+          title="Show only unlabelled points and go to where most of them are (N; Shift+N goes back)"
+          className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200 text-left"
+        >
+          {finder ? 'Next unlabelled area (N)' : 'Find unlabelled points (N)'}
+        </button>
+        {finder && finder.places > 0 && (
+          <button
+            data-testid="label-finder-prev"
+            onClick={() => onFinderStep(-1)}
+            title="Previous area (Shift+N)"
+            className="px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200"
+          >
+            Back
+          </button>
+        )}
+      </div>
+      {finder && (
+        <div
+          data-testid="label-finder-status"
+          data-index={finder.index}
+          data-places={finder.places}
+          data-total={finder.total}
+          className="mt-1 text-[10px] text-neutral-400"
+        >
+          {finder.places === 0
+            ? 'No unlabelled points left.'
+            : `Area ${finder.index + 1} of ${finder.places}: ${finder.estimated ? 'about ' : ''}`
+              + `${finder.here.toLocaleString()} of ${finder.total.toLocaleString()} unlabelled points.`}
+        </div>
+      )}
 
       {unexported && (
         <div data-testid="label-unexported" className="mt-2 text-[10px] text-amber-400">

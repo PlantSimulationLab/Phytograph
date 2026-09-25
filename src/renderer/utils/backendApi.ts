@@ -4724,6 +4724,8 @@ export interface LabelStrokeRequest {
   to_class: number;
   /** Omit for "any visible" — no class gate. */
   from_classes?: number[];
+  /** Hidden and locked classes: never repainted, whatever the From gate says. */
+  exclude_classes?: number[];
   /** Cross-section the stroke was drawn in; ANDed with `region`. */
   slab?: CropOctreeRegion;
   stroke_id: string;
@@ -4780,6 +4782,31 @@ export async function labelCloudRegion(
     console.error('label_cloud_region failed:', error);
     throw error;
   }
+}
+
+/** One place where a column's unlabelled points gather (session frame). */
+export interface UnlabelledCluster {
+  count: number;
+  center: [number, number, number];
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+/**
+ * Where the column's still-unlabelled points are: connected groups on a coarse
+ * grid, largest first, for the label tool to step the camera through.
+ */
+export async function getUnlabelledClusters(
+  sessionId: string, slug?: string,
+): Promise<{ total: number; estimated?: boolean; clusters: UnlabelledCluster[] }> {
+  const q = slug ? `?slug=${encodeURIComponent(slug)}` : '';
+  const response = await fetch(
+    `${getBackendUrl()}/api/cloud/session/${sessionId}/unlabelled_clusters${q}`);
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return response.json();
 }
 
 /**

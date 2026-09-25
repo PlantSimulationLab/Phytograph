@@ -74,6 +74,8 @@ apply to them.)
 | <kbd>Esc</kbd> | Cancel the lasso in progress |
 | <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo the last stroke |
 | <kbd>Shift</kbd>+<kbd>Ctrl</kbd>+<kbd>Z</kbd> | Redo the stroke you just undid |
+| <kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd> | Go to the next / previous area of unlabelled points |
+| <kbd>Alt</kbd>+click a class | Show only that class (again: show every class) |
 
 ## Crop polygon
 

@@ -25,6 +25,7 @@ import { MISS_ATTRIBUTE } from './classification';
 // `includes(v)` would drop every point of that class.
 export function filterValueKeeps(f: FilterRange, v: number): boolean {
   if (f.selectedClasses) return f.selectedClasses.includes(Math.round(v));
+  if (f.excludedClasses) return !f.excludedClasses.includes(Math.round(v));
   return v >= f.min && v <= f.max;
 }
 

@@ -64,3 +64,11 @@ describe('labelStrokeRequest', () => {
     expect(req).toMatchObject({ stroke_id: 's', to_class: 64, from_classes: [0], slab: { kind: 'slab' } });
   });
 });
+
+describe('labelStrokeRequest exclusions', () => {
+  it('sends the hidden/locked classes a replay must honour', () => {
+    expect(labelStrokeRequest(stroke('s', { excludeClasses: [64, 2] })))
+      .toMatchObject({ exclude_classes: [64, 2] });
+    expect(labelStrokeRequest(stroke('s'))).not.toHaveProperty('exclude_classes');
+  });
+});

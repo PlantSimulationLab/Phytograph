@@ -424,3 +424,13 @@ describe('incremental replay', () => {
     expect((globalThis as any).__labelOverlay).toBe('sentinel');
   });
 });
+
+describe('excluded classes', () => {
+  it('a stroke never repaints a hidden or locked class, even with no From gate', () => {
+    const geom = makeGeometry([[0, 0, 0], [0.1, 0, 0]]);
+    // Committed: point 0 is class 64 (index 1), point 1 is unclassified.
+    const stroke = { ...lowX(2), excludeIndices: new Set([1]) };
+    applyStrokesToGeometry(geom, identity, undefined, [64, 0], state([stroke]));
+    expect(labels(geom)).toEqual([1, 2]);
+  });
+});

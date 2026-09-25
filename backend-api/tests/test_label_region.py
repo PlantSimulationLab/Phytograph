@@ -1086,3 +1086,54 @@ def test_a_compaction_during_the_unlocked_selection_is_respected(
     assert fired and len(sess.positions) < 1000, "the bake did not compact"
     want = _box_mask(sess.positions, BOX_BIG)
     np.testing.assert_array_equal(_labels(sid) == 64, want)
+
+
+def test_excluded_classes_are_never_repainted(client, cache_root, grid_xyz):
+    """Hidden and locked classes arrive as `exclude_classes`: a stroke over them
+    leaves them alone even with no From gate ("any visible class")."""
+    sid = _create(client, grid_xyz)
+    sess = main._cloud_sessions[sid]
+    _paint(client, sid, [_stroke(BOX_SMALL, 64, "s1")])
+    small = _box_mask(sess.positions, BOX_SMALL)
+    big = _box_mask(sess.positions, BOX_BIG)
+    stroke = _stroke(BOX_BIG, 65, "s2")
+    stroke["exclude_classes"] = [64]
+    body = _paint(client, sid, [stroke])
+    assert (_labels(sid)[small] == 64).all()
+    assert (_labels(sid)[big & ~small] == 65).all()
+    assert body["applied"][0]["selected_count"] == int((big & ~small).sum())
+    # And the undo of that stroke leaves the excluded class as it was.
+    client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                json={"undo_after_stroke_ids": ["s1"]})
+    assert (_labels(sid)[small] == 64).all() and not (_labels(sid) == 65).any()
+
+
+def test_unlabelled_clusters_find_the_gaps_largest_first(client, cache_root, tmp_path):
+    """Two separate blobs of points, one of them labelled: the finder reports
+    only the unlabelled blob, and ranks separate blobs by size."""
+    rng = np.random.default_rng(1)
+    a = rng.uniform(0, 0.2, size=(300, 3))                 # big blob near origin
+    b = rng.uniform(0, 0.2, size=(100, 3)) + [3, 3, 3]     # small blob far away
+    c = rng.uniform(0, 0.2, size=(200, 3)) + [0, 3, 0]     # medium blob
+    f = tmp_path / "blobs.xyz"
+    np.savetxt(f, np.vstack([a, b, c]), fmt="%.5f")
+    sid = _create(client, f)
+    body = client.get(f"/api/cloud/session/{sid}/unlabelled_clusters").json()
+    assert body["total"] == 600
+    assert [cl["count"] for cl in body["clusters"]] == [300, 200, 100]
+    assert np.allclose(body["clusters"][2]["center"], b.mean(axis=0), atol=1e-3)
+
+    # Label the big blob: it drops out, the others remain in order.
+    box = {"kind": "box", "min": [-1, -1, -1], "max": [0.5, 0.5, 0.5], "invert": False}
+    _paint(client, sid, [_stroke(box, 64, "s1")])
+    body = client.get(f"/api/cloud/session/{sid}/unlabelled_clusters").json()
+    assert body["total"] == 300
+    assert [cl["count"] for cl in body["clusters"]] == [200, 100]
+
+
+def test_unlabelled_clusters_do_not_splinter_a_sparse_blob():
+    """Points further apart than a grid cell must still form one area: cells
+    are never finer than twice the typical point spacing."""
+    pts = np.loadtxt(Path(__file__).resolve().parents[2] / "tests/e2e/fixtures/two-blobs.xyz")
+    clusters = main._unlabelled_clusters(pts, np.ones(len(pts), dtype=bool))
+    assert [c["count"] for c in clusters] == [40, 20]

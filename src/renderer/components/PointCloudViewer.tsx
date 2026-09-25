@@ -95,6 +95,7 @@ import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
+import { getUnlabelledClusters, type UnlabelledCluster } from '../utils/backendApi';
 import { screenStrokeTileTest } from '../lib/strokeTileTest';
 import { createKeyedSerialQueue, type KeyedSerialQueue } from '../lib/keyedSerialQueue';
 import {
@@ -2612,6 +2613,12 @@ export default function PointCloudViewer({
   const [paletteLibrary, setPaletteLibrary] = useState<ClassPalette[]>([]);
   const [labelActiveClass, setLabelActiveClass] = useState(0);
   const [labelVisibleClasses, setLabelVisibleClasses] = useState<Set<number>>(new Set());
+  // Classes no stroke may change, whatever its From gate (the padlocks).
+  const [labelLockedClasses, setLabelLockedClasses] = useState<Set<number>>(new Set());
+  // The unlabelled-point finder: where the column's unlabelled points gather,
+  // and which of those places the camera is on. Null until first used.
+  const [labelFinder, setLabelFinder] =
+    useState<{ clusters: UnlabelledCluster[]; index: number; total: number; estimated: boolean } | null>(null);
   // null = "Any visible" (no class gate) — see LabelPanel.
   const [labelFromClasses, setLabelFromClasses] = useState<Set<number> | null>(null);
   // Uncommitted strokes and the dirty flag, per (cloud, column) — see
@@ -5241,6 +5248,14 @@ export default function PointCloudViewer({
     return cloud?.data.octree?.sessionId ? cloud : null;
   }, [showLabelPanel, selectedIds, clouds]);
   const labelPendingEntry = pendingFor(labelPending, labelTargetCloud?.id, labelPalette?.slug);
+  // Palette POSITIONS of the classes the eye has hidden, for the target cloud's
+  // visibility mask (the overlay buffer holds positions, not class values).
+  const labelHiddenIndices = useMemo(() => {
+    if (!labelTargetCloud || !labelPalette) return null;
+    const hidden = labelPalette.classes
+      .map((c, i) => (labelVisibleClasses.has(c.value) ? -1 : i)).filter((i) => i >= 0);
+    return hidden.length ? hidden : null;
+  }, [labelTargetCloud, labelPalette, labelVisibleClasses]);
   const labelStrokes = labelPendingEntry.strokes;
   const labelDirty = labelPendingEntry.dirty;
 
@@ -5580,6 +5595,8 @@ export default function PointCloudViewer({
   const applyLabelPalette = useCallback((next: ClassPalette) => {
     setLabelPalette(next);
     setLabelVisibleClasses(new Set(next.classes.map(c => c.value)));
+    setLabelLockedClasses(new Set());
+    setLabelFinder(null);
     setLabelActiveClass(prev => (
       // Keep the user's active class if the new palette still has it, so an
       // edit that only renames or recolours does not move their brush.
@@ -5809,6 +5826,8 @@ export default function PointCloudViewer({
     labelColumnByCloudRef.current.set(labelTargetCloud.id, palette.slug);
     setLabelPalette(palette);
     setLabelVisibleClasses(new Set(palette.classes.map(c => c.value)));
+    setLabelLockedClasses(new Set());
+    setLabelFinder(null);
     // Start on the first non-Unclassified class: painting "Unclassified" by
     // accident is a silent no-op the user would have to debug.
     setLabelActiveClass(palette.classes.find(c => c.value !== 0)?.value ?? 0);
@@ -5852,11 +5871,18 @@ export default function PointCloudViewer({
     // stroke (not read live) so undo/redo replays the section the user actually
     // painted in, even after they have stepped the slab on.
     const activeSlab = sectionTargetCloud?.id === cloud.id ? slab : null;
+    // Never repaint what the user cannot see: a hidden class is protected, so
+    // "any visible class" means exactly that (the eye used to do nothing). A
+    // LOCKED class is protected whether shown or not.
+    const excludeClasses = palette.classes
+      .map((c) => c.value)
+      .filter((v) => !labelVisibleClasses.has(v) || labelLockedClasses.has(v));
     const stroke: LabelStroke = {
       strokeId,
       region,
       toClass: labelActiveClass,
       fromClasses: labelFromClasses ? [...labelFromClasses] : undefined,
+      ...(excludeClasses.length ? { excludeClasses } : {}),
       slab: activeSlab ? slabToPayload(activeSlab) : undefined,
     };
     const before: LabelEditState = {
@@ -5938,7 +5964,8 @@ export default function PointCloudViewer({
       }
     });
   }, [labelTargetCloud, labelActiveClass, labelFromClasses, labelStrokes,
-      labelVisibleClasses, labelDirty, scene, showToast, updateLabelPending, labelQueue,
+      labelVisibleClasses, labelLockedClasses, labelDirty, scene, showToast, updateLabelPending,
+      labelQueue,
       // `slab`/`sectionTargetCloud` are READ in the body (activeSlab), so they
       // must be dependencies. Omitting them froze `slab` at its first-render
       // value — null — so every stroke drawn inside a section shipped WITHOUT
@@ -6087,9 +6114,12 @@ export default function PointCloudViewer({
       const fromIndices = s.fromClasses
         ? new Set(s.fromClasses.map((v) => valueToIndex.get(v) ?? -1))
         : null;
+      const excludeIndices = s.excludeClasses?.length
+        ? new Set(s.excludeClasses.map((v) => valueToIndex.get(v) ?? -1))
+        : null;
       return {
         predicate, aabb: strokeAabb(s.region), tileMayHit: screenStrokeTileTest(s.region),
-        toIndex, fromIndices,
+        toIndex, fromIndices, excludeIndices,
       };
     });
     return {
@@ -6237,6 +6267,45 @@ export default function PointCloudViewer({
   const handleLabelUndo = useCallback(() => {
     if (labelUndoAvailable) handleUndo();
   }, [labelUndoAvailable, handleUndo]);
+
+  /**
+   * Move the camera to the next (or previous) place where the column's
+   * unlabelled points gather. Re-read from the backend every step, so places
+   * the user has labelled since drop out. The first step also shows only the
+   * Unclassified points, which is what makes the stragglers visible at all in
+   * a mostly-labelled cloud (Alt-click a class to bring the rest back).
+   */
+  const stepLabelFinder = useCallback(async (dir: 1 | -1) => {
+    const cloud = labelTargetCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    const palette = labelPaletteRef.current;
+    if (!cloud || !sessionId || !palette) return;
+    try {
+      const { clusters, total, estimated = false } = await getUnlabelledClusters(sessionId, palette.slug);
+      if (clusters.length === 0) {
+        setLabelFinder({ clusters, index: -1, total, estimated });
+        return;
+      }
+      const first = labelFinder === null;
+      const index = first ? 0
+        : ((labelFinder.index + dir) % clusters.length + clusters.length) % clusters.length;
+      setLabelFinder({ clusters, index, total, estimated });
+      if (first) setLabelVisibleClasses(new Set([UNCLASSIFIED_VALUE]));
+      const c = clusters[index];
+      const size = new THREE.Vector3(
+        c.max[0] - c.min[0], c.max[1] - c.min[1], c.max[2] - c.min[2]);
+      // A single point has no extent; frame a small neighbourhood instead.
+      const floor = Math.max(size.x, size.y, size.z) || 0.5;
+      size.max(new THREE.Vector3(floor, floor, floor).multiplyScalar(0.25));
+      (window as any).__frameSelection?.({
+        center: new THREE.Vector3(c.center[0], c.center[1], c.center[2]), size,
+      });
+    } catch (err) {
+      showToast({ title: describeBackendError(err, 'Finding unlabelled points').message, type: 'error' });
+    }
+  }, [labelTargetCloud, labelFinder, showToast]);
+  const labelFinderStepRef = useRef(stepLabelFinder);
+  labelFinderStepRef.current = stepLabelFinder;
 
   /**
    * Bake one column's labels into its cloud's display octree, in the background.
@@ -7505,6 +7574,16 @@ export default function PointCloudViewer({
         if (!typing && showLabelPanel) {
           e.preventDefault();
           setLabelDrawing(d => !d);
+        }
+      }
+      // 'N' / Shift+N step through the places unlabelled points gather.
+      if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing && showLabelPanel) {
+          e.preventDefault();
+          void labelFinderStepRef.current(e.shiftKey ? -1 : 1);
         }
       }
       // Enter: while mid-polygon, close the polygon. Otherwise (in crop
@@ -21050,6 +21129,7 @@ export default function PointCloudViewer({
                   // user hits Save. See `labelOverlayByCloud`.
                   labelOverlayRef={labelOverlayBoxesRef.current.get(cloud.id) ?? null}
                   labelStatsId={cloud.id}
+                  labelHiddenIndices={labelTargetCloud?.id === cloud.id ? labelHiddenIndices : null}
                   labelCommittedSlug={
                     labelOverlayByCloud.get(cloud.id)?.slug
                     ?? labelPalette?.slug ?? MANUAL_CLASS_ATTRIBUTE
@@ -24961,6 +25041,33 @@ export default function PointCloudViewer({
             return next.size === 0 ? null : next;
           })}
           onSetFromAnyVisible={() => setLabelFromClasses(null)}
+          lockedClasses={labelLockedClasses}
+          finder={labelFinder && {
+            index: labelFinder.index, places: labelFinder.clusters.length, total: labelFinder.total,
+            here: labelFinder.clusters[labelFinder.index]?.count ?? 0,
+            estimated: labelFinder.estimated,
+          }}
+          onFinderStep={(dir) => { void stepLabelFinder(dir); }}
+          onToggleLocked={(v) => setLabelLockedClasses((prev) => {
+            const next = new Set(prev);
+            if (next.has(v)) next.delete(v); else next.add(v);
+            return next;
+          })}
+          // Protect = every class except Unclassified locked, so strokes only
+          // ever label what is not labelled yet. Off unlocks everything.
+          onToggleProtect={() => setLabelLockedClasses((prev) => {
+            const labelled = labelPalette.classes
+              .map((c) => c.value).filter((v) => v !== UNCLASSIFIED_VALUE);
+            const on = labelled.length > 0 && labelled.every((v) => prev.has(v));
+            return on ? new Set() : new Set(labelled);
+          })}
+          onIsolateClass={(v) => setLabelVisibleClasses((prev) => {
+            // Already isolated on this class: show everything again.
+            if (prev.size === 1 && prev.has(v)) {
+              return new Set(labelPalette.classes.map((c) => c.value));
+            }
+            return new Set([v]);
+          })}
           onUndoStroke={handleLabelUndo}
           // Two distinct controls: cycle through the built-in preset
           // vocabularies, or open the editor to build one of your own.

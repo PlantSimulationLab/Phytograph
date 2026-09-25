@@ -238,11 +238,31 @@ With no dot set, a stroke repaints any visible class.
     only where it is already wood" — a no-op. The panel warns you when the two
     line up like this.
 
-## Show and hide classes
+## Show, hide and lock classes
 
-The eye icon on each row hides that class from the viewer. Hidden classes are
-also skipped when repainting, so hiding a class you have finished with protects
-it while you work on the rest.
+The eye icon on each row hides that class's points from the viewer. Hidden
+classes are also never repainted: a stroke skips them whatever the `over`
+column says, so hiding a class you have finished with protects it while you
+work on the rest, and "any visible class" means exactly that.
+
+**Alt-click** a class row to show *only* that class, which is the quickest way
+to check what a class really contains. Alt-click the same row again to show
+every class.
+
+The padlock on each row **locks** a class: no stroke changes its points, and
+unlike hiding it stays on screen. **Protect labelled points**, under the class
+list, locks every class except Unclassified, so strokes only ever label points
+that have no label yet, which makes it safe to sweep a big lasso over a
+half-finished cloud. Click it again to unlock everything.
+
+## Find what is still unlabelled
+
+**Find unlabelled points** (or `N`) shows only the Unclassified points and moves
+the camera to where most of them are. Press `N` again for the next such area,
+largest first, and `Shift+N` to go back; the panel says which area you are on
+and how many unlabelled points are left. Each step re-reads the cloud, so areas
+you label drop out as you go, and when nothing is left the panel says so.
+Alt-click a class row to see the labelled points again.
 
 ## What happens to the labels
 

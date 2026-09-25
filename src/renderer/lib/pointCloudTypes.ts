@@ -425,6 +425,10 @@ export interface LabelStroke {
   region: PendingDeleteRegion;
   toClass: number;
   fromClasses?: number[];
+  /** Classes the stroke must never change: hidden or locked when it was drawn.
+   *  Captured per stroke so a replay (undo/redo, the overlay) honours the
+   *  visibility and locks the user had AT THE TIME. */
+  excludeClasses?: number[];
   /**
    * Cross-section slab the stroke was drawn inside, INTERSECTED with `region`.
    * The lasso says where on screen, the slab says how deep — so a stroke drawn
@@ -1005,6 +1009,9 @@ export interface FilterRange {
   max: number;
   enabled: boolean;
   selectedClasses?: number[];
+  /** Drop these classes, keep every other value (including classes nobody
+   *  listed). Used to hide classes in the label tool. */
+  excludedClasses?: number[];
 }
 
 // All filters for a point cloud

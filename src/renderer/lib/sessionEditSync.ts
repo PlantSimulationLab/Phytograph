@@ -79,6 +79,7 @@ export function labelStrokeRequest(stroke: LabelStroke): LabelStrokeRequest {
     region: stroke.region as CropOctreeRegion,
     to_class: stroke.toClass,
     ...(stroke.fromClasses ? { from_classes: stroke.fromClasses } : {}),
+    ...(stroke.excludeClasses?.length ? { exclude_classes: stroke.excludeClasses } : {}),
     ...(stroke.slab ? { slab: stroke.slab as unknown as CropOctreeRegion } : {}),
     stroke_id: stroke.strokeId,
   };

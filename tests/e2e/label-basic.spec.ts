@@ -791,3 +791,151 @@ test('a pause in painting bakes the column on its own', async () => {
     await page.evaluate(() => { delete (window as any).__labelIdleBakeMs; });
   }
 });
+
+/** Points the tiny cloud's tiles actually DRAW, from the visibility mask's
+ *  own per-cloud stats (keyed by the cloud's octree cache id). */
+async function drawnPoints(page: LaunchedApp['page']) {
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  const cid = await row.getAttribute('data-octree-cache-id');
+  return page.evaluate((id) => {
+    const s = (window as any).__octreeMaskByCloud?.[id ?? ''];
+    return s ? s.drawn : -1;
+  }, cid);
+}
+
+test('the eye hides a class, and a hidden class is never repainted', async () => {
+  // The eye used to do nothing at all, while the panel promised it protected
+  // hidden classes. Hidden classes now drop out of the view AND out of every
+  // stroke ("paint over any visible class" means visible).
+  const { page, panel } = await openLabelTool();
+  const first = Number(await panel.getAttribute('data-active-class'));
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+
+  await page.getByTestId(`label-visible-${first}`).click();
+  await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(0);
+
+  // Painting another class over the whole view changes nothing: every point
+  // is in the hidden class.
+  const second = await otherClass(page, first);
+  await page.getByTestId(`label-class-${second}`).click();
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '2', { timeout: 15_000 });
+  await page.waitForTimeout(500);
+  expect((await counts(panel))[String(first)]).toBe(60);
+  expect((await counts(panel))[String(second)] ?? 0).toBe(0);
+
+  // Shown again: all 60 draw, and a stroke now repaints them.
+  await page.getByTestId(`label-visible-${first}`).click();
+  await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(60);
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+});
+
+test('Alt-click isolates a class, and again shows every class', async () => {
+  const { page, panel } = await openLabelTool();
+  const first = Number(await panel.getAttribute('data-active-class'));
+  const second = await otherClass(page, first);
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(60);
+
+  // Isolate the class nobody has: nothing draws.
+  await page.getByTestId(`label-class-${second}`).click({ modifiers: ['Alt'] });
+  await expect(page.getByTestId(`label-class-${second}`)).toHaveAttribute('data-visible', 'true');
+  await expect(page.getByTestId(`label-class-${first}`)).toHaveAttribute('data-visible', 'false');
+  await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(0);
+  // Isolate the painted class: all 60.
+  await page.getByTestId(`label-class-${first}`).click({ modifiers: ['Alt'] });
+  await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(60);
+  // Alt-click the isolated class again: every class is visible.
+  await page.getByTestId(`label-class-${first}`).click({ modifiers: ['Alt'] });
+  await expect(page.getByTestId(`label-class-${second}`)).toHaveAttribute('data-visible', 'true');
+  await expect(page.getByTestId('label-class-0')).toHaveAttribute('data-visible', 'true');
+});
+
+test('a locked class is never repainted, and Protect locks every labelled class', async () => {
+  const { page, panel } = await openLabelTool();
+  const first = Number(await panel.getAttribute('data-active-class'));
+  const second = await otherClass(page, first);
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+
+  // Lock the painted class: a stroke of another class over everything is a no-op.
+  await page.getByTestId(`label-lock-${first}`).click();
+  await expect(page.getByTestId(`label-class-${first}`)).toHaveAttribute('data-locked', 'true');
+  await page.getByTestId(`label-class-${second}`).click();
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '2', { timeout: 15_000 });
+  await page.waitForTimeout(500);
+  expect((await counts(panel))[String(first)]).toBe(60);
+
+  // Locked is not hidden: the class still draws.
+  await expect.poll(() => drawnPoints(page), { timeout: 15_000 }).toBe(60);
+
+  // Protect is on exactly while every labelled class is locked...
+  await page.getByTestId(`label-lock-${first}`).click();
+  await page.getByTestId('label-protect').click();
+  await expect(page.getByTestId('label-protect')).toHaveAttribute('data-active', 'true');
+  await expect(page.getByTestId(`label-class-${second}`)).toHaveAttribute('data-locked', 'true');
+  await expect(page.getByTestId('label-class-0')).toHaveAttribute('data-locked', 'false');
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '3', { timeout: 15_000 });
+  await page.waitForTimeout(500);
+  expect((await counts(panel))[String(first)]).toBe(60);
+
+  // ...and off unlocks everything, so the stroke goes through.
+  await page.getByTestId('label-protect').click();
+  await expect(page.getByTestId(`label-class-${first}`)).toHaveAttribute('data-locked', 'false');
+  await paintWholeViewport(page);
+  await expect.poll(async () => (await counts(panel))[String(second)] ?? 0,
+    { timeout: 15_000 }).toBe(60);
+});
+
+test('the finder steps the camera through the places unlabelled points gather', async () => {
+  // Largest first, N forward and Shift+N back, showing only unlabelled points,
+  // and it says so once there is nothing left to label.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', join(repoRoot, 'tests', 'e2e', 'fixtures', 'two-blobs.xyz'));
+  await completeImportWizard(page);
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="two-blobs"]');
+  await expect(row).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  await page.getByTestId('tool-label').click();
+  const panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+  const status = page.getByTestId('label-finder-status');
+  const target = () => page.evaluate(() => (window as any).__getCameraState().target as number[]);
+
+  await page.getByTestId('label-find-unlabelled').click();
+  await expect(status).toHaveAttribute('data-index', '0', { timeout: 15_000 });
+  await expect(status).toHaveAttribute('data-places', '2');
+  await expect(status).toContainText('40 of 60');
+  // Only the unlabelled points are shown while finding.
+  await expect(page.getByTestId('label-class-0')).toHaveAttribute('data-visible', 'true');
+  const active = await panel.getAttribute('data-active-class');
+  await expect(page.getByTestId(`label-class-${active}`)).toHaveAttribute('data-visible', 'false');
+  const t0 = await target();
+
+  await page.keyboard.press('n');
+  await expect(status).toHaveAttribute('data-index', '1', { timeout: 15_000 });
+  await expect(status).toContainText('20 of 60');
+  await expect.poll(async () => (await target())[0] - t0[0], { timeout: 10_000 })
+    .toBeGreaterThan(4.5);
+
+  await page.keyboard.press('Shift+N');
+  await expect(status).toHaveAttribute('data-index', '0', { timeout: 15_000 });
+
+  // Label everything: the finder reports nothing left. The finder framed one
+  // area, so frame the whole cloud again before the full-view lasso.
+  await page.evaluate(() => {
+    (window as any).__orientToAxis({ x: 0, y: 1, z: 0 });
+    (window as any).__frameSelection();
+  });
+  await page.waitForTimeout(500);
+  await paintWholeViewport(page);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await page.keyboard.press('n');
+  await expect(status).toHaveAttribute('data-places', '0', { timeout: 15_000 });
+  await expect(status).toContainText('No unlabelled points left');
+});
