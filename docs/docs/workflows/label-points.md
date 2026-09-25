@@ -86,6 +86,26 @@ and the sphere it corresponds to grows or shrinks in the cloud to match.
 If the cursor is not over any geometry the brush shows nothing and paints
 nothing, rather than guessing a depth and labelling points you cannot see.
 
+### Pick a whole piece with one click
+
+The **Pick** tool (`K`) labels a whole piece of the cloud per click — a leaf, a
+stretch of branch, or a whole plant — instead of tracing it:
+
+- **Pieces** cuts the cloud into compact pieces about **Size** across. A piece
+  never jumps a gap, so a leaf stays separate from the leaf behind it.
+- **Connected** takes everything joined up, bridging gaps up to **Gap**: a
+  plant standing apart from its neighbours, or a fruit hanging clear.
+
+Leave the size at `0` and the first click chooses one from the point spacing
+and fills it in; change it to pick smaller or larger pieces. **Shift+click**
+also takes the neighbouring pieces facing the same way — a flat leaf blade, or
+the ground around a stem — and stops at a fold. A drag still turns the view, so
+you can look around between clicks.
+
+The first click on a cloud takes a moment while it is cut into pieces; later
+clicks at the same size are immediate. Each click is one stroke, undone and
+redone like any other.
+
 ### How deep a stroke reaches
 
 The panel's **Depth** row decides how far behind the outline a stroke paints:

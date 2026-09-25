@@ -95,7 +95,7 @@ import { dirname } from '../lib/pathUtils';
 import { useScene, type SceneState } from '../state/sceneStore';
 import type { TransformState, HistoryTransaction } from '../state/sceneActions';
 import { labelStrokeRequest, planSessionSync } from '../lib/sessionEditSync';
-import { getUnlabelledClusters, type UnlabelledCluster } from '../utils/backendApi';
+import { getUnlabelledClusters, segmentPick, type UnlabelledCluster } from '../utils/backendApi';
 import { screenStrokeTileTest } from '../lib/strokeTileTest';
 import { createKeyedSerialQueue, type KeyedSerialQueue } from '../lib/keyedSerialQueue';
 import {
@@ -137,6 +137,7 @@ import { SectionInset } from './viewer/overlays/SectionInset';
 import { sampleOctreeFootprint } from '../lib/sectionInset';
 import { profileLinePredicate, profileLineRegion, screenToProfile, type ProfileLineSide } from '../lib/profileLine';
 import { buildDepthLimit, depthLimitPredicate, forEachDrawnPoint } from '../lib/frontSurface';
+import { voxelSetAabb, voxelSetPredicate } from '../lib/voxelSet';
 import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules, splitDeletesByClipBudget, MAX_CLIP_BOXES } from '../lib/deletePreview';
 import { stepCounter, stepReporter } from '../lib/stepProgress';
 import {
@@ -2598,6 +2599,11 @@ export default function PointCloudViewer({
   // surface, or only inside a limiting box (lib/frontSurface; LabelStroke).
   const [labelDepthMode, setLabelDepthMode] = useState<'through' | 'front' | 'box'>('through');
   const [labelDepthTolerance, setLabelDepthTolerance] = useState(0);
+  // Click-to-pick (the Pick tool): segmentation mode, and piece size in cloud
+  // units (0 = automatic; the first pick fills in the size it used).
+  const [labelPickMode, setLabelPickMode] = useState<'pieces' | 'connected'>('pieces');
+  const [labelPickSize, setLabelPickSize] = useState(0);
+  const [labelPickBusy, setLabelPickBusy] = useState(false);
   // The limiting box, WORLD coords, and its two-click placement.
   const [labelLimitBox, setLabelLimitBox] = useState<{
     min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number };
@@ -6127,6 +6133,59 @@ export default function PointCloudViewer({
    * is live, so closePolygonFrom falls through to the lasso. Assigned in render
    * for the same reason as paintLabelStrokeRef.
    */
+  /**
+   * The Pick tool: a click (not a drag) on the viewport labels the piece under
+   * the cursor. The surface point comes from the same depth probe zoom uses;
+   * the backend segments the cloud (cached), resolves the piece — grown to its
+   * neighbours facing the same way on Shift+click — and returns it as a
+   * voxel set, which then goes through paintLabelStroke like any stroke.
+   */
+  const labelPickRef = useRef<(clientX: number, clientY: number, grow: boolean) => void>(() => {});
+  labelPickRef.current = (clientX, clientY, grow) => {
+    const cloud = labelTargetCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    const probe = depthProbeRef.current;
+    if (!cloud || !sessionId || !probe || labelPickBusy) return;
+    const hit = probe(clientX, clientY);
+    if (!hit) return;   // pointed at nothing: nothing to pick, and nothing to say
+    const off = displayOffsetRef.current;
+    const seed: [number, number, number] = [hit.x + (off?.x ?? 0), hit.y + (off?.y ?? 0), hit.z + (off?.z ?? 0)];
+    setLabelPickBusy(true);
+    segmentPick(sessionId, {
+      seed, mode: labelPickMode, size: labelPickSize > 0 ? labelPickSize : null, grow,
+    })
+      .then((res) => {
+        // Show the automatic size, sent back exactly so it hits the same cache.
+        if (!(labelPickSize > 0)) setLabelPickSize(res.size);
+        return paintLabelStrokeRef.current?.(res.region);
+      })
+      .catch((err) => showToast({ type: 'error', title: describeBackendError(err, 'Picking').message }))
+      .finally(() => setLabelPickBusy(false));
+  };
+  const labelPickActive = !!labelTargetCloud && labelDrawing && labelTool === 'pick';
+  useEffect(() => {
+    if (!labelPickActive) return;
+    let down: { x: number; y: number } | null = null;
+    const isViewport = (t: EventTarget | null) => t instanceof HTMLCanvasElement
+      && !t.closest('[data-testid="section-inset"]');
+    const onDown = (e: PointerEvent) => {
+      down = e.button === 0 && isViewport(e.target) ? { x: e.clientX, y: e.clientY } : null;
+    };
+    const onUp = (e: PointerEvent) => {
+      const d = down;
+      down = null;
+      if (!d || e.button !== 0 || !isViewport(e.target)) return;
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4) return;   // an orbit, not a click
+      labelPickRef.current(e.clientX, e.clientY, e.shiftKey);
+    };
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [labelPickActive]);
+
   const labelLineCloseRef = useRef<((verts: { x: number; y: number }[]) => boolean) | null>(null);
   labelLineCloseRef.current = labelTool === 'line' && labelLineAvailable && slab
     ? (verts) => {
@@ -6203,6 +6262,7 @@ export default function PointCloudViewer({
       // _polyline_halfspace_mask, pinned to the same contract file.
       return profileLinePredicate(region);
     }
+    if (region.kind === 'voxel_set') return voxelSetPredicate(region);
     // squares_union (the erase brush's shape) — not produced by the label tool
     // in Phase 1, but replayable if a stroke ever carries one.
     const { centers, half_sizes, projection, view, canvas } = region;
@@ -6249,6 +6309,7 @@ export default function PointCloudViewer({
       });
       return box.isEmpty() ? null : box;
     }
+    if (region.kind === 'voxel_set') return voxelSetAabb(region);
     if (region.kind !== 'box') return null;
     return new THREE.Box3(
       new THREE.Vector3(region.min[0], region.min[1], region.min[2]),
@@ -6516,6 +6577,11 @@ export default function PointCloudViewer({
     const k = e.key.toLowerCase();
     if (k === 'b' || k === 'g' || k === 'r') {
       setLabelTool(k === 'b' ? 'brush' : k === 'g' ? 'lasso' : 'rect');
+      setLabelDrawing(true);
+      return true;
+    }
+    if (k === 'k') {
+      setLabelTool('pick');
       setLabelDrawing(true);
       return true;
     }
@@ -17996,7 +18062,7 @@ export default function PointCloudViewer({
         if (isInputFocused()) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         // The label tool owns these keys while its panel is open (labelKeyRef).
-        if (labelPanelOpenRef.current && /^[0-9bgrxp]$/.test(k)) return;
+        if (labelPanelOpenRef.current && /^[0-9bgrxpk]$/.test(k)) return;
         // For a CLOUD, the Blender-style translate gesture only runs while the
         // Translate tool (and its panel) is open, so the panel's OK/Cancel is
         // always the commit surface — pressing `t` can't create an orphaned
@@ -25416,6 +25482,11 @@ export default function PointCloudViewer({
           onLineSideChange={setLabelLineSide}
           lineBand={labelLineBand}
           onLineBandChange={setLabelLineBand}
+          pickMode={labelPickMode}
+          onPickModeChange={(m) => { setLabelPickMode(m); setLabelPickSize(0); }}
+          pickSize={labelPickSize}
+          onPickSizeChange={setLabelPickSize}
+          pickBusy={labelPickBusy}
           depthMode={labelDepthMode}
           onDepthModeChange={setLabelDepthMode}
           depthTolerance={labelDepthTolerance}

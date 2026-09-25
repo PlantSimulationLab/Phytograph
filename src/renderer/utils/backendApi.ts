@@ -236,6 +236,7 @@ import { BACKEND_PORT_PROD } from '../../shared/constants';
 import type { ScanParamsFromFile } from '../lib/scanParameters';
 import type { MeshData, PlantMaterialDef } from '../lib/pointCloudTypes';
 import type { DepthLimit } from '../lib/frontSurface';
+import type { VoxelSetRegion } from '../lib/voxelSet';
 
 // Cached backend base URL. The port is chosen per-instance by the main process
 // (src/main/backend.ts) so concurrent app instances / dev sessions / E2E runs
@@ -4807,6 +4808,27 @@ export async function getUnlabelledClusters(
   const q = slug ? `?slug=${encodeURIComponent(slug)}` : '';
   const response = await fetch(
     `${getBackendUrl()}/api/cloud/session/${sessionId}/unlabelled_clusters${q}`);
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+/**
+ * The label tool's click-to-pick: the piece of the cloud at `seed` (session
+ * coordinates), as a `voxel_set` region ready to send as a label stroke.
+ * `size` null = automatic; the reply carries the size used.
+ */
+export async function segmentPick(
+  sessionId: string,
+  body: { seed: [number, number, number]; mode: 'pieces' | 'connected'; size?: number | null; grow?: boolean },
+): Promise<{ size: number; segments: number; region: VoxelSetRegion; voxels: number; points: number }> {
+  const response = await fetch(`${getBackendUrl()}/api/cloud/session/${sessionId}/segment_pick`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, size: body.size ?? null }),
+  });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);

@@ -32,6 +32,7 @@ import normals as normals_mod
 import scalar_fields
 import session_store
 import tiled
+import label_segments
 from pytexit import py2tex
 
 # ==================== PyHelios source submodule ====================
@@ -30942,10 +30943,33 @@ def _canonical_region(region: dict) -> str:
             side, "" if band is None else "{:.6g}".format(float(band)),
             "1" if invert else "0",
         )
+    if kind == "voxel_set":
+        voxel = region.get("voxel")
+        origin = region.get("origin")
+        if not isinstance(voxel, (int, float)) or not math.isfinite(voxel) or voxel <= 0:
+            raise HTTPException(status_code=400, detail="region.voxel must be a positive size.")
+        if (not isinstance(origin, (list, tuple)) or len(origin) != 3
+                or not all(isinstance(c, (int, float)) and math.isfinite(c) for c in origin)):
+            raise HTTPException(status_code=400, detail="region.origin must be [x, y, z].")
+        try:
+            keys = label_segments.decode_keys(region.get("keys") or "")
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400,
+                                detail="region.keys must be base64 int32 (i, j, k) triplets.")
+        if keys.shape[0] == 0 or keys.shape[0] > label_segments.MAX_PICK_VOXELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"region.keys must hold 1 to {label_segments.MAX_PICK_VOXELS} voxels.")
+        import hashlib
+        return "voxel_set|{:.9g}|{:.9g},{:.9g},{:.9g}|{}|{}".format(
+            float(voxel), *(float(c) for c in origin),
+            hashlib.sha1(region["keys"].encode("ascii")).hexdigest(),
+            "1" if region.get("invert") else "0",
+        )
     raise HTTPException(
         status_code=400,
         detail=(f"region.kind must be 'box', 'polygon', 'squares_union', 'spheres_union', "
-                f"'slab', or 'polyline_halfspace'. Got: {kind!r}"),
+                f"'slab', 'polyline_halfspace', or 'voxel_set'. Got: {kind!r}"),
     )
 
 
@@ -31236,6 +31260,10 @@ def _region_mask(
         mask = _slab_mask(positions, region)
     elif kind == "polyline_halfspace":
         mask = _polyline_halfspace_mask(positions, region)
+    elif kind == "voxel_set":
+        mask = label_segments.voxel_set_mask(
+            positions, region["origin"], region["voxel"],
+            label_segments.decode_keys(region["keys"]))
     else:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
@@ -31410,6 +31438,12 @@ class CropOctreeRegion(BaseModel):
     line: Optional[List[List[float]]] = None
     side: Optional[str] = None
     band: Optional[float] = None
+    # Voxel-set fields (the label tool's click-to-pick, F6): the picked piece
+    # as explicit voxels, `keys` base64 int32 (i, j, k) triplets on the grid
+    # floor((p - origin) / voxel). See label_segments.voxel_set_mask.
+    voxel: Optional[float] = None
+    origin: Optional[List[float]] = None
+    keys: Optional[str] = None
     invert: bool = False
 
 
@@ -35804,6 +35838,101 @@ def get_unlabelled_clusters(session_id: str, slug: str = MANUAL_CLASS_SLUG):
     total = int(unlabelled.sum())
     return {"session_id": session_id, "slug": slug, "total": total,
             "estimated": total > _UNLABELLED_SAMPLE, "clusters": clusters}
+
+
+# One cached segmentation per session: (mode, size, geometry identity) -> seg.
+# A click-to-pick session clicks many times at one size, and segmenting is the
+# whole cost (seconds on tens of millions of points); the pick itself is cheap.
+_SEGMENT_CACHE: dict = {}
+_SEGMENT_AUTO_SIZE: dict = {}
+_SEGMENT_CACHE_LOCK = threading.Lock()
+
+
+class SegmentPickRequest(BaseModel):
+    """Pick the piece under `seed` (session coordinates, e.g. the surface point
+    under the cursor). `size` None = automatic from the point spacing; the
+    reply says what was used, so the panel can show and adjust it."""
+    seed: List[float]
+    mode: str = "pieces"
+    size: Optional[float] = None
+    grow: bool = False
+    max_angle: float = 20.0
+
+
+@app.post("/api/cloud/session/{session_id}/segment_pick")
+def segment_pick(session_id: str, request: SegmentPickRequest):
+    """The label tool's click-to-pick (F6): segment the cloud's editable points
+    (cached), find the segment at `seed`, optionally grow it across adjacent
+    segments with a similar normal, and return it as a `voxel_set` region for
+    a label stroke. Read-only: nothing is labelled until that stroke is sent."""
+    if request.mode not in ("pieces", "connected"):
+        raise HTTPException(status_code=400, detail="mode must be 'pieces' or 'connected'.")
+    if len(request.seed) != 3 or not all(math.isfinite(c) for c in request.seed):
+        raise HTTPException(status_code=400, detail="seed must be a finite [x, y, z].")
+    if request.size is not None and not (math.isfinite(request.size) and request.size > 0):
+        raise HTTPException(status_code=400, detail="size must be a positive number.")
+    sess = _get_cloud_session(session_id)
+    with _cloud_session_lock:
+        positions = sess.positions
+        editable = _session_editable_mask_locked(sess)
+        gen = sess.octree_stale_gen
+    n_editable = int(editable.sum())
+    if n_editable == 0:
+        raise HTTPException(status_code=400, detail="The cloud has no points that can be labelled.")
+    ident = (id(positions), gen, n_editable)
+    with _SEGMENT_CACHE_LOCK:
+        for sid in [k for k in _SEGMENT_CACHE if k not in _cloud_sessions]:
+            _SEGMENT_CACHE.pop(sid, None)
+        for k in [k for k in _SEGMENT_AUTO_SIZE if k[0] not in _cloud_sessions]:
+            _SEGMENT_AUTO_SIZE.pop(k, None)
+        cached = _SEGMENT_CACHE.get(session_id)
+    pts = None
+    size = request.size
+    if size is None:
+        # Automatic size, remembered per geometry so repeat clicks (and the
+        # panel echoing it back as an explicit size) reuse one segmentation.
+        auto_key = (session_id, request.mode, ident)
+        with _SEGMENT_CACHE_LOCK:
+            size = _SEGMENT_AUTO_SIZE.get(auto_key)
+        if size is None:
+            pts = positions[editable].astype(np.float64)
+            spacing = label_segments.median_spacing(pts)
+            size = float(spacing * (10.0 if request.mode == "pieces" else 3.0))
+            with _SEGMENT_CACHE_LOCK:
+                _SEGMENT_AUTO_SIZE[auto_key] = size
+    key = (request.mode, float(size), ident)
+    seg = cached[1] if cached and cached[0] == key else None
+    if seg is None:
+        if pts is None:
+            pts = positions[editable].astype(np.float64)
+        try:
+            seg = label_segments.segment(pts, size, request.mode)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        with _SEGMENT_CACHE_LOCK:
+            _SEGMENT_CACHE[session_id] = (key, seg)
+    seed = np.asarray(request.seed, dtype=np.float64)
+    centroids = seg.sums / seg.counts[:, None]
+    d2 = ((centroids - seed) ** 2).sum(axis=1)
+    v = int(np.argmin(d2))
+    if d2[v] > (4.0 * seg.voxel) ** 2:
+        raise HTTPException(status_code=404, detail="No points near the picked location.")
+    voxels = label_segments.pick(seg, v, request.grow, request.max_angle)
+    keys = seg.keys[voxels]
+    return {
+        "session_id": session_id,
+        "mode": request.mode,
+        "size": float(size),
+        "segments": seg.n_segments,
+        "region": {
+            "kind": "voxel_set",
+            "voxel": float(seg.voxel),
+            "origin": [float(c) for c in seg.origin],
+            "keys": label_segments.encode_keys(keys),
+        },
+        "voxels": int(voxels.size),
+        "points": int(seg.counts[voxels].sum()),
+    }
 
 
 @app.post("/api/cloud/session/{session_id}/reset_label_edits")

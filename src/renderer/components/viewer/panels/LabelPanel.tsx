@@ -1,8 +1,8 @@
-import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck, Square, Spline } from 'lucide-react';
+import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck, Square, Spline, MousePointerClick } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import type { ProfileLineSide } from '../../../lib/profileLine';
 
-export type LabelTool = 'lasso' | 'brush' | 'rect' | 'line';
+export type LabelTool = 'lasso' | 'brush' | 'rect' | 'line' | 'pick';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 import type { LabelableColumn } from '../../../lib/classPalettes';
@@ -106,6 +106,12 @@ export interface LabelPanelProps {
   /** Line tool: limit to within this distance of the line; 0 = no limit. */
   lineBand?: number;
   onLineBandChange?: (b: number) => void;
+  /** Pick tool: how the cloud is cut into pieces, and the piece size (0 = auto). */
+  pickMode?: 'pieces' | 'connected';
+  onPickModeChange?: (m: 'pieces' | 'connected') => void;
+  pickSize?: number;
+  onPickSizeChange?: (v: number) => void;
+  pickBusy?: boolean;
   /** How deep an outline reaches: through the cloud, front surface, or a box. */
   depthMode?: 'through' | 'front' | 'box';
   onDepthModeChange?: (m: 'through' | 'front' | 'box') => void;
@@ -183,6 +189,11 @@ export function LabelPanel({
   onLineSideChange,
   lineBand = 0,
   onLineBandChange,
+  pickMode = 'pieces',
+  onPickModeChange,
+  pickSize = 0,
+  onPickSizeChange,
+  pickBusy = false,
   depthMode = 'through',
   onDepthModeChange,
   depthTolerance = 0,
@@ -337,7 +348,62 @@ export function LabelPanel({
             <Spline className="w-3 h-3" />
             Line
           </button>
+          <button
+            data-testid="label-tool-pick"
+            onClick={() => onToolChange('pick')}
+            title="Click a piece of the cloud to label all of it; Shift+click also takes its neighbours facing the same way (K)"
+            className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 ${
+              tool === 'pick'
+                ? 'bg-blue-600 text-white'
+                : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+            }`}
+          >
+            <MousePointerClick className="w-3 h-3" />
+            Pick
+          </button>
         </div>
+        {tool === 'pick' && (
+          <div data-testid="label-pick-options" data-pick-mode={pickMode}
+            data-pick-busy={pickBusy ? 'true' : 'false'} className="mt-1.5">
+            <div className="flex gap-1">
+              {(['pieces', 'connected'] as const).map((m) => (
+                <button
+                  key={m}
+                  data-testid={`label-pick-mode-${m}`}
+                  onClick={() => onPickModeChange?.(m)}
+                  title={m === 'pieces'
+                    ? 'Compact pieces about Size across: a leaf, a stretch of branch'
+                    : 'Everything connected, bridging gaps up to Size: a whole plant standing apart'}
+                  className={`flex-1 px-2 py-0.5 text-[10px] rounded ${
+                    pickMode === m
+                      ? 'bg-sky-700 text-white'
+                      : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+                  }`}
+                >
+                  {m === 'pieces' ? 'Pieces' : 'Connected'}
+                </button>
+              ))}
+            </div>
+            <label className="flex items-center gap-1.5 mt-1 text-[10px] text-neutral-400">
+              <span className="shrink-0">{pickMode === 'pieces' ? 'Size' : 'Gap'}</span>
+              <DebouncedNumberInput
+                data-testid="label-pick-size"
+                value={pickSize}
+                onCommit={(v) => onPickSizeChange?.(v)}
+                min={0}
+                format={(n) => String(Number(n.toPrecision(4)))}
+                title={pickMode === 'pieces'
+                  ? 'How big a piece is, in cloud units. 0 = automatic from the point spacing.'
+                  : 'The widest gap still counted as connected, in cloud units. 0 = automatic.'}
+                className="w-16 px-1.5 py-0.5 bg-neutral-900 border border-neutral-700 rounded text-[10px] text-neutral-200"
+              />
+              <span className="text-neutral-500">{pickSize > 0 ? '' : '(auto)'}</span>
+            </label>
+            <p className="text-[9px] text-neutral-500 mt-1 leading-tight">
+              {pickBusy ? 'Finding the piece…' : 'Click a piece. Shift+click adds its neighbours facing the same way.'}
+            </p>
+          </div>
+        )}
         {tool === 'line' && (
           <div data-testid="label-line-options" data-line-side={lineSide} className="mt-1.5">
             <div className="flex gap-1">
@@ -766,7 +832,7 @@ export function LabelPanel({
         </summary>
         <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
           <dt><kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd></dt><dd>Paint the numbered class</dd>
-          <dt><kbd>G</kbd> <kbd>R</kbd> <kbd>B</kbd> <kbd>P</kbd></dt><dd>Lasso, rectangle, brush, line (in a section)</dd>
+          <dt><kbd>G</kbd> <kbd>R</kbd> <kbd>B</kbd> <kbd>P</kbd> <kbd>K</kbd></dt><dd>Lasso, rectangle, brush, line (in a section), pick</dd>
           <dt><kbd>X</kbd></dt><dd>Swap the paint class with the one it paints over</dd>
           <dt><kbd>L</kbd></dt><dd>Stop drawing to look around, and back</dd>
           <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Brush size</dd>

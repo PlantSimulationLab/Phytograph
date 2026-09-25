@@ -1036,3 +1036,57 @@ test('R picks the rectangle, not a Rotate of a mesh selected alongside the cloud
   await page.waitForTimeout(300);
   await expect(page.getByTestId('transform-hud')).toHaveCount(0);
 });
+
+test('Pick labels the whole piece under a click, and undo/redo replays it', async () => {
+  // One click per piece instead of tracing it. In Connected mode a piece is
+  // everything joined up: the 40-point blob at the origin, not the 20-point
+  // one 5 units away.
+  const { app, page } = session;
+  const fixture = join(repoRoot, 'tests', 'e2e', 'fixtures', 'two-blobs.xyz');
+  await importFiles(app, page, 'import-auto', fixture);
+  await completeImportWizard(page);
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="two-blobs"]');
+  await expect(row).toHaveAttribute('data-point-count', '60', { timeout: 20_000 });
+  await page.getByTestId('tool-label').click();
+  const panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+
+  await page.keyboard.press('k');
+  await expect(panel).toHaveAttribute('data-label-tool', 'pick');
+  await page.getByTestId('label-pick-mode-connected').click();
+  await expect(page.getByTestId('label-pick-size')).toHaveValue('0');
+
+  // Click a point of the big blob, clear of the panel.
+  await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 0, z: 1 }));
+  await page.evaluate(() => (window as any).__frameSelection?.());
+  const pts = fixturePoints(fixture);
+  const panelBox = (await panel.boundingBox())!;
+  let target: { x: number; y: number } | null = null;
+  for (const w of pts.filter(([x]) => x < 2.5)) {
+    const p = await page.evaluate((w) => (window as any).__worldToScreen(w), w);
+    if (p.visible && p.x < panelBox.x - 10) { target = p; break; }
+  }
+  expect(target).not.toBeNull();
+  await page.mouse.click(target!.x, target!.y);
+
+  const labelled = async () => Number(await panel.getAttribute('data-labelled-count'));
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(40);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+  // The automatic size it used is filled in, ready to adjust.
+  await expect.poll(async () => Number(await page.getByTestId('label-pick-size').inputValue()))
+    .toBeGreaterThan(0);
+
+  // A drag is an orbit, not a pick.
+  await page.mouse.move(target!.x, target!.y);
+  await page.mouse.down();
+  await page.mouse.move(target!.x + 40, target!.y + 30, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+
+  // The stroke carries the piece itself, so undo and redo replay it exactly.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(0);
+  await page.keyboard.press('ControlOrMeta+Shift+z');
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(40);
+});

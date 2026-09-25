@@ -1,0 +1,59 @@
+{
+  "_comment": "Golden vectors for the voxel_set region (the label tool click-to-pick). Asserted by src/renderer/lib/voxelSet.test.ts (voxelSetPredicate, the live preview) and backend-api/tests/test_segment_pick.py (label_segments.voxel_set_mask, what the session labels). A point is in when floor((p - origin) / voxel) is one of the keys; keys are base64 little-endian int32 (i, j, k) triplets, here (0,0,0), (2,1,0), (-1,0,3).",
+  "region": {
+    "kind": "voxel_set",
+    "voxel": 0.25,
+    "origin": [
+      0.5,
+      -1,
+      0
+    ],
+    "keys": "AAAAAAAAAAAAAAAAAgAAAAEAAAAAAAAA/////wAAAAADAAAA"
+  },
+  "points": [
+    [
+      0.5,
+      -1,
+      0
+    ],
+    [
+      0.74,
+      -0.76,
+      0.2
+    ],
+    [
+      0.75,
+      -1,
+      0
+    ],
+    [
+      1,
+      -0.75,
+      0.1
+    ],
+    [
+      0.3,
+      -0.9,
+      0.8
+    ],
+    [
+      0.3,
+      -0.9,
+      1
+    ],
+    [
+      100,
+      0,
+      0
+    ]
+  ],
+  "expected": [
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    false
+  ]
+}

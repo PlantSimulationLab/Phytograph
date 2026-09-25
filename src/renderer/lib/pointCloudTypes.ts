@@ -5,6 +5,7 @@
 // code, so importing this module has zero side effects.
 import type { PolylineHalfspaceRegion } from './profileLine';
 import type { DepthLimit } from './frontSurface';
+import type { VoxelSetRegion } from './voxelSet';
 import * as THREE from 'three';
 import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod, DemLayer } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
@@ -406,7 +407,9 @@ export type PendingDeleteRegion =
       invert?: boolean;
     }
   // Above / below / near a line drawn in a cross-section (lib/profileLine).
-  | PolylineHalfspaceRegion;
+  | PolylineHalfspaceRegion
+  // A piece picked with the label tool's click-to-pick (lib/voxelSet).
+  | VoxelSetRegion;
 
 /**
  * One manual-labelling edit: "inside `region`, points whose current class is in
