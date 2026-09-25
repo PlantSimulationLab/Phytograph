@@ -14,6 +14,13 @@ interface TreeSegmentPanelProps {
   maxOutlierGap: number;
   seedMode: boolean;
   seedCount: number;
+  // Automatic stem seeds (fills the seed list) and tiling for large plots.
+  autoSeedInProgress: boolean;
+  onAutoSeed: () => void;
+  tiling: 'auto' | 'on' | 'off';
+  tileBufferM: number;
+  onTilingChange: (t: 'auto' | 'on' | 'off') => void;
+  onTileBufferChange: (n: number) => void;
   splitClouds: boolean;
   inProgress: boolean;
   error: string | null;
@@ -52,6 +59,12 @@ export function TreeSegmentPanel({
   maxOutlierGap,
   seedMode,
   seedCount,
+  autoSeedInProgress,
+  onAutoSeed,
+  tiling,
+  tileBufferM,
+  onTilingChange,
+  onTileBufferChange,
   splitClouds,
   inProgress,
   error,
@@ -226,6 +239,16 @@ export function TreeSegmentPanel({
             </div>
           </>
         )}
+        <button
+          data-testid="tree-auto-seed"
+          onClick={onAutoSeed}
+          disabled={inProgress || autoSeedInProgress}
+          className="w-full mb-1 flex items-center justify-center gap-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 disabled:text-neutral-500 text-[10px] text-neutral-200"
+          title="Find trunks in the 1–2 m layer above the terrain and add one seed per trunk. Needs Generate DEM with height above ground."
+        >
+          {autoSeedInProgress && <Loader2 className="w-3 h-3 animate-spin" />}
+          Auto-seed stems
+        </button>
         <div className="flex items-center justify-between text-[10px] text-neutral-500">
           <span data-testid="tree-seed-count">{seedCount} seed{seedCount === 1 ? '' : 's'}</span>
           {seedCount > 0 && (
@@ -238,6 +261,40 @@ export function TreeSegmentPanel({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Tiling for large plots */}
+      <div className="grid grid-cols-2 gap-2 mb-3 text-[10px] text-neutral-400">
+        <label className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1">Tiling
+            <InfoHint
+              label="Tiling"
+              text="Large plots are segmented in square tiles, each with a buffer of its neighbours' points, and every tree is kept from the one tile its stem stands in. Auto tiles only when the plot is too big to segment at once."
+            />
+          </span>
+          <select
+            data-testid="tree-tiling"
+            value={tiling}
+            onChange={(e) => onTilingChange(e.target.value as 'auto' | 'on' | 'off')}
+            disabled={inProgress}
+            className="bg-neutral-700 text-neutral-200 rounded px-1 py-0.5"
+          >
+            <option value="auto">Auto</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-0.5" title="Must be wider than any crown reaches from its stem">
+          Tile buffer (m)
+          <DebouncedNumberInput
+            data-testid="tree-tile-buffer"
+            value={tileBufferM}
+            onCommit={onTileBufferChange}
+            min={1} max={50} step={1} debounceMs={0}
+            disabled={inProgress || tiling === 'off'}
+            className="bg-neutral-700 text-neutral-200 rounded px-1 py-0.5 w-full"
+          />
+        </label>
       </div>
 
       {/* Split checkbox */}

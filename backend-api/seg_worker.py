@@ -190,10 +190,18 @@ def run(workdir: str) -> int:
         elif tool == "trees":
             seeds_path = os.path.join(workdir, "seeds.npy")
             seeds = np.load(seeds_path) if os.path.exists(seeds_path) else None
-            ti_params = main._treeiso_params_from_dict(params)
-            main._auto_treeiso_decimation(points, ti_params)
-            labels = main.segment_trees(points, ti_params, seeds)
+            # Tiled when the plot is too big for one segmentation (or when
+            # asked); `tiling="off"` is exactly the untiled path. The tiles fan
+            # out to the spawn pool, which memory-maps input.npy.
+            import tiled_trees
+            labels, tmeta = tiled_trees.segment(
+                points, params, seeds,
+                tiling=str(params.get("tiling", "auto")),
+                buffer_m=float(params.get("tile_buffer_m", tiled_trees.DEFAULT_BUFFER_M)),
+                points_path=input_path)
             np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
+            with open(os.path.join(workdir, "result.json"), "w") as f:
+                json.dump(tmeta, f, default=_json_default)
 
         elif tool == "anchors":
             # Per-plant landmark extraction for coarse registration. Runs here

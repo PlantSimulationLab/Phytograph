@@ -105,6 +105,7 @@ nav:
       - Plant models: concepts/plant-models.md
       - Leaf area density: concepts/leaf-area-density.md
       - Crown metrics: concepts/crown-metrics.md
+      - Stem detection & tiling: concepts/stem-detection-and-tiling.md
   - Workflows:
       - workflows/index.md
       - Getting around:

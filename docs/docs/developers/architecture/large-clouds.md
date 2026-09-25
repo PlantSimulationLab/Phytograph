@@ -181,6 +181,18 @@ The collar is the algorithm's own scale; too small a collar shows up as
 seams, which `tests/test_tiled.py` checks separately within 0.5 m of tile
 boundaries rather than letting the whole-cloud average hide it.
 
+**Tree segmentation** tiles differently (`tiled_trees.py`), because a tree
+crosses tile lines: each buffered tile is segmented whole, every tree is
+anchored (its seed, or the centroid of its lowest 1 m), the one tile whose core
+holds the anchor keeps it, and overlapping claims go to the tile where the
+point sat deepest inside the buffer. Voxel sizes are resolved once from the
+point spacing (no whole-plot coarsening), tiles run on the spawn pool inside
+the seg worker, and `trees_truncated` reports kept trees whose points were only
+seen near an interior buffer edge. Method and defaults:
+[Stem detection & tiling](../../concepts/stem-detection-and-tiling.md);
+`tests/test_tiled_trees.py` checks the stitching against an oracle segmenter
+and the real path through the worker.
+
 **Ground segmentation** is the first tool on it. From
 `PHYTOGRAPH_GROUND_TILE_MIN_POINTS` (default 4 M) up, `segment_ground` runs
 per tile of about `PHYTOGRAPH_GROUND_TILE_TARGET_POINTS` (3 M) points with a

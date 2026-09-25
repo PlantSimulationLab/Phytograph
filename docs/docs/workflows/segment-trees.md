@@ -96,6 +96,19 @@ For tricky scenes you can guide the result by marking trunks yourself:
 3. Click **Segment Trees**. Each seed yields exactly one tree, and ambiguous
    segments are assigned to their nearest seed.
 
+### Auto-seed stems
+
+On a plot with many trees, let Phytograph find the trunks: click
+**Auto-seed stems**. It looks for trunks in the layer 1–2 m above the
+terrain, so run [Generate DEM](generate-dem.md) with **Height above
+ground** ticked first. It fills the seed list with one seed per trunk and
+turns **Seed trunks** on so you can review them: remove a wrong one with
+right-click (the last seed) or add one it missed by clicking. Then click
+**Segment Trees**. Trunks the scan could not see at breast height are
+missed, and a big dead branch or a post can be seeded. Treat the result as a
+first draft. How it decides is on
+[Stem detection & tiling](../concepts/stem-detection-and-tiling.md#automatic-stem-seeds).
+
 !!! note "Panels block seeding"
     The floating panels (Tree Segmentation, the scan/mesh stack on the right,
     Display, and any toast) sit *over* the viewport, so they take the click
@@ -104,6 +117,23 @@ For tricky scenes you can guide the result by marking trunks yourself:
     block; the empty space around them in the right-hand column is ordinary
     viewport. The panels stay usable while seeding; to reach a trunk behind one,
     turn seeding off, orbit or pan it into the open, and turn seeding back on.
+
+## Large plots: tiling
+
+A plot too big to segment at once is segmented in square **tiles**, each
+with a buffer of its neighbours' points. Every tree is then kept from the
+one tile its stem stands in, so trees crossing tile lines stay whole.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| **Tiling** | Auto | *Auto* tiles only when the plot is too big to segment at once; *On* always tiles; *Off* never does. |
+| **Tile buffer** | 10 m | How far past its tile each tile sees. It must be wider than any crown reaches from its stem. |
+
+If trees may have been cut off at a buffer, a warning says how many:
+widen the buffer beyond the widest crown and run again. Seeds (manual or
+automatic) work with tiling, and each tree keeps its seed's number. The
+method is on
+[Stem detection & tiling](../concepts/stem-detection-and-tiling.md#tiled-segmentation).
 
 ## Refining the result
 

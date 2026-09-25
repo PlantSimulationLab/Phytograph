@@ -22,5 +22,6 @@ referring to the same physical plant.
 - :material-grid: **[Leaf area density](leaf-area-density.md)** — foliage density per voxel (m²/m³), inverted from how scan beams are intercepted.
 
 - :material-tree: **[Crown metrics](crown-metrics.md)** — fitted crown shape with height, width, volume, and related size measurements.
+- :material-pine-tree: **[Stem detection & tiling](stem-detection-and-tiling.md)** — automatic trunk seeds, and segmenting large plots in stitched tiles.
 
 </div>

@@ -4496,6 +4496,13 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   // trees were probably fused into one and `num_trees` is too low. Surfaced as
   // a warning toast — it is the only signal that a plausible count is wrong.
   fusion_warning?: string | null;
+  // Segment Trees: how the run was tiled (backend-api/tiled_trees.py), when
+  // it was. `trees_truncated` > 0 means some trees may have been cut off by a
+  // tile's buffer and the buffer should be widened.
+  tiling?: {
+    tiled: boolean; tiles_run?: number; trees_kept?: number; trees_truncated?: number;
+    buffer_m?: number; tile_m?: number; workers?: number;
+  } | null;
   // /bake only: how many delete snapshots survived the bake. Normally 0 — bake
   // clears the undo history — but a delete that lands after the compaction
   // starts a fresh one. The renderer's `pendingDeletes` stack indexes that same
@@ -5636,10 +5643,42 @@ export async function sessionSegmentTrees(
   sessionId: string,
   // `acknowledge_cost` (boolean) confirms an expensive run after the backend
   // answered 409 with a cost advisory — hence the boolean in the index signature.
-  params: { [k: string]: number | number[][] | boolean | undefined; seed_points?: number[][]; acknowledge_cost?: boolean },
+  params: { [k: string]: number | number[][] | boolean | string | undefined; seed_points?: number[][]; acknowledge_cost?: boolean; tiling?: 'auto' | 'on' | 'off'; tile_buffer_m?: number },
   signal?: AbortSignal,
 ): Promise<CloudSessionBakeResult> {
   return postSegment<CloudSessionBakeResult>(`/api/cloud/session/${sessionId}/segment_trees`, params, signal, 600000);
+}
+
+export interface DetectedStem {
+  x: number; y: number; z: number;   // the session's stored frame, z at 1.3 m above ground
+  radius_m: number;
+  n_inliers: number;
+  arc_coverage: number;
+}
+
+/** Automatic trunk seeds from the breast-height layer (backend-api/stem_seeds.py).
+ * Needs the height_above_ground column; a 400 names what to run first. */
+export async function detectStems(
+  sessionId: string, request: { band_min_m?: number; band_max_m?: number; max_diameter_m?: number } = {},
+): Promise<{ seeds: DetectedStem[]; layer_points: number }> {
+  const baseUrl = getBackendUrl();
+  const controller = new AbortController();
+  const timeoutId = abortOnTimeout(controller, 600000, 'detect_stems');
+  try {
+    const response = await fetch(`${baseUrl}/api/cloud/session/${sessionId}/detect_stems`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /**

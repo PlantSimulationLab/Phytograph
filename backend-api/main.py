@@ -7744,6 +7744,14 @@ try:
 except (ValueError, TypeError):
     _TREEISO_MAX_POINTS = 50_000_000
 
+# Raw-input backstop when segmentation may TILE: the per-tile work is bounded,
+# leaving the full-N staging copy (24 B/pt), node count (8 B/pt) and tile
+# binning (16 B/pt).
+try:
+    _TREEISO_MAX_POINTS_TILED = int(os.environ.get("PHYTOGRAPH_TREEISO_MAX_POINTS_TILED", "200000000"))
+except (ValueError, TypeError):
+    _TREEISO_MAX_POINTS_TILED = 200_000_000
+
 # Post-decimation node ceiling. `_auto_treeiso_decimation` already targets
 # ~1 M nodes (TARGET_DECIMATED_NODES); this allows 2× headroom before refusing,
 # so a cloud the auto-scaler handled always passes and only a genuinely
@@ -7806,6 +7814,11 @@ class TreeSegmentationRequest(BaseModel):
     # occluded limb, while this declares a body far from its instance to be a
     # different tree.
     max_outlier_gap: float = 0.65
+    # Tiled segmentation (tiled_trees.py; docs/docs/concepts/stem-detection-
+    # and-tiling.md): 'auto' tiles when the plot exceeds the voxel guideline,
+    # 'on' always, 'off' never. The buffer must exceed any crown's reach.
+    tiling: str = "auto"
+    tile_buffer_m: float = 10.0
 
 
 class TreeSegmentationResponse(BaseModel):
@@ -7948,8 +7961,13 @@ def _treeiso_size_error(points: np.ndarray, param_dict: dict) -> Optional[str]:
     keeps sending unresolved params across the process boundary exactly as
     before."""
     n = len(points)
-    if n > _TREEISO_MAX_POINTS:
-        return (f"{n:,} points exceeds the {_TREEISO_MAX_POINTS:,}-point limit for "
+    # Tiled segmentation bounds every expensive stage per tile; only the
+    # full-N staging, node count and tile binning remain, so its backstop is
+    # higher (see `_TREEISO_MAX_POINTS_TILED`).
+    tiled_run = str(param_dict.get("tiling", "off")) != "off"
+    limit = _TREEISO_MAX_POINTS_TILED if tiled_run else _TREEISO_MAX_POINTS
+    if n > limit:
+        return (f"{n:,} points exceeds the {limit:,}-point limit for "
                 "tree segmentation. Downsample or crop first.")
     return None
 
@@ -7982,7 +8000,14 @@ def _treeiso_cost_warning(points: np.ndarray, param_dict: dict) -> Optional[dict
         # TreeIso deps missing (no C-extension): let the worker raise the real,
         # more specific import error rather than masking it with a cost probe.
         return None
-    _auto_treeiso_decimation(points, resolved)
+    if str(param_dict.get("tiling", "off")) != "off":
+        # The same voxel sizes (and so the same node count) the tiling decision
+        # in tiled_trees.segment uses: spacing-derived, without the whole-cloud
+        # coarsening an untiled run needs.
+        import tiled_trees
+        resolved, _spacing = tiled_trees.resolve_params(np.asarray(points, dtype=np.float64), resolved)
+    else:
+        _auto_treeiso_decimation(points, resolved)
     nodes = _count_treeiso_nodes(points, resolved)
 
     # MEMORY arm. The node count is a good TIME signal and a poor memory one:
@@ -7997,11 +8022,22 @@ def _treeiso_cost_warning(points: np.ndarray, param_dict: dict) -> Optional[dict
     headroom = max(
         0, memory_budget.admission_budget_bytes() - _ADMISSION.admitted_bytes())
     over_memory = headroom > 0 and est_bytes > headroom
+    # Over the node guideline, a run with tiling on or auto is SPLIT into
+    # bounded tiles rather than run as one superlinear job - but the plot is
+    # still a long run in total, so it still asks for confirmation; the message
+    # says it will tile.
+    tiled_run = str(param_dict.get("tiling", "off")) != "off"
     over_nodes = nodes is not None and nodes > _TREEISO_MAX_NODES
     if not (over_nodes or over_memory):
         return None
 
-    if over_nodes:
+    if over_nodes and tiled_run:
+        import tiled_trees
+        n_tiles = max(2, int(math.ceil(nodes / tiled_trees.DEFAULT_TILE_NODES)))
+        msg = (f"This cloud has {nodes:,} voxels after decimation, above the "
+               f"{_TREEISO_MAX_NODES:,} guideline ({len(points):,} points), so it will "
+               f"be segmented in tiles (roughly {n_tiles}). It may take a while.")
+    elif over_nodes:
         msg = (f"This cloud will run tree segmentation on {nodes:,} voxels after "
                f"decimation, above the {_TREEISO_MAX_NODES:,} guideline "
                f"({len(points):,} points at a {resolved.decimate_res1:g} m voxel "
@@ -8440,6 +8476,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
         # subprocess (see `_run_killable`); the worker reconstructs TreeIsoParams,
         # runs `_auto_treeiso_decimation`, then `segment_trees`. Cancel SIGKILLs it.
         ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
+        ti_param_dict.update(tiling=request.tiling, tile_buffer_m=request.tile_buffer_m)
         try:
             sub_labels = await _run_killable(
                 "trees", pts, ti_param_dict, http_request=http_request, seeds=seeds,
@@ -25989,6 +26026,7 @@ async def _run_killable(
     seeds: "Optional[np.ndarray]" = None,
     origins: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
+    meta_out: "Optional[dict]" = None,
 ):
     """Run one segmentation compute (`tool` ∈ ground|wood|trees|denoise|skeleton|normals)
     in a KILLABLE child process and return its result.
@@ -26018,7 +26056,7 @@ async def _run_killable(
     try:
         return await _run_killable_admitted(
             tool, points, params, http_request=http_request, reflectance=reflectance,
-            seeds=seeds, origins=origins, poll=poll)
+            seeds=seeds, origins=origins, poll=poll, meta_out=meta_out)
     finally:
         admitted.__exit__(None, None, None)
 
@@ -26033,8 +26071,11 @@ async def _run_killable_admitted(
     seeds: "Optional[np.ndarray]" = None,
     origins: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
+    meta_out: "Optional[dict]" = None,
 ):
-    """The body of `_run_killable`, once the memory budget has admitted it."""
+    """The body of `_run_killable`, once the memory budget has admitted it.
+    `meta_out`, when given, receives the worker's result.json for tools that
+    otherwise return bare labels (trees: the tiling report)."""
     import asyncio
     import tempfile
 
@@ -26107,6 +26148,8 @@ async def _run_killable_admitted(
             return rd, np.load(os.path.join(workdir, "output.npy"))
 
         result_dict, labels = await run_in_threadpool(_collect)
+        if meta_out is not None and result_dict:
+            meta_out.update(result_dict)
 
         if tool in ("skeleton", "ml_device", "ml_import"):
             return result_dict if result_dict is not None else {}
@@ -38837,6 +38880,65 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     return {**common, "cache_id": cache_key, "cache_dir": str(cache_dir), **meta}
 
 
+class DetectStemsRequest(BaseModel):
+    """Automatic trunk seeds (stem_seeds.py; docs/docs/concepts/stem-detection-
+    and-tiling.md). Unset fields take the documented defaults."""
+    band_min_m: Optional[float] = None
+    band_max_m: Optional[float] = None
+    max_diameter_m: Optional[float] = None
+
+
+@app.post("/api/cloud/session/{session_id}/detect_stems")
+def session_detect_stems(session_id: str, request: DetectStemsRequest):
+    """Find trunks in the session's breast-height layer and return one seed
+    per trunk, in the session's STORED frame (the frame `seed_points` of
+    segment_trees is compared in). Needs the `height_above_ground` column: a
+    trunk has to be found at a fixed height above the terrain.
+
+    Plain `def`: a chunked pass over the columns (only the thin layer is ever
+    copied out), then clustering and circle fits on that layer."""
+    import stem_seeds
+
+    sess = _get_cloud_session(session_id)
+    try:
+        params = stem_seeds.StemSeedParams.from_dict(request.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    with _cloud_session_lock:
+        positions = sess.positions
+        deleted = sess.deleted
+        hag_col = sess.extras.get(HEIGHT_ABOVE_GROUND_SLUG)
+        ground_col = sess.extras.get(GROUND_CLASS_SLUG)
+        miss_col = sess.extras.get(_MISS_SLUG)
+        n = int(len(positions))
+    if hag_col is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Automatic stem seeds need heights above the terrain. Run Generate DEM "
+                   "with 'Height above ground' ticked first.")
+    parts_p, parts_h = [], []
+    with _ADMISSION.admit(n * 2, f"stem detection on {n:,} pts"):
+        for a, b in session_store.iter_ranges(n):
+            with _cloud_session_lock:
+                if sess.positions is not positions:
+                    raise HTTPException(status_code=409, detail="The cloud changed; try again.")
+                keep = ~np.asarray(deleted[a:b])
+                if miss_col is not None:
+                    keep &= np.asarray(miss_col[a:b]) == 0
+                if ground_col is not None:
+                    keep &= np.asarray(ground_col[a:b]) != GROUND_CLASS_GROUND
+                h = np.asarray(hag_col[a:b], dtype=np.float64)
+                keep &= np.isfinite(h) & (h >= params.band_min_m) & (h <= params.band_max_m)
+                if keep.any():
+                    parts_p.append(np.asarray(positions[a:b][keep], dtype=np.float64))
+                    parts_h.append(h[keep])
+    pts = np.vstack(parts_p) if parts_p else np.zeros((0, 3))
+    hag = np.concatenate(parts_h) if parts_h else np.zeros(0)
+    seeds = stem_seeds.detect_stems(pts, hag, params)
+    return {"seeds": seeds, "layer_points": int(len(pts)),
+            "params": {"band_min_m": params.band_min_m, "band_max_m": params.band_max_m}}
+
+
 class SessionTreeSegmentRequest(TreeSegmentationRequest):
     """Run TreeIso on the session's in-RAM points and append a `tree_instance`
     column. Inherits the TreeIso tuning fields; `points`/`source` are ignored."""
@@ -38889,6 +38991,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     plant_pts = pts[plant_mask]
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
+    ti_param_dict.update(tiling=request.tiling, tile_buffer_m=request.tile_buffer_m)
     size_error = await run_in_threadpool(_treeiso_size_error, plant_pts, ti_param_dict)
     if size_error:
         raise HTTPException(status_code=400, detail=size_error)
@@ -38912,9 +39015,11 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
                 status_code=409,
                 detail={"cost_warning": warning, "message": warning["message"]},
             )
+    tiling_meta: dict = {}
     try:
         plant_labels = await _run_killable(
             "trees", plant_pts, ti_param_dict, http_request=http_request, seeds=seeds,
+            meta_out=tiling_meta,
         )
     except ClientDisconnected:
         # Client gave up before the octree rebuild; the worker was killed and the
@@ -38937,7 +39042,9 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # uses this to iterate ids 1..num_trees when "split into one cloud per tree"
     # is enabled, extracting each into its own child session.
     num_trees = int(labels.max()) if labels.size else 0
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": fusion_warning, **meta}
+    # How the run was tiled, and how many trees may have been cut off by a
+    # tile's buffer (tiled_trees.py) - the renderer surfaces a warning.
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": fusion_warning, "tiling": tiling_meta or None, **meta}
 
 
 def _translate_octree_in_place(cache_id: Optional[str],

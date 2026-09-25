@@ -10,7 +10,7 @@ import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ,
 import * as THREE from 'three';
 import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, detectStems, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -1362,6 +1362,9 @@ export default function PointCloudViewer({
   // Human-in-the-loop trunk seeding: when seeding, clicks drop a seed marker.
   const [treeSeedMode, setTreeSeedMode] = useState(false);
   const [treeSeedPoints, setTreeSeedPoints] = useState<Array<[number, number, number]>>([]);
+  const [treeAutoSeedInProgress, setTreeAutoSeedInProgress] = useState(false);
+  const [treeTiling, setTreeTiling] = useState<'auto' | 'on' | 'off'>('auto');
+  const [treeTileBufferM, setTreeTileBufferM] = useState(10);
   // Refine controls (post-segmentation merge/split of the tree_instance field).
   const [treeMergeA, setTreeMergeA] = useState(1);
   const [treeMergeB, setTreeMergeB] = useState(2);
@@ -15233,6 +15236,8 @@ export default function PointCloudViewer({
       max_gap: treeMaxGap,
       max_outlier_gap: treeMaxOutlierGap,
       acknowledge_cost: acknowledgeCost,
+      tiling: treeTiling,
+      tile_buffer_m: treeTileBufferM,
     };
     const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
 
@@ -15252,6 +15257,13 @@ export default function PointCloudViewer({
           ...tiParams,
           ...(seeds ? { seed_points: seeds } : {}),
         }, abort.signal);
+        const truncated = meta.tiling?.trees_truncated ?? 0;
+        if (meta.tiling?.tiled && truncated > 0) {
+          showToast({
+            type: 'warning', title: 'Tree Segmentation',
+            message: `Segmented in ${meta.tiling.tiles_run} tiles; ${truncated} tree${truncated === 1 ? '' : 's'} may have been cut off at a tile's ${meta.tiling.buffer_m} m buffer. Widen the tile buffer beyond the widest crown and run again.`,
+          });
+        }
         // The parent keeps ALL points, coloured by tree_instance.
         retireLabelColumn(id, TREE_INSTANCE_ATTRIBUTE);
         onUpdateCloud(id, buildSessionOctreeData(meta, octreeInfo, baseName));
@@ -15461,7 +15473,32 @@ export default function PointCloudViewer({
       treeSegmentAbortRef.current = null;
       treeSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM]);
+
+  // Fill the seed list with one seed per trunk found in the breast-height
+  // layer, and turn seed mode on so they are drawn for review before running.
+  const handleAutoSeedStems = useCallback(async () => {
+    const cloud = clouds.find(c => selectedIds.has(c.id));
+    const sessionId = cloud?.data.octree?.sessionId;
+    if (!sessionId || treeAutoSeedInProgress) return;
+    setTreeAutoSeedInProgress(true);
+    setTreeSegmentError(null);
+    try {
+      const res = await detectStems(sessionId);
+      setTreeSeedPoints(res.seeds.map(s => [s.x, s.y, s.z] as [number, number, number]));
+      setTreeSeedMode(res.seeds.length > 0);
+      showToast({
+        type: res.seeds.length ? 'success' : 'warning', title: 'Auto-seed stems',
+        message: res.seeds.length
+          ? `Found ${res.seeds.length} trunk${res.seeds.length === 1 ? '' : 's'}. Review the seeds, then Segment Trees.`
+          : 'No trunks were found in the 1–2 m layer above the terrain.',
+      });
+    } catch (err) {
+      setTreeSegmentError(err instanceof Error ? err.message : 'Stem detection failed.');
+    } finally {
+      setTreeAutoSeedInProgress(false);
+    }
+  }, [clouds, selectedIds, treeAutoSeedInProgress, showToast]);
 
   // Refine the tree_instance field in place (flat clouds only — octree clouds
   // bake the attribute on disk and would need a backend re-run). Reads the
@@ -25981,6 +26018,12 @@ export default function PointCloudViewer({
           maxOutlierGap={treeMaxOutlierGap}
           seedMode={treeSeedMode}
           seedCount={treeSeedPoints.length}
+          autoSeedInProgress={treeAutoSeedInProgress}
+          onAutoSeed={() => void handleAutoSeedStems()}
+          tiling={treeTiling}
+          tileBufferM={treeTileBufferM}
+          onTilingChange={setTreeTiling}
+          onTileBufferChange={setTreeTileBufferM}
           splitClouds={treeSplitClouds}
           inProgress={treeSegmentInProgress}
           error={treeSegmentError}
