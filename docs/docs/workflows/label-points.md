@@ -347,6 +347,17 @@ into another instance column are kept as they are.
 It is one stroke: the result shows at once, undo takes it back, and you then
 correct it by hand like any painting.
 
+## Save and load strokes
+
+**Save strokes…** writes every stroke the column has had since the cloud was
+loaded to a small `.json` file. **Load strokes…** replays such a file onto the
+column being edited, as one undoable step. The strokes are stored in the
+cloud's own coordinates, so they land in the same place on a re-import of the
+same scan — to carry work across a re-import, or to share it with a colleague
+who has the same file. Classes are stored by number: load onto a column whose
+class set uses the same numbers, and the panel says if the file uses classes
+the set does not have.
+
 ## What happens to the labels
 
 Labels are stored in whichever column you picked: the hand-labelling column

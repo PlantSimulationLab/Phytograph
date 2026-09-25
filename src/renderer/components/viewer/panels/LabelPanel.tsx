@@ -125,6 +125,9 @@ export interface LabelPanelProps {
   /** Pre-label (F8): other columns of this cloud whose classes can seed this one. */
   prelabelSources?: Array<{ slug: string; label: string; classes: ClassDef[] }>;
   onPrelabel?: (source: string, map: Record<string, number> | null, onlyUnlabelled: boolean) => void;
+  /** Save the column's strokes to a file, or replay a saved file (F10). */
+  onSaveStrokes?: () => void;
+  onLoadStrokes?: () => void;
   /** Pick tool: how the cloud is cut into pieces, and the piece size (0 = auto). */
   pickMode?: 'pieces' | 'connected';
   onPickModeChange?: (m: 'pieces' | 'connected') => void;
@@ -211,6 +214,8 @@ export function LabelPanel({
   instances = null,
   prelabelSources = [],
   onPrelabel,
+  onSaveStrokes,
+  onLoadStrokes,
   pickMode = 'pieces',
   onPickModeChange,
   pickSize = 0,
@@ -980,6 +985,21 @@ export function LabelPanel({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {(onSaveStrokes || onLoadStrokes) && (
+        <div className="mt-2 flex items-center gap-1 text-[10px]">
+          <button data-testid="label-save-strokes" onClick={onSaveStrokes}
+            title="Save this column's strokes to a file, to replay on a re-imported scan or share"
+            className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200">
+            Save strokes…
+          </button>
+          <button data-testid="label-load-strokes" onClick={onLoadStrokes}
+            title="Replay a saved stroke file onto this column (one undo step)"
+            className="flex-1 px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600 text-neutral-200">
+            Load strokes…
+          </button>
         </div>
       )}
 

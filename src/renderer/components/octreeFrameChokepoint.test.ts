@@ -185,9 +185,9 @@ describe('screen-space regions refresh the octree first', () => {
       ...[...src.matchAll(/\blabelCloudRegion\(\s*sessionId/g)].map(m => m.index!),
     ];
     // Label sites: the stroke, its paired column's stroke (same queue job,
-    // after the stroke's own request), and a redo's replay.
-    expect(sites.filter(i => i > -1).length, 'expected erase, erase-redo and 3 label sites')
-      .toBe(5);
+    // after the stroke's own request), a redo's replay, and Load strokes.
+    expect(sites.filter(i => i > -1).length, 'expected erase, erase-redo and 4 label sites')
+      .toBe(6);
     for (const at of sites) {
       expect(at, 'missing call site').toBeGreaterThan(-1);
       const before = src.slice(Math.max(0, at - 2400), at);

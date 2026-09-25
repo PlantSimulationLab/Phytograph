@@ -7,6 +7,7 @@ import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
 import { resetToFreshScene } from './helpers/resetApp';
 import { stubSaveDialog } from './helpers/stubSaveDialog';
+import { stubOpenDialog } from './helpers/stubOpenDialog';
 import { readLasClasses } from './helpers/lasClasses';
 
 const TINY = join(repoRoot, 'tests', 'e2e', 'fixtures', 'tiny.xyz');
@@ -752,6 +753,55 @@ test('an instance stroke can set a semantic class too, in one undo step', async 
   await page.getByTestId('label-undo').click();
   await expect.poll(async () => (await counts(panel))[woodValue] ?? 0, { timeout: 30_000 }).toBe(0);
   await page.getByTestId('label-column-select').selectOption('tree_instance');
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+});
+
+test('strokes save to a file and replay onto the re-imported scan', async () => {
+  // Paint, bake (closing the panel), paint again, save. The file must hold
+  // BOTH strokes: a bake clears the undo list, and a save that only knew the
+  // unbaked strokes would replay to a different result.
+  const { app } = session;
+  let { page, panel } = await openLabelToolOnTreeCloud();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+
+  await panel.getByTestId('label-class-3').click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '3': 60 });
+
+  await panel.getByRole('button', { name: 'Close' }).click();
+  await expect(panel).toHaveCount(0);
+  await page.getByTestId('tool-label').click();
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute('data-label-baking', 'false', { timeout: 60_000 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '0');
+
+  // Second stroke: delete Tree 3 — every point back to Unassigned.
+  await panel.getByTestId('label-class-3').click();
+  await page.getByTestId('label-instance-delete').click();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '0': 60 });
+
+  const dir = mkdtempSync(join(tmpdir(), 'phyto-strokes-'));
+  const file = join(dir, 'strokes.json');
+  await stubSaveDialog(app, file);
+  await page.getByTestId('label-save-strokes').click();
+  await expect.poll(() => { try { return JSON.parse(readFileSync(file, 'utf8')).strokes.length; } catch { return 0; } },
+    { timeout: 10_000 }).toBe(2);
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  expect(saved).toMatchObject({ format: 'phytograph-label-strokes', slug: 'tree_instance' });
+  expect(saved.strokes.map((s: { toClass: number }) => s.toClass)).toEqual([3, 0]);
+
+  // A fresh import of the same scan, then Load: same result, as one undo step.
+  await resetToFreshScene(session.app, session.page);
+  ({ page, panel } = await openLabelToolOnTreeCloud());
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+  await stubOpenDialog(app, file);
+  await page.getByTestId('label-load-strokes').click();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '0': 60 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '2');
+  await page.getByTestId('label-undo').click();
   await expect.poll(async () => await counts(panel), { timeout: 30_000 })
     .toEqual({ '1': 24, '3': 36 });
 });

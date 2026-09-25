@@ -130,6 +130,7 @@ import {
   isLasFlagColumn, lasFlagPalette,
 } from '../lib/classPalettes';
 import { isInstanceColumnSlug, withNewInstance, WHOLE_CLOUD } from '../lib/instances';
+import { parseStrokeFile, renumberStrokes, serializeStrokes } from '../lib/strokeFile';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
 import { LabelPanel, type LabelTool } from './viewer/panels/LabelPanel';
 import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
@@ -2696,7 +2697,13 @@ export default function PointCloudViewer({
    * correcting `wood_class`, re-running wood segmentation and pressing Undo
    * reverse-applied the old deltas onto the NEW segmentation.
    */
+  // Every stroke a column has had since the cloud was loaded, for Save strokes
+  // (F10): the baked ones here, the unbaked ones in labelPending. A bake moves
+  // strokes from there to here; a tool that rewrites the column clears both,
+  // since the strokes no longer describe it.
+  const labelJournalRef = useRef(new Map<string, LabelStroke[]>());
   const retireLabelColumn = useCallback((cloudId: string, slug: string) => {
+    labelJournalRef.current.delete(`${cloudId}|${slug}`);
     setLabelPending((prev) => updatePending(prev, cloudId, slug, (e) =>
       (e.strokes.length === 0 && !e.dirty ? e : { ...e, strokes: [], dirty: false })));
     // Through the ref: stable identity, so the tool callbacks that call this
@@ -6192,6 +6199,94 @@ export default function PointCloudViewer({
     });
   }, []);
 
+  // ── Stroke files (F10) ────────────────────────────────────────────────────
+  const handleSaveStrokes = useCallback(async () => {
+    const cloud = labelTargetCloud;
+    const palette = labelPaletteRef.current;
+    if (!cloud || !palette) return;
+    const strokes = [
+      ...(labelJournalRef.current.get(`${cloud.id}|${palette.slug}`) ?? []),
+      ...pendingFor(labelPendingRef.current, cloud.id, palette.slug).strokes,
+    ];
+    if (strokes.length === 0) {
+      showToast({ type: 'info', title: 'No strokes to save', message: 'Only strokes painted since this cloud was loaded can be saved.' });
+      return;
+    }
+    const base = (cloud.data.fileName ?? 'cloud').replace(/\.[^.]+$/, '');
+    const path = await window.electronAPI?.dialog.save({
+      title: 'Save label strokes',
+      defaultPath: `${base}-${palette.slug}-strokes.json`,
+      filters: [{ name: 'Label strokes', extensions: ['json'] }],
+    });
+    if (!path) return;
+    try {
+      await window.electronAPI.fs.writeText(path, serializeStrokes(palette.slug, strokes, {
+        paletteName: palette.name, source: cloud.data.fileName ?? undefined,
+      }));
+      showToast({ type: 'success', title: `Saved ${strokes.length} stroke${strokes.length === 1 ? '' : 's'}` });
+    } catch (err) {
+      showToast({ type: 'error', title: describeBackendError(err, 'Saving strokes').message });
+    }
+  }, [labelTargetCloud, showToast]);
+
+  const handleLoadStrokes = useCallback(async () => {
+    const cloud = labelTargetCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    const palette = labelPaletteRef.current;
+    if (!cloud || !sessionId || !palette) return;
+    const picked = await window.electronAPI?.dialog.open({
+      title: 'Load label strokes',
+      filters: [{ name: 'Label strokes', extensions: ['json'] }],
+    });
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    let file;
+    try {
+      file = parseStrokeFile(await window.electronAPI.fs.readText(path));
+    } catch (err) {
+      showToast({ type: 'error', title: 'Could not load the strokes', message: (err as Error).message });
+      return;
+    }
+    const strokes = renumberStrokes(file.strokes, `f${Date.now().toString(36)}`);
+    if (strokes.length === 0) return;
+    const known = new Set(palette.classes.map((c) => c.value));
+    const unknown = [...new Set(strokes.map((s) => s.toClass))].filter((v) => !known.has(v));
+    const slug = palette.slug;
+    const entry = pendingFor(labelPendingRef.current, cloud.id, slug);
+    const before: LabelEditState = {
+      strokes: entry.strokes, activeClass: labelActiveClass,
+      visibleClasses: [...labelVisibleClasses], paletteId: palette.id, dirty: entry.dirty,
+    };
+    // Preview first, as for a painted stroke; rolled back if the replay fails.
+    updateLabelPending(cloud.id, slug, (e) => ({ strokes: [...e.strokes, ...strokes], dirty: true, palette }));
+    const ids = new Set(strokes.map((s) => s.strokeId));
+    await labelQueue.run(cloud.id, async () => {
+      try {
+        if (!(await ensureOctreeFrameCurrentRef.current(cloud.id))) throw new Error('The cloud could not be refreshed.');
+        const res = await labelCloudRegion(sessionId, strokes.map(labelStrokeRequest), slug, palette.name);
+        labelCountsSeqRef.current++;
+        setLabelClassCounts(Object.fromEntries(
+          Object.entries(res.class_counts).map(([k, v]) => [Number(k), Number(v)])) as Record<number, number>);
+        scene.commit({
+          label: 'load label strokes',
+          actions: [{ t: 'labelEdit', id: cloud.id, slug, before,
+            after: { ...before, strokes: [...entry.strokes, ...strokes], dirty: true } }],
+        });
+        markLabelsChanged(cloud.id, slug);
+        showToast({
+          type: unknown.length ? 'info' : 'success',
+          title: `Loaded ${strokes.length} stroke${strokes.length === 1 ? '' : 's'}${file.slug !== slug ? ` (saved from ${file.slug})` : ''}`,
+          message: unknown.length
+            ? `Class value${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')} ${unknown.length === 1 ? 'is' : 'are'} not in this class set: add ${unknown.length === 1 ? 'it' : 'them'} to see ${unknown.length === 1 ? 'it' : 'them'} coloured.`
+            : undefined,
+        });
+      } catch (err) {
+        updateLabelPending(cloud.id, slug, (e) => ({ ...e, strokes: e.strokes.filter((x) => !ids.has(x.strokeId)) }));
+        showToast({ type: 'error', title: describeBackendError(err, 'Loading strokes').message });
+      }
+    });
+  }, [labelTargetCloud, labelActiveClass, labelVisibleClasses, labelQueue, scene, showToast, updateLabelPending]);
+
   // ── Instance columns (F7) ─────────────────────────────────────────────────
   //
   // The class list IS the instance list (counts, hide, isolate and lock all
@@ -6819,6 +6914,8 @@ export default function PointCloudViewer({
       next.set(cloudId, { palette, strokes, seq });
       return next;
     });
+    const jk = `${cloudId}|${slug}`;
+    labelJournalRef.current.set(jk, [...(labelJournalRef.current.get(jk) ?? []), ...entry.strokes]);
     updateLabelPending(cloudId, slug, (e) => ({ ...e, strokes: [], dirty: false }));
     sceneRef.current.labelBoundary(cloudId, slug);
     // The per-cloud palette binding and the categorical registration describe
@@ -25673,6 +25770,8 @@ export default function PointCloudViewer({
           } : null}
           prelabelSources={labelPrelabelSources}
           onPrelabel={handlePrelabel}
+          onSaveStrokes={() => { void handleSaveStrokes(); }}
+          onLoadStrokes={() => { void handleLoadStrokes(); }}
           pickMode={labelPickMode}
           onPickModeChange={(m) => { setLabelPickMode(m); setLabelPickSize(0); }}
           pickSize={labelPickSize}
