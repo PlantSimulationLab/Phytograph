@@ -74,6 +74,9 @@ export interface ExportModalProps {
     format: 'xyz' | 'txt' | 'csv' | 'ply' | 'asc' | 'pts' | 'pcd' | 'las' | 'laz',
     columns: string[] | null,
     cloudId: string,
+    // LAS/LAZ: which class column fills the standard classification byte.
+    // undefined = automatic (hand labels first), null = none (all 0).
+    las?: { classificationColumn?: string | null },
   ) => void;
   // Batch export. `scanIds` the checked objects, `includeMisses`, `writeXml` (bundle vs
   // data-only), `columns` the ordered ASCII column slugs (always includes xyz),
@@ -259,6 +262,8 @@ export function ExportModal({
   // meaningful there — the picker drops its drag affordance for them.
   const cloudFormatIsOrdered = !usesFixedColumnOrder(cloudFormat);
   const cloudIsLas = cloudFormat === 'las' || cloudFormat === 'laz';
+  // '' = automatic, '__none__' = leave the byte at 0, else a column slug.
+  const [classByte, setClassByte] = useState('');
 
   // Columns for a LAS/LAZ export: the standard dimensions it cannot omit
   // (x/y/z, intensity) are forced on and locked; colour and scalars stay
@@ -440,6 +445,24 @@ export function ExportModal({
                       stored — LAS identifies dimensions by name.
                     </div>
                   )}
+                  {cloudIsLas && (
+                    <label className="flex items-center gap-1.5 mt-2 text-[10px] text-neutral-300">
+                      <span className="shrink-0">Classification byte from</span>
+                      <select
+                        data-testid="export-las-classification"
+                        value={classByte}
+                        onChange={(e) => setClassByte(e.target.value)}
+                        title="The LAS classification field other software reads. Values above 255 cannot be stored there."
+                        className="flex-1 min-w-0 px-1 py-0.5 rounded bg-neutral-700 text-neutral-200"
+                      >
+                        <option value="">Automatic (hand labels first)</option>
+                        <option value="__none__">None (all 0)</option>
+                        {activeCloudColumns.filter((c) => c.kind === 'label').map((c) => (
+                          <option key={c.slug} value={c.slug}>{c.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   {selectedSlugs(activeCloudColumns).length === 0 && (
                     <div className="text-[10px] text-amber-300 mt-1">Select at least one column.</div>
                   )}
@@ -463,6 +486,9 @@ export function ExportModal({
                   cloudFormat,
                   cloudFormatTakesColumns ? selectedSlugs(activeCloudColumns) : null,
                   soleCheckedObject!.id,
+                  cloudIsLas && classByte
+                    ? { classificationColumn: classByte === '__none__' ? null : classByte }
+                    : undefined,
                 )}
                 className={`mt-3 w-full px-3 py-2 rounded text-xs flex items-center justify-center gap-1.5 ${
                   cloudFormatTakesColumns && selectedSlugs(activeCloudColumns).length === 0

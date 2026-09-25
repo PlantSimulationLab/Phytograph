@@ -22526,6 +22526,12 @@ class PointCloudExportRequest(BaseModel):
     #                   intensity live in the core point record of every format
     #                   and cannot be removed — the UI locks them on.
     columns: Optional[List[str]] = None
+    # LAS/LAZ (F9): the class column for the standard classification byte.
+    # None = automatic (hand labels, imported, ground, wood); "" = none.
+    classification_column: Optional[str] = None
+    # Class palettes by column slug ({slug: {classes: [{value, label, color}]}}),
+    # written as the LAS classification lookup and a Phytograph palette record.
+    class_palettes: Optional[Dict[str, Any]] = None
 
 
 class PointCloudExportResponse(BaseModel):
@@ -22967,12 +22973,128 @@ def export_point_cloud_las(request: PointCloudExportRequest, http_request: Reque
                     f"Supported: {', '.join(sorted(_POINT_CLOUD_EXPORT_FORMATS))}"),
         )
 
+    # And the classification-byte column: a session column with ids above 255
+    # cannot go in the byte, and saying so is a 400, not a truncated stream.
+    src = request.source
+    if (request.classification_column and request.format.lower() in ("las", "laz")
+            and src is not None and getattr(src, "session_id", None)):
+        sess = _get_cloud_session(src.session_id)
+        with _cloud_session_lock:
+            extras = dict(sess.extras)
+        _las_class_source(list(extras), request.classification_column, extras)
+
     run_id, cancel_event = _new_cancel_token()
     return _bin_frame_streaming_response(
         lambda progress: json.dumps(
             _do_point_cloud_export(request, progress=progress, cancel_event=cancel_event)
         ).encode("utf-8"),
         request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+# Label columns that are LAS point FLAGS (F9): painted like any 0/1 class
+# column, written to the point record's flag bit rather than as an extra
+# dimension, and read back from it. MIRRORED from `LAS_FLAG_COLUMNS` in
+# src/renderer/lib/classPalettes.ts.
+_LAS_FLAG_COLUMNS = {"flag_withheld": "withheld", "flag_synthetic": "synthetic",
+                     "flag_key_point": "key_point"}
+_LAS_FLAG_LABELS = {"withheld": "Withheld", "synthetic": "Synthetic", "key_point": "Key-point"}
+# The Phytograph palette record: {slug: palette} as JSON, so a re-import (ours)
+# shows every class column by name and colour. The LAS 1.4 classification
+# lookup beside it names the classification byte's classes for other software.
+_PHYTOGRAPH_VLR_USER = "Phytograph"
+_PHYTOGRAPH_PALETTE_RECORD = 1
+
+
+def _las_class_source(export_slugs, requested: "Optional[str]", sess_extras=None):
+    """Which column fills the classification byte. `requested` None = the
+    historical priority (hand labels, imported, ground, wood); '' = none; a slug
+    = that column, which must be exported and fit in a byte."""
+    if requested is None:
+        return next((sl for sl in (MANUAL_CLASS_SLUG, "las_classification",
+                                   GROUND_CLASS_SLUG, WOOD_CLASS_SLUG)
+                     if sl in export_slugs), None)
+    if requested == "":
+        return None
+    if requested not in export_slugs:
+        raise HTTPException(status_code=400,
+                            detail=f"classification_column {requested!r} is not among the exported columns.")
+    if sess_extras is not None and requested in sess_extras:
+        top = float(np.nanmax(sess_extras[requested])) if len(sess_extras[requested]) else 0.0
+        if top > 255.5:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"{requested!r} holds values up to {int(round(top))}; the LAS classification "
+                        "byte stores 0-255. It is still exported as its own dimension."))
+    return requested
+
+
+def _las_palette_vlrs(class_palettes: "Optional[dict]", slugs, class_source):
+    """(vlrs, evlrs) naming the exported class columns: the LAS 1.4
+    classification lookup for the byte, and the Phytograph palette record.
+    The palette record goes in an EVLR when it outgrows a VLR's 65,535 bytes."""
+    import json as _json
+    import struct
+    import laspy
+    vlrs, evlrs = [], []
+    pals = {sl: p for sl, p in (class_palettes or {}).items()
+            if isinstance(p, dict) and (sl in slugs or sl == class_source)}
+    src_pal = pals.get(class_source) if class_source else None
+    if src_pal:
+        rec = bytearray()
+        for c in src_pal.get("classes", []):
+            try:
+                v = int(c.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= v <= 255:
+                name = str(c.get("label", ""))[:15].encode("ascii", "replace")
+                rec += struct.pack("<B15s", v, name)
+        if rec:
+            vlrs.append(laspy.VLR(user_id="LASF_Spec", record_id=0,
+                                  description="Classification lookup", record_data=bytes(rec)))
+    if pals:
+        data = _json.dumps(pals, separators=(",", ":")).encode("utf-8")
+        v = laspy.VLR(user_id=_PHYTOGRAPH_VLR_USER, record_id=_PHYTOGRAPH_PALETTE_RECORD,
+                      description="Class palettes (JSON)", record_data=data)
+        (vlrs if len(data) <= 65535 else evlrs).append(v)
+    return vlrs, evlrs
+
+
+def _las_file_palettes(header) -> dict:
+    """{slug: palette} from a file's Phytograph palette record, plus a palette
+    for `las_classification` built from a classification lookup when the file
+    has one and no palette of our own names that column."""
+    import json as _json
+    import struct
+    out: dict = {}
+    lookup = None
+    for v in list(getattr(header, "vlrs", []) or []) + list(getattr(header, "evlrs", []) or []):
+        uid = str(getattr(v, "user_id", "")).rstrip("\x00")
+        rid = getattr(v, "record_id", None)
+        if uid == _PHYTOGRAPH_VLR_USER and rid == _PHYTOGRAPH_PALETTE_RECORD:
+            try:
+                data = _json.loads(bytes(v.record_data).decode("utf-8"))
+                if isinstance(data, dict):
+                    out.update({k: p for k, p in data.items() if isinstance(p, dict)})
+            except (ValueError, AttributeError):
+                pass
+        elif uid == "LASF_Spec" and rid == 0:
+            if getattr(v, "lookups", None):
+                lookup = {int(k): str(d) for k, d in v.lookups.items()}
+            elif getattr(v, "record_data", None):
+                raw = bytes(v.record_data)
+                lookup = {}
+                for i in range(0, len(raw) - len(raw) % 16, 16):
+                    cls, name = struct.unpack("<B15s", raw[i:i + 16])
+                    lookup[int(cls)] = name.split(b"\x00", 1)[0].decode("ascii", "replace")
+    if lookup and "las_classification" not in out:
+        out["las_classification"] = {
+            "id": "file-las_classification", "name": "LAS classification",
+            "slug": "las_classification", "updatedAt": 0,
+            "classes": [{"value": k, "label": d or f"Class {k}", "color": [0.6, 0.6, 0.6]}
+                        for k, d in sorted(lookup.items())],
+        }
+    return out
 
 
 def _las_export_point_format(want_color: bool) -> int:
@@ -22990,7 +23112,8 @@ def _las_export_point_format(want_color: bool) -> int:
 
 def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                            columns: "Optional[List[str]]", translation,
-                           progress=None) -> dict:
+                           progress=None, classification_column: "Optional[str]" = None,
+                           class_palettes: "Optional[dict]" = None) -> dict:
     """Stream a session to a LAS/LAZ file in row chunks - the export twin of
     `_session_to_las`, without ever materialising the survivor set.
 
@@ -23047,9 +23170,11 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
     want_intensity = has_intensity and (wanted is None or "intensity" in wanted)
     export_slugs = [sl for sl in extra_slugs if wanted is None or sl in wanted]
     write_timestamp = has_timestamps and (wanted is None or "timestamp" in wanted)
-    class_source = next(
-        (sl for sl in (MANUAL_CLASS_SLUG, "las_classification", GROUND_CLASS_SLUG, WOOD_CLASS_SLUG)
-         if sl in export_slugs), None)
+    class_source = _las_class_source(export_slugs, classification_column, sess.extras)
+    # LAS flags go to the record's flag bits, not to extra dimensions.
+    flag_slugs = [sl for sl in export_slugs if sl in _LAS_FLAG_COLUMNS]
+    dim_slugs = [sl for sl in export_slugs if sl not in _LAS_FLAG_COLUMNS]
+    palette_vlrs, palette_evlrs = _las_palette_vlrs(class_palettes, dim_slugs, class_source)
 
     def _stage(frac, msg):
         if progress is not None:
@@ -23060,10 +23185,14 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
     header = laspy.LasHeader(point_format=_las_export_point_format(want_color), version="1.4")
     header.offsets = np.floor(pos_min)
     header.scales = [0.001, 0.001, 0.001]
-    for slug in export_slugs:
+    for slug in dim_slugs:
         header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
     if write_timestamp:
         header.add_extra_dim(laspy.ExtraBytesParams(name="timestamp", type=np.float32))
+    for v in palette_vlrs:
+        header.vlrs.append(v)
+    for v in palette_evlrs:
+        header.evlrs = list(header.evlrs or []) + [v]
 
     ext = ".laz" if fmt == "laz" else ".las"
     tmp = dest.with_name(dest.name + ".partial" + ext)
@@ -23095,7 +23224,10 @@ def _export_session_to_las(sess: "CloudSession", dest: Path, *, fmt: str,
                 if bint is not None:
                     record.intensity = bint
                 for sl, col in bext.items():
-                    record[sl] = col
+                    if sl in _LAS_FLAG_COLUMNS:
+                        record[_LAS_FLAG_COLUMNS[sl]] = (col > 0.5).astype(np.uint8)
+                    else:
+                        record[sl] = col
                 if bts is not None:
                     record["timestamp"] = bts
                 if class_source is not None:
@@ -23177,7 +23309,9 @@ def _do_point_cloud_export(
             sess = _get_cloud_session(src.session_id)
             return _export_session_to_las(
                 sess, _resolve_export_dest(request.dest_path), fmt=fmt,
-                columns=request.columns, translation=src.translation, progress=progress)
+                columns=request.columns, translation=src.translation, progress=progress,
+                classification_column=request.classification_column,
+                class_palettes=request.class_palettes)
         # The read copies every surviving point plus every column; an export
         # of a large cloud is one of the biggest transients in the process.
         n_src = _source_point_count_estimate(src)
@@ -23375,8 +23509,15 @@ def _do_point_cloud_export(
         # Declare every scalar as a float32 extra dimension, named by slug —
         # identical to `_xyz_to_las`, so our own importer reads them back as the
         # same named scalars (and PotreeConverter carries them into the octree).
-        for slug in export_extras:
+        class_source = _las_class_source(list(export_extras), request.classification_column)
+        dim_extras = [sl for sl in export_extras if sl not in _LAS_FLAG_COLUMNS]
+        for slug in dim_extras:
             header.add_extra_dim(laspy.ExtraBytesParams(name=slug, type=np.float32))
+        palette_vlrs, palette_evlrs = _las_palette_vlrs(request.class_palettes, dim_extras, class_source)
+        for v in palette_vlrs:
+            header.vlrs.append(v)
+        if palette_evlrs:
+            header.evlrs = list(header.evlrs or []) + palette_evlrs
         las = laspy.LasData(header)
 
         # Each assignment quantises to the header scale (the 1 mm grid), which is
@@ -23415,7 +23556,10 @@ def _do_point_cloud_export(
         if export_extras:
             _stage(0.78, f"Packing {len(export_extras)} scalar field(s)")
             for slug, col in export_extras.items():
-                las[slug] = col.astype(np.float32)
+                if slug in _LAS_FLAG_COLUMNS:
+                    las[_LAS_FLAG_COLUMNS[slug]] = (np.asarray(col) > 0.5).astype(np.uint8)
+                else:
+                    las[slug] = col.astype(np.float32)
 
         # ALSO write a class column into the standard LAS `classification` byte.
         #
@@ -23434,14 +23578,13 @@ def _do_point_cloud_export(
         # clipped to the 0-255 the LAS 1.4 byte allows. Writing a FLOAT column
         # straight to a reserved standard name is what crashes laspy (it tries to
         # bit-pack into the flags byte), hence the explicit cast.
-        class_source = next(
-            (sl for sl in (MANUAL_CLASS_SLUG, "las_classification",
-                           GROUND_CLASS_SLUG, WOOD_CLASS_SLUG)
-             if sl in export_extras),
-            None,
-        )
         if class_source is not None:
             vals = np.rint(np.asarray(export_extras[class_source], dtype=np.float64))
+            if vals.size and vals.max() > 255:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"{class_source!r} holds values up to {int(vals.max())}; the LAS "
+                            "classification byte stores 0-255."))
             las.classification = np.clip(vals, 0, 255).astype(np.uint8)
 
         # Determine file extension
@@ -33411,6 +33554,15 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
         # "classification" in the colour-by list with nothing to tell them apart.
         for d in std_dims:
             name = d.name
+            if name in _LAS_FLAG_LABELS:
+                # A LAS point flag comes back as the label column the export
+                # wrote it from (F9), kept when ANY point has it set.
+                candidates[name] = {
+                    "arr": np.empty(n, dtype=_las_dim_dtype(d)), "slug": f"flag_{name}",
+                    "label": f"LAS flag: {_LAS_FLAG_LABELS[name]}", "first": None,
+                    "const": True, "flag": True,
+                }
+                continue
             if name in _LAS_STD_DIMS_SKIP or name in _LAS_MULTIRETURN_SRC:
                 continue
             slug = f"las_{name}"
@@ -33518,7 +33670,7 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
                     extra_dims_meta.append({"slug": cand["slug"], "label": cand["label"]})
                 del cand["arr"]
                 continue
-            if n and not cand["const"]:
+            if n and (not cand["const"] or (cand.get("flag") and cand["first"])):
                 vals32 = cand["arr"].astype(np.float32)
                 if store is not None:
                     col = f"x{len(extra_cols)}"
@@ -33527,6 +33679,14 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
                 extras[cand["slug"]] = vals32
                 extra_dims_meta.append({"slug": cand["slug"], "label": cand["label"]})
             del cand["arr"]
+
+        # Class names and colours a Phytograph export wrote into the file (F9),
+        # carried on the column's extra-dim entry so the create response can hand
+        # them to the renderer as the cloud's palettes.
+        file_palettes = _las_file_palettes(header)
+        for ed in extra_dims_meta:
+            if ed["slug"] in file_palettes:
+                ed["palette"] = file_palettes[ed["slug"]]
 
         # gps_time is the LAD trajectory-join key — route it to a dedicated float64
         # array, NOT the float32 `extras` dict (a float32 cast at adjusted-standard
@@ -34774,6 +34934,11 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         observed_classes = _session_observed_classes_locked(sess)
     meta = {"cache_id": cache_key, "cache_dir": str(cache_dir),
             "observed_classes": observed_classes, **meta}
+    # Palettes read from the file (see `_las_file_palettes`), by column slug.
+    file_palettes = {ed["slug"]: ed["palette"] for ed in (sess.extra_dims_meta or [])
+                     if isinstance(ed, dict) and "palette" in ed}
+    if file_palettes:
+        meta["class_palettes"] = file_palettes
 
     # Surface sky/miss info so the renderer can hide misses by default, colour
     # them distinctly, and relocate them onto the bounding sphere for display.

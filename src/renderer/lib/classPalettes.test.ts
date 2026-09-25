@@ -4,7 +4,7 @@ import {
   paletteToScheme, paletteToIndexScheme, paletteIndexMaps,
   makePreset, makeEmptyPalette, parsePalette, parsePaletteList, defaultSlugForPreset,
   ASPRS_CLASSES, UNCLASSIFIED_VALUE, USER_CLASS_MIN,
-  PALETTE_SOFT_MAX, withPendingLabelColumn,
+  PALETTE_SOFT_MAX, withPendingLabelColumn, isLasFlagColumn, lasFlagPalette,
   type ClassPalette, type LabelableColumn,
 } from './classPalettes';
 import { buildCategoricalGradientStops, categoricalSchemeForCloud } from './classification';
@@ -334,8 +334,11 @@ describe('labelableColumnsFor', () => {
     const cols = columnsForAlmond();
     expect(cols.map((c) => c.slug)).toEqual([
       MANUAL_CLASS_ATTRIBUTE, 'tree_instance', 'col_4', 'col_5',
+      'flag_withheld', 'flag_synthetic', 'flag_key_point',
     ]);
-    expect(cols.map((c) => c.kind)).toEqual(['manual', 'categorical', 'scalar', 'scalar']);
+    expect(cols.map((c) => c.kind)).toEqual([
+      'manual', 'categorical', 'scalar', 'scalar', 'categorical', 'categorical', 'categorical',
+    ]);
     // The almond file has no manual_class column yet — the backend makes it on
     // the first stroke, so it must still be offered.
     expect(cols[0].missing).toBe(true);
@@ -711,5 +714,30 @@ describe('forkPaletteForSave', () => {
     expect(f.name).toBe('orchard.laz — Tree instance');
     expect(f.derived).toBe(true);
     expect(forkPaletteForSave(f, 'orchard.laz', 6)).toBe(f);   // already the user's
+  });
+});
+
+describe('LAS flag columns', () => {
+  it('are always offered, missing until painted, and keep a painted one\'s values', () => {
+    const cols = labelableColumnsFor({
+      columnOptions: [{ value: 'flag_synthetic', label: 'flag_synthetic' }],
+      observedClasses: { flag_synthetic: [0, 1] },
+      manualSlug: MANUAL_CLASS_ATTRIBUTE,
+      isCategorical: () => false,
+    });
+    const flags = cols.filter((c) => isLasFlagColumn(c.slug));
+    expect(flags.map((c) => [c.slug, c.label, c.missing])).toEqual([
+      ['flag_withheld', 'LAS flag: Withheld', true],
+      ['flag_synthetic', 'LAS flag: Synthetic', false],
+      ['flag_key_point', 'LAS flag: Key-point', true],
+    ]);
+    expect(flags[1].observed).toEqual([0, 1]);
+    expect(cols.filter((c) => c.slug === 'flag_synthetic')).toHaveLength(1);
+  });
+
+  it('paint Off / On', () => {
+    const p = lasFlagPalette('flag_withheld', 0);
+    expect(p.classes.map((c) => [c.value, c.label])).toEqual([[0, 'Off'], [1, 'Withheld']]);
+    expect(validatePalette(p).filter((i) => i.level === 'error')).toEqual([]);
   });
 });

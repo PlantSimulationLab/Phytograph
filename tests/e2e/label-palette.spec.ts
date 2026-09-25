@@ -786,3 +786,57 @@ test('pre-label seeds a column from another column, through a class map, in one 
     return (c[woodValue] ?? 0) + (c[leafValue] ?? 0);
   }, { timeout: 30_000 }).toBe(0);
 });
+
+test('a LAS export carries the flags, the chosen class byte and the class names back in', async () => {
+  const { app } = session;
+  let { page, panel } = await openLabelToolOnTreeCloud();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+
+  // Name Tree 1 "Almond": the name must survive the file.
+  const editor = await openEditor(page);
+  await page.locator('[data-testid="palette-class-row"][data-class-value="1"]')
+    .getByTestId('palette-class-label').fill('Almond');
+  await page.getByTestId('palette-save').click();
+  await expect(editor).toHaveCount(0);
+
+  // Withhold every point, through the LAS flag column.
+  await page.getByTestId('label-column-select').selectOption('flag_withheld');
+  await expect(panel).toHaveAttribute('data-label-slug', 'flag_withheld');
+  await expect(panel.getByTestId('label-class-1')).toContainText('Withheld');
+  await panel.getByTestId('label-class-1').click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '1': 60 });
+
+  // Export with the tree ids in the classification byte.
+  const savePath = join(mkdtempSync(join(tmpdir(), 'phytograph-flags-las-')), 'trees.las');
+  await stubSaveDialog(app, savePath);
+  await page.evaluate(() => (window as any).__openExportPanel?.());
+  await expect(page.getByTestId('export-modal')).toBeVisible();
+  await page.getByTestId('export-format-las').click();
+  await page.getByTestId('export-las-classification').selectOption('tree_instance');
+  await page.getByTestId('export-cloud-go').click();
+  await expect(page.getByTestId('toast-success').filter({ hasText: 'Export Complete' }))
+    .toBeVisible({ timeout: 30_000 });
+
+  const { classes, flags } = readLasClasses(savePath);
+  expect(classes.filter((c) => c === 1)).toHaveLength(24);
+  expect(classes.filter((c) => c === 3)).toHaveLength(36);
+  // Bit 2 is Withheld.
+  expect(flags.every((f) => (f & 0b100) !== 0)).toBe(true);
+
+  // Re-import the file: the flag column and the class names come back.
+  await resetToFreshScene(session.app, session.page);
+  await importFiles(app, page, 'import-auto', savePath);
+  await completeImportWizard(page);
+  const row = page.locator('[data-testid="scan-row"][data-scan-name="trees"]');
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  await expect(row).toHaveAttribute('data-point-count', '60');
+  await page.getByTestId('tool-label').click();
+  panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('label-column-select').selectOption('tree_instance');
+  await expect(panel.getByTestId('label-class-1')).toContainText('Almond', { timeout: 15_000 });
+  await page.getByTestId('label-column-select').selectOption('flag_withheld');
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '1': 60 });
+});

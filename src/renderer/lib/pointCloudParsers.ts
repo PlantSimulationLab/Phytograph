@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { PointCloudData, ScalarField } from './pointCloudTypes';
-import type { ClassPalette } from './classPalettes';
+import { parsePalette, type ClassPalette } from './classPalettes';
 import { isLengthUnit } from './units';
 import {
   importPointCloudByPath,
@@ -1052,14 +1052,28 @@ export function buildPointCloudFromOctree(
   const {
     asciiFormat,
     columnPlan,
-    categoricalAttributes,
     sessionId,
     worldShift,
     sourceUnits,
     sourceUnitScale,
     continuousAttributes,
-    classPalettes,
+    classPalettes: passedPalettes,
   } = options;
+  // Palettes a Phytograph LAS export wrote into the file (the backend reads
+  // them back as `class_palettes`), under any the caller already holds: a file
+  // re-imported shows its classes by name, and its label columns as classes.
+  const filePalettes: Record<string, ClassPalette> = {};
+  const rawFile = (meta as OctreeMetadata & { class_palettes?: unknown }).class_palettes;
+  if (rawFile && typeof rawFile === 'object') {
+    for (const [slug, raw] of Object.entries(rawFile as Record<string, unknown>)) {
+      const p = parsePalette(raw);
+      if (p && p.slug === slug) filePalettes[slug] = p;
+    }
+  }
+  const classPalettes = { ...filePalettes, ...(passedPalettes ?? {}) };
+  const categoricalAttributes = Object.keys(filePalettes).length
+    ? Array.from(new Set([...(options.categoricalAttributes ?? []), ...Object.keys(filePalettes)]))
+    : options.categoricalAttributes;
   // Prefer the tight data extent over the cube-padded octree bounds.
   // Crop-box init, fit-to-bounds camera framing, and the bounds shown in
   // the right-pane scan list all expect "where the data actually lives"

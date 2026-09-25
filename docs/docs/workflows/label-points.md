@@ -359,7 +359,18 @@ or a column you created. Either way they behave like any other scalar:
 - split the cloud into one cloud per class,
 - [export](import-export.md) them to LAS/LAZ, where they are written both as
   their own named column and into the standard LAS classification byte (classes
-  0–255), so other LiDAR software sees them too.
+  0–255), so other LiDAR software sees them too. The file also carries the
+  class **names and colours**: other programs read the names of the
+  classification byte's classes, and a re-import into Phytograph brings back
+  every labelled column's class set.
+
+### LAS flags
+
+LAS files mark points **withheld**, **synthetic** or as **key-points** with
+flags in each point rather than with classes. The column list offers one
+column for each (*LAS flag: Withheld*, and so on): paint *Withheld* onto the
+points to flag, exactly as you would a class, and the LAS export sets the
+flag. Re-importing the file brings the flag back as the same column.
 
 ## Work in a cross-section
 

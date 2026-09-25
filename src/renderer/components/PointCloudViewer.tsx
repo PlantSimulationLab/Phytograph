@@ -127,6 +127,7 @@ import {
   makePreset, defaultSlugForPreset, paletteIndexMaps, paletteToIndexScheme, UNCLASSIFIED_VALUE,
   labelableColumnsFor, withPendingLabelColumn, derivePaletteForColumn, makeEmptyPalette,
   validatePalette, forkPaletteForSave, type ClassPalette, type LabelableColumn, type PalettePreset,
+  isLasFlagColumn, lasFlagPalette,
 } from '../lib/classPalettes';
 import { isInstanceColumnSlug, withNewInstance, WHOLE_CLOUD } from '../lib/instances';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
@@ -5736,6 +5737,8 @@ export default function PointCloudViewer({
   const paletteForColumn = useCallback((
     column: LabelableColumn | undefined, slug: string,
   ): ClassPalette => {
+    // A LAS flag is Off/On whatever values it holds.
+    if (isLasFlagColumn(slug)) return lasFlagPalette(slug, Date.now());
     const hasValues = (column?.observed?.length ?? 0) > 0;
     if (column && hasValues) {
       return derivePaletteForColumn(
@@ -11081,7 +11084,10 @@ export default function PointCloudViewer({
     // Progress/cancel plumbing for the backend-backed branches. The in-renderer
     // branches (ASCII/PLY/OBJ/LAS on a flat cloud) format synchronously and have
     // nothing to stream, so they ignore it.
-    opts?: { signal?: AbortSignal; onProgress?: BinaryFrameProgress; onRunId?: (runId: string) => void },
+    opts?: {
+      signal?: AbortSignal; onProgress?: BinaryFrameProgress; onRunId?: (runId: string) => void;
+      las?: { classificationColumn?: string | null };
+    },
   ): Promise<{ fileName: string; pointCount: number } | null> => {
     const baseName = cloud.data.fileName?.replace(/\.[^.]+$/, '') || 'pointcloud';
     const destName = destPath.slice(destPath.lastIndexOf(destPath.includes('\\') ? '\\' : '/') + 1);
@@ -11104,6 +11110,13 @@ export default function PointCloudViewer({
           // on the octree/session path — i.e. on every normally-imported cloud.
           // LAS/LAZ ignore it (fixed schema + named extra dimensions).
           ...(columns && columns.length ? { columns } : {}),
+          // LAS/LAZ: the column for the classification byte, and the class
+          // names and colours, so another program (or a re-import) shows the
+          // classes by name rather than as bare numbers.
+          ...(opts?.las && opts.las.classificationColumn !== undefined
+            ? { classification_column: opts.las.classificationColumn ?? '' } : {}),
+          ...(cloud.data.octree?.classPalettes
+            ? { class_palettes: cloud.data.octree.classPalettes } : {}),
         }, opts?.signal, opts?.onProgress, opts?.onRunId);
         if (response.success) {
           return { fileName: response.filename || destName, pointCount: response.point_count };
@@ -11396,6 +11409,7 @@ export default function PointCloudViewer({
     // its object list, which is seeded from — but no longer tied to — the scene
     // selection). Other callers still mean "the selected cloud".
     cloudId?: string,
+    las?: { classificationColumn?: string | null },
   ) => {
     const id = cloudId ?? (selectedIds.size === 1 ? Array.from(selectedIds)[0] : undefined);
     if (!id) return;
@@ -11431,6 +11445,7 @@ export default function PointCloudViewer({
       // paints it — the user sees a multi-second freeze and no progress at all.
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const result = await exportPointCloudInner(format, columns, cloud, destPath, {
+        las,
         signal: controller.signal,
         onProgress: (fraction, message) =>
           setExportProgress({ fraction, label: message || 'Exporting…' }),

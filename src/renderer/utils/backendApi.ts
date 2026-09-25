@@ -2873,6 +2873,12 @@ export interface PointCloudExportRequest {
   // named extra dimensions, so the backend writes EVERY available scalar as its
   // own extra dimension and the UI hides the picker for it.
   columns?: string[];
+  // LAS/LAZ: the class column written to the classification byte ('' = none);
+  // omitted = automatic (hand labels, then imported, ground, wood).
+  classification_column?: string;
+  // Class palettes by column slug, written into the file as the LAS
+  // classification lookup and a Phytograph palette record (F9).
+  class_palettes?: Record<string, unknown>;
 }
 
 export interface PointCloudExportResponse {

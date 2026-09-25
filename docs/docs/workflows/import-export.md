@@ -506,6 +506,14 @@ need to pick fields or keep other scalars.
     instead of 7, which has no RGB dimension. Both carry GPS time and a full
     classification byte (classes 0–255).
 
+    **Classification byte from** chooses which class column fills that byte:
+    *Automatic* uses the hand labels, then an imported classification, then
+    ground and wood/leaf results; *None* leaves it at 0; or pick any class
+    column. A column with values above 255 (a plot of more trees than that)
+    cannot go in the byte, and the export says so; it is still written as its
+    own dimension. The file also records the class names and colours, and the
+    [LAS flags](label-points.md#las-flags) you painted.
+
 | Format | Carries |
 |---|---|
 | `.las` / `.laz` | x, y, z, intensity, colour, plus the scalars you select as **named LAS extra dimensions** |

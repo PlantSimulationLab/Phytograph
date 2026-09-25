@@ -443,6 +443,34 @@ export interface LabelableColumn {
   range?: [number, number];
 }
 
+/**
+ * The LAS point flags a user can set by painting (F9). Each is an ordinary
+ * 0/1 label column; the LAS writer puts it in the point record's flag bit
+ * rather than in an extra dimension, and the reader turns a set bit back into
+ * the column. MIRRORED from `_LAS_FLAG_COLUMNS` in backend-api/main.py.
+ */
+export const LAS_FLAG_COLUMNS: Readonly<Record<string, string>> = {
+  flag_withheld: 'Withheld',
+  flag_synthetic: 'Synthetic',
+  flag_key_point: 'Key-point',
+};
+
+export function isLasFlagColumn(slug: string): boolean {
+  return Object.prototype.hasOwnProperty.call(LAS_FLAG_COLUMNS, slug);
+}
+
+/** Off / On for a flag column. */
+export function lasFlagPalette(slug: string, now: number): ClassPalette {
+  const name = LAS_FLAG_COLUMNS[slug] ?? slug;
+  return {
+    id: `flag-${slug}`, name: `LAS flag: ${name}`, slug, updatedAt: now,
+    classes: [
+      def(UNCLASSIFIED_VALUE, 'Off', UNCLASSIFIED_COLOR),
+      def(1, name, [0.95, 0.45, 0.15]),
+    ],
+  };
+}
+
 /** `tree_instance` → `Tree instance`. Only used when the cloud names no label. */
 function humaniseSlug(slug: string): string {
   const spaced = slug.replace(/_/g, ' ').trim();
@@ -513,6 +541,20 @@ export function labelableColumnsFor(args: {
   out.sort((a, b) => (
     a.kind === b.kind ? a.label.localeCompare(b.label) : (a.kind === 'categorical' ? -1 : 1)
   ));
+
+  // The LAS flags are always offered, like the hand-labelling column: the
+  // backend creates one on its first stroke, and the LAS writer maps it to the
+  // point record's flag bit.
+  for (const [slug, name] of Object.entries(LAS_FLAG_COLUMNS)) {
+    const at = out.findIndex((c) => c.slug === slug);
+    const entry: LabelableColumn = {
+      slug, label: `LAS flag: ${name}`, kind: 'categorical',
+      missing: at < 0,
+      ...(observedClasses?.[slug] ? { observed: observedClasses[slug] } : {}),
+    };
+    if (at >= 0) out.splice(at, 1);
+    out.push(entry);
+  }
 
   // The hand-labelling column is ALWAYS offered, even on a cloud that has no
   // such column yet: the backend creates it on the first stroke. Without this
