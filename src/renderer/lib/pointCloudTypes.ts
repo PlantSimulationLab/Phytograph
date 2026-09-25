@@ -4,6 +4,7 @@
 // import them without a components → lib cycle. Pure types only — no runtime
 // code, so importing this module has zero side effects.
 import type { PolylineHalfspaceRegion } from './profileLine';
+import type { DepthLimit } from './frontSurface';
 import * as THREE from 'three';
 import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod, DemLayer } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
@@ -439,6 +440,10 @@ export interface LabelStroke {
    * undo replays the section that was actually active at the time.
    */
   slab?: SlabRegionPayload;
+  /** Front-surface limit ("Front" mode): only what was visible in the outline. */
+  depthLimit?: DepthLimit;
+  /** Limiting box ("Box" mode), ANDed in like the slab. */
+  limitBox?: { kind: 'box'; min: [number, number, number]; max: [number, number, number] };
 }
 
 /**

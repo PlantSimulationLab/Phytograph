@@ -136,6 +136,7 @@ import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
 import { SectionInset } from './viewer/overlays/SectionInset';
 import { sampleOctreeFootprint } from '../lib/sectionInset';
 import { profileLinePredicate, profileLineRegion, screenToProfile, type ProfileLineSide } from '../lib/profileLine';
+import { buildDepthLimit, depthLimitPredicate, forEachDrawnPoint } from '../lib/frontSurface';
 import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules, splitDeletesByClipBudget, MAX_CLIP_BOXES } from '../lib/deletePreview';
 import { stepCounter, stepReporter } from '../lib/stepProgress';
 import {
@@ -2593,6 +2594,20 @@ export default function PointCloudViewer({
   // Line tool (above / below / near a line drawn in a section).
   const [labelLineSide, setLabelLineSide] = useState<ProfileLineSide>('above');
   const [labelLineBand, setLabelLineBand] = useState(0);
+  // How deep a lasso / rectangle reaches: through the cloud, only the front
+  // surface, or only inside a limiting box (lib/frontSurface; LabelStroke).
+  const [labelDepthMode, setLabelDepthMode] = useState<'through' | 'front' | 'box'>('through');
+  const [labelDepthTolerance, setLabelDepthTolerance] = useState(0);
+  // The limiting box, WORLD coords, and its two-click placement.
+  const [labelLimitBox, setLabelLimitBox] = useState<{
+    min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number };
+  } | null>(null);
+  const [labelBoxDraw, setLabelBoxDraw] = useState<'idle' | 'corner-1' | 'corner-2'>('idle');
+  const labelBoxDrawRef = useRef(labelBoxDraw);
+  labelBoxDrawRef.current = labelBoxDraw;
+  const labelBoxFirstRef = useRef<{ x: number; y: number } | null>(null);
+  const labelBoxCursorRef = useRef<{ x: number; y: number } | null>(null);
+  const [labelBoxCursorTick, setLabelBoxCursorTick] = useState(0);
   /** Brush radius in CANVAS PIXELS — constant on screen, as a brush should be. */
   const [labelBrushPx, setLabelBrushPx] = useState(28);
   const [labelBrushCursor, setLabelBrushCursor] =
@@ -5316,6 +5331,13 @@ export default function PointCloudViewer({
   }, [showLabelPanel, selectedIds, clouds]);
   // The line tool draws in a section, so it needs one on the cloud being labelled.
   const labelLineAvailable = !!labelTargetCloud && !!slab && sectionTargetCloud?.id === labelTargetCloud.id;
+  // World Z extent of the labelled cloud: the limiting box spans it by default.
+  const labelTargetZ = useMemo(() => {
+    const b = labelTargetCloud?.data.bounds;
+    const tz = labelTargetCloud ? getEditState(labelTargetCloud.id).translation.z : 0;
+    return b ? { min: b.min.z + tz, max: b.max.z + tz } : { min: 0, max: 0 };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labelTargetCloud, editStates]);
   const labelPendingEntry = pendingFor(labelPending, labelTargetCloud?.id, labelPalette?.slug);
   // Palette POSITIONS of the classes the eye has hidden, for the target cloud's
   // visibility mask (the overlay buffer holds positions, not class values).
@@ -5562,7 +5584,10 @@ export default function PointCloudViewer({
     // The line tool draws with the lasso's polyline; with no section to draw
     // it in (it has just been cleared) it falls back to the lasso.
     if (labelTool === 'line' && !labelLineAvailable) { setLabelTool('lasso'); return; }
-    const want = !labelDrawing ? null
+    // Placing the limiting box owns the pointer: the lasso overlay would
+    // swallow the two corner clicks.
+    const want = labelBoxDraw !== 'idle' ? 'idle'
+      : !labelDrawing ? null
       : labelTool === 'lasso' || labelTool === 'line' ? 'drawing-polygon'
         : labelTool === 'rect' ? 'drawing-rect' : 'idle';
     if (want === null) return;
@@ -5574,7 +5599,7 @@ export default function PointCloudViewer({
       setRectDragStart(null);
       rectDragCurrentRef.current = null;
     }
-  }, [labelTargetCloud, labelDrawing, labelTool, cropDrawState, labelLineAvailable]);
+  }, [labelTargetCloud, labelDrawing, labelTool, cropDrawState, labelLineAvailable, labelBoxDraw]);
 
   /** True while the sphere brush owns the pointer. */
   const labelBrushActive = !!labelTargetCloud && labelDrawing && labelTool === 'brush';
@@ -5955,6 +5980,33 @@ export default function PointCloudViewer({
     const excludeClasses = palette.classes
       .map((c) => c.value)
       .filter((v) => !labelVisibleClasses.has(v) || labelLockedClasses.has(v));
+    // Depth mode. Box bounds every stroke kind; Front applies to the outline
+    // tools (the brush already stops at the surface, the line at the slab).
+    if (labelDepthMode === 'box' && !labelLimitBox) {
+      showToast({ type: 'info', title: 'Draw the limiting box first', message: 'Box mode paints only inside the box: use Draw box in the Label panel, or switch to Through.' });
+      return;
+    }
+    const limitBox = labelDepthMode === 'box' && labelLimitBox
+      ? {
+          kind: 'box' as const,
+          min: [labelLimitBox.min.x, labelLimitBox.min.y, labelLimitBox.min.z] as [number, number, number],
+          max: [labelLimitBox.max.x, labelLimitBox.max.y, labelLimitBox.max.z] as [number, number, number],
+        }
+      : undefined;
+    // Front: the surface the user can see inside the outline, from the points
+    // actually drawn at the frozen camera. Points the slab clips are not drawn,
+    // so they must not hide anything either.
+    const depthLimit = labelDepthMode === 'front' && region.kind === 'polygon'
+      ? buildDepthLimit(
+          region.points, region.projection, region.view, region.canvas,
+          forEachDrawnPoint(
+            (octreeRegistryRef.current.get(cloud.id) as any)?.root,
+            displayOffsetRef.current,
+            activeSlab ? slabPredicate(activeSlab) : undefined,
+          ),
+          labelDepthTolerance,
+        ) ?? undefined
+      : undefined;
     const stroke: LabelStroke = {
       strokeId,
       region,
@@ -5962,6 +6014,8 @@ export default function PointCloudViewer({
       fromClasses: labelFromClasses ? [...labelFromClasses] : undefined,
       ...(excludeClasses.length ? { excludeClasses } : {}),
       slab: activeSlab ? slabToPayload(activeSlab) : undefined,
+      ...(depthLimit ? { depthLimit } : {}),
+      ...(limitBox ? { limitBox } : {}),
     };
     const before: LabelEditState = {
       strokes: labelStrokes,
@@ -6051,7 +6105,8 @@ export default function PointCloudViewer({
       // section-bounded paint while the backend labelled unbounded (or, with
       // the polygon covering the viewport, everything). Preview and truth
       // silently disagreed, which is the exact failure C1-R warns about.
-      slab, sectionTargetCloud]);
+      slab, sectionTargetCloud,
+      labelDepthMode, labelLimitBox, labelDepthTolerance]);
 
   // closePolygonFrom is created once, so it must reach the CURRENT painter
   // through a ref rather than a captured closure.
@@ -6230,9 +6285,14 @@ export default function PointCloudViewer({
             offset: s.slab.offset,
           })
         : null;
-      const predicate = slabTest
-        ? (x: number, y: number, z: number) => regionTest(x, y, z) && slabTest(x, y, z)
-        : regionTest;
+      // The front-surface and box limits AND in the same way, for the same reason.
+      const depthTest = s.depthLimit ? depthLimitPredicate(s.depthLimit) : null;
+      const boxTest = s.limitBox ? buildRegionPredicate(s.limitBox) : null;
+      const tests = [regionTest, slabTest, boxTest, depthTest]
+        .filter(Boolean) as Array<(x: number, y: number, z: number) => boolean>;
+      const predicate = tests.length === 1
+        ? regionTest
+        : (x: number, y: number, z: number) => tests.every((t) => t(x, y, z));
       const toIndex = valueToIndex.get(s.toClass) ?? unlabeledIndex;
       const fromIndices = s.fromClasses
         ? new Set(s.fromClasses.map((v) => valueToIndex.get(v) ?? -1))
@@ -22325,6 +22385,62 @@ export default function PointCloudViewer({
           />
         )}
 
+        {/* Label tool's LIMITING box: placed with the crop tool's two-click
+            raycaster, spanning the labelled cloud's full height (the panel's Z
+            fields trim it). Shown whenever Box mode is on, so the user can see
+            what bounds their strokes. */}
+        {labelTargetCloud && labelBoxDraw !== 'idle' && (
+          <BoxDrawRaycaster
+            groundZ={labelTargetZ.min - displayOffset.z}
+            octrees={(() => {
+              const oct = octreeRegistryRef.current.get(labelTargetCloud.id);
+              return oct ? [oct] : [];
+            })()}
+            onMove={(x, y) => {
+              labelBoxCursorRef.current = { x: x + displayOffset.x, y: y + displayOffset.y };
+              setLabelBoxCursorTick((t) => t + 1);
+            }}
+            onPick={(x, y) => {
+              const wx = x + displayOffset.x;
+              const wy = y + displayOffset.y;
+              // Through the ref: both clicks land on the same mounted raycaster.
+              if (labelBoxDrawRef.current === 'corner-1') {
+                labelBoxFirstRef.current = { x: wx, y: wy };
+                setLabelBoxDraw('corner-2');
+                return;
+              }
+              const first = labelBoxFirstRef.current;
+              labelBoxFirstRef.current = null;
+              labelBoxCursorRef.current = null;
+              setLabelBoxDraw('idle');
+              if (!first) return;
+              setLabelLimitBox({
+                min: { x: Math.min(first.x, wx), y: Math.min(first.y, wy), z: labelTargetZ.min },
+                max: { x: Math.max(first.x, wx), y: Math.max(first.y, wy), z: labelTargetZ.max },
+              });
+            }}
+          />
+        )}
+        {labelTargetCloud && labelDepthMode === 'box' && (() => {
+          void labelBoxCursorTick;
+          const first = labelBoxFirstRef.current;
+          const cursor = labelBoxCursorRef.current;
+          const box = labelBoxDraw === 'corner-2' && first && cursor
+            ? {
+                min: { x: Math.min(first.x, cursor.x), y: Math.min(first.y, cursor.y), z: labelTargetZ.min },
+                max: { x: Math.max(first.x, cursor.x), y: Math.max(first.y, cursor.y), z: labelTargetZ.max },
+              }
+            : labelBoxDraw === 'idle' ? labelLimitBox : null;
+          return (
+            <group {...SCENE_OVERLAY} position={[-displayOffset.x, -displayOffset.y, -displayOffset.z]}>
+              {first && labelBoxDraw === 'corner-2' && (
+                <CropCornerMarker position={[first.x, first.y, labelTargetZ.min]} color="#22c55e" />
+              )}
+              {box && <CropBox min={box.min} max={box.max} keepInside />}
+            </group>
+          );
+        })()}
+
         {/* Live in-viewport feedback while placing box corners: a small
             marker at the first corner and, once it's placed, a preview box
             spanning corner 1 → current cursor that updates on every move.
@@ -25300,6 +25416,23 @@ export default function PointCloudViewer({
           onLineSideChange={setLabelLineSide}
           lineBand={labelLineBand}
           onLineBandChange={setLabelLineBand}
+          depthMode={labelDepthMode}
+          onDepthModeChange={setLabelDepthMode}
+          depthTolerance={labelDepthTolerance}
+          onDepthToleranceChange={setLabelDepthTolerance}
+          limitBox={labelLimitBox}
+          onLimitBoxZChange={(z) => setLabelLimitBox((b) => (b
+            ? { min: { ...b.min, z: z.min }, max: { ...b.max, z: z.max } } : b))}
+          boxDrawing={labelBoxDraw !== 'idle'}
+          onDrawBox={() => {
+            if (labelBoxDraw !== 'idle') {
+              labelBoxFirstRef.current = null;
+              setLabelBoxDraw('idle');
+            } else {
+              setLabelBoxDraw('corner-1');
+            }
+          }}
+          onClearBox={() => setLabelLimitBox(null)}
           brushPx={labelBrushPx}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}

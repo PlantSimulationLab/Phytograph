@@ -86,6 +86,24 @@ and the sphere it corresponds to grows or shrinks in the cloud to match.
 If the cursor is not over any geometry the brush shows nothing and paints
 nothing, rather than guessing a depth and labelling points you cannot see.
 
+### How deep a stroke reaches
+
+The panel's **Depth** row decides how far behind the outline a stroke paints:
+
+- **Through** (the default) — the lasso and rectangle select every point inside
+  the outline at every depth, as if the outline were pushed through the cloud.
+- **Front** — the lasso and rectangle select only the surface you can see
+  inside the outline, so outlining a leaf no longer paints the branch behind
+  it. The surface is taken from the points drawn on screen when you close the
+  outline. **Also keep** adds a little depth behind that surface, in cloud
+  units, for a surface that is rough or thick; `0` allows only for the
+  surface's own slope.
+- **Box** — every stroke, including the brush and the line, selects only
+  inside a limiting box. Click **Draw box**, then click two opposite corners in
+  the view; the box spans the cloud's full height, and the **Z** fields trim
+  it. Until a box is drawn, strokes are refused rather than painting
+  everywhere.
+
 The lasso remains the better tool for covering a large region in one go — and,
 paired with a [cross-section](#work-in-a-cross-section), for classifying a cloud
 systematically. Inside a section there is a fourth tool, the

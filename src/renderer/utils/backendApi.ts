@@ -235,6 +235,7 @@ import { BACKEND_PORT_PROD } from '../../shared/constants';
 // re-exported below so backendApi consumers get it without a second import.
 import type { ScanParamsFromFile } from '../lib/scanParameters';
 import type { MeshData, PlantMaterialDef } from '../lib/pointCloudTypes';
+import type { DepthLimit } from '../lib/frontSurface';
 
 // Cached backend base URL. The port is chosen per-instance by the main process
 // (src/main/backend.ts) so concurrent app instances / dev sessions / E2E runs
@@ -4728,6 +4729,10 @@ export interface LabelStrokeRequest {
   exclude_classes?: number[];
   /** Cross-section the stroke was drawn in; ANDed with `region`. */
   slab?: CropOctreeRegion;
+  /** Front-surface limit (lib/frontSurface), ANDed with `region`. */
+  depth_limit?: DepthLimit;
+  /** Limiting box, ANDed with `region`. */
+  limit_box?: CropOctreeRegion;
   stroke_id: string;
 }
 

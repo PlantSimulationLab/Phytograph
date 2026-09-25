@@ -72,3 +72,13 @@ describe('labelStrokeRequest exclusions', () => {
     expect(labelStrokeRequest(stroke('s'))).not.toHaveProperty('exclude_classes');
   });
 });
+
+describe('labelStrokeRequest limits', () => {
+  it('sends the front-surface limit and the limiting box a redo must replay', () => {
+    const box = { kind: 'box' as const, min: [0, 0, 0] as [number, number, number], max: [1, 1, 1] as [number, number, number] };
+    const req = labelStrokeRequest(stroke('s', { depthLimit: { cell: 3 } as never, limitBox: box }));
+    expect(req).toMatchObject({ depth_limit: { cell: 3 }, limit_box: box });
+    expect(labelStrokeRequest(stroke('s'))).not.toHaveProperty('depth_limit');
+    expect(labelStrokeRequest(stroke('s'))).not.toHaveProperty('limit_box');
+  });
+});

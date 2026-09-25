@@ -713,3 +713,86 @@ test('the line tool paints above or below a line drawn across the section', asyn
   await drawLine(0.225);
   await expect.poll(labelled, { timeout: 20_000 }).toBe(2 * ROW);
 });
+
+async function lassoEverything(page: LaunchedApp['page']) {
+  const overlay = page.getByTestId('crop-polygon-overlay');
+  await expect(overlay).toBeVisible();
+  const box = (await overlay.boundingBox())!;
+  const inset = 8;
+  for (const c of [
+    { x: box.x + inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + inset },
+    { x: box.x + box.width - inset, y: box.y + box.height - inset },
+    { x: box.x + inset, y: box.y + box.height - inset },
+  ]) await page.mouse.click(c.x, c.y);
+  await page.keyboard.press('Enter');
+}
+
+test('Front depth paints only the surface you can see, not what is behind it', async () => {
+  // No section here: this is the other answer to the lasso painting through the
+  // cloud. Seen from +y the dense far plane (y = 8) hides the sparse near one
+  // (y = 0) completely, so a full-viewport lasso must label exactly the far
+  // plane — Through would label both.
+  const { page } = await importDepthLayers();
+  await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 1, z: 0 }));
+  await page.evaluate(() => (window as any).__frameSelection?.());
+  await page.getByTestId('tool-label').click();
+  const label = page.getByTestId('label-panel');
+  await expect(label).toBeVisible();
+
+  await page.getByTestId('label-depth-front').click();
+  await expect(page.getByTestId('label-depth')).toHaveAttribute('data-depth-mode', 'front');
+  await lassoEverything(page);
+  await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
+  await expect.poll(async () => Number(await label.getAttribute('data-labelled-count')),
+    { timeout: 20_000 }).toBe(FAR_PLANE);
+
+  // Through, from the same view, reaches the plane behind.
+  await page.keyboard.press('ControlOrMeta+z');
+  await page.getByTestId('label-depth-through').click();
+  await lassoEverything(page);
+  await expect.poll(async () => Number(await label.getAttribute('data-labelled-count')),
+    { timeout: 20_000 }).toBe(TOTAL);
+});
+
+test('Box depth paints only inside the limiting box', async () => {
+  // Looking down, a box over x in [-0.425, 0.425] and both planes: the far
+  // plane's 17 columns x = -0.40 .. 0.40 (41 points each) and the near plane's
+  // x = 0 column (5 points). A full-viewport lasso may reach nothing else.
+  const { page } = await importDepthLayers();
+  await page.getByTestId('tool-label').click();
+  const label = page.getByTestId('label-panel');
+  await expect(label).toBeVisible();
+
+  await page.getByTestId('label-depth-box').click();
+  // No box yet: a stroke is refused rather than painting unbounded.
+  await lassoEverything(page);
+  await expect(page.getByText('Draw the limiting box first')).toBeVisible();
+  await expect(label).toHaveAttribute('data-pending-strokes', '0');
+
+  await page.getByTestId('label-box-draw').click();
+  // Straight down and framed, whatever view the previous test left: the
+  // corners must not land under the panel.
+  await page.evaluate(() => (window as any).__orientToAxis({ x: 0, y: 0, z: 1 }));
+  await page.evaluate(() => (window as any).__frameSelection?.());
+  const panelBox = (await label.boundingBox())!;
+  // Corners on the ground (z = -1, the cloud's floor), clear of any point.
+  for (const w of [[-0.425, -1, -1], [0.425, 9, -1]]) {
+    const p = await page.evaluate((w) => (window as any).__worldToScreen(w), w);
+    expect(p.x < panelBox.x || p.y > panelBox.y + panelBox.height).toBe(true);
+    await page.mouse.click(p.x, p.y);
+  }
+  await expect(page.getByTestId('label-box-clear')).toBeVisible();
+  // The box is where the corners were aimed (to the pick's precision).
+  const [x0, y0, , x1, y1] = (await page.getByTestId('label-depth').getAttribute('data-limit-box'))!
+    .split(',').map(Number);
+  expect(x0).toBeCloseTo(-0.425, 1);
+  expect(x1).toBeCloseTo(0.425, 1);
+  expect(y0).toBeLessThan(0);
+  expect(y1).toBeGreaterThan(8);
+
+  await lassoEverything(page);
+  await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
+  await expect.poll(async () => Number(await label.getAttribute('data-labelled-count')),
+    { timeout: 20_000 }).toBe(17 * 41 + 5);
+});

@@ -1,0 +1,97 @@
+{
+  "_comment": "Golden vectors for a label stroke depth_limit (front-surface lasso). Asserted by src/renderer/lib/frontSurface.test.ts (depthLimitPredicate, the live preview) and backend-api/tests/test_front_surface.py (_depth_limit_mask, what the session labels). Orthographic camera at z = 10 looking down -z over x, y in [-1, 1] on a 20 x 20 canvas, so view depth = 10 - z and pixel = ((x + 1) * 10, (1 - y) * 10). Thresholds are row-major float32 [3, inf, 5, 7]; outside the grid, or in an inf cell, a point passes.",
+  "limit": {
+    "projection": [
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      -0.02002002002002002,
+      0,
+      0,
+      0,
+      -1.002002002002002,
+      1
+    ],
+    "view": [
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      -10,
+      1
+    ],
+    "canvas": {
+      "width": 20,
+      "height": 20
+    },
+    "x0": 0,
+    "y0": 0,
+    "cell": 10,
+    "cols": 2,
+    "rows": 2,
+    "thresholds": "AABAQAAAgH8AAKBAAADgQA=="
+  },
+  "points": [
+    [
+      -0.5,
+      0.5,
+      8
+    ],
+    [
+      -0.5,
+      0.5,
+      6
+    ],
+    [
+      0.5,
+      0.5,
+      0
+    ],
+    [
+      -0.5,
+      -0.5,
+      5.5
+    ],
+    [
+      0.5,
+      -0.5,
+      2
+    ],
+    [
+      3,
+      0,
+      0
+    ],
+    [
+      0.5,
+      -0.5,
+      3
+    ]
+  ],
+  "expected": [
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true
+  ]
+}

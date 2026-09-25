@@ -12210,7 +12210,14 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
             scan_label = (getattr(scan_entry, 'label', None)
                           or os.path.basename(scan_entry.file_path or '')
                           or 'this scan')
-            if not scan_flags["has_misses"] and not scan_flags["has_timestamp"]:
+            if not scan_flags["has_misses"] and scan_flags.get("timestamps_stripped"):
+                warnings.append(
+                    f"Scan '{scan_label}' has no sky/miss points, and its rounded "
+                    "timestamps were not used to recover them here. Run Backfill "
+                    "Misses on the cloud first; LAD without misses cannot count "
+                    "beams that hit the sky and is likely to be inaccurate."
+                )
+            elif not scan_flags["has_misses"] and not scan_flags["has_timestamp"]:
                 warnings.append(
                     f"Scan '{scan_label}' has no sky/miss points and no timestamp "
                     "column, so LAD cannot account for beams that hit the sky and is "
@@ -34096,6 +34103,84 @@ class DeleteRegionRequest(BaseModel):
     region: CropOctreeRegion
 
 
+class DepthLimit(BaseModel):
+    """Front-surface limit for a label lasso or rectangle: a coarse grid of
+    view-depth THRESHOLDS over the outline, at the stroke's frozen camera. A
+    point passes when its view depth is within its cell's threshold.
+
+    Built by the renderer (src/renderer/lib/frontSurface.ts) from the points it
+    drew, so it is the renderer that decides what "the surface you can see"
+    means; this side only compares, which is what keeps preview and replay
+    equal. `thresholds` is cols*rows little-endian float32, row-major, base64;
+    +inf means no surface is known in that cell (everything there passes), and
+    so does a point outside the grid — the limit only ever REMOVES points."""
+    projection: List[float]
+    view: List[float]
+    canvas: dict
+    x0: float
+    y0: float
+    cell: float
+    cols: int
+    rows: int
+    thresholds: str
+
+
+_MAX_DEPTH_LIMIT_CELLS = 1 << 18
+
+
+def _decode_depth_limit(dl: "DepthLimit") -> "np.ndarray":
+    """Validate a DepthLimit and return its thresholds (raises 400)."""
+    import base64
+    import binascii
+    if len(dl.projection) != 16 or len(dl.view) != 16:
+        raise HTTPException(status_code=400, detail="depth_limit.projection and view must be 16 numbers.")
+    if not (0 < dl.cols and 0 < dl.rows and dl.cols * dl.rows <= _MAX_DEPTH_LIMIT_CELLS):
+        raise HTTPException(status_code=400,
+                            detail=f"depth_limit must have 1 to {_MAX_DEPTH_LIMIT_CELLS} cells.")
+    if not (dl.cell > 0 and math.isfinite(dl.cell)):
+        raise HTTPException(status_code=400, detail="depth_limit.cell must be a positive size.")
+    try:
+        w = int(dl.canvas["width"]); h = int(dl.canvas["height"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="depth_limit.canvas needs width and height.")
+    if w <= 0 or h <= 0:
+        raise HTTPException(status_code=400, detail="depth_limit.canvas must be positive.")
+    try:
+        raw = base64.b64decode(dl.thresholds, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="depth_limit.thresholds must be base64.")
+    if len(raw) != 4 * dl.cols * dl.rows:
+        raise HTTPException(status_code=400,
+                            detail="depth_limit.thresholds must hold cols*rows float32 values.")
+    return np.frombuffer(raw, dtype="<f4")
+
+
+def _depth_limit_mask(positions: "np.ndarray", dl: "DepthLimit") -> "np.ndarray":
+    """MIRRORS `depthLimitPredicate` in src/renderer/lib/frontSurface.ts; both
+    are pinned to src/shared/frontSurface.contract.json."""
+    thr = _decode_depth_limit(dl).astype(np.float64)
+    n = positions.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    P = np.asarray(dl.projection, dtype=np.float64).reshape(4, 4, order="F")
+    V = np.asarray(dl.view, dtype=np.float64).reshape(4, 4, order="F")
+    hom = np.hstack([positions.astype(np.float64, copy=False), np.ones((n, 1))])
+    v = hom @ V.T
+    c = v @ P.T
+    w = c[:, 3]
+    ahead = w > 0
+    safe_w = np.where(ahead, w, 1.0)
+    px = (c[:, 0] / safe_w + 1.0) * 0.5 * float(dl.canvas["width"])
+    py = (1.0 - c[:, 1] / safe_w) * 0.5 * float(dl.canvas["height"])
+    col = np.floor((px - dl.x0) / dl.cell)
+    row = np.floor((py - dl.y0) / dl.cell)
+    in_grid = ahead & (col >= 0) & (row >= 0) & (col < dl.cols) & (row < dl.rows)
+    out = np.ones(n, dtype=bool)
+    k = (row[in_grid] * dl.cols + col[in_grid]).astype(np.int64)
+    out[in_grid] = -v[in_grid, 2] <= thr[k]
+    return out
+
+
 class LabelStroke(BaseModel):
     """One replayable label edit: "inside `region`, points whose CURRENT class
     is in `from_classes` become `to_class`".
@@ -34131,6 +34216,11 @@ class LabelStroke(BaseModel):
     # would mean canonicalisation, nesting rules and validation for a composition
     # this is the only caller of.
     slab: Optional[CropOctreeRegion] = None
+    # Front-surface limit (lasso / rectangle in "Front" mode): only the points
+    # on the surface the user could see inside the outline. See DepthLimit.
+    depth_limit: Optional[DepthLimit] = None
+    # Limiting box ("Box" mode): ANDed in like the slab, for any stroke kind.
+    limit_box: Optional[CropOctreeRegion] = None
 
 
 class LabelRegionRequest(BaseModel):
@@ -34291,7 +34381,8 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                     extras={k: np.array(v) for k, v in _las.extras.items()},
                     extra_dims_meta=_las.extra_dims_meta, timestamps=None if _las.timestamps is None else np.array(_las.timestamps),
                     gps_time_encoding=_las.gps_time_encoding,
-                    beam_origins=None if _las.beam_origins is None else np.array(_las.beam_origins))
+                    beam_origins=None if _las.beam_origins is None else np.array(_las.beam_origins),
+                    warnings=_las.warnings)
                 store.delete()
                 store = None
                 store_box.pop("store", None)
@@ -35395,6 +35486,12 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
         _canonical_region(rd)
         if stroke.slab is not None:
             _canonical_region(stroke.slab.model_dump())   # validate (raises 400)
+        if stroke.depth_limit is not None:
+            _decode_depth_limit(stroke.depth_limit)       # validate (raises 400)
+        if stroke.limit_box is not None:
+            if stroke.limit_box.kind != "box":
+                raise HTTPException(status_code=400, detail="limit_box must be a 'box' region.")
+            _canonical_region(stroke.limit_box.model_dump())
         if not (MANUAL_CLASS_MIN <= stroke.to_class <= class_max):
             raise HTTPException(
                 status_code=400,
@@ -35453,6 +35550,10 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
                 # Depth bound from the cross-section. Closed-form and
                 # camera-free, so this matches the renderer's preview exactly.
                 idx = idx[_region_mask(positions[idx], stroke.slab.model_dump())]
+            if stroke.limit_box is not None and idx.size:
+                idx = idx[_region_mask(positions[idx], stroke.limit_box.model_dump())]
+            if stroke.depth_limit is not None and idx.size:
+                idx = idx[_depth_limit_mask(positions[idx], stroke.depth_limit)]
             # Editable: alive AND not a sky/miss point.
             keep = ~deleted[idx]
             if miss_arr is not None:

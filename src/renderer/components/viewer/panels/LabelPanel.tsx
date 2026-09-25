@@ -106,6 +106,19 @@ export interface LabelPanelProps {
   /** Line tool: limit to within this distance of the line; 0 = no limit. */
   lineBand?: number;
   onLineBandChange?: (b: number) => void;
+  /** How deep an outline reaches: through the cloud, front surface, or a box. */
+  depthMode?: 'through' | 'front' | 'box';
+  onDepthModeChange?: (m: 'through' | 'front' | 'box') => void;
+  /** Front mode: extra world depth kept behind the visible surface. */
+  depthTolerance?: number;
+  onDepthToleranceChange?: (v: number) => void;
+  /** Box mode: the limiting box (world), or null before one is drawn. */
+  limitBox?: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } } | null;
+  onLimitBoxZChange?: (z: { min: number; max: number }) => void;
+  /** Box mode: placing the two corners. */
+  boxDrawing?: boolean;
+  onDrawBox?: () => void;
+  onClearBox?: () => void;
   /** Brush radius in screen pixels, shown so the wheel/bracket keys are discoverable. */
   brushPx: number;
   /**
@@ -170,6 +183,15 @@ export function LabelPanel({
   onLineSideChange,
   lineBand = 0,
   onLineBandChange,
+  depthMode = 'through',
+  onDepthModeChange,
+  depthTolerance = 0,
+  onDepthToleranceChange,
+  limitBox = null,
+  onLimitBoxZChange,
+  boxDrawing = false,
+  onDrawBox,
+  onClearBox,
   brushPx,
   columns,
   activeSlug,
@@ -195,6 +217,7 @@ export function LabelPanel({
   // "Paint X only over X" — the combination that silently does nothing.
   const isNoOp = !!fromClasses && fromClasses.size === 1 && fromClasses.has(activeClass);
   const activeColumn = columns.find((c) => c.slug === activeSlug);
+  const limitBoxZ = limitBox ? { min: limitBox.min.z, max: limitBox.max.z } : null;
 
   return (
     <div
@@ -361,6 +384,95 @@ export function LabelPanel({
             Size {brushPx}px — scroll or <kbd>[</kbd>/<kbd>]</kbd> to change.
             Alt+scroll zooms while the brush is active.
           </p>
+        )}
+      </div>
+
+      {/* Depth: how far behind the outline a lasso or rectangle reaches. */}
+      <div
+        data-testid="label-depth"
+        data-depth-mode={depthMode}
+        data-limit-box={limitBox
+          ? [limitBox.min.x, limitBox.min.y, limitBox.min.z, limitBox.max.x, limitBox.max.y, limitBox.max.z]
+            .map((v) => v.toFixed(3)).join(',')
+          : ''}
+        className="mb-3"
+      >
+        <div className="flex items-center gap-1">
+          <span className="text-[9px] text-neutral-500 uppercase tracking-wide w-10 shrink-0">Depth</span>
+          {(['through', 'front', 'box'] as const).map((m) => (
+            <button
+              key={m}
+              data-testid={`label-depth-${m}`}
+              onClick={() => onDepthModeChange?.(m)}
+              title={m === 'through'
+                ? 'The lasso and rectangle select at every depth inside the outline'
+                : m === 'front'
+                  ? 'The lasso and rectangle select only the surface you can see inside the outline'
+                  : 'Every stroke selects only inside a box you place'}
+              className={`flex-1 px-2 py-0.5 text-[10px] rounded ${
+                depthMode === m
+                  ? 'bg-sky-700 text-white'
+                  : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+              }`}
+            >
+              {m === 'through' ? 'Through' : m === 'front' ? 'Front' : 'Box'}
+            </button>
+          ))}
+        </div>
+        {depthMode === 'front' && (
+          <label className="flex items-center gap-1.5 mt-1 text-[10px] text-neutral-400">
+            <span className="shrink-0">Also keep</span>
+            <DebouncedNumberInput
+              data-testid="label-depth-tolerance"
+              value={depthTolerance}
+              onCommit={(v) => onDepthToleranceChange?.(v)}
+              min={0}
+              debounceMs={0}
+              title="How far behind the visible surface still counts as on it, in cloud units. 0 = automatic (the surface's own slope)."
+              className="w-16 px-1.5 py-0.5 bg-neutral-900 border border-neutral-700 rounded text-[10px] text-neutral-200"
+            />
+            <span className="text-neutral-500">behind the surface</span>
+          </label>
+        )}
+        {depthMode === 'box' && (
+          <div className="mt-1 text-[10px] text-neutral-400">
+            <div className="flex items-center gap-1">
+              <button
+                data-testid="label-box-draw"
+                onClick={onDrawBox}
+                className={`px-2 py-0.5 rounded ${boxDrawing ? 'bg-amber-700 text-white' : 'bg-neutral-700 text-neutral-200 hover:bg-neutral-600'}`}
+              >
+                {boxDrawing ? 'Click two corners…' : limitBoxZ ? 'Redraw box' : 'Draw box'}
+              </button>
+              {limitBoxZ && !boxDrawing && (
+                <button data-testid="label-box-clear" onClick={onClearBox}
+                  className="px-2 py-0.5 rounded bg-neutral-700 text-neutral-300 hover:bg-neutral-600">
+                  Clear
+                </button>
+              )}
+            </div>
+            {limitBoxZ && !boxDrawing && (
+              <div className="flex items-center gap-1 mt-1">
+                <span className="shrink-0">Z</span>
+                <DebouncedNumberInput
+                  data-testid="label-box-zmin"
+                  value={limitBoxZ.min}
+                  onCommit={(v) => onLimitBoxZChange?.({ min: v, max: Math.max(v, limitBoxZ.max) })}
+                  className="w-16 px-1.5 py-0.5 bg-neutral-900 border border-neutral-700 rounded text-[10px] text-neutral-200"
+                />
+                <span>to</span>
+                <DebouncedNumberInput
+                  data-testid="label-box-zmax"
+                  value={limitBoxZ.max}
+                  onCommit={(v) => onLimitBoxZChange?.({ min: Math.min(v, limitBoxZ.min), max: v })}
+                  className="w-16 px-1.5 py-0.5 bg-neutral-900 border border-neutral-700 rounded text-[10px] text-neutral-200"
+                />
+              </div>
+            )}
+            {!limitBoxZ && !boxDrawing && (
+              <p className="text-[9px] text-amber-400 mt-1">No box yet: strokes are refused until one is drawn.</p>
+            )}
+          </div>
         )}
       </div>
 
