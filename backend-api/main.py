@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 import pandas as pd
 import numpy as np
 import io
@@ -6483,24 +6483,8 @@ def _shared_dem_bbox(*subsets: np.ndarray) -> "Optional[List[float]]":
     return [min(xs_min), min(ys_min), max(xs_max), max(ys_max)]
 
 
-def _pit_fill_chm(chm: np.ndarray) -> np.ndarray:
-    """First-pass pit-free CHM smoothing: fill the 'pits' where a DSM cell dipped
-    because a pulse penetrated the canopy to a lower return. Runs a NaN-aware 3×3
-    grey-closing (dilation then erosion) over finite cells, which lifts isolated
-    low cells to their neighbourhood max without inflating the overall surface.
-    A full Khosravipour spiral pit-free CHM is a future refinement."""
-    from scipy.ndimage import maximum_filter, minimum_filter
-    finite = np.isfinite(chm)
-    if not finite.any():
-        return chm
-    # Grey-closing = max-filter then min-filter. Feed NaNs as -inf into the max
-    # pass (so real cells win) and +inf into the min pass, then restore voids.
-    filled = np.where(finite, chm, -np.inf)
-    filled = maximum_filter(filled, size=3, mode="nearest")
-    filled = np.where(np.isfinite(filled), filled, np.inf)
-    filled = minimum_filter(filled, size=3, mode="nearest")
-    out = np.where(finite, filled, np.nan)
-    return out
+# One definition, shared with the CHM tree segmentation (chm_trees.py).
+from chm_trees import pit_fill_chm as _pit_fill_chm  # noqa: E402
 
 
 def _compute_chm(ground_pts: np.ndarray, surface_pts: np.ndarray, *, request,
@@ -7819,6 +7803,17 @@ class TreeSegmentationRequest(BaseModel):
     # 'on' always, 'off' never. The buffer must exceed any crown's reach.
     tiling: str = "auto"
     tile_buffer_m: float = 10.0
+    # Which algorithm: 'treeiso' (default; terrestrial scans with visible stems)
+    # or 'chm' (canopy-height-model watershed; airborne / closed canopy, where
+    # TreeIso fuses touching crowns). See chm_trees.py. The TreeIso fields
+    # above are ignored for 'chm', and the chm_* fields below for 'treeiso'.
+    method: Literal["treeiso", "chm"] = "treeiso"
+    chm_cell: Optional[float] = Field(None, gt=0)  # CHM cell (m); None = chm_min_spacing / 7
+    chm_min_height: float = Field(2.0, ge=0)        # canopy lower than this is not a tree
+    chm_min_spacing: float = Field(2.0, gt=0)       # closest two treetops may stand (m)
+
+
+_CHM_PARAM_FIELDS = ("chm_cell", "chm_min_height", "chm_min_spacing")
 
 
 class TreeSegmentationResponse(BaseModel):
@@ -8186,7 +8181,8 @@ def _instance_trunk_count(pts: np.ndarray) -> int:
     return int(max(1, (sizes >= floor).sum()))
 
 
-def _treeiso_row_fusion_warning(points: np.ndarray, labels: np.ndarray) -> Optional[str]:
+def _treeiso_row_fusion_warning(points: np.ndarray, labels: np.ndarray,
+                                stage1_collapsed: bool = False) -> Optional[str]:
     """Advisory: does any instance contain SEVERAL basal stems, i.e. did several
     trees get fused into one?
 
@@ -8209,6 +8205,16 @@ def _treeiso_row_fusion_warning(points: np.ndarray, labels: np.ndarray) -> Optio
 
     Returns a message naming the instances and the implied tree count, or None
     when every instance looks single-stemmed.
+
+    The advice must name only things the user can act on. It used to say
+    "re-run with a different stage-1 voxel size, or use trunk seeds", and both
+    were dead ends: the voxel size is deliberately not in the panel, and seeds
+    only reassign WHOLE TreeIso segments, so they cannot split a segment that
+    already spans several trees. And the count is a floor, not an estimate —
+    on an airborne scan (bad_segment_example.laz: 333 instances, ~1,400 trees)
+    most stems are never sampled, so the trunk count read 436. The collapse is
+    named only when `stage1_collapsed` says it actually fired; the fusion on
+    that scan was stage 2's, with a healthy stage 1.
     """
     labels = np.asarray(labels)
     multi: List[Tuple[int, int]] = []
@@ -8225,12 +8231,18 @@ def _treeiso_row_fusion_warning(points: np.ndarray, labels: np.ndarray) -> Optio
                   - len(multi))
     listed = ", ".join(f"{tid} ({stems} trunks)" for tid, stems in multi[:5])
     more = "" if len(multi) <= 5 else f" and {len(multi) - 5} more"
+    n_found = len([t for t in np.unique(labels) if t > 0])
+    cause = (
+        "TreeIso's first stage collapsed on this cloud (a known solver defect), "
+        "which fuses neighbouring trees. "
+        if stage1_collapsed else ""
+    )
     return (
         f"{len(multi)} instance(s) contain more than one trunk — {listed}{more}. "
-        f"Several trees were probably merged into one instance (this scene looks "
-        f"like about {implied} trees, not {len([t for t in np.unique(labels) if t > 0])}). "
-        f"Re-run with a different stage-1 voxel size, or use trunk seeds to pin "
-        f"one instance per tree."
+        f"Several trees were probably merged into one instance (at least "
+        f"{implied} trees, not {n_found}). {cause}"
+        f"For an airborne or closed-canopy scan, switch Method to Canopy height. "
+        f"Otherwise lower the 2D reg. strength (λ₂) to split merged trees."
     )
 
 
@@ -8437,6 +8449,35 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
                 error=f"Fewer than 10 points remain after dropping {reason} points.",
             )
 
+        if request.method == "chm":
+            # Canopy-height-model watershed (chm_trees.py). No cost prompt,
+            # tiling or multi-trunk advisory: see _session_segment_trees_chm.
+            ground_pts = None
+            if ground_excluded:
+                gmask = (np.asarray(request.ground_class) == GROUND_CLASS_GROUND) \
+                    & np.isfinite(points).all(axis=1)
+                ground_pts = points[gmask] if gmask.any() else None
+            try:
+                sub_labels = await _run_killable(
+                    "trees", pts, _chm_param_dict(request), http_request=http_request,
+                    seeds=(np.asarray(request.seed_points, dtype=np.float64)
+                           if request.seed_points else None),
+                    ground=ground_pts,
+                )
+            except ClientDisconnected:
+                return TreeSegmentationResponse(
+                    success=False, num_points=n_full,
+                    error="Tree segmentation was cancelled.",
+                )
+            labels = np.zeros(n_full, dtype=np.int64)
+            labels[eligible] = np.asarray(sub_labels)
+            return TreeSegmentationResponse(
+                success=True, labels=[int(x) for x in labels],
+                num_trees=int(len(np.unique(labels[labels > 0]))), num_points=n_full,
+                ground_warning=(not ground_excluded) and await run_in_threadpool(
+                    _looks_like_ground_present, pts),
+            )
+
         ti_params_for_cost = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
         size_error = _treeiso_size_error(pts, ti_params_for_cost)
         if size_error:
@@ -8478,8 +8519,10 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
         ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
         ti_param_dict.update(tiling=request.tiling, tile_buffer_m=request.tile_buffer_m)
         try:
+            run_meta: dict = {}
             sub_labels = await _run_killable(
                 "trees", pts, ti_param_dict, http_request=http_request, seeds=seeds,
+                meta_out=run_meta,
             )
         except ClientDisconnected:
             # Client gave up (panel closed / Cancel / fetch timeout). The worker
@@ -8504,6 +8547,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
         # slab is measured on the same geometry that was segmented.
         fusion_warning = await run_in_threadpool(
             _treeiso_row_fusion_warning, pts, np.asarray(sub_labels),
+            bool(run_meta.get("stage1_collapsed")),
         )
         return TreeSegmentationResponse(
             success=True,
@@ -26025,6 +26069,7 @@ async def _run_killable(
     reflectance: "Optional[np.ndarray]" = None,
     seeds: "Optional[np.ndarray]" = None,
     origins: "Optional[np.ndarray]" = None,
+    ground: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
     meta_out: "Optional[dict]" = None,
 ):
@@ -26056,7 +26101,7 @@ async def _run_killable(
     try:
         return await _run_killable_admitted(
             tool, points, params, http_request=http_request, reflectance=reflectance,
-            seeds=seeds, origins=origins, poll=poll, meta_out=meta_out)
+            seeds=seeds, origins=origins, ground=ground, poll=poll, meta_out=meta_out)
     finally:
         admitted.__exit__(None, None, None)
 
@@ -26070,6 +26115,7 @@ async def _run_killable_admitted(
     reflectance: "Optional[np.ndarray]" = None,
     seeds: "Optional[np.ndarray]" = None,
     origins: "Optional[np.ndarray]" = None,
+    ground: "Optional[np.ndarray]" = None,
     poll: float = 0.25,
     meta_out: "Optional[dict]" = None,
 ):
@@ -26093,6 +26139,8 @@ async def _run_killable_admitted(
                 np.save(os.path.join(workdir, "seeds.npy"), np.asarray(seeds))
             if origins is not None and len(origins) > 0:
                 np.save(os.path.join(workdir, "origins.npy"), np.asarray(origins))
+            if ground is not None and len(ground) > 0:
+                np.save(os.path.join(workdir, "ground.npy"), np.asarray(ground))
             with open(os.path.join(workdir, "request.json"), "w") as f:
                 json.dump({"tool": tool, "params": params}, f)
 
@@ -38945,6 +38993,41 @@ class SessionTreeSegmentRequest(TreeSegmentationRequest):
     pass
 
 
+def _chm_param_dict(request: TreeSegmentationRequest) -> dict:
+    """The JSON-safe params the killable worker needs for method='chm'."""
+    d = {k: getattr(request, k) for k in _CHM_PARAM_FIELDS}
+    d["method"] = "chm"
+    return d
+
+
+async def _session_segment_trees_chm(session_id: str, sess, request, http_request,
+                                     *, pts, plant_mask, ground_pts, seeds):
+    """The method='chm' branch of `session_segment_trees`: the same inputs
+    (ground and misses excluded, labels scattered back onto every survivor),
+    minus what only TreeIso needs. No cost prompt or tiling — the CHM is one
+    O(N) pass (~7 s at 8.4 M points) — and no multi-trunk advisory, which
+    counts stems and an airborne scan has almost none to count. The ground
+    points go to the worker separately, as the DTM."""
+    meta: dict = {}
+    try:
+        plant_labels = await _run_killable(
+            "trees", pts[plant_mask], _chm_param_dict(request),
+            http_request=http_request, seeds=seeds,
+            ground=ground_pts if len(ground_pts) else None, meta_out=meta,
+        )
+    except ClientDisconnected:
+        raise HTTPException(status_code=499, detail="Tree segmentation was cancelled.")
+    labels = np.zeros(len(pts), dtype=np.int64)
+    labels[plant_mask] = np.asarray(plant_labels)
+    with _cloud_session_lock:
+        _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)
+    cache_key, cache_dir, rebuild_meta = await run_in_threadpool(_session_rebuild, sess)
+    num_trees = int(labels.max()) if labels.size else 0
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key,
+            "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": None,
+            "tiling": None, "chm": meta or None, **rebuild_meta}
+
+
 @app.post("/api/cloud/session/{session_id}/segment_trees")
 async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequest,
                                 http_request: Request):
@@ -38990,6 +39073,12 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     )
     plant_pts = pts[plant_mask]
 
+    if request.method == "chm":
+        return await _session_segment_trees_chm(
+            session_id, sess, request, http_request, pts=pts, plant_mask=plant_mask,
+            ground_pts=pts[is_ground & is_hit], seeds=seeds,
+        )
+
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
     ti_param_dict.update(tiling=request.tiling, tile_buffer_m=request.tile_buffer_m)
     size_error = await run_in_threadpool(_treeiso_size_error, plant_pts, ti_param_dict)
@@ -39034,6 +39123,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     # tell the user the count was wrong.
     fusion_warning = await run_in_threadpool(
         _treeiso_row_fusion_warning, plant_pts, np.asarray(plant_labels),
+        bool(tiling_meta.get("stage1_collapsed")),
     )
     with _cloud_session_lock:
         _session_add_extra_column(sess, TREE_INSTANCE_SLUG, TREE_INSTANCE_LABEL, labels)

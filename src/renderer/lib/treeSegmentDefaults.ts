@@ -128,3 +128,12 @@ export function treeSegmentDefaultsForExtent(horizontalExtentM: number): TreeSeg
   const maxOutlierGap = clampRound(OUTLIER_GAP_DEFAULT, 0, maxGap);
   return { decimateRes1, decimateRes2, maxGap, maxOutlierGap };
 }
+
+// Canopy-height (CHM) method defaults — mirror DEFAULT_MIN_SPACING_M /
+// DEFAULT_MIN_HEIGHT_M in backend-api/chm_trees.py. Unlike the TreeIso voxel
+// sizes above these are NOT seeded from extent: they are distances set by the
+// trees (how close two tops stand, how tall a tree is), not by the survey.
+export const CHM_TREE_DEFAULTS = {
+  minSpacing: 2.0,
+  minHeight: 2.0,
+} as const;

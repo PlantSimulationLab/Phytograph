@@ -1,10 +1,35 @@
 # Segment individual trees
 
 Separate a point cloud containing **many trees** into individual trees, giving
-every point a per-tree **instance ID**. Phytograph uses **TreeIso** — a
-classical cut-pursuit graph method that runs on the CPU (no GPU required).
+every point a per-tree **instance ID**. Two methods are available, both on the
+CPU (no GPU required):
+
+- **TreeIso (terrestrial)** — a cut-pursuit graph method that builds trees up
+  from stems and branches. Use it for ground-based scans where trunks are
+  visible.
+- **Canopy height (airborne)** — finds each treetop in a canopy height model and
+  splits the canopy between them. Use it for airborne and drone scans, and for
+  dense canopies where TreeIso merges neighbouring trees.
 
 ---
+
+## Choose a method
+
+Pick the method in the panel's **Method** list. The rule of thumb is *what can
+the scan see?*
+
+| The scan shows… | Use |
+|---|---|
+| Trunks and branches (terrestrial / mobile laser scanning) | **TreeIso** |
+| Mostly crown tops, few or no trunks (airborne / drone) | **Canopy height** |
+| Crowns that touch or interlock, and TreeIso returns several trees per instance | **Canopy height** |
+
+TreeIso groups the cloud by where its stems and branches are, so on an airborne
+scan of a closed canopy it has almost nothing to separate touching crowns with,
+and it merges them — typically five to ten trees per instance. No TreeIso
+setting fully fixes that. Canopy height finds trees where such a scan *does*
+see them: at the tops of the crowns. How each method works is on
+[Tree segmentation methods](../concepts/tree-segmentation-methods.md).
 
 ## When to use this
 
@@ -15,14 +40,16 @@ classical cut-pursuit graph method that runs on the CPU (no GPU required).
 
 ## Before you start
 
-TreeIso isolates **above-ground tree structure**, so deal with the ground first
+Both methods isolate **above-ground tree structure**, so deal with the ground first
 with [Segment ground points](segment-ground.md). You have two options:
 
 - **Remove** the ground points, or
 - **Label** them (run ground segmentation and keep the labelled cloud without
   deleting the ground). When the cloud carries a `ground_class` label,
-  Segment Trees automatically excludes the ground points — TreeIso only sees the
-  plant points, and the ground keeps tree ID `0` ("Unassigned").
+  Segment Trees automatically excludes the ground points — only the plant points
+  are segmented, and the ground keeps tree ID `0` ("Unassigned"). **Canopy
+  height** also uses the labelled ground points as its terrain model; on a
+  ground-removed cloud it uses the lowest returns instead.
 
 If ground appears to still be present *and unlabelled* when you run the tool,
 Phytograph warns you (but still runs).
@@ -36,7 +63,20 @@ Phytograph warns you (but still runs).
 3. Open the **Segment Trees** tool from the toolbar (the trees/forest icon in
    the **Tools** › Segmentation group) or the command palette
    (`Cmd/Ctrl-K` → "Segment Trees").
-4. Adjust parameters if needed. The size-dependent settings (the internal
+4. Choose the **Method** (see [Choose a method](#choose-a-method)). For
+   **Canopy height**, the settings are:
+    - **Min tree spacing (m)** — the closest two treetops can stand. The main
+      setting: lower it if neighbouring trees come out as one, raise it if one
+      crown is split into several. Default `2.0`; the spacing between trees in a
+      row is a good starting point.
+    - **Min tree height (m)** — canopy lower than this above the ground is not a
+      tree and stays unassigned. Default `2.0`.
+    - **CHM cell (m)** — grid size of the canopy height model. Leave it empty
+      (*auto*) to use one seventh of **Min tree spacing** (kept between 0.1 and
+      1 m). It follows the crown size rather than the point density, so sparse
+      scans get a fine grid too; a coarse grid merges neighbouring trees.
+
+    For **TreeIso**, adjust these if needed. The size-dependent settings (the internal
    decimation and the max-gap below) are seeded from the cloud's extent each time
    the panel opens — fine for a close-range scan, coarser for a field- or
    airborne-scale tile — so a large-area scan is handled as efficiently as a
@@ -93,8 +133,18 @@ For tricky scenes you can guide the result by marking trunks yourself:
 2. Left-click each trunk in the viewer — a numbered marker drops at that spot.
    Right-click removes the last seed; **Clear seeds** removes all. (The camera is
    locked while seeding; turn the mode off to orbit.)
-3. Click **Segment Trees**. Each seed yields exactly one tree, and ambiguous
-   segments are assigned to their nearest seed.
+3. Click **Segment Trees**. Each seed yields exactly one tree.
+
+What a seed does depends on the method:
+
+- **TreeIso** — ambiguous segments are assigned to their nearest seed. A seed
+  re-assigns whole segments, so it can join a tree that came out split, but it
+  **cannot** separate trees TreeIso has already merged into one segment.
+- **Canopy height** — a seed replaces any automatic treetop within
+  **Min tree spacing** of it, and every other tree is still found
+  automatically. So you only seed the trees that came out wrong: put a seed on
+  each of two merged trees to split them, or one seed on a crown that was split
+  to join it. Seeded trees get IDs `1`…`n` in the order you placed them.
 
 ### Auto-seed stems
 
@@ -119,6 +169,9 @@ first draft. How it decides is on
     turn seeding off, orbit or pan it into the open, and turn seeding back on.
 
 ## Large plots: tiling
+
+*TreeIso only — Canopy height handles any plot size in one pass, so the tiling
+settings are hidden for it.*
 
 A plot too big to segment at once is segmented in square **tiles**, each
 with a buffer of its neighbours' points. Every tree is then kept from the
@@ -155,8 +208,8 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
   trunk, which is exactly the shape the segmentation is otherwise inclined to
   attach to the nearest complete tree.
 - If neighbouring trees still merge into one, lower **Separate trees beyond**
-  first — that is the knob for this — then **Max intra-tree gap**, or add trunk
-  **seeds**.
+  first — that is the knob for this — then **Max intra-tree gap**. If whole
+  crowns are merged (not just a neighbour's branches), try **Canopy height**.
 - **If several trees come back as one instance each — for example an orchard
   returning one instance per row — re-run the tool.** This is a known defect in
   the underlying graph-cut solver, which occasionally fails to divide the cloud
@@ -164,12 +217,18 @@ Once a cloud is segmented (flat clouds), a **Refine** section appears:
   result can still come back fused. It depends on the exact number of points, so
   simply running it again on a slightly cropped or downsampled cloud usually
   clears it. Changing **1D/2D reg. strength** does *not* help here — those knobs
-  have no effect when this happens. Trunk **seeds** are the reliable workaround,
-  since they pin one instance per tree.
+  have no effect when this happens. The warning names this cause only when it
+  actually happened.
 - Phytograph warns you when an instance contains **more than one trunk**, which
   is the signature of several trees having been merged. Trust that warning over
   the tree count: a fused result looks perfectly plausible otherwise, and every
-  per-tree measurement taken from it will be wrong.
+  per-tree measurement taken from it will be wrong. The tree count it gives is a
+  **minimum** — trunks the scan barely sampled are not counted, so on an
+  airborne scan the true number can be several times higher.
+- **If the warning appears on an airborne scan, or on crowns that touch**,
+  switch **Method** to **Canopy height**. Lowering **2D reg. strength** also
+  splits merged TreeIso instances, but on such scans it tends to break single
+  trees into pieces before it separates all the merged ones.
 - If one tree is split into several, raise **2D reg. strength** or **Merge** the
   pieces afterward.
 - Segmentation runs in the background, so the rest of the app stays responsive

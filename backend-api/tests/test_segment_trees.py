@@ -1019,6 +1019,31 @@ def test_multi_trunk_instances_are_flagged():
 
 
 @requires_treeiso
+def test_fusion_advice_names_only_things_the_user_can_act_on():
+    """The advice used to send users to a "stage-1 voxel size" the panel does
+    not show, and to trunk seeds, which only reassign whole TreeIso segments
+    and so cannot split one that already spans several trees (reported on
+    bad_segment_example.laz, where stage 1 had NOT collapsed). It must point at
+    real controls, blame the collapse only when it fired, and call the trunk
+    count what it is — a floor."""
+    per_tree = 4000
+    trunk_frac = 0.15
+    points = _five_trees_two_rows(per_tree=per_tree, trunk_frac=trunk_frac)
+    per = int(per_tree * trunk_frac) + per_tree
+    fused = np.where(np.repeat(np.arange(1, 6), per) <= 3, 1, 2)
+
+    msg = main._treeiso_row_fusion_warning(points, fused)
+    assert "voxel" not in msg.lower(), msg
+    assert "seed" not in msg.lower(), msg
+    assert "collapsed" not in msg, msg
+    assert "at least 5 trees" in msg, msg
+    assert "Canopy height" in msg and "λ₂" in msg, msg
+
+    collapsed = main._treeiso_row_fusion_warning(points, fused, True)
+    assert "collapsed" in collapsed, collapsed
+
+
+@requires_treeiso
 def test_single_tree_is_not_flagged_as_fused():
     """One tree, one instance, no warning — the detector's false-positive guard.
 

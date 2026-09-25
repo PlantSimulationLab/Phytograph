@@ -23,5 +23,6 @@ referring to the same physical plant.
 
 - :material-tree: **[Crown metrics](crown-metrics.md)** — fitted crown shape with height, width, volume, and related size measurements.
 - :material-pine-tree: **[Stem detection & tiling](stem-detection-and-tiling.md)** — automatic trunk seeds, and segmenting large plots in stitched tiles.
+- :material-forest: **[Tree segmentation methods](tree-segmentation-methods.md)** — TreeIso vs. canopy height: how each finds trees, what each assumes, and which to use.
 
 </div>

@@ -274,4 +274,8 @@ def segment(points: np.ndarray, params: dict, seeds: Optional[np.ndarray], *,
 
     p = main._treeiso_params_from_dict(dict(base))
     main._auto_treeiso_decimation(points, p)
-    return main.segment_trees(points, p, seeds), {"tiled": False}
+    labels = main.segment_trees(points, p, seeds)
+    # Reported so the fusion advisory names the collapse only when it happened
+    # (the flag is thread-local to this worker; the parent can't read it).
+    from treeiso import treeiso_core as _tc
+    return labels, {"tiled": False, "stage1_collapsed": bool(_tc.stage1_collapsed())}

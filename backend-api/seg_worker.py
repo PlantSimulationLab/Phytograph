@@ -14,6 +14,7 @@ Protocol (all files live in `workdir`):
        input.npy        (N, 3) float64 points
        reflectance.npy  optional (N,) float64           (wood only)
        seeds.npy        optional (S, 3) float64          (trees only)
+       ground.npy       optional (M, 3) float64          (trees, method=chm: DTM)
        normals.npy      optional (N, 3) float64          (poisson only)
        origins.npy      optional (N, 3) float64          (normals only; per-point
                                                           beam origins)
@@ -186,6 +187,25 @@ def run(workdir: str) -> int:
                     np.asarray(values, dtype=np.float32))
             with open(os.path.join(workdir, "result.json"), "w") as f:
                 json.dump(nmeta, f, default=_json_default)
+
+        elif tool == "trees" and params.get("method") == "chm":
+            # Canopy-height-model watershed (chm_trees.py): one O(N) pass, so no
+            # tiling. Optional ground.npy (the cloud's ground-labelled points)
+            # feeds the DTM; without it the lowest returns stand in.
+            import chm_trees
+            seeds_path = os.path.join(workdir, "seeds.npy")
+            seeds = np.load(seeds_path) if os.path.exists(seeds_path) else None
+            ground_path = os.path.join(workdir, "ground.npy")
+            ground = np.load(ground_path) if os.path.exists(ground_path) else None
+            cmeta: dict = {}
+            labels = chm_trees.segment_trees_chm(
+                points, cell=params.get("chm_cell"),
+                min_height=float(params.get("chm_min_height", chm_trees.DEFAULT_MIN_HEIGHT_M)),
+                min_spacing=float(params.get("chm_min_spacing", chm_trees.DEFAULT_MIN_SPACING_M)),
+                ground=ground, seeds=seeds, meta=cmeta)
+            np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
+            with open(os.path.join(workdir, "result.json"), "w") as f:
+                json.dump(cmeta, f, default=_json_default)
 
         elif tool == "trees":
             seeds_path = os.path.join(workdir, "seeds.npy")

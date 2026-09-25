@@ -106,6 +106,7 @@ nav:
       - Leaf area density: concepts/leaf-area-density.md
       - Crown metrics: concepts/crown-metrics.md
       - Stem detection & tiling: concepts/stem-detection-and-tiling.md
+      - Tree segmentation methods: concepts/tree-segmentation-methods.md
   - Workflows:
       - workflows/index.md
       - Getting around:

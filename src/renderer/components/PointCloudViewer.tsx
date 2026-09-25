@@ -81,7 +81,8 @@ import StatusPill from './StatusPill';
 import { type ScanParameters, scanParametersFromFile, applyTrajectoryToParams, isMovingScan } from '../lib/scanParameters';
 import { groundSegmentDefaultsForExtent } from '../lib/groundSegmentDefaults';
 import { demDefaultsForExtent } from '../lib/demDefaults';
-import { treeSegmentDefaultsForExtent } from '../lib/treeSegmentDefaults';
+import { treeSegmentDefaultsForExtent, CHM_TREE_DEFAULTS } from '../lib/treeSegmentDefaults';
+import type { TreeSegmentMethod } from '../utils/backendApi';
 import { poseStreamToWire, shiftPoseStream, transformPoseStream, trajectoryDurationS, deriveMovingScanGrid, poseStreamBounds } from '../lib/poseStream';
 import { boundsCenterDiagonal, detectFrameMismatch, recenterShiftFor, type Vec3 } from '../lib/frameMismatch';
 import { prettifyQSMError } from '../lib/qsmErrors';
@@ -1365,6 +1366,14 @@ export default function PointCloudViewer({
   const [treeAutoSeedInProgress, setTreeAutoSeedInProgress] = useState(false);
   const [treeTiling, setTreeTiling] = useState<'auto' | 'on' | 'off'>('auto');
   const [treeTileBufferM, setTreeTileBufferM] = useState(10);
+  // Method + canopy-height (CHM) knobs; see backend-api/chm_trees.py. Not
+  // reseeded on open: min spacing / height are tree-architecture distances,
+  // not survey-scale ones, and an empty cell (null) lets the backend use
+  // min spacing ÷ 7.
+  const [treeMethod, setTreeMethod] = useState<TreeSegmentMethod>('treeiso');
+  const [treeChmMinSpacing, setTreeChmMinSpacing] = useState<number>(CHM_TREE_DEFAULTS.minSpacing);
+  const [treeChmMinHeight, setTreeChmMinHeight] = useState<number>(CHM_TREE_DEFAULTS.minHeight);
+  const [treeChmCell, setTreeChmCell] = useState<number | null>(null);
   // Refine controls (post-segmentation merge/split of the tree_instance field).
   const [treeMergeA, setTreeMergeA] = useState(1);
   const [treeMergeB, setTreeMergeB] = useState(2);
@@ -15238,6 +15247,10 @@ export default function PointCloudViewer({
       acknowledge_cost: acknowledgeCost,
       tiling: treeTiling,
       tile_buffer_m: treeTileBufferM,
+      method: treeMethod,
+      chm_min_spacing: treeChmMinSpacing,
+      chm_min_height: treeChmMinHeight,
+      ...(treeChmCell != null ? { chm_cell: treeChmCell } : {}),
     };
     const seeds = treeSeedPoints.length > 0 ? treeSeedPoints.map(p => [p[0], p[1], p[2]]) : undefined;
 
@@ -15329,7 +15342,7 @@ export default function PointCloudViewer({
           message: [
             treeSplitClouds && splitCount > 0
               ? `Segmented ${meta.point_count.toLocaleString()} points into ${splitCount} tree cloud${splitCount === 1 ? '' : 's'}.`
-              : `Segmented ${meta.point_count.toLocaleString()} points into individual trees.`,
+              : `Segmented ${meta.point_count.toLocaleString()} points into ${numTrees.toLocaleString()} tree${numTrees === 1 ? '' : 's'}.`,
             fusionWarning,
           ].filter(Boolean).join(' '),
         });
@@ -15473,7 +15486,7 @@ export default function PointCloudViewer({
       treeSegmentAbortRef.current = null;
       treeSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM, treeMethod, treeChmMinSpacing, treeChmMinHeight, treeChmCell]);
 
   // Fill the seed list with one seed per trunk found in the breast-height
   // layer, and turn seed mode on so they are drawn for review before running.
@@ -26012,6 +26025,14 @@ export default function PointCloudViewer({
       {/* Tree Segmentation Panel (TreeIso) */}
       {showTreeSegmentPanel && selectedIds.size === 1 && (
         <TreeSegmentPanel
+          method={treeMethod}
+          chmMinSpacing={treeChmMinSpacing}
+          chmMinHeight={treeChmMinHeight}
+          chmCell={treeChmCell}
+          onMethodChange={(m) => { setTreeMethod(m); setTreeSegmentCostWarning(null); }}
+          onChmMinSpacingChange={setTreeChmMinSpacing}
+          onChmMinHeightChange={setTreeChmMinHeight}
+          onChmCellChange={setTreeChmCell}
           regStrength1={treeRegStrength1}
           regStrength2={treeRegStrength2}
           maxGap={treeMaxGap}

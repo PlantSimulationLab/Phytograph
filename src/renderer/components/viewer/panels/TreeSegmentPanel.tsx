@@ -1,6 +1,8 @@
+import { useEffect, useRef, useState } from 'react';
 import { Sprout, Loader2, X, AlertTriangle } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import { InfoHint } from '../../InfoHint';
+import type { TreeSegmentMethod } from '../../../utils/backendApi';
 
 // Presentational tool panel for TreeIso tree-instance segmentation. State,
 // handlers (`onSegment`/`onMerge`/`onSplit`), and the seed-mode pointer plumbing
@@ -8,6 +10,15 @@ import { InfoHint } from '../../InfoHint';
 // the selected flat cloud already carries a tree_instance field) so this stays
 // a pure render. Parent gates on `showTreeSegmentPanel && selectedIds.size === 1`.
 interface TreeSegmentPanelProps {
+  // 'treeiso' shows the TreeIso knobs; 'chm' the canopy-height ones.
+  method: TreeSegmentMethod;
+  chmMinSpacing: number;
+  chmMinHeight: number;
+  chmCell: number | null;   // null = the backend's default, min spacing ÷ 7
+  onMethodChange: (m: TreeSegmentMethod) => void;
+  onChmMinSpacingChange: (n: number) => void;
+  onChmMinHeightChange: (n: number) => void;
+  onChmCellChange: (n: number | null) => void;
   regStrength1: number;
   regStrength2: number;
   maxGap: number;
@@ -53,6 +64,14 @@ interface TreeSegmentPanelProps {
 }
 
 export function TreeSegmentPanel({
+  method,
+  chmMinSpacing,
+  chmMinHeight,
+  chmCell,
+  onMethodChange,
+  onChmMinSpacingChange,
+  onChmMinHeightChange,
+  onChmCellChange,
   regStrength1,
   regStrength2,
   maxGap,
@@ -113,11 +132,91 @@ export function TreeSegmentPanel({
         </button>
       </div>
 
-      <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
-        TreeIso isolates individual trees by cut-pursuit graph segmentation.
-        Works best on ground-removed clouds — run Ground Segmentation first.
+      {/* Method. TreeIso needs visible stems; an airborne scan of a closed
+          canopy has almost none, and TreeIso fuses its touching crowns
+          (bad_segment_example.laz: 333 instances for ~1,400 trees). The CHM
+          method finds trees where such a scan does see them — the crown tops. */}
+      <div className="mb-3">
+        <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+          Method
+          <InfoHint
+            data-testid="tree-method-help"
+            label="Method"
+            text="TreeIso (terrestrial) builds trees up from stems and branches — use it for ground-based scans where trunks are visible. Canopy height (airborne) finds each treetop in a canopy height model and gives every point the crown above it — use it for airborne or drone scans, and for dense canopies where TreeIso merges neighbouring trees."
+          />
+        </label>
+        <select
+          data-testid="tree-method"
+          value={method}
+          onChange={(e) => onMethodChange(e.target.value as TreeSegmentMethod)}
+          disabled={inProgress}
+          className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+        >
+          <option value="treeiso">TreeIso (terrestrial)</option>
+          <option value="chm">Canopy height (airborne)</option>
+        </select>
       </div>
 
+      <div className="mb-3 p-2 bg-neutral-900/50 rounded text-[10px] text-neutral-400">
+        {method === 'chm'
+          ? 'Finds treetops in a canopy height model and splits the crowns between them. Points under a crown (stems, understory) join that tree.'
+          : 'TreeIso isolates individual trees by cut-pursuit graph segmentation.'}
+        {' '}Works best on ground-removed clouds — run Ground Segmentation first.
+      </div>
+
+      {method === 'chm' && (
+        <>
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+              Min tree spacing (m)
+              <InfoHint
+                data-testid="tree-chm-min-spacing-help"
+                label="Min tree spacing"
+                text="The closest two treetops can stand. The main setting: lower it if neighbouring trees come out as one, raise it if one crown is split into several trees. About the distance between trees in a row is a good start."
+              />
+            </label>
+            <DebouncedNumberInput
+              data-testid="tree-chm-min-spacing"
+              value={chmMinSpacing}
+              onCommit={onChmMinSpacingChange}
+              min={0.3} max={30} step={0.1}
+              disabled={inProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+              Min tree height (m)
+              <InfoHint
+                data-testid="tree-chm-min-height-help"
+                label="Min tree height"
+                text="Canopy lower than this above the ground is not a tree, so low shrubs and grass are left unassigned (tree id 0)."
+              />
+            </label>
+            <DebouncedNumberInput
+              data-testid="tree-chm-min-height"
+              value={chmMinHeight}
+              onCommit={onChmMinHeightChange}
+              min={0} max={100} step={0.5}
+              disabled={inProgress}
+              className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
+            />
+          </div>
+          <div className="mb-3">
+            <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+              CHM cell (m)
+              <InfoHint
+                data-testid="tree-chm-cell-help"
+                label="CHM cell"
+                text="Grid size of the canopy height model. Leave empty to use one seventh of the min tree spacing, which resolves the dip between neighbouring crowns at any point density. Raise it only to smooth out very bumpy crowns — a coarse grid merges neighbouring trees."
+              />
+            </label>
+            <ChmCellInput value={chmCell} onCommit={onChmCellChange} disabled={inProgress} />
+          </div>
+        </>
+      )}
+
+      {method === 'treeiso' && (<>
       {/* Regularization strength 1 (3D) */}
       <div className="mb-3">
         <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
@@ -208,6 +307,7 @@ export function TreeSegmentPanel({
           </div>
         )}
       </div>
+      </>)}
 
       {/* Trunk seeding (human-in-the-loop) */}
       <div className="mb-3 p-2 bg-neutral-900/50 rounded">
@@ -224,7 +324,9 @@ export function TreeSegmentPanel({
           <InfoHint
             data-testid="tree-seed-mode-help"
             label="Seed trunks"
-            text="Guide the result by marking trunks yourself. Turn this on, then left-click each trunk in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and ambiguous segments are assigned to their nearest seed — use it when neighbouring trees merge or split automatically."
+            text={method === 'chm'
+              ? "Correct the result by marking trees yourself. Turn this on, then left-click a trunk or treetop in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and replaces any automatic treetop within the min tree spacing of it; every other tree is still found automatically. Seed just the trees that came out wrong — two seeds split a merged pair, one seed joins a split crown."
+              : "Guide the result by marking trunks yourself. Turn this on, then left-click each trunk in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and ambiguous segments are assigned to their nearest seed — use it when neighbouring trees split automatically. Seeds can't separate trees TreeIso has already merged into one segment; for that, lower λ₂ or use Canopy height."}
           />
         </label>
         {seedMode && (
@@ -263,8 +365,8 @@ export function TreeSegmentPanel({
         </div>
       </div>
 
-      {/* Tiling for large plots */}
-      <div className="grid grid-cols-2 gap-2 mb-3 text-[10px] text-neutral-400">
+      {/* Tiling for large plots (TreeIso only: the CHM is one linear pass). */}
+      {method === 'treeiso' && <div className="grid grid-cols-2 gap-2 mb-3 text-[10px] text-neutral-400">
         <label className="flex flex-col gap-0.5">
           <span className="flex items-center gap-1">Tiling
             <InfoHint
@@ -295,7 +397,7 @@ export function TreeSegmentPanel({
             className="bg-neutral-700 text-neutral-200 rounded px-1 py-0.5 w-full"
           />
         </label>
-      </div>
+      </div>}
 
       {/* Split checkbox */}
       <label className="flex items-center gap-2 text-[10px] text-neutral-400 mb-3">
@@ -433,5 +535,43 @@ export function TreeSegmentPanel({
         </div>
       )}
     </div>
+  );
+}
+
+// Optional CHM cell: empty = "auto" (null, the backend uses min spacing ÷ 7).
+// A text draft rather than DebouncedNumberInput, because that one has
+// no empty state — the repo's pattern for an optional number field (see
+// CLAUDE.md, "Numeric input fields"). Only a finite positive parse commits.
+function ChmCellInput({ value, onCommit, disabled }: {
+  value: number | null;
+  onCommit: (n: number | null) => void;
+  disabled: boolean;
+}) {
+  const [draft, setDraft] = useState(value == null ? '' : String(value));
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setDraft(value == null ? '' : String(value));
+  }, [value]);
+  const commit = (s: string) => {
+    if (s.trim() === '') { onCommit(null); return; }
+    const n = parseFloat(s);
+    if (Number.isFinite(n) && n > 0) onCommit(n);
+  };
+  return (
+    <input
+      data-testid="tree-chm-cell"
+      type="text"
+      inputMode="decimal"
+      placeholder="auto"
+      value={draft}
+      disabled={disabled}
+      onFocus={() => { focused.current = true; }}
+      onChange={(e) => { setDraft(e.target.value); commit(e.target.value); }}
+      onBlur={() => {
+        focused.current = false;
+        setDraft(value == null ? '' : String(value));
+      }}
+      className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600 placeholder:text-neutral-500"
+    />
   );
 }

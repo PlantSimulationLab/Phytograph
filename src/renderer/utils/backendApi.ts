@@ -1485,7 +1485,17 @@ export interface TreeSegmentationRequest {
   score_candidate_thresh?: number;
   init_stem_rel_length_thresh?: number;
   max_outlier_gap?: number;
+
+  // 'treeiso' (default, terrestrial scans) or 'chm' — canopy-height-model
+  // watershed for airborne / closed canopy (backend-api/chm_trees.py). The
+  // TreeIso fields above are ignored for 'chm', the chm_* ones for 'treeiso'.
+  method?: TreeSegmentMethod;
+  chm_cell?: number | null;      // metres; null/absent = chm_min_spacing / 7
+  chm_min_height?: number;       // metres above ground
+  chm_min_spacing?: number;      // metres between treetops
 }
+
+export type TreeSegmentMethod = 'treeiso' | 'chm';
 
 export interface TreeSegmentationResponse {
   success: boolean;
