@@ -685,3 +685,73 @@ test('editing the stock preset in two projects keeps both in the library', async
   await expect(page.getByTestId('palette-library-row').filter({ hasText: 'Project two' }))
     .toBeVisible();
 });
+
+test('instances: new, merge, delete and frame, each undoable', async () => {
+  // tree_instance holds 1 (24 points, centred z = 0.1875) and 3 (36 points,
+  // centred z = 1.125).
+  const { page, panel } = await openLabelToolOnTreeCloud();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+  const inst = page.getByTestId('label-instances');
+  await expect(inst).toBeVisible();
+
+  // New instance: the next id after the highest, named like its siblings, and
+  // made the paint class.
+  await page.getByTestId('label-instance-new').click();
+  await expect(panel.getByTestId('label-class-4')).toContainText('Tree 4');
+  await expect(panel).toHaveAttribute('data-active-class', '4');
+
+  // Frame: the view centres on the selected instance's points.
+  await panel.getByTestId('label-class-3').click();
+  await page.getByTestId('label-instance-frame').click();
+  await expect.poll(async () => page.evaluate(() => (window as any).__getCameraState().target as number[]))
+    .toEqual([expect.closeTo(0, 3), expect.closeTo(0, 3), expect.closeTo(1.125, 3)]);
+
+  // Merge 1 into 3: every point of Tree 1 becomes Tree 3, wherever it is.
+  await panel.getByTestId('label-class-1').click();
+  await page.getByTestId('label-instance-merge').selectOption('3');
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '3': 60 });
+  await expect(panel).toHaveAttribute('data-active-class', '3');
+  await page.getByTestId('label-undo').click();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+
+  // Delete 3: its points return to Unassigned; Tree 1 is untouched.
+  await panel.getByTestId('label-class-3').click();
+  await page.getByTestId('label-instance-delete').click();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '0': 36, '1': 24 });
+  await page.getByTestId('label-undo').click();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+});
+
+test('an instance stroke can set a semantic class too, in one undo step', async () => {
+  const { page, panel } = await openLabelToolOnTreeCloud();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+
+  // "Also set" the hand-labelling column's Wood on every stroke.
+  const pair = page.getByTestId('label-instance-pair');
+  const wood = await pair.locator('option', { hasText: 'Wood' }).first().getAttribute('value');
+  expect(wood).toMatch(/^manual_class:\d+$/);
+  await pair.selectOption(wood!);
+
+  await panel.getByTestId('label-class-1').click();
+  await paintWholeViewport(page);
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 }).toEqual({ '1': 60 });
+
+  // The hand-labelling column got the same points as Wood.
+  const woodValue = wood!.split(':')[1];
+  await page.getByTestId('label-column-select').selectOption('manual_class');
+  await expect(panel).toHaveAttribute('data-label-slug', 'manual_class');
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ [woodValue]: 60 });
+
+  // One undo takes back both columns.
+  await page.getByTestId('label-undo').click();
+  await expect.poll(async () => (await counts(panel))[woodValue] ?? 0, { timeout: 30_000 }).toBe(0);
+  await page.getByTestId('label-column-select').selectOption('tree_instance');
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+});

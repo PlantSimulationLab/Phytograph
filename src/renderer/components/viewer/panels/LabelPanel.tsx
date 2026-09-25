@@ -106,6 +106,20 @@ export interface LabelPanelProps {
   /** Line tool: limit to within this distance of the line; 0 = no limit. */
   lineBand?: number;
   onLineBandChange?: (b: number) => void;
+  /**
+   * Instance-column actions (F7), present only when the active column numbers
+   * objects (`*_instance`). They act on the ACTIVE instance (the selected row).
+   */
+  instances?: {
+    onNew: () => void;
+    onMergeInto: (target: number) => void;
+    onDelete: () => void;
+    onFrame: () => void;
+    /** Semantic columns a stroke can also set, with their classes. */
+    pairOptions: Array<{ slug: string; label: string; classes: ClassDef[] }>;
+    pair: { slug: string; value: number } | null;
+    onPairChange: (p: { slug: string; value: number } | null) => void;
+  } | null;
   /** Pick tool: how the cloud is cut into pieces, and the piece size (0 = auto). */
   pickMode?: 'pieces' | 'connected';
   onPickModeChange?: (m: 'pieces' | 'connected') => void;
@@ -189,6 +203,7 @@ export function LabelPanel({
   onLineSideChange,
   lineBand = 0,
   onLineBandChange,
+  instances = null,
   pickMode = 'pieces',
   onPickModeChange,
   pickSize = 0,
@@ -771,6 +786,66 @@ export function LabelPanel({
           </div>
         )}
       </div>
+
+      {instances && (
+        <div data-testid="label-instances" className="mb-3 p-2 rounded bg-neutral-900/60 border border-neutral-700 text-[10px] text-neutral-300">
+          <div className="flex items-center gap-1 mb-1.5">
+            <span className="text-[9px] text-neutral-500 uppercase tracking-wide flex-1">Instances</span>
+            <button data-testid="label-instance-new" onClick={instances.onNew}
+              title="Add the next free id and paint with it"
+              className="px-2 py-0.5 rounded bg-neutral-700 hover:bg-neutral-600">New instance</button>
+          </div>
+          {activeClass !== 0 && (
+            <div className="flex items-center gap-1 flex-wrap">
+              <span className="text-neutral-400">{activeName}:</span>
+              <button data-testid="label-instance-frame" onClick={instances.onFrame}
+                title="Move the view to this instance"
+                className="px-1.5 py-0.5 rounded bg-neutral-700 hover:bg-neutral-600">Frame</button>
+              <select
+                data-testid="label-instance-merge"
+                value=""
+                onChange={(e) => { if (e.target.value) instances.onMergeInto(Number(e.target.value)); }}
+                title="Give every point of this instance another instance's id"
+                className="px-1 py-0.5 rounded bg-neutral-700 text-neutral-200"
+              >
+                <option value="">Merge into…</option>
+                {classes.filter((c) => c.value !== activeClass && c.value !== 0).map((c) => (
+                  <option key={c.value} value={c.value}>{c.label}</option>
+                ))}
+              </select>
+              <button data-testid="label-instance-delete" onClick={instances.onDelete}
+                title="Return every point of this instance to Unassigned (undoable)"
+                className="px-1.5 py-0.5 rounded bg-neutral-700 hover:bg-red-900/60">Delete</button>
+            </div>
+          )}
+          {instances.pairOptions.length > 0 && (
+            <label className="flex items-center gap-1 mt-1.5">
+              <span className="shrink-0 text-neutral-400">Also set</span>
+              <select
+                data-testid="label-instance-pair"
+                value={instances.pair ? `${instances.pair.slug}:${instances.pair.value}` : ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (!v) { instances.onPairChange(null); return; }
+                  const i = v.lastIndexOf(':');
+                  instances.onPairChange({ slug: v.slice(0, i), value: Number(v.slice(i + 1)) });
+                }}
+                title="Each stroke also paints this class in another column, in the same undo step"
+                className="flex-1 min-w-0 px-1 py-0.5 rounded bg-neutral-700 text-neutral-200"
+              >
+                <option value="">nothing else</option>
+                {instances.pairOptions.map((o) => (
+                  <optgroup key={o.slug} label={o.label}>
+                    {o.classes.filter((c) => c.value !== 0).map((c) => (
+                      <option key={c.value} value={`${o.slug}:${c.value}`}>{o.label}: {c.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
 
       <div className="flex items-center gap-1.5">
         <button

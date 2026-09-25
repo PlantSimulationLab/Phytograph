@@ -35935,6 +35935,25 @@ def segment_pick(session_id: str, request: SegmentPickRequest):
     }
 
 
+@app.get("/api/cloud/session/{session_id}/label_extent")
+def get_label_extent(session_id: str, slug: str, value: int):
+    """How many editable points carry class `value` in column `slug`, and their
+    bounds (session coordinates) — what the label tool frames an instance by."""
+    sess = _get_cloud_session(session_id)
+    _validate_label_slug(slug)
+    with _cloud_session_lock:
+        positions = sess.positions
+        editable = _session_editable_mask_locked(sess)
+        col = sess.extras.get(slug)
+    if col is None:
+        return {"count": 0, "min": [0, 0, 0], "max": [0, 0, 0]}
+    idx = np.flatnonzero(editable & (np.rint(col) == value))
+    if idx.size == 0:
+        return {"count": 0, "min": [0, 0, 0], "max": [0, 0, 0]}
+    pts = positions[idx]
+    return {"count": int(idx.size), "min": pts.min(axis=0).tolist(), "max": pts.max(axis=0).tolist()}
+
+
 @app.post("/api/cloud/session/{session_id}/reset_label_edits")
 def reset_cloud_label_edits(session_id: str, request: ResetLabelEditsRequest):
     """Roll the label column back to an earlier point in its history (undo).

@@ -309,6 +309,30 @@ and how many unlabelled points are left. Each step re-reads the cloud, so areas
 you label drop out as you go, and when nothing is left the panel says so.
 Alt-click a class row to see the labelled points again.
 
+## Instances: this tree, that leaf
+
+A column whose name ends in `_instance` (`tree_instance` from a tree
+segmentation, or one you create such as `leaf_instance`) numbers **objects**
+rather than naming classes. Its class list is the list of instances, with
+their point counts, and show, hide, isolate and lock work as for any class. An
+**Instances** box in the panel adds what numbering objects needs, acting on
+the instance selected in the list:
+
+- **New instance** adds the next free id after the highest in use, named like
+  its siblings (*Tree 18* after *Tree 17*), and makes it the paint class. Paint
+  with it to split a wrongly merged instance — with the old instance as the
+  only *over* class, so nothing else is touched.
+- **Frame** moves the view to the instance.
+- **Merge into…** gives every point of this instance another instance's id.
+- **Delete** returns every point of this instance to *Unassigned*.
+- **Also set** paints a class in another column with every stroke — say
+  *Hand labels: Wood* while you paint *Tree 3* — so an instance and what it is
+  are labelled together. Both columns change in one step, and one undo takes
+  both back.
+
+Merge and delete are strokes like any other: undo reverses them, and the id
+stays in the list (with no points) so an undo has somewhere to put them back.
+
 ## What happens to the labels
 
 Labels are stored in whichever column you picked: the hand-labelling column

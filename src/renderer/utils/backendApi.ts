@@ -4815,6 +4815,20 @@ export async function getUnlabelledClusters(
   return response.json();
 }
 
+/** How many points carry `value` in column `slug`, and their bounds (session
+ *  coordinates) — for framing an instance. */
+export async function getLabelExtent(
+  sessionId: string, slug: string, value: number,
+): Promise<{ count: number; min: [number, number, number]; max: [number, number, number] }> {
+  const q = `?slug=${encodeURIComponent(slug)}&value=${value}`;
+  const response = await fetch(`${getBackendUrl()}/api/cloud/session/${sessionId}/label_extent${q}`);
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 /**
  * The label tool's click-to-pick: the piece of the cloud at `seed` (session
  * coordinates), as a `voxel_set` region ready to send as a label stroke.

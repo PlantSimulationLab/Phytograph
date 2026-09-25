@@ -184,11 +184,13 @@ describe('screen-space regions refresh the octree first', () => {
       src.indexOf('deleteCloudRegion(sessionId, region as CropOctreeRegion)'),
       ...[...src.matchAll(/\blabelCloudRegion\(\s*sessionId/g)].map(m => m.index!),
     ];
-    expect(sites.filter(i => i > -1).length, 'expected erase, erase-redo and 2 label sites')
-      .toBe(4);
+    // Label sites: the stroke, its paired column's stroke (same queue job,
+    // after the stroke's own request), and a redo's replay.
+    expect(sites.filter(i => i > -1).length, 'expected erase, erase-redo and 3 label sites')
+      .toBe(5);
     for (const at of sites) {
       expect(at, 'missing call site').toBeGreaterThan(-1);
-      const before = src.slice(Math.max(0, at - 1200), at);
+      const before = src.slice(Math.max(0, at - 2400), at);
       expect(before, `guard missing before ${src.slice(at, at + 60)}`)
         .toMatch(/await ensureOctreeFrameCurrentRef\.current\(/);
     }
