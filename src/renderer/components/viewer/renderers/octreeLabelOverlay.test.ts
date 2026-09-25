@@ -434,3 +434,29 @@ describe('excluded classes', () => {
     expect(labels(geom)).toEqual([1, 2]);
   });
 });
+
+describe('pre-label strokes (fromAttribute)', () => {
+  // wood_class values per point: 1 wood, 2 leaf, 7 something unmapped.
+  const wood = () => new THREE.BufferAttribute(new Float32Array([1, 2, 7, 2]), 1);
+  const pts: Array<[number, number, number]> = [[0, 0, 0], [0.1, 0, 0], [0.2, 0, 0], [1, 0, 0]];
+
+  it('takes each point\'s class from the source attribute, through the map', () => {
+    const geom = makeGeometry(pts, { wood_class: wood() });
+    // wood -> palette value 65 (index 2), leaf -> 64 (index 1); 7 unmapped.
+    const stroke: LabelStrokeRender = {
+      ...lowX(0), fromAttribute: { name: 'wood_class', indexOf: new Map([[1, 2], [2, 1]]) },
+    };
+    applyStrokesToGeometry(geom, identity, undefined, null, state([stroke]));
+    // The unmapped 7 keeps what it had; x = 1 is outside the region.
+    expect(labels(geom)).toEqual([2, 1, 0, 0]);
+  });
+
+  it('skips a tile that does not carry the source attribute', () => {
+    const geom = makeGeometry(pts);
+    const stroke: LabelStrokeRender = {
+      ...lowX(5), fromAttribute: { name: 'wood_class', indexOf: new Map([[1, 2]]) },
+    };
+    applyStrokesToGeometry(geom, identity, undefined, null, state([stroke]));
+    expect(labels(geom)).toEqual([0, 0, 0, 0]);
+  });
+});

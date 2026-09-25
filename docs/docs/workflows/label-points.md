@@ -333,6 +333,20 @@ the instance selected in the list:
 Merge and delete are strokes like any other: undo reverses them, and the id
 stays in the list (with no points) so an undo has somewhere to put them back.
 
+## Pre-label from another column
+
+Rather than start a column from nothing, seed it from a result another tool
+already wrote — ground segmentation's `ground_class`, wood/leaf segmentation's
+`wood_class`, a tree segmentation's `tree_instance`, or any other class column
+on the cloud. Choose it under **Pre-label from another column…**, check how
+its classes map onto yours (classes with the same name are matched for you; the
+rest you pick, or leave as they are), and click **Pre-label**. **Only points
+still Unclassified** keeps what you have already painted. Instance ids copied
+into another instance column are kept as they are.
+
+It is one stroke: the result shows at once, undo takes it back, and you then
+correct it by hand like any painting.
+
 ## What happens to the labels
 
 Labels are stored in whichever column you picked: the hand-labelling column

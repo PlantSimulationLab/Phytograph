@@ -83,6 +83,7 @@ export function labelStrokeRequest(stroke: LabelStroke): LabelStrokeRequest {
     ...(stroke.slab ? { slab: stroke.slab as unknown as CropOctreeRegion } : {}),
     ...(stroke.depthLimit ? { depth_limit: stroke.depthLimit } : {}),
     ...(stroke.limitBox ? { limit_box: stroke.limitBox } : {}),
+    ...(stroke.fromColumn ? { from_column: stroke.fromColumn } : {}),
     stroke_id: stroke.strokeId,
   };
 }

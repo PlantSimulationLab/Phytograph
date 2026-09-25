@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck, Square, Spline, MousePointerClick } from 'lucide-react';
 import { DebouncedNumberInput } from '../../DebouncedNumberInput';
 import type { ProfileLineSide } from '../../../lib/profileLine';
+import { defaultPrelabelMap } from '../../../lib/prelabel';
 
 export type LabelTool = 'lasso' | 'brush' | 'rect' | 'line' | 'pick';
 import type { ClassDef } from '../../../lib/classification';
@@ -120,6 +122,9 @@ export interface LabelPanelProps {
     pair: { slug: string; value: number } | null;
     onPairChange: (p: { slug: string; value: number } | null) => void;
   } | null;
+  /** Pre-label (F8): other columns of this cloud whose classes can seed this one. */
+  prelabelSources?: Array<{ slug: string; label: string; classes: ClassDef[] }>;
+  onPrelabel?: (source: string, map: Record<string, number> | null, onlyUnlabelled: boolean) => void;
   /** Pick tool: how the cloud is cut into pieces, and the piece size (0 = auto). */
   pickMode?: 'pieces' | 'connected';
   onPickModeChange?: (m: 'pieces' | 'connected') => void;
@@ -204,6 +209,8 @@ export function LabelPanel({
   lineBand = 0,
   onLineBandChange,
   instances = null,
+  prelabelSources = [],
+  onPrelabel,
   pickMode = 'pieces',
   onPickModeChange,
   pickSize = 0,
@@ -244,6 +251,11 @@ export function LabelPanel({
   const isNoOp = !!fromClasses && fromClasses.size === 1 && fromClasses.has(activeClass);
   const activeColumn = columns.find((c) => c.slug === activeSlug);
   const limitBoxZ = limitBox ? { min: limitBox.min.z, max: limitBox.max.z } : null;
+  // Pre-label draft: the chosen source column and its class map.
+  const [prelabel, setPrelabel] = useState<{
+    slug: string; map: Record<string, number> | null; onlyUnlabelled: boolean;
+  } | null>(null);
+  const prelabelSource = prelabel ? prelabelSources.find((s) => s.slug === prelabel.slug) : undefined;
 
   return (
     <div
@@ -898,6 +910,76 @@ export function LabelPanel({
         <div data-testid="label-unexported" className="mt-2 text-[10px] text-amber-400">
           Labels changed since this cloud was last exported. Export it to keep
           them: they are not saved when the app closes.
+        </div>
+      )}
+
+      {onPrelabel && prelabelSources.length > 0 && (
+        <div data-testid="label-prelabel" className="mt-2 text-[10px] text-neutral-300">
+          <select
+            data-testid="label-prelabel-source"
+            value={prelabel?.slug ?? ''}
+            onChange={(e) => {
+              const src = prelabelSources.find((s) => s.slug === e.target.value);
+              setPrelabel(src ? {
+                slug: src.slug,
+                map: defaultPrelabelMap(src.slug, src.classes, activeSlug, classes),
+                onlyUnlabelled: true,
+              } : null);
+            }}
+            title="Seed this column from a result another tool wrote (ground, wood/leaf, trees…)"
+            className="w-full px-1 py-1 rounded bg-neutral-700 text-neutral-200"
+          >
+            <option value="">Pre-label from another column…</option>
+            {prelabelSources.map((s) => <option key={s.slug} value={s.slug}>{s.label}</option>)}
+          </select>
+          {prelabel && prelabelSource && (
+            <div className="mt-1 p-1.5 rounded border border-neutral-700 bg-neutral-900/60">
+              {prelabel.map === null ? (
+                <p className="text-neutral-400">Instance ids are copied unchanged.</p>
+              ) : (
+                prelabelSource.classes.filter((c) => c.value !== 0).map((c) => (
+                  <label key={c.value} className="flex items-center gap-1 mb-0.5">
+                    <span className="flex-1 truncate">{c.label} →</span>
+                    <select
+                      data-testid={`label-prelabel-map-${c.value}`}
+                      value={prelabel.map![String(c.value)] ?? ''}
+                      onChange={(e) => {
+                        const next = { ...prelabel.map! };
+                        if (e.target.value === '') delete next[String(c.value)];
+                        else next[String(c.value)] = Number(e.target.value);
+                        setPrelabel({ ...prelabel, map: next });
+                      }}
+                      className="px-1 py-0.5 rounded bg-neutral-700 text-neutral-200"
+                    >
+                      <option value="">leave as is</option>
+                      {classes.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                  </label>
+                ))
+              )}
+              <label className="flex items-center gap-1 mt-1 text-neutral-400">
+                <input
+                  type="checkbox"
+                  data-testid="label-prelabel-only-unlabelled"
+                  checked={prelabel.onlyUnlabelled}
+                  onChange={(e) => setPrelabel({ ...prelabel, onlyUnlabelled: e.target.checked })}
+                />
+                Only points still Unclassified
+              </label>
+              <div className="flex gap-1 mt-1">
+                <button
+                  data-testid="label-prelabel-apply"
+                  disabled={busy || (prelabel.map !== null && Object.keys(prelabel.map).length === 0)}
+                  onClick={() => { onPrelabel(prelabel.slug, prelabel.map, prelabel.onlyUnlabelled); setPrelabel(null); }}
+                  className="flex-1 px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
+                >
+                  Pre-label
+                </button>
+                <button onClick={() => setPrelabel(null)}
+                  className="px-2 py-1 rounded bg-neutral-700 hover:bg-neutral-600">Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

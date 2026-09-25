@@ -4734,6 +4734,8 @@ export interface LabelStrokeRequest {
   depth_limit?: DepthLimit;
   /** Limiting box, ANDed with `region`. */
   limit_box?: CropOctreeRegion;
+  /** Pre-label: per-point class from another column (see LabelStroke.fromColumn). */
+  from_column?: { slug: string; map?: Record<string, number> };
   stroke_id: string;
 }
 

@@ -447,6 +447,12 @@ export interface LabelStroke {
   depthLimit?: DepthLimit;
   /** Limiting box ("Box" mode), ANDed in like the slab. */
   limitBox?: { kind: 'box'; min: [number, number, number]; max: [number, number, number] };
+  /**
+   * Pre-label (F8): take each point's class from another column instead of
+   * `toClass` — through `map` (source value → class; unmapped values are left
+   * alone), or unchanged when `map` is absent.
+   */
+  fromColumn?: { slug: string; map?: Record<string, number> };
 }
 
 /**

@@ -5978,7 +5978,7 @@ export default function PointCloudViewer({
     region: PendingDeleteRegion,
     // An instance action (merge, delete): its own class and From gate, and
     // none of the painting bounds — it means "every point of this instance".
-    override?: { toClass: number; fromClasses: number[] },
+    override?: { toClass: number; fromClasses?: number[]; fromColumn?: LabelStroke['fromColumn'] },
   ) => {
     const cloud = labelTargetCloud;
     const sessionId = cloud?.data.octree?.sessionId;
@@ -6028,6 +6028,7 @@ export default function PointCloudViewer({
       region,
       toClass: override ? override.toClass : labelActiveClass,
       fromClasses: override ? override.fromClasses : labelFromClasses ? [...labelFromClasses] : undefined,
+      ...(override?.fromColumn ? { fromColumn: override.fromColumn } : {}),
       ...(excludeClasses.length ? { excludeClasses } : {}),
       slab: activeSlab ? slabToPayload(activeSlab) : undefined,
       ...(depthLimit ? { depthLimit } : {}),
@@ -6164,6 +6165,29 @@ export default function PointCloudViewer({
       // silently disagreed, which is the exact failure C1-R warns about.
       slab, sectionTargetCloud,
       labelDepthMode, labelLimitBox, labelDepthTolerance]);
+
+  // ── Pre-label from another column (F8) ────────────────────────────────────
+  //
+  // Seed the column being edited from a result another tool already wrote
+  // (ground_class, wood_class, tree_instance, a model's output): one
+  // whole-cloud stroke whose classes come per point from that column, through
+  // a class map. One undo step, like any stroke, and nothing is baked.
+  const labelPrelabelSources = useMemo(() => {
+    if (!labelTargetCloud || !labelPalette) return [];
+    const bound = labelTargetCloud.data.octree?.classPalettes;
+    return labelColumns
+      .filter((c) => c.kind !== 'scalar' && !c.missing && c.slug !== labelPalette.slug)
+      .map((c) => ({ slug: c.slug, label: c.label, classes: (bound?.[c.slug] ?? paletteForColumn(c, c.slug)).classes }));
+  }, [labelTargetCloud, labelPalette, labelColumns, paletteForColumn]);
+  const handlePrelabel = useCallback((
+    source: string, map: Record<string, number> | null, onlyUnlabelled: boolean,
+  ) => {
+    void paintLabelStrokeRef.current?.(WHOLE_CLOUD, {
+      toClass: UNCLASSIFIED_VALUE,
+      fromClasses: onlyUnlabelled ? [UNCLASSIFIED_VALUE] : undefined,
+      fromColumn: { slug: source, ...(map ? { map } : {}) },
+    });
+  }, []);
 
   // ── Instance columns (F7) ─────────────────────────────────────────────────
   //
@@ -6486,9 +6510,23 @@ export default function PointCloudViewer({
       const excludeIndices = s.excludeClasses?.length
         ? new Set(s.excludeClasses.map((v) => valueToIndex.get(v) ?? -1))
         : null;
+      // A pre-label stroke reads its classes from the source column's tile
+      // attribute, through the stroke's value map (or unchanged).
+      const fromAttribute = s.fromColumn
+        ? {
+            name: s.fromColumn.slug,
+            indexOf: s.fromColumn.map
+              ? new Map(Object.entries(s.fromColumn.map)
+                .flatMap(([src, dst]) => {
+                  const i = valueToIndex.get(dst);
+                  return i === undefined ? [] : [[Number(src), i] as [number, number]];
+                }))
+              : valueToIndex,
+          }
+        : null;
       return {
         predicate, aabb: strokeAabb(s.region), tileMayHit: screenStrokeTileTest(s.region),
-        toIndex, fromIndices, excludeIndices,
+        toIndex, fromIndices, excludeIndices, fromAttribute,
       };
     });
     return {
@@ -25618,6 +25656,8 @@ export default function PointCloudViewer({
               ? { ...p, palette: labelPairOptions.find((o) => o.slug === p.slug)!.palette }
               : null),
           } : null}
+          prelabelSources={labelPrelabelSources}
+          onPrelabel={handlePrelabel}
           pickMode={labelPickMode}
           onPickModeChange={(m) => { setLabelPickMode(m); setLabelPickSize(0); }}
           pickSize={labelPickSize}

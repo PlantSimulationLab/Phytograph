@@ -34255,6 +34255,11 @@ class LabelStroke(BaseModel):
     depth_limit: Optional[DepthLimit] = None
     # Limiting box ("Box" mode): ANDed in like the slab, for any stroke kind.
     limit_box: Optional[CropOctreeRegion] = None
+    # Pre-label (F8): each selected point takes its class from another column
+    # (`slug`) instead of `to_class` — through `map` (source value -> class,
+    # string keys as JSON requires; unmapped values are left alone), or
+    # unchanged when `map` is absent. The From/exclude gates still apply.
+    from_column: Optional[dict] = None
 
 
 class LabelRegionRequest(BaseModel):
@@ -35526,6 +35531,28 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
             if stroke.limit_box.kind != "box":
                 raise HTTPException(status_code=400, detail="limit_box must be a 'box' region.")
             _canonical_region(stroke.limit_box.model_dump())
+        if stroke.from_column is not None:
+            fc_slug = stroke.from_column.get("slug")
+            if not isinstance(fc_slug, str) or fc_slug == slug:
+                raise HTTPException(status_code=400,
+                                    detail="from_column.slug must name ANOTHER column of this cloud.")
+            with _cloud_session_lock:
+                fc_ok = fc_slug in sess.extras
+            if not fc_ok:
+                raise HTTPException(status_code=400,
+                                    detail=f"from_column: the cloud has no column {fc_slug!r}.")
+            fc_map = stroke.from_column.get("map")
+            if fc_map is not None:
+                try:
+                    items = [(int(float(k)), int(v)) for k, v in fc_map.items()]
+                except (TypeError, ValueError, AttributeError):
+                    raise HTTPException(status_code=400,
+                                        detail="from_column.map must map class values to classes.")
+                for _, v in items:
+                    if not (MANUAL_CLASS_MIN <= v <= class_max):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"from_column.map targets must be in [{MANUAL_CLASS_MIN}, {class_max}].")
         if not (MANUAL_CLASS_MIN <= stroke.to_class <= class_max):
             raise HTTPException(
                 status_code=400,
@@ -35616,15 +35643,32 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
                 # Hidden and locked classes are never repainted.
                 idx = idx[~np.isin(np.rint(col[idx]).astype(np.int64),
                                    list(stroke.exclude_classes))]
+            if stroke.from_column is not None and idx.size:
+                # Per-point targets from the source column (pre-label).
+                src = np.rint(sess.extras[stroke.from_column["slug"]][idx]).astype(np.int64)
+                fc_map = stroke.from_column.get("map")
+                if fc_map is not None:
+                    keys = np.array([int(float(k)) for k in fc_map], dtype=np.int64)
+                    vals = np.array([int(v) for v in fc_map.values()], dtype=np.int64)
+                    order = np.argsort(keys)
+                    keys, vals = keys[order], vals[order]
+                    pos = np.minimum(np.searchsorted(keys, src), max(keys.size - 1, 0))
+                    hit = (keys.size > 0) & (keys[pos] == src) if keys.size else np.zeros(src.size, bool)
+                    idx, target = idx[hit], vals[pos[hit]]
+                else:
+                    target = np.clip(src, MANUAL_CLASS_MIN, class_max)
+            else:
+                target = np.full(idx.size, stroke.to_class, dtype=np.int64)
             selected_count = int(idx.size)
             # Exclude no-ops so `changed_count` means what it says and the delta
             # carries no dead weight for points already in the target class.
-            changed_idx = idx[np.rint(col[idx]).astype(np.int64) != stroke.to_class]
+            changing = np.rint(col[idx]).astype(np.int64) != target
+            changed_idx = idx[changing]
             if changed_idx.size:
                 history.append(_encode_label_delta(
                     stroke.stroke_id, changed_idx, col[changed_idx].copy(),
                 ))
-                col[changed_idx] = float(stroke.to_class)
+                col[changed_idx] = target[changing].astype(np.float32)
             applied.append({
                 "stroke_id": stroke.stroke_id,
                 "selected_count": selected_count,

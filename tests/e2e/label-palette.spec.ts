@@ -755,3 +755,34 @@ test('an instance stroke can set a semantic class too, in one undo step', async 
   await expect.poll(async () => await counts(panel), { timeout: 30_000 })
     .toEqual({ '1': 24, '3': 36 });
 });
+
+test('pre-label seeds a column from another column, through a class map, in one undo step', async () => {
+  const { page, panel } = await openLabelToolOnTreeCloud();
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ '1': 24, '3': 36 });
+  // Edit the hand-labelling column (wood/leaf), seeded from tree_instance.
+  await page.getByTestId('label-column-select').selectOption('manual_class');
+  await expect(panel).toHaveAttribute('data-label-slug', 'manual_class');
+  const woodValue = await panel.locator('[data-testid^="label-class-"]:not([data-testid="label-class-list"])', { hasText: 'Wood' }).first()
+    .getAttribute('data-testid').then((t) => t!.replace('label-class-', ''));
+  const leafValue = await panel.locator('[data-testid^="label-class-"]:not([data-testid="label-class-list"])', { hasText: 'Leaf' }).first()
+    .getAttribute('data-testid').then((t) => t!.replace('label-class-', ''));
+
+  await page.getByTestId('label-prelabel-source').selectOption('tree_instance');
+  // Nothing matches by name ("Tree 1" is not "Wood"), so nothing is mapped yet
+  // and there is nothing to apply.
+  await expect(page.getByTestId('label-prelabel-apply')).toBeDisabled();
+  await page.getByTestId('label-prelabel-map-1').selectOption(woodValue);
+  await page.getByTestId('label-prelabel-map-3').selectOption(leafValue);
+  await page.getByTestId('label-prelabel-apply').click();
+
+  await expect.poll(async () => await counts(panel), { timeout: 30_000 })
+    .toEqual({ [woodValue]: 24, [leafValue]: 36 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1');
+
+  await page.getByTestId('label-undo').click();
+  await expect.poll(async () => {
+    const c = await counts(panel);
+    return (c[woodValue] ?? 0) + (c[leafValue] ?? 0);
+  }, { timeout: 30_000 }).toBe(0);
+});

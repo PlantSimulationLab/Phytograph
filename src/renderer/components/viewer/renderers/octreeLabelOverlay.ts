@@ -81,6 +81,13 @@ export interface LabelStrokeRender {
   /** Never repaint points whose CURRENT index is in this set (hidden or locked
    *  classes). Applied after the From gate. */
   excludeIndices?: Set<number> | null;
+  /**
+   * A pre-label stroke (F8): the target is read PER POINT from another of the
+   * tile's attributes (e.g. `wood_class`), mapped from its value to a palette
+   * index, instead of being one `toIndex`. A value with no entry is left alone,
+   * as the backend does; a tile without the attribute is skipped.
+   */
+  fromAttribute?: { name: string; indexOf: ReadonlyMap<number, number> } | null;
 }
 
 export interface LabelOverlayState {
@@ -205,12 +212,22 @@ function replayStrokes(
     if (tileBox && stroke.tileMayHit && !stroke.tileMayHit(tileBox)) continue;
     const from = stroke.fromIndices;
     const exclude = stroke.excludeIndices?.size ? stroke.excludeIndices : null;
+    const src: ArrayLike<number> | null = stroke.fromAttribute
+      ? geometry.attributes?.[stroke.fromAttribute.name]?.array ?? null : null;
+    if (stroke.fromAttribute && !src) continue;
+    const indexOf = stroke.fromAttribute?.indexOf;
     for (let i = 0; i < count; i++) {
       if (from && !from.has(out[i])) continue;
       if (exclude && exclude.has(out[i])) continue;
       v.set(position.getX(i), position.getY(i), position.getZ(i))
         .applyMatrix4(matrixWorld);
-      if (stroke.predicate(v.x + ox, v.y + oy, v.z + oz)) out[i] = stroke.toIndex;
+      if (!stroke.predicate(v.x + ox, v.y + oy, v.z + oz)) continue;
+      if (src && indexOf) {
+        const t = indexOf.get(Math.round(src[i]));
+        if (t !== undefined) out[i] = t;
+      } else {
+        out[i] = stroke.toIndex;
+      }
     }
   }
 }
