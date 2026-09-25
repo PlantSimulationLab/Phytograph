@@ -67,7 +67,9 @@ apply to them.)
 
 | Shortcut | Action |
 |---|---|
-| <kbd>1</kbd>–<kbd>9</kbd> | Select the first nine classes as the paint class |
+| <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> | Select the first ten classes as the paint class |
+| <kbd>G</kbd> / <kbd>R</kbd> / <kbd>B</kbd> | Lasso / rectangle / brush |
+| <kbd>X</kbd> | Swap the paint class with the class it paints over |
 | Left-click | Place a lasso corner |
 | <kbd>Enter</kbd> or double-click | Close the lasso and paint the enclosed points |
 | Right-click | Remove the last lasso corner |

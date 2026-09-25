@@ -2586,7 +2586,7 @@ export default function PointCloudViewer({
    * region"; a brush is faster for touch-up and is depth-limited, so it does
    * not paint the trunk behind the leaf you aimed at.
    */
-  const [labelTool, setLabelTool] = useState<'lasso' | 'brush'>('lasso');
+  const [labelTool, setLabelTool] = useState<'lasso' | 'brush' | 'rect'>('lasso');
   /** Brush radius in CANVAS PIXELS — constant on screen, as a brush should be. */
   const [labelBrushPx, setLabelBrushPx] = useState(28);
   const [labelBrushCursor, setLabelBrushCursor] =
@@ -5483,18 +5483,24 @@ export default function PointCloudViewer({
     // Only the LASSO arms the polygon overlay. In brush mode the overlay would
     // sit over the canvas swallowing every mousedown, so the brush would never
     // receive one.
-    if (labelTargetCloud && labelDrawing && labelTool === 'lasso' && cropDrawState === 'idle') {
-      setCropDrawState('drawing-polygon');
+    //
+    // The draw state each label tool wants: the lasso draws a polygon, the
+    // rectangle a rect drag (the crop tool's own gesture, committed as a
+    // four-corner stroke), the brush neither. Switching TO the brush must also
+    // disarm an already-armed overlay: it fills the viewport and swallows every
+    // mousedown, so the brush would never receive one and would look dead.
+    if (!labelTargetCloud) return;
+    const want = !labelDrawing ? null
+      : labelTool === 'lasso' ? 'drawing-polygon'
+        : labelTool === 'rect' ? 'drawing-rect' : 'idle';
+    if (want === null) return;
+    if (cropDrawState !== want
+        && (cropDrawState === 'idle' || cropDrawState === 'drawing-polygon'
+          || cropDrawState === 'drawing-rect')) {
+      setCropDrawState(want);
       setPolygonInProgress([]);
-      return;
-    }
-    // Switching TO the brush must also disarm an already-armed lasso. Not
-    // arming it is not enough: the overlay stays mounted from before the
-    // switch, fills the viewport, and swallows every mousedown — so the brush
-    // would never receive one and would appear completely dead.
-    if (labelTargetCloud && labelTool === 'brush' && cropDrawState === 'drawing-polygon') {
-      setCropDrawState('idle');
-      setPolygonInProgress([]);
+      setRectDragStart(null);
+      rectDragCurrentRef.current = null;
     }
   }, [labelTargetCloud, labelDrawing, labelTool, cropDrawState]);
 
@@ -6306,6 +6312,45 @@ export default function PointCloudViewer({
   }, [labelTargetCloud, labelFinder, showToast]);
   const labelFinderStepRef = useRef(stepLabelFinder);
   labelFinderStepRef.current = stepLabelFinder;
+
+  /**
+   * The label tool's single-key speed loop, while its panel is open. Returns
+   * true when it handled the key. Re-pointed every render (it reads the live
+   * palette and From gate), and called from the one keydown handler below.
+   *   1-9, 0  the first ten class rows (the panel numbers them)
+   *   B G R   brush, lasso, rectangle
+   *   X       swap the paint class with the From class (one From class only)
+   */
+  const labelKeyRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
+  // Read by the transform shortcuts: while the label panel is open its keys (R
+  // for the rectangle above all, which would otherwise start a Rotate of the
+  // selected cloud) belong to the label tool.
+  const labelPanelOpenRef = useRef(false);
+  labelPanelOpenRef.current = showLabelPanel;
+  labelKeyRef.current = (e: KeyboardEvent) => {
+    if (!showLabelPanel || !labelPalette || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (/^[0-9]$/.test(e.key)) {
+      const row = e.key === '0' ? 9 : Number(e.key) - 1;
+      const cls = labelPalette.classes[row];
+      if (!cls) return false;
+      setLabelActiveClass(cls.value);
+      return true;
+    }
+    const k = e.key.toLowerCase();
+    if (k === 'b' || k === 'g' || k === 'r') {
+      setLabelTool(k === 'b' ? 'brush' : k === 'g' ? 'lasso' : 'rect');
+      setLabelDrawing(true);
+      return true;
+    }
+    if (k === 'x') {
+      if (!labelFromClasses || labelFromClasses.size !== 1) return true;
+      const [from] = labelFromClasses;
+      setLabelFromClasses(new Set([labelActiveClass]));
+      setLabelActiveClass(from);
+      return true;
+    }
+    return false;
+  };
 
   /**
    * Bake one column's labels into its cloud's display octree, in the background.
@@ -7576,6 +7621,16 @@ export default function PointCloudViewer({
           setLabelDrawing(d => !d);
         }
       }
+      // The label tool's class, tool and swap keys (see labelKeyRef).
+      {
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing && labelKeyRef.current(e)) {
+          e.preventDefault();
+          return;
+        }
+      }
       // 'N' / Shift+N step through the places unlabelled points gather.
       if ((e.key === 'n' || e.key === 'N') && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const el = document.activeElement as HTMLElement | null;
@@ -8541,6 +8596,19 @@ export default function PointCloudViewer({
       false,
       displayOffsetRef.current,
     );
+    // The label tool's rectangle: a four-corner lasso stroke, painted exactly
+    // as a closed lasso is, and the tool stays armed for the next one.
+    if (labelModeRef.current) {
+      void paintLabelStrokeRef.current?.({
+        kind: 'polygon',
+        points: region.points.map((p) => [p.x, p.y] as [number, number]),
+        projection: region.projection,
+        view: region.view,
+        canvas: { width: region.canvasSize.width, height: region.canvasSize.height },
+      });
+      rearm();
+      return;
+    }
     setCropPolygon({
       points: region.points,
       projection: region.projection,
@@ -17742,6 +17810,8 @@ export default function PointCloudViewer({
       if (!modal) {
         if (isInputFocused()) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
+        // The label tool owns these keys while its panel is open (labelKeyRef).
+        if (labelPanelOpenRef.current && /^[0-9bgrx]$/.test(k)) return;
         // For a CLOUD, the Blender-style translate gesture only runs while the
         // Translate tool (and its panel) is open, so the panel's OK/Cancel is
         // always the commit surface — pressing `t` can't create an orphaned
@@ -22639,7 +22709,8 @@ export default function PointCloudViewer({
           rubber-bands the opposite corner; mouseup freezes the four corners
           into cropPolygon (camera snapshotted), so the backend / predicate
           path is identical to the polygon lasso. */}
-      {editMode === 'crop' && cropMode === 'rect' && (cropDrawState === 'drawing-rect' || cropPolygon) && (() => {
+      {((editMode === 'crop' && cropMode === 'rect' && (cropDrawState === 'drawing-rect' || cropPolygon))
+        || (editMode === 'label' && labelTool === 'rect' && cropDrawState === 'drawing-rect')) && (() => {
         const isDrawing = cropDrawState === 'drawing-rect';
         // Read the tick so the rubber-band re-renders as the cursor moves.
         void rectDragTick;

@@ -1,4 +1,4 @@
-import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck } from 'lucide-react';
+import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck, Square } from 'lucide-react';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 import type { LabelableColumn } from '../../../lib/classPalettes';
@@ -94,8 +94,8 @@ export interface LabelPanelProps {
   onSetFromAnyVisible: () => void;
   onUndoStroke: () => void;
   /** Selection primitive: lasso outline, or sphere brush. */
-  tool: 'lasso' | 'brush';
-  onToolChange: (t: 'lasso' | 'brush') => void;
+  tool: 'lasso' | 'brush' | 'rect';
+  onToolChange: (t: 'lasso' | 'brush' | 'rect') => void;
   /** Brush radius in screen pixels, shown so the wheel/bracket keys are discoverable. */
   brushPx: number;
   /**
@@ -189,6 +189,7 @@ export function LabelPanel({
       data-pending-strokes={pendingStrokes}
       data-label-dirty={dirty ? 'true' : 'false'}
       data-label-unexported={unexported ? 'true' : 'false'}
+      data-label-tool={tool}
       data-label-baking={baking ? 'true' : 'false'}
       data-label-drawing={drawing ? 'true' : 'false'}
       data-section-active={sectionActive ? 'true' : 'false'}
@@ -247,7 +248,7 @@ export function LabelPanel({
           <button
             data-testid="label-tool-lasso"
             onClick={() => onToolChange('lasso')}
-            title="Click to place outline vertices; Enter closes the shape"
+            title="Click to place outline vertices; Enter closes the shape (G)"
             className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 ${
               tool === 'lasso'
                 ? 'bg-blue-600 text-white'
@@ -258,9 +259,22 @@ export function LabelPanel({
             Lasso
           </button>
           <button
+            data-testid="label-tool-rect"
+            onClick={() => onToolChange('rect')}
+            title="Drag a rectangle; it selects at every depth, like the lasso (R)"
+            className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 ${
+              tool === 'rect'
+                ? 'bg-blue-600 text-white'
+                : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+            }`}
+          >
+            <Square className="w-3 h-3" />
+            Rect
+          </button>
+          <button
             data-testid="label-tool-brush"
             onClick={() => onToolChange('brush')}
-            title="Drag to paint. Depth-limited: it does not paint through the cloud"
+            title="Drag to paint. Depth-limited: it does not paint through the cloud (B)"
             className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 ${
               tool === 'brush'
                 ? 'bg-blue-600 text-white'
@@ -418,7 +432,7 @@ export function LabelPanel({
                 style={{ backgroundColor: rgbToHex(c.color) }}
               />
               <span className="flex-1 truncate text-neutral-200" title={c.label}>
-                {i < 9 ? `${i + 1}. ` : ''}{c.label}
+                {i < 10 ? `${(i + 1) % 10}. ` : ''}{c.label}
               </span>
               <span className="text-[10px] text-neutral-500 tabular-nums">
                 {classCounts[c.value] ?? 0}
@@ -563,6 +577,22 @@ export function LabelPanel({
           them: they are not saved when the app closes.
         </div>
       )}
+
+      <details data-testid="label-shortcuts" className="mt-2 text-[10px] text-neutral-400">
+        <summary className="cursor-pointer select-none text-neutral-500 hover:text-neutral-300">
+          Keyboard shortcuts
+        </summary>
+        <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+          <dt><kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd></dt><dd>Paint the numbered class</dd>
+          <dt><kbd>G</kbd> <kbd>R</kbd> <kbd>B</kbd></dt><dd>Lasso, rectangle, brush</dd>
+          <dt><kbd>X</kbd></dt><dd>Swap the paint class with the one it paints over</dd>
+          <dt><kbd>L</kbd></dt><dd>Stop drawing to look around, and back</dd>
+          <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Brush size</dd>
+          <dt><kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd></dt><dd>Next / previous unlabelled area</dd>
+          <dt>Alt+click</dt><dd>Show only that class</dd>
+          <dt><kbd>⌘Z</kbd> / <kbd>⇧⌘Z</kbd></dt><dd>Undo / redo a stroke</dd>
+        </dl>
+      </details>
 
       {bakeFailed && (
         <div data-testid="label-bake-failed-hint" className="mt-2 text-[10px] text-amber-400">

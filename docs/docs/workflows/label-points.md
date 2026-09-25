@@ -15,9 +15,10 @@ label anything you like.
 2. Click **Label Points** (the brush icon in the **Tools** › Segmentation
    group), or open the command palette and choose **Label Points**.
 3. Pick the class you want to paint by clicking it in the class list. The
-   number keys `1`–`9` select the first nine classes.
+   number keys `1`–`9` and `0` pick the first ten classes, in the order the
+   panel numbers them.
 4. Choose how you want to select points — **Lasso** or **Brush** (see
-   [Lasso or brush?](#lasso-or-brush) below).
+   [Lasso, rectangle or brush?](#lasso-rectangle-or-brush) below).
 5. Paint. With the lasso, click to place each corner of an outline, then press
    `Enter` (or double-click) to close it. With the brush, just drag. Points
    selected take the active class and recolour straight away.
@@ -61,15 +62,20 @@ does not do what you expect.
     **File › New** names how many clouds have labels that would be lost. An
     export clears it for the label columns it wrote.
 
-## Lasso or brush?
+## Lasso, rectangle or brush?
 
-Both are always available; they answer different questions.
+All three are always available (`G`, `R` and `B` switch between them); they
+answer different questions.
 
-| | Lasso | Brush |
-|---|---|---|
-| How you paint | Click each corner, `Enter` to close | Drag |
-| Best for | A precise outline around an irregular region | Fast touch-up and correction |
-| Depth | Selects at **every depth** inside the outline | Stops at the surface you are pointing at |
+| | Lasso | Rectangle | Brush |
+|---|---|---|---|
+| How you paint | Click each corner, `Enter` to close | Drag a box | Drag |
+| Best for | A precise outline around an irregular region | Sweeping a block quickly | Fast touch-up and correction |
+| Depth | Selects at **every depth** inside the outline | Every depth, like the lasso | Stops at the surface you are pointing at |
+
+`X` swaps the paint class with the class it paints **over** (when exactly one
+`over` dot is set): after painting **Wood** over **Leaf**, one key sets up
+painting **Leaf** over **Wood**. **Keyboard shortcuts**, at the bottom of the panel, lists them all.
 
 The brush is a sphere that sits on the geometry under your cursor, so it does
 not paint the trunk behind the leaf you aimed at. Set its size with the scroll

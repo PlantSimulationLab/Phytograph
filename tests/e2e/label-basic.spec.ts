@@ -939,3 +939,100 @@ test('the finder steps the camera through the places unlabelled points gather', 
   await expect(status).toHaveAttribute('data-places', '0', { timeout: 15_000 });
   await expect(status).toContainText('No unlabelled points left');
 });
+
+test('number keys pick the numbered class rows', async () => {
+  const { page, panel } = await openLabelTool();
+  const rows = page.getByTestId('label-class-list').locator('[data-testid^="label-class-"]');
+  const valueOf = async (i: number) =>
+    (await rows.nth(i).getAttribute('data-testid'))!.replace('label-class-', '');
+  await page.keyboard.press('1');
+  await expect(panel).toHaveAttribute('data-active-class', await valueOf(0));
+  await page.keyboard.press('2');
+  await expect(panel).toHaveAttribute('data-active-class', await valueOf(1));
+  // The rows are numbered for exactly this.
+  await expect(rows.nth(1)).toContainText('2.');
+});
+
+test('B, G and R switch the tool', async () => {
+  const { page, panel } = await openLabelTool();
+  await page.keyboard.press('b');
+  await expect(panel).toHaveAttribute('data-label-tool', 'brush');
+  await page.keyboard.press('r');
+  await expect(panel).toHaveAttribute('data-label-tool', 'rect');
+  await expect(page.getByTestId('crop-rect-overlay')).toBeVisible();
+  await page.keyboard.press('g');
+  await expect(panel).toHaveAttribute('data-label-tool', 'lasso');
+  await expect(page.getByTestId('crop-polygon-overlay')).toBeVisible();
+});
+
+test('X swaps the paint class with the From class', async () => {
+  const { page, panel } = await openLabelTool();
+  const first = Number(await panel.getAttribute('data-active-class'));
+  const second = await otherClass(page, first);
+  await page.getByTestId(`label-from-${second}`).click();
+  await page.keyboard.press('x');
+  await expect(panel).toHaveAttribute('data-active-class', String(second));
+  await expect(page.getByTestId(`label-class-${first}`)).toHaveAttribute('data-in-from', 'true');
+  await expect(page.getByTestId(`label-class-${second}`)).toHaveAttribute('data-in-from', 'false');
+});
+
+/** Drag a rectangle over `frac` of the rect overlay (from its left edge). */
+async function dragRect(page: LaunchedApp['page'], frac = 1) {
+  const overlay = page.getByTestId('crop-rect-overlay');
+  await expect(overlay).toBeVisible();
+  const box = (await overlay.boundingBox())!;
+  await page.mouse.move(box.x + 8, box.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 8 + (box.width - 16) * frac * 0.5, box.y + box.height / 2);
+  await page.mouse.move(box.x + 8 + (box.width - 16) * frac, box.y + box.height - 8);
+  await page.mouse.up();
+}
+
+test('the rectangle paints what it encloses, at every depth', async () => {
+  const { page, panel } = await openLabelTool();
+  await page.getByTestId('label-tool-rect').click();
+  // The cylinder is centred, so the left half of the view holds about half of it.
+  await dragRect(page, 0.5);
+  await expect(panel).toHaveAttribute('data-pending-strokes', '1', { timeout: 15_000 });
+  await expect.poll(async () => Number(await panel.getAttribute('data-labelled-count')),
+    { timeout: 15_000 }).toBeGreaterThan(0);
+  const half = Number(await panel.getAttribute('data-labelled-count'));
+  expect(half).toBeLessThan(60);
+  // The tool stays armed: a second, full rectangle takes the rest.
+  await dragRect(page, 1);
+  await expect(panel).toHaveAttribute('data-labelled-count', '60', { timeout: 15_000 });
+  await expect(panel).toHaveAttribute('data-pending-strokes', '2');
+});
+
+test('R picks the rectangle, not a Rotate of a mesh selected alongside the cloud', async () => {
+  // R is also the transform shortcut, and it rotates a selected mesh (or scan
+  // position). With a mesh selected together with the labelled cloud, pressing
+  // R to pick the rectangle started rotating the mesh.
+  const { app, page } = session;
+  await importFiles(app, page, 'import-auto', TINY);
+  await completeImportWizard(page);
+  await importFiles(app, page, 'import-auto', join(repoRoot, 'tests', 'e2e', 'fixtures', 'cube-mesh.ply'));
+  const meshRow = page.getByTestId('mesh-row').first();
+  await expect(meshRow).toBeVisible({ timeout: 30_000 });
+  const cloudRow = page.locator('[data-testid="scan-row"][data-scan-name="tiny"]');
+  // A click TOGGLES a scan row, so only click when it is not already selected.
+  if (await cloudRow.getAttribute('data-selected') !== 'true') {
+    await cloudRow.getByTestId('scan-row-name').click();
+  }
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+  await meshRow.click({ modifiers: ['ControlOrMeta'] });
+  await expect(cloudRow).toHaveAttribute('data-selected', 'true');
+
+  await page.getByTestId('tool-label').click();
+  const panel = page.getByTestId('label-panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('label-mode-toggle').click();          // stop drawing
+  const canvas = page.locator('canvas').first();
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.move(box.x + box.width / 2 + 5, box.y + box.height / 2 + 5);
+  await page.keyboard.press('r');
+  await expect(panel).toHaveAttribute('data-label-tool', 'rect');
+  await page.waitForTimeout(300);
+  await expect(page.getByTestId('transform-hud')).toHaveCount(0);
+});
