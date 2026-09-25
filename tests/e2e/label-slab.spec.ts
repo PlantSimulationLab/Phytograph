@@ -651,3 +651,65 @@ test('an inset map shows where the section sits, and follows it as it steps', as
   await page.getByTestId('section-clear').click();
   await expect(inset).toHaveCount(0);
 });
+
+test('the line tool paints above or below a line drawn across the section', async () => {
+  // TerraScan's Above/Below Line: cut a crown from its stem, or a trunk from the
+  // ground, in one stroke. The far plane is a 41 x 41 grid over x, z in
+  // [-1, 1] (0.05 apart); a line at z = 0.225 splits it between rows.
+  const { page } = await importDepthLayers();
+  await page.getByTestId('tool-label').click();
+  const label = page.getByTestId('label-panel');
+  await expect(label).toBeVisible();
+  // No section, no line: it is drawn IN a section.
+  await expect(page.getByTestId('label-tool-line')).toBeDisabled();
+  // Close it (its armed lasso covers the toolbar), make a section, come back.
+  await label.getByRole('button', { name: 'Close' }).click();
+  await expect(label).toHaveCount(0);
+
+  await page.getByTestId('tool-cross-section').click();
+  await expect(page.getByTestId('cross-section-panel')).toBeVisible();
+  await setSlab(page, 8, 1);
+  // Step there and back: a step re-frames the locked view face-on.
+  await page.keyboard.press('.');
+  await page.keyboard.press(',');
+
+  await page.getByTestId('tool-label').click();
+  await expect(label).toBeVisible();
+  await page.getByTestId('label-tool-line').click();
+  await expect(label).toHaveAttribute('data-label-tool', 'line');
+  await expect(page.getByTestId('crop-polygon-overlay')).toBeVisible();
+
+  const drawLine = async (z: number) => {
+    // Two clicks on the left half of the plane; past its ends the line holds
+    // its height, so it still spans the whole section.
+    for (const x of [-0.9, -0.1]) {
+      const p = await page.evaluate((w) => (window as any).__worldToScreen(w), [x, 8, z]);
+      await page.mouse.click(p.x, p.y);
+    }
+    await page.keyboard.press('Enter');
+  };
+
+  const labelled = async () => Number(await label.getAttribute('data-labelled-count'));
+  const ROW = 41;
+
+  // Above: rows z = 0.25 .. 1.0 — 16 rows. None of the near plane: the slab
+  // bounds the stroke.
+  await drawLine(0.225);
+  await expect(label).toHaveAttribute('data-pending-strokes', '1', { timeout: 20_000 });
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(16 * ROW);
+
+  // Below: rows z = -1.0 .. 0.2 — 25 rows.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(0);
+  await page.getByTestId('label-line-side-below').click();
+  await drawLine(0.225);
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(25 * ROW);
+
+  // Below, within 0.1 of the line: rows z = 0.15 and 0.2 only.
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(0);
+  await page.getByTestId('label-line-band').fill('0.1');
+  await page.getByTestId('label-line-band').press('Tab');
+  await drawLine(0.225);
+  await expect.poll(labelled, { timeout: 20_000 }).toBe(2 * ROW);
+});

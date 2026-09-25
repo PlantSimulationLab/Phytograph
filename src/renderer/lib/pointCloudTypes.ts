@@ -3,6 +3,7 @@
 // extracted leaf components (components/viewer/**), and the lib parsers can all
 // import them without a components → lib cycle. Pure types only — no runtime
 // code, so importing this module has zero side effects.
+import type { PolylineHalfspaceRegion } from './profileLine';
 import * as THREE from 'three';
 import type { BackendPointSource, ColumnPlan, ScanParamsFromFile, TriangulationMethod, DemLayer } from '../utils/backendApi';
 import type { ScanParameters } from './scanParameters';
@@ -402,7 +403,9 @@ export type PendingDeleteRegion =
       centers: Array<[number, number, number]>;
       radii: number[];
       invert?: boolean;
-    };
+    }
+  // Above / below / near a line drawn in a cross-section (lib/profileLine).
+  | PolylineHalfspaceRegion;
 
 /**
  * One manual-labelling edit: "inside `region`, points whose current class is in

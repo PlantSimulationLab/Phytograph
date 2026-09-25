@@ -88,7 +88,8 @@ nothing, rather than guessing a depth and labelling points you cannot see.
 
 The lasso remains the better tool for covering a large region in one go — and,
 paired with a [cross-section](#work-in-a-cross-section), for classifying a cloud
-systematically.
+systematically. Inside a section there is a fourth tool, the
+[line](#paint-above-or-below-a-line) (`P`).
 
 ## Choose what you are labelling
 
@@ -313,6 +314,25 @@ height of the cloud.
 A small **map** in the lower-left corner of the viewport shows the cloud from
 above with the section as a blue band, so you can tell where you are while every
 face-on slice looks alike. The band moves as you step.
+
+### Paint above or below a line
+
+With a section drawn, the Label panel's **Line** tool (`P`) cuts the section in
+one stroke — a stem from its crown, or a trunk from the ground. Click along the
+section to draw a line through the points, then `Enter` or double-click to
+finish. Every point in the section on the chosen side is painted:
+
+- **Above** or **Below** the line. Set **Within ±** to paint only a band that
+  close to the line — the 20 cm of ground under a profile, say. `0` means the
+  whole side.
+- **Near** — within **±** of the line on either side. Left at `0`, the band is
+  the section's own thickness.
+
+Past either end the line keeps the height of its last point, so a line that
+stops short of the section's edge still covers it. The line is drawn in the
+section, so it needs a view facing the section; a view looking along the
+section cannot place it. Like every stroke drawn in a section, it paints nothing
+outside the slab.
 
 ### Getting back to the whole cloud
 

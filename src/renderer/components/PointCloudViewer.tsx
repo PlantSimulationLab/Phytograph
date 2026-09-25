@@ -129,12 +129,13 @@ import {
   validatePalette, forkPaletteForSave, type ClassPalette, type LabelableColumn, type PalettePreset,
 } from '../lib/classPalettes';
 import type { LabelOverlayState } from './viewer/renderers/octreeLabelOverlay';
-import { LabelPanel } from './viewer/panels/LabelPanel';
+import { LabelPanel, type LabelTool } from './viewer/panels/LabelPanel';
 import { MANUAL_CLASS_ATTRIBUTE, rgbToHex } from '../lib/classification';
 import { useViewportBlockZone } from '../hooks/useViewportBlockZone';
 import { ViewportBlockedZone } from './viewer/overlays/ViewportBlockedZone';
 import { SectionInset } from './viewer/overlays/SectionInset';
 import { sampleOctreeFootprint } from '../lib/sectionInset';
+import { profileLinePredicate, profileLineRegion, screenToProfile, type ProfileLineSide } from '../lib/profileLine';
 import { pendingDeletesToClipBoxes, pendingDeletesToCropMaskRules, splitDeletesByClipBudget, MAX_CLIP_BOXES } from '../lib/deletePreview';
 import { stepCounter, stepReporter } from '../lib/stepProgress';
 import {
@@ -2588,7 +2589,10 @@ export default function PointCloudViewer({
    * region"; a brush is faster for touch-up and is depth-limited, so it does
    * not paint the trunk behind the leaf you aimed at.
    */
-  const [labelTool, setLabelTool] = useState<'lasso' | 'brush' | 'rect'>('lasso');
+  const [labelTool, setLabelTool] = useState<LabelTool>('lasso');
+  // Line tool (above / below / near a line drawn in a section).
+  const [labelLineSide, setLabelLineSide] = useState<ProfileLineSide>('above');
+  const [labelLineBand, setLabelLineBand] = useState(0);
   /** Brush radius in CANVAS PIXELS — constant on screen, as a brush should be. */
   const [labelBrushPx, setLabelBrushPx] = useState(28);
   const [labelBrushCursor, setLabelBrushCursor] =
@@ -5306,6 +5310,8 @@ export default function PointCloudViewer({
     const cloud = clouds.find(c => selectedIds.has(c.id));
     return cloud?.data.octree?.sessionId ? cloud : null;
   }, [showLabelPanel, selectedIds, clouds]);
+  // The line tool draws in a section, so it needs one on the cloud being labelled.
+  const labelLineAvailable = !!labelTargetCloud && !!slab && sectionTargetCloud?.id === labelTargetCloud.id;
   const labelPendingEntry = pendingFor(labelPending, labelTargetCloud?.id, labelPalette?.slug);
   // Palette POSITIONS of the classes the eye has hidden, for the target cloud's
   // visibility mask (the overlay buffer holds positions, not class values).
@@ -5549,8 +5555,11 @@ export default function PointCloudViewer({
     // disarm an already-armed overlay: it fills the viewport and swallows every
     // mousedown, so the brush would never receive one and would look dead.
     if (!labelTargetCloud) return;
+    // The line tool draws with the lasso's polyline; with no section to draw
+    // it in (it has just been cleared) it falls back to the lasso.
+    if (labelTool === 'line' && !labelLineAvailable) { setLabelTool('lasso'); return; }
     const want = !labelDrawing ? null
-      : labelTool === 'lasso' ? 'drawing-polygon'
+      : labelTool === 'lasso' || labelTool === 'line' ? 'drawing-polygon'
         : labelTool === 'rect' ? 'drawing-rect' : 'idle';
     if (want === null) return;
     if (cropDrawState !== want
@@ -5561,7 +5570,7 @@ export default function PointCloudViewer({
       setRectDragStart(null);
       rectDragCurrentRef.current = null;
     }
-  }, [labelTargetCloud, labelDrawing, labelTool, cropDrawState]);
+  }, [labelTargetCloud, labelDrawing, labelTool, cropDrawState, labelLineAvailable]);
 
   /** True while the sphere brush owns the pointer. */
   const labelBrushActive = !!labelTargetCloud && labelDrawing && labelTool === 'brush';
@@ -6051,6 +6060,46 @@ export default function PointCloudViewer({
   // render is safe here because it holds no state, only the latest callback.
   paintLabelStrokeRef.current = paintLabelStroke;
 
+  /**
+   * Finish a LINE-tool polyline: each clicked pixel is cast onto the section's
+   * centre plane and becomes an [along, z] vertex, and the stroke paints the
+   * chosen side of that line — within the slab, which paintLabelStroke ANDs in
+   * as it does for every stroke drawn in a section. Null unless the line tool
+   * is live, so closePolygonFrom falls through to the lasso. Assigned in render
+   * for the same reason as paintLabelStrokeRef.
+   */
+  const labelLineCloseRef = useRef<((verts: { x: number; y: number }[]) => boolean) | null>(null);
+  labelLineCloseRef.current = labelTool === 'line' && labelLineAvailable && slab
+    ? (verts) => {
+        if (verts.length < 2) return false;
+        const cam = polygonCameraRef.current;
+        const size = polygonCanvasSizeRef.current;
+        if (!cam || !size) return false;
+        const frozen = polygonRegionFromCamera(verts, cam, size, false, displayOffsetRef.current);
+        const line: Array<[number, number]> = [];
+        for (const v of verts) {
+          const p = screenToProfile(v.x, v.y, frozen.projection, frozen.view, frozen.canvasSize, slab);
+          if (!p) {
+            showToast({
+              type: 'error',
+              title: 'The line must be drawn facing the section',
+              message: 'This view looks along the section, so a click cannot be placed in it. Lock the view to the section (or turn toward it) and draw again.',
+            });
+            setPolygonInProgress([]);
+            return false;
+          }
+          line.push(p);
+        }
+        // 'near' needs a band; without one, the section's own thickness is a
+        // scale the user has already chosen for this cloud.
+        const band = labelLineSide === 'near' && !(labelLineBand > 0) ? slab.depth : labelLineBand;
+        void paintLabelStrokeRef.current?.(profileLineRegion(slab, line, labelLineSide, band));
+        setPolygonInProgress([]);
+        setCropDrawState('idle');
+        return true;
+      }
+    : null;
+
   // World-space membership test for a committed region, mirroring exactly what
   // the backend's `_region_mask` does for the same payload — the preview and
   // the applied result therefore agree by construction rather than by two
@@ -6089,6 +6138,11 @@ export default function PointCloudViewer({
         }
         return false;
       };
+    }
+    if (region.kind === 'polyline_halfspace') {
+      // Camera-free, like the slab it is drawn in: the backend's
+      // _polyline_halfspace_mask, pinned to the same contract file.
+      return profileLinePredicate(region);
     }
     // squares_union (the erase brush's shape) — not produced by the label tool
     // in Phase 1, but replayable if a stroke ever carries one.
@@ -6398,6 +6452,12 @@ export default function PointCloudViewer({
     const k = e.key.toLowerCase();
     if (k === 'b' || k === 'g' || k === 'r') {
       setLabelTool(k === 'b' ? 'brush' : k === 'g' ? 'lasso' : 'rect');
+      setLabelDrawing(true);
+      return true;
+    }
+    if (k === 'p') {
+      if (!labelLineAvailable) return true;   // no section: nothing to draw the line in
+      setLabelTool('line');
       setLabelDrawing(true);
       return true;
     }
@@ -7587,6 +7647,8 @@ export default function PointCloudViewer({
   // close on. Returns whether it closed, so a caller can decide (the lasso
   // needs at least a triangle).
   const closePolygonFrom = useCallback((verts: { x: number; y: number }[]): boolean => {
+    // The label LINE tool shares this polyline but is an open line, not a shape.
+    if (labelModeRef.current && labelLineCloseRef.current) return labelLineCloseRef.current(verts);
     if (verts.length < 3) return false;
     if (!polygonCameraRef.current || !polygonCanvasSizeRef.current) return false;
     const region = polygonRegionFromCamera(
@@ -17870,7 +17932,7 @@ export default function PointCloudViewer({
         if (isInputFocused()) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         // The label tool owns these keys while its panel is open (labelKeyRef).
-        if (labelPanelOpenRef.current && /^[0-9bgrx]$/.test(k)) return;
+        if (labelPanelOpenRef.current && /^[0-9bgrxp]$/.test(k)) return;
         // For a CLOUD, the Blender-style translate gesture only runs while the
         // Translate tool (and its panel) is open, so the panel's OK/Cancel is
         // always the commit surface — pressing `t` can't create an orphaned
@@ -22735,7 +22797,7 @@ export default function PointCloudViewer({
                     strokeDasharray="4 4"
                   />
                 )}
-                {points.length >= 3 && cursor && (
+                {points.length >= 3 && cursor && !(editMode === 'label' && labelTool === 'line') && (
                   <line
                     x1={cursor.x}
                     y1={cursor.y}
@@ -25230,6 +25292,10 @@ export default function PointCloudViewer({
           onEditPalette={() => setShowPaletteEditor(true)}
           tool={labelTool}
           onToolChange={setLabelTool}
+          lineSide={labelLineSide}
+          onLineSideChange={setLabelLineSide}
+          lineBand={labelLineBand}
+          onLineBandChange={setLabelLineBand}
           brushPx={labelBrushPx}
           drawing={labelDrawing}
           onToggleDrawing={() => setLabelDrawing(v => !v)}

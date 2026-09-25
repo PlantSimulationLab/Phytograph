@@ -1,4 +1,8 @@
-import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck, Square } from 'lucide-react';
+import { Brush, X, Undo2, Eye, EyeOff, Palette, Shuffle, Lasso, Lock, Unlock, ShieldCheck, Square, Spline } from 'lucide-react';
+import { DebouncedNumberInput } from '../../DebouncedNumberInput';
+import type { ProfileLineSide } from '../../../lib/profileLine';
+
+export type LabelTool = 'lasso' | 'brush' | 'rect' | 'line';
 import type { ClassDef } from '../../../lib/classification';
 import { rgbToHex } from '../../../lib/classification';
 import type { LabelableColumn } from '../../../lib/classPalettes';
@@ -94,8 +98,14 @@ export interface LabelPanelProps {
   onSetFromAnyVisible: () => void;
   onUndoStroke: () => void;
   /** Selection primitive: lasso outline, or sphere brush. */
-  tool: 'lasso' | 'brush' | 'rect';
-  onToolChange: (t: 'lasso' | 'brush' | 'rect') => void;
+  tool: LabelTool;
+  onToolChange: (t: LabelTool) => void;
+  /** Line tool: which side of the drawn line to paint. */
+  lineSide?: ProfileLineSide;
+  onLineSideChange?: (s: ProfileLineSide) => void;
+  /** Line tool: limit to within this distance of the line; 0 = no limit. */
+  lineBand?: number;
+  onLineBandChange?: (b: number) => void;
   /** Brush radius in screen pixels, shown so the wheel/bracket keys are discoverable. */
   brushPx: number;
   /**
@@ -156,6 +166,10 @@ export function LabelPanel({
   onUndoStroke,
   tool,
   onToolChange,
+  lineSide = 'above',
+  onLineSideChange,
+  lineBand = 0,
+  onLineBandChange,
   brushPx,
   columns,
   activeSlug,
@@ -284,7 +298,63 @@ export function LabelPanel({
             <Brush className="w-3 h-3" />
             Brush
           </button>
+          <button
+            data-testid="label-tool-line"
+            onClick={() => onToolChange('line')}
+            disabled={!sectionActive}
+            title={sectionActive
+              ? 'Draw a line across the section; everything above or below it is painted (P)'
+              : 'Draw a cross-section first: the line is drawn in a section'}
+            className={`flex-1 px-2 py-1 text-[10px] rounded flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed ${
+              tool === 'line'
+                ? 'bg-blue-600 text-white'
+                : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+            }`}
+          >
+            <Spline className="w-3 h-3" />
+            Line
+          </button>
         </div>
+        {tool === 'line' && (
+          <div data-testid="label-line-options" data-line-side={lineSide} className="mt-1.5">
+            <div className="flex gap-1">
+              {(['above', 'below', 'near'] as const).map((s) => (
+                <button
+                  key={s}
+                  data-testid={`label-line-side-${s}`}
+                  onClick={() => onLineSideChange?.(s)}
+                  className={`flex-1 px-2 py-0.5 text-[10px] rounded ${
+                    lineSide === s
+                      ? 'bg-sky-700 text-white'
+                      : 'bg-neutral-700 text-neutral-300 hover:bg-neutral-600'
+                  }`}
+                >
+                  {s === 'above' ? 'Above' : s === 'below' ? 'Below' : 'Near'}
+                </button>
+              ))}
+            </div>
+            <label className="flex items-center gap-1.5 mt-1 text-[10px] text-neutral-400">
+              <span className="shrink-0">Within ±</span>
+              <DebouncedNumberInput
+                data-testid="label-line-band"
+                value={lineBand}
+                onCommit={(v) => onLineBandChange?.(v)}
+                min={0}
+                debounceMs={0}
+                title={lineSide === 'near'
+                  ? 'How close to the line a point must be'
+                  : 'Only paint this close to the line; 0 = everything on that side'}
+                className="w-16 px-1.5 py-0.5 bg-neutral-900 border border-neutral-700 rounded text-[10px] text-neutral-200"
+              />
+              <span className="text-neutral-500">
+                {lineSide === 'near' ? '(0 = section thickness)' : '(0 = no limit)'}
+              </span>
+            </label>
+            <p className="text-[9px] text-neutral-500 mt-1 leading-tight">
+              Click along the section, Enter or double-click to finish.
+            </p>
+          </div>
+        )}
         {tool === 'brush' && (
           <p data-testid="label-brush-size" data-brush-px={brushPx}
             className="text-[9px] text-neutral-500 mt-1 leading-tight">
@@ -584,7 +654,7 @@ export function LabelPanel({
         </summary>
         <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
           <dt><kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd></dt><dd>Paint the numbered class</dd>
-          <dt><kbd>G</kbd> <kbd>R</kbd> <kbd>B</kbd></dt><dd>Lasso, rectangle, brush</dd>
+          <dt><kbd>G</kbd> <kbd>R</kbd> <kbd>B</kbd> <kbd>P</kbd></dt><dd>Lasso, rectangle, brush, line (in a section)</dd>
           <dt><kbd>X</kbd></dt><dd>Swap the paint class with the one it paints over</dd>
           <dt><kbd>L</kbd></dt><dd>Stop drawing to look around, and back</dd>
           <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Brush size</dd>

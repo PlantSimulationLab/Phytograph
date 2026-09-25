@@ -30890,10 +30890,55 @@ def _canonical_region(region: dict) -> str:
             float(region.get("offset", 0.0)),
             "1" if invert else "0",
         )
+    if kind == "polyline_halfspace":
+        invert = bool(region.get("invert", False))
+        a = region.get("a")
+        b = region.get("b")
+        for name, v in (("a", a), ("b", b)):
+            if (not isinstance(v, (list, tuple)) or len(v) != 2
+                    or not all(isinstance(c, (int, float)) and math.isfinite(c) for c in v)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"region.{name} must be an [x, y] pair for a polyline_halfspace region.",
+                )
+        if math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1])) < 1e-12:
+            raise HTTPException(
+                status_code=400,
+                detail="region.a and region.b must differ (the line needs a section frame).",
+            )
+        line = region.get("line")
+        if (not isinstance(line, (list, tuple)) or len(line) < 2
+                or not all(isinstance(v, (list, tuple)) and len(v) == 2
+                           and all(isinstance(c, (int, float)) and math.isfinite(c) for c in v)
+                           for v in line)):
+            raise HTTPException(
+                status_code=400,
+                detail="region.line must be at least 2 finite [along, z] vertices.",
+            )
+        side = region.get("side")
+        if side not in _PROFILE_LINE_SIDES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"region.side must be one of {', '.join(_PROFILE_LINE_SIDES)}. Got: {side!r}",
+            )
+        band = region.get("band")
+        if band is not None and (not isinstance(band, (int, float))
+                                 or not math.isfinite(band) or band <= 0):
+            raise HTTPException(status_code=400, detail="region.band must be a positive number.")
+        if side == "near" and band is None:
+            raise HTTPException(
+                status_code=400, detail="region.band is required for side 'near'.",
+            )
+        return "polyline_halfspace|{:.6g},{:.6g}|{:.6g},{:.6g}|{}|{}|{}|{}".format(
+            float(a[0]), float(a[1]), float(b[0]), float(b[1]),
+            ";".join("{:.6g},{:.6g}".format(float(u), float(z)) for u, z in line),
+            side, "" if band is None else "{:.6g}".format(float(band)),
+            "1" if invert else "0",
+        )
     raise HTTPException(
         status_code=400,
-        detail=(f"region.kind must be 'box', 'polygon', 'squares_union', 'spheres_union', or "
-                f"'slab'. Got: {kind!r}"),
+        detail=(f"region.kind must be 'box', 'polygon', 'squares_union', 'spheres_union', "
+                f"'slab', or 'polyline_halfspace'. Got: {kind!r}"),
     )
 
 
@@ -31061,6 +31106,48 @@ def _slab_mask(positions: "np.ndarray", region: dict) -> "np.ndarray":
     )
 
 
+_PROFILE_LINE_SIDES = ("above", "below", "near")
+
+
+def _polyline_halfspace_mask(positions: "np.ndarray", region: dict) -> "np.ndarray":
+    """Boolean mask for "above / below / near a line drawn in a section".
+
+    MIRRORS `profileLinePredicate` in src/renderer/lib/profileLine.ts; both are
+    pinned to src/shared/profileLine.contract.json.
+
+    The line lives in the SLAB FRAME: `line` is a list of [along, z] vertices,
+    where `along` is the distance from `a` along the a→b centreline and `z` is
+    world height — exactly the two axes a face-on section shows on screen. A
+    point's height is compared with the line's height at the point's own
+    `along`, linearly interpolated between vertices and held flat past either
+    end (np.interp's clamping), so a line drawn a few pixels short of the edge
+    of the section still covers it.
+
+    `side`: 'above' keeps z >= line, 'below' z <= line, 'near' |z - line| <=
+    band. `band`, when given, also bounds 'above'/'below' to within `band` of
+    the line ("the 30 cm of ground under this profile"). Camera-free, like the
+    slab, so preview and replay evaluate the same closed form. Not bounded
+    across the section — callers AND it with the slab (LabelStroke.slab)."""
+    a = np.asarray(region["a"], dtype=np.float64)
+    b = np.asarray(region["b"], dtype=np.float64)
+    t = b - a
+    length = float(np.hypot(t[0], t[1]))
+    t = t / length
+    line = np.asarray(region["line"], dtype=np.float64).reshape(-1, 2)
+    order = np.argsort(line[:, 0], kind="stable")
+    line = line[order]
+    along = (positions[:, :2] - a) @ t
+    dz = positions[:, 2] - np.interp(along, line[:, 0], line[:, 1])
+    side = region["side"]
+    band = region.get("band")
+    if side == "near":
+        return np.abs(dz) <= float(band)
+    mask = dz >= 0.0 if side == "above" else dz <= 0.0
+    if band is not None:
+        mask &= np.abs(dz) <= float(band)
+    return mask
+
+
 def _region_pixels(positions: "np.ndarray", region: dict) -> "np.ndarray":
     """Project `positions` to canvas pixels using a screen-space region's frozen
     camera. Returns (n, 2). Only meaningful for polygon / squares_union kinds.
@@ -31140,6 +31227,8 @@ def _region_mask(
         )
     elif kind == "slab":
         mask = _slab_mask(positions, region)
+    elif kind == "polyline_halfspace":
+        mask = _polyline_halfspace_mask(positions, region)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown region.kind: {kind!r}")
 
@@ -31308,6 +31397,12 @@ class CropOctreeRegion(BaseModel):
     zMin: Optional[float] = None
     zMax: Optional[float] = None
     offset: float = 0.0
+    # Polyline-halfspace fields ("above / below / near a line drawn in a
+    # section"). Shares `a`/`b` with the slab as its frame; `line` is [along, z]
+    # vertices in that frame. See `_polyline_halfspace_mask`.
+    line: Optional[List[List[float]]] = None
+    side: Optional[str] = None
+    band: Optional[float] = None
     invert: bool = False
 
 

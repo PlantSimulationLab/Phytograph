@@ -1,0 +1,54 @@
+{
+  "_comment": "Golden vectors for the 'polyline_halfspace' region (above / below / near a line drawn in a cross-section). Asserted by BOTH src/renderer/lib/profileLine.test.ts (profileLinePredicate, the live preview) and backend-api/tests/test_profile_line.py (_region_mask, what the session actually labels). Change one implementation without the other and its own test fails. Points are world [x, y, z]; `line` vertices are [along, z] in the a->b frame; past either end the line holds its end height.",
+  "points": [
+    [0, 5, 2],
+    [5, 0, 1.5],
+    [5, -3, 2.05],
+    [10, 0, 2.9],
+    [8, 1, 3],
+    [-4, 2, 0.5]
+  ],
+  "cases": [
+    {
+      "name": "above, unbounded",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [10, 0], "line": [[2, 1], [8, 3]], "side": "above" },
+      "expected": [true, false, true, false, true, false]
+    },
+    {
+      "name": "below, unbounded (a point ON the line is both above and below)",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [10, 0], "line": [[2, 1], [8, 3]], "side": "below" },
+      "expected": [false, true, false, true, true, true]
+    },
+    {
+      "name": "near, band 0.2",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [10, 0], "line": [[2, 1], [8, 3]], "side": "near", "band": 0.2 },
+      "expected": [false, false, true, true, true, false]
+    },
+    {
+      "name": "above, within a 0.5 band",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [10, 0], "line": [[2, 1], [8, 3]], "side": "above", "band": 0.5 },
+      "expected": [false, false, true, false, true, false]
+    },
+    {
+      "name": "below, within a 0.3 band",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [10, 0], "line": [[2, 1], [8, 3]], "side": "below", "band": 0.3 },
+      "expected": [false, false, false, true, true, false]
+    },
+    {
+      "name": "vertices drawn right to left",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [10, 0], "line": [[8, 3], [2, 1]], "side": "above" },
+      "expected": [true, false, true, false, true, false]
+    },
+    {
+      "name": "inverted",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [10, 0], "line": [[2, 1], [8, 3]], "side": "above", "invert": true },
+      "expected": [false, true, false, true, false, true]
+    },
+    {
+      "name": "diagonal section frame: along is measured on the a->b direction",
+      "region": { "kind": "polyline_halfspace", "a": [0, 0], "b": [3, 4], "line": [[0, 0], [5, 5]], "side": "above" },
+      "points": [[3, 4, 5.01], [3, 4, 4.9], [0, 0, 0.1], [-4, 3, 0.01], [-4, 3, -0.01]],
+      "expected": [true, false, true, true, false]
+    }
+  ]
+}
