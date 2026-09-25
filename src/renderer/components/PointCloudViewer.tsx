@@ -2980,10 +2980,14 @@ export default function PointCloudViewer({
       if (isFinite(min.x)) {
         const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
         const size = new THREE.Vector3().subVectors(max, min);
-        // Small delay to ensure camera controller is ready
+        // Small delay to ensure camera controller is ready. Dropped if the
+        // user turns the camera in the meantime: framing is a courtesy, and
+        // landing after they chose a view throws their view away.
+        const scheduledAt = performance.now();
         setTimeout(() => {
           const snapToView = (window as any).__snapToView;
-          if (snapToView) {
+          const movedAt = (window as any).__getCameraState?.()?.lastUserMoveAt ?? 0;
+          if (snapToView && movedAt <= scheduledAt) {
             snapToView('iso', { center, size });
           }
         }, 50);

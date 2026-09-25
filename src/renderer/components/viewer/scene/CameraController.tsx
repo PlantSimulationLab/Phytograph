@@ -217,8 +217,27 @@ export function CameraController({
   // where the camera should sit (e.g. (0,0,1) places the camera above for a
   // top-down view). Up is kept Z-up except for top/bottom, where looking along
   // ±Z is degenerate and we fall back to Y-up (matching snapToView).
+  // Set once the user moves the camera themselves (a snap, a frame, an orbit,
+  // a zoom) while content is on screen. The auto-framing below must not undo
+  // that: both its first framing and its one-shot robust RE-frame are
+  // asynchronous (the robust extent arrives with the session, seconds after
+  // the cloud appears), so either could land after the user had already turned
+  // to the view they wanted and throw it away. Cleared when the scene empties.
+  const userMovedCameraRef = useRef(false);
+  const hasContentRef = useRef(hasContent);
+  hasContentRef.current = hasContent;
+  // When the user last moved the camera (performance.now()). A deferred
+  // auto-frame scheduled BEFORE this is stale and must be dropped — see the
+  // new-cloud framing in PointCloudViewer.
+  const lastUserMoveAtRef = useRef(0);
+  const noteUserCamera = () => {
+    lastUserMoveAtRef.current = performance.now();
+    if (hasContentRef.current) userMovedCameraRef.current = true;
+  };
+
   const orientToAxis = useCallback((axis: { x: number; y: number; z: number }) => {
     if (!controlsRef.current) return;
+    noteUserCamera();
     const controls = controlsRef.current;
     const target: THREE.Vector3 = controls.target;
     const radius = camera.position.distanceTo(target) || 1;
@@ -248,6 +267,7 @@ export function CameraController({
   // falls back to the global bounds (i.e. "fit everything from here").
   const frameSelection = useCallback((target?: { center: THREE.Vector3; size: THREE.Vector3 }) => {
     if (!controlsRef.current) return;
+    noteUserCamera();
     const controls = controlsRef.current;
     // As in snapToView: the no-target "fit everything" form fits the CONTENT.
     const { center: worldCenter, size } = target || framingBoundsRef.current;
@@ -380,6 +400,7 @@ export function CameraController({
       } else if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) {
         return;
       }
+      noteUserCamera();
 
       e.preventDefault();
       e.stopPropagation();
@@ -807,6 +828,7 @@ export function CameraController({
           rearmTimerRef.current = null;
           hasFramedContentRef.current = false;
           framedRobustRef.current = false;
+          userMovedCameraRef.current = false;
         }, EMPTY_SCENE_REARM_MS);
       }
       return;
@@ -821,6 +843,12 @@ export function CameraController({
     // Already framed, and either we used the robust box or there is none to
     // upgrade to — nothing to do. (Without the second clause a scene that never
     // gets a robust box would re-frame on every bounds change, fighting the user.)
+    if (userMovedCameraRef.current) {
+      // The user has taken the camera: this content counts as framed.
+      hasFramedContentRef.current = true;
+      framedRobustRef.current = true;
+      return;
+    }
     if (hasFramedContentRef.current && (framedRobustRef.current || !haveRobust)) return;
     if (!controlsRef.current) return;
     // Wait one tick so OrbitControls is mounted (the mount effect above
@@ -828,6 +856,8 @@ export function CameraController({
     const timer = setTimeout(() => {
       if (!controlsRef.current) return;
       // Frame the CONTENT, not the outlier-inflated raw bounds.
+      // Re-checked here too: the user may have moved in the tick since.
+      if (userMovedCameraRef.current) return;
       snapToView('iso', framingBoundsRef.current);
       hasFramedContentRef.current = true;
       framedRobustRef.current = haveRobust;
@@ -994,6 +1024,7 @@ export function CameraController({
       const dy = e.clientY - last.y;
       if (dx === 0 && dy === 0) return;
       last = { x: e.clientX, y: e.clientY };
+      noteUserCamera();
       rotateAboutPivot(dx, dy);
     };
     const onPointerUp = () => { dragging = false; };
@@ -1059,6 +1090,7 @@ export function CameraController({
         ? [controlsRef.current.target.x, controlsRef.current.target.y, controlsRef.current.target.z]
         : null,
       framedContent: hasFramedContentRef.current,
+      lastUserMoveAt: lastUserMoveAtRef.current,
       // WORLD-space centre of the content (outlier-resistant); the zoom fallback
       // anchor converges here when the pointer misses geometry.
       contentCenter: [...contentCentreRef.current],
