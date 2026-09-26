@@ -880,6 +880,8 @@ export async function parsePointCloudFromPath(
   // session-create call — there is no second chance to apply it once the
   // session (and its octree) exist.
   sourceUnits?: string | null,
+  // `{source_slug: label}` for in-file scalars renamed in the wizard.
+  scalarLabels?: Record<string, string> | null,
 ): Promise<PointCloudData> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -895,7 +897,7 @@ export async function parsePointCloudFromPath(
       path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
       missDistanceThreshold ?? null, origin ?? null,
       opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
-      roleOverrides ?? null, sourceUnits ?? null,
+      roleOverrides ?? null, sourceUnits ?? null, scalarLabels ?? null,
     );
     return buildPointCloudFromOctree(meta, path, name, {
       asciiFormat,
@@ -962,6 +964,7 @@ export async function parsePointCloudsFromPath(
   // backend scales positions to metres by it at session create; there is no
   // second chance once the session and its octree exist.
   sourceUnits?: string | null,
+  scalarLabels?: Record<string, string> | null,
 ): Promise<ImportedScanPosition[]> {
   const sepIdx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   const name = sepIdx >= 0 ? path.slice(sepIdx + 1) : path;
@@ -973,7 +976,7 @@ export async function parsePointCloudsFromPath(
     const data = await parsePointCloudFromPath(
       path, asciiFormat, columnPlan, categoricalAttributes, worldShift,
       continuousAttributes, missDistanceThreshold, origin, opts, droppedSlugs,
-      roleOverrides, sourceUnits,
+      roleOverrides, sourceUnits, scalarLabels,
     );
     return [{ data, name, scanIndex: 0 }];
   }
@@ -982,7 +985,7 @@ export async function parsePointCloudsFromPath(
     path, asciiFormat ?? null, columnPlan ?? null, worldShift ?? null,
     missDistanceThreshold ?? null, origin ?? null,
     opts?.signal, opts?.onProgress, opts?.onRunId, droppedSlugs ?? null,
-    sourceUnits ?? null,
+    sourceUnits ?? null, roleOverrides ?? null, scalarLabels ?? null,
   );
 
   const ok = positions.filter(p => p.session && !p.error);

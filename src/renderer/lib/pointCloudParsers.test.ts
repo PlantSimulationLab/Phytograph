@@ -1125,7 +1125,7 @@ describe('parsePointCloudFromPath', () => {
     const body = JSON.parse((init as RequestInit).body as string);
     // `source_units: null` is the no-unit-chosen case — the backend reads it as
     // "no scaling", which is exactly what every import did before units existed.
-    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null, role_overrides: null, source_units: null });
+    expect(body).toEqual({ source_path: '/abs/path/scan.xyz', ascii_format: null, column_plan: null, world_shift: null, miss_distance_threshold: null, origin: null, drop_slugs: null, role_overrides: null, source_units: null, scalar_labels: null });
   });
 
   it('forwards the wizard source unit, which the backend scales positions by', async () => {
@@ -1311,6 +1311,31 @@ describe('parsePointCloudsFromPath', () => {
     expect(out[1].data.octree?.scanParams?.origin).toEqual([9, 9, 9]);
     const [url] = fetchSpy.mock.calls[0];
     expect(url).toContain('/api/cloud/session/create-multi');
+  });
+
+  it('sends the wizard\'s in-file role overrides and renames to create-multi', async () => {
+    // Every path-backed import goes through create-multi. It used to take
+    // neither field, so an in-file role reassignment (shot_time → Timestamp)
+    // and an in-file rename were computed by the wizard and dropped on the floor.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'cloud', session: sessionMeta('only') },
+    ]));
+    await parsePointCloudsFromPath('/abs/cloud.las', null, null, undefined, null, undefined,
+      null, null, undefined, null, { shot_time: 'timestamp' }, 'm', { Deviation: 'Leaf wetness' });
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.role_overrides).toEqual({ shot_time: 'timestamp' });
+    expect(body.scalar_labels).toEqual({ Deviation: 'Leaf wetness' });
+  });
+
+  it('sends null, not {}, when the wizard changed nothing', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(multiResponse([
+      { scan_index: 0, name: 'cloud', session: sessionMeta('only') },
+    ]));
+    await parsePointCloudsFromPath('/abs/cloud.las', null, null, undefined, null, undefined,
+      null, null, undefined, null, {}, 'm', {});
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.role_overrides).toBeNull();
+    expect(body.scalar_labels).toBeNull();
   });
 
   it('returns a single element for an ordinary single-scan source', async () => {

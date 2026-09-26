@@ -419,7 +419,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     // callers that don't offer a cancel (none, currently) still work.
     opts?: ImportProgressOptions,
   ): Promise<Scan[]> => {
-    const { input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, droppedSlugs, worldShift, units } = result;
+    const {
+      input, asciiFormat, columnPlan, categoricalSlugs, continuousSlugs, droppedSlugs,
+      roleOverrides, scalarLabels, worldShift, units,
+    } = result;
     // Far-field miss-detection threshold is a user setting; thread it into the
     // import so the backend's distance fallback honours it (the primary
     // target_index==99 signal ignores it).
@@ -427,10 +430,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     const positions = await parsePointCloudsFromPath(
       input.path, asciiFormat, columnPlan, categoricalSlugs, worldShift, continuousSlugs,
       missDistanceThreshold, null, opts, droppedSlugs,
-      // roleOverrides is not threaded on this path (unchanged); `units` is the
-      // wizard's source-unit choice, which the backend scales positions by at
-      // session create.
-      null, units,
+      // In-file role reassignments and renames. `units` is the wizard's
+      // source-unit choice, which the backend scales positions by at session
+      // create.
+      roleOverrides ?? null, units, scalarLabels ?? null,
     );
     for (const slug of categoricalSlugs) registerCategoricalSlug(slug);
     for (const slug of continuousSlugs) registerContinuousSlug(slug);

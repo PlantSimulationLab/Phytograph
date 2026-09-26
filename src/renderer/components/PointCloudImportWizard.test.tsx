@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { PointCloudImportWizard, type WizardResult } from './PointCloudImportWizard';
 import type { PointCloudPreviewResponse, PreviewColumn } from '../utils/backendApi';
 
@@ -413,5 +413,180 @@ describe('PointCloudImportWizard — role assignment on fixed-layout formats', (
     await open(LAS_COLUMNS, 'las');
     const values = [...roleSelect(3)!.options].map((o) => o.value);
     expect(values.sort()).toEqual(['extra', 'label']);
+  });
+});
+
+// ─── "Apply to all scans" ────────────────────────────────────────────────────
+//
+// THE BUG: the box copied the current scan's settings ONCE, when it was ticked.
+// Every edit made after that — a rename most visibly — landed on the scan on
+// screen only, while the box still read as checked and still unlocked Import,
+// so scans 2..N imported on their defaults. These drive the real component
+// through the real controls and read what each scan would actually be imported
+// with.
+
+type Deferred = { resolve: (p: PointCloudPreviewResponse) => void };
+
+async function openMany(
+  layouts: PreviewColumn[][],
+  opts: { kind?: string; defer?: number[] } = {},
+) {
+  const kind = opts.kind ?? 'ascii';
+  const deferred: Record<number, Deferred> = {};
+  vi.mocked(previewPointCloud).mockImplementation((path: string) => {
+    const i = Number(/scan(\d+)/.exec(path)![1]);
+    if (opts.defer?.includes(i)) {
+      return new Promise((resolve) => { deferred[i] = { resolve }; });
+    }
+    return Promise.resolve(preview(layouts[i], kind));
+  });
+  const onComplete = vi.fn();
+  render(
+    <PointCloudImportWizard
+      inputs={layouts.map((_, i) => ({
+        path: `/p/scan${i}.${kind === 'ascii' ? 'xyz' : 'las'}`, fileName: `scan${i}` }))}
+      onCancel={vi.fn()}
+      onComplete={onComplete}
+    />,
+  );
+  await waitFor(() => expect(screen.getAllByTestId('import-wizard-column').length)
+    .toBe(layouts[0].length));
+  const results = (): WizardResult[] => onComplete.mock.calls[0][0];
+  return { onComplete, results, deferred };
+}
+
+function nameBox(index: number): HTMLInputElement {
+  const cell = document.querySelector(`[data-testid="import-wizard-column"][data-col-index="${index}"]`);
+  return cell!.querySelector('[data-testid="import-wizard-name"]') as HTMLInputElement;
+}
+
+function roleOf(r: WizardResult, index: number) {
+  return r.columnPlan!.columns.find((c) => c.index === index)!;
+}
+
+describe('PointCloudImportWizard — apply to all scans', () => {
+  it('edits made AFTER ticking the box reach every scan', async () => {
+    const { results } = await openMany([ASCII_COLUMNS, ASCII_COLUMNS, ASCII_COLUMNS]);
+    fireEvent.click(screen.getByTestId('import-wizard-apply-all'));
+
+    // Rename, re-role, untick, and change the unit — all after the tick.
+    fireEvent.change(nameBox(4), { target: { value: 'Leaf wetness' } });
+    fireEvent.change(
+      document.querySelector('[data-col-index="3"] [data-testid="import-wizard-role"]')!,
+      { target: { value: 'intensity' } });
+    fireEvent.click(includeBox(3)!);   // untick intensity…
+    fireEvent.click(includeBox(3)!);   // …and back, restoring the new role
+    fireEvent.change(screen.getByTestId('import-wizard-units-select'), { target: { value: 'ft' } });
+    submit();
+
+    const rs = results();
+    expect(rs).toHaveLength(3);
+    for (const r of rs) {
+      expect(roleOf(r, 4).label).toBe('Leaf wetness');
+      expect(roleOf(r, 4).slug).toBe('Leaf wetness');
+      expect(roleOf(r, 3).role).toBe('intensity');
+      expect(r.units).toBe('ft');
+    }
+  });
+
+  it('an untick after the tick drops the column on every scan', async () => {
+    const { results } = await openMany([ASCII_COLUMNS, ASCII_COLUMNS]);
+    fireEvent.click(screen.getByTestId('import-wizard-apply-all'));
+    fireEvent.click(includeBox(4)!);
+    submit();
+    for (const r of results()) expect(roleOf(r, 4).role).toBe('skip');
+  });
+
+  it('an edit on a LATER scan propagates back to the first', async () => {
+    const { results } = await openMany([ASCII_COLUMNS, ASCII_COLUMNS]);
+    fireEvent.click(screen.getByTestId('import-wizard-apply-all'));
+    fireEvent.click(screen.getByTestId('import-wizard-next'));
+    await waitFor(() => expect(screen.getByTestId('import-wizard-step').textContent).toContain('2 of 2'));
+    fireEvent.change(nameBox(4), { target: { value: 'From scan two' } });
+    submit();
+    for (const r of results()) expect(roleOf(r, 4).label).toBe('From scan two');
+  });
+
+  it('without the box, an edit stays on its own scan', async () => {
+    const { results } = await openMany([ASCII_COLUMNS, ASCII_COLUMNS]);
+    fireEvent.change(nameBox(4), { target: { value: 'Only here' } });
+    fireEvent.click(screen.getByTestId('import-wizard-next'));
+    await waitFor(() => expect(screen.getByTestId('import-wizard-step').textContent).toContain('2 of 2'));
+    submit();
+    const [a, b] = results();
+    expect(roleOf(a, 4).label).toBe('Only here');
+    expect(roleOf(b, 4).label).toBe('Junk');
+  });
+
+  it('a scan whose preview lands AFTER the tick still gets the settings', async () => {
+    const { results, deferred } = await openMany(
+      [ASCII_COLUMNS, ASCII_COLUMNS], { defer: [1] });
+    fireEvent.click(screen.getByTestId('import-wizard-apply-all'));
+    fireEvent.change(nameBox(4), { target: { value: 'Late' } });
+
+    // Scan 1's preview arrives only now.
+    await act(async () => { deferred[1].resolve(preview(ASCII_COLUMNS)); });
+    await waitFor(() => expect((screen.getByTestId('import-wizard-import') as HTMLButtonElement).disabled).toBe(false));
+    submit();
+    expect(roleOf(results()[1], 4).label).toBe('Late');
+  });
+
+  it('a differently-laid-out scan is left alone and must be reviewed before import', async () => {
+    const OTHER = [...ASCII_COLUMNS,
+      col({ index: 5, header_name: 'extra2', suggested_slug: 'extra2', suggested_label: 'Extra2' })];
+    const { results } = await openMany([ASCII_COLUMNS, ASCII_COLUMNS, OTHER]);
+    fireEvent.click(screen.getByTestId('import-wizard-apply-all'));
+    fireEvent.change(nameBox(4), { target: { value: 'Renamed' } });
+
+    const importBtn = screen.getByTestId('import-wizard-import');
+    expect((importBtn as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('import-wizard-review-hint').textContent)
+      .toMatch(/Scan 3 has a different column layout/);
+
+    fireEvent.click(screen.getByTestId('import-wizard-next'));
+    fireEvent.click(screen.getByTestId('import-wizard-next'));
+    await waitFor(() => expect((importBtn as HTMLButtonElement).disabled).toBe(false));
+    submit();
+    const rs = results();
+    expect(roleOf(rs[1], 4).label).toBe('Renamed');
+    expect(roleOf(rs[2], 4).label).toBe('Junk');   // not overwritten
+  });
+
+  it('header names that run together do not count as one layout', async () => {
+    const A = [...ASCII_COLUMNS.slice(0, 3),
+      col({ index: 3, header_name: 'ab' }), col({ index: 4, header_name: 'c' })];
+    const B = [...ASCII_COLUMNS.slice(0, 3),
+      col({ index: 3, header_name: 'a' }), col({ index: 4, header_name: 'bc' })];
+    const { results } = await openMany([A, B]);
+    fireEvent.click(screen.getByTestId('import-wizard-apply-all'));
+    fireEvent.change(nameBox(4), { target: { value: 'Renamed' } });
+    fireEvent.click(screen.getByTestId('import-wizard-next'));
+    await waitFor(() => expect((screen.getByTestId('import-wizard-import') as HTMLButtonElement).disabled).toBe(false));
+    submit();
+    expect(roleOf(results()[1], 4).label).not.toBe('Renamed');
+  });
+
+  it('an in-file rename is display-only: scalarLabels carries it, slugs stay the file\'s', async () => {
+    const { results } = await openMany([LAS_COLUMNS, LAS_COLUMNS], { kind: 'las' });
+    fireEvent.click(screen.getByTestId('import-wizard-apply-all'));
+    fireEvent.change(nameBox(3), { target: { value: 'Leaf wetness' } });
+    fireEvent.change(
+      document.querySelector('[data-col-index="3"] [data-testid="import-wizard-role"]')!,
+      { target: { value: 'label' } });
+    fireEvent.click(includeBox(4)!);
+    submit();
+    for (const r of results()) {
+      expect(r.scalarLabels).toEqual({ Deviation: 'Leaf wetness' });
+      // Categorical registration and drops name the column by the FILE's slug —
+      // a renamed slug would name a field the cloud does not have.
+      expect(r.categoricalSlugs).toEqual(['Deviation']);
+      expect(r.droppedSlugs).toEqual(['amplitude']);
+    }
+  });
+
+  it('a no-edit in-file import sends no labels', async () => {
+    const { results } = await openMany([LAS_COLUMNS], { kind: 'las' });
+    submit();
+    expect(results()[0].scalarLabels).toEqual({});
   });
 });

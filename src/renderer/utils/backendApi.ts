@@ -4567,6 +4567,9 @@ export async function createCloudSession(
   // a label. undefined/null/'m' means no scaling, which is exactly what every
   // import did before units existed.
   sourceUnits?: string | null,
+  // `{source_slug: label}` — in-file scalar columns the user renamed in the
+  // wizard. Display-only: the slug stays the file's own.
+  scalarLabels?: Record<string, string> | null,
 ): Promise<CloudSessionMetadata> {
   try {
     // The endpoint streams PHP1 progress markers ahead of its JSON tail, so it
@@ -4587,6 +4590,8 @@ export async function createCloudSession(
         role_overrides: roleOverrides && Object.keys(roleOverrides).length
           ? roleOverrides : null,
         source_units: sourceUnits ?? null,
+        scalar_labels: scalarLabels && Object.keys(scalarLabels).length
+          ? scalarLabels : null,
       },
       signal,
       600000,
@@ -4654,6 +4659,11 @@ export async function createCloudSessions(
   // create. Every position in a multi-scan file shares it — they come from one
   // file, so one declared unit.
   sourceUnits?: string | null,
+  // See createCloudSession. Both apply to every position: they come from one
+  // file, so one schema. Before these were threaded, the wizard computed them
+  // and every octree import (which comes through here) silently dropped them.
+  roleOverrides?: Record<string, string> | null,
+  scalarLabels?: Record<string, string> | null,
 ): Promise<CloudScanPosition[]> {
   try {
     const res = await fetchJsonWithProgress<CloudScanPositions & { error?: string }>(
@@ -4667,6 +4677,10 @@ export async function createCloudSessions(
         origin: origin ?? null,
         drop_slugs: droppedSlugs?.length ? droppedSlugs : null,
         source_units: sourceUnits ?? null,
+        role_overrides: roleOverrides && Object.keys(roleOverrides).length
+          ? roleOverrides : null,
+        scalar_labels: scalarLabels && Object.keys(scalarLabels).length
+          ? scalarLabels : null,
       },
       signal,
       600000,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronLeft, ChevronRight, FileUp, AlertTriangle, Route } from 'lucide-react';
 import {
   previewPointCloud,
@@ -61,6 +61,10 @@ export interface WizardResult {
   // in the wizard. Empty for a no-edit import, which then behaves exactly as
   // before (pure backend auto-detection).
   roleOverrides?: Record<string, string>;
+  // `{source_slug: label}` for in-file scalar columns the user renamed. The
+  // slug is the file's own and stays; only the display label changes. ASCII
+  // renames ride `columnPlan` instead. Empty for a no-edit import.
+  scalarLabels?: Record<string, string>;
   // The complement of `droppedSlugs` — the in-file slugs still ticked. Only the
   // RIEGL extract path uses it, because that endpoint takes a keep list.
   keptSlugs: string[];
@@ -255,6 +259,9 @@ interface ColumnConfig {
   // an override, or a future improvement to auto-detection would be silently
   // overridden by a stale choice the user never made.
   detectedRole: string;
+  // The label the preview suggested, so `scalarLabels` sends only an in-file
+  // rename the user actually made.
+  detectedLabel: string;
   // Whether the column's ROLE may be reassigned on a fixed-layout format.
   // Distinct from `remappable` (ASCII-only: the column's POSITION can move).
   // An in-file scalar's name is an arbitrary vendor string, so auto-detection
@@ -359,6 +366,7 @@ function configFromColumn(c: PreviewColumn): ColumnConfig {
     typeHint: c.type_hint,
     remappable: c.remappable,
     detectedRole: role,
+    detectedLabel: c.suggested_label,
     roleAssignable: c.role_assignable ?? false,
   };
 }
@@ -531,10 +539,105 @@ function continuousSlugs(cfg: ScanConfig): string[] {
     .filter(Boolean);
 }
 
+// In-file renames, as `{source_slug: display label}`. An in-file column's slug
+// is the file's own field name and is what every other channel (drops, keeps,
+// role overrides, categorical registration) names it by, so a rename there
+// changes only the LABEL — changing the slug would make each of those channels
+// name a field the file does not have. ASCII renames ride the ColumnPlan instead.
+// Only labels the user actually changed are sent, so a no-edit import is
+// unchanged.
+export function scalarLabels(cfg: ScanConfig): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const c of cfg.columns) {
+    if (c.remappable || !c.imported || !SCALAR_ROLES.has(c.role)) continue;
+    const label = c.label.trim();
+    if (!c.slug || !label || label === c.detectedLabel) continue;
+    out[c.slug] = label;
+  }
+  return out;
+}
+
+// The identity "apply to all" matches scans by: format, column count, each
+// column's header, and whether it is positionally remappable. JSON-encoded so
+// header names can't run together (['ab','c'] vs ['a','bc']), and carrying the
+// kind so an .xyz and a .ply that happen to share names don't count as one
+// layout. null until the scan has a preview — an unknown layout matches nothing.
+export function layoutSignature(cfg: ScanConfig | null | undefined): string | null {
+  if (!cfg || !cfg.preview || cfg.autoOnly) return null;
+  return JSON.stringify([
+    cfg.preview.kind ?? '',
+    cfg.columns.map((c) => [c.headerName ?? null, c.remappable]),
+  ]);
+}
+
+// Copy `src`'s user settings onto `target`, or null when their layouts differ
+// (a 6-col layout must never land on a 4-col file). Pure, so the wizard can run
+// it inside a single setConfigs updater on every edit while "apply to all" is
+// on — the box has to mean "these settings, for every scan", not "a snapshot
+// of them taken when I ticked it".
+export function propagateSettings(src: ScanConfig, target: ScanConfig): ScanConfig | null {
+  const sig = layoutSignature(src);
+  if (sig === null || layoutSignature(target) !== sig) return null;
+  return {
+    ...target,
+    rgbIs255: src.rgbIs255,
+    // Carry the global shift too. It is auto-suggested per file as
+    // floor(min) per axis, so scans of ONE site get DIFFERENT shifts --
+    // measured 25 m and 28 m apart on a three-scan vineyard, because the
+    // scanners stood that far apart. Clouds render at
+    // `world - displayOffset - worldShift`, so scans that disagree about
+    // the shift are drawn in different frames: registration aligns them
+    // correctly in world coordinates and the viewport then re-separates
+    // them by the difference. "Apply to all" has to mean one frame.
+    shiftEnabled: src.shiftEnabled,
+    shift: { ...src.shift },
+    shiftTouched: true,
+    // Units are deliberately NOT carried when the target scan detected its
+    // own. A unit is a property of the individual FILE — a batch can mix a
+    // metre LAS with a feet one — and a detected unit is a fact read from
+    // that file, so overwriting it with a neighbour's choice would rescale
+    // real data on the strength of a UI convenience. Scans that could not
+    // detect one do inherit, which is the case apply-to-all is for: a
+    // directory of unit-less ASCII exports that are all in the same unit.
+    ...(target.unitsCertain ? {} : { units: src.units, unitsTouched: true }),
+    // The trajectory follows too (clearing it included), shown on the target
+    // as inherited rather than as that scan's own explicit choice.
+    trajectory: src.trajectory,
+    trajectoryExplicit: false,
+    trajectoryError: null,
+    columns: target.columns.map((col, idx) => {
+      const s = src.columns[idx];
+      if (!s) return col;
+      // Carry the Import choice too — the whole point of apply-to-all is
+      // that the user shouldn't have to untick the same junk column on
+      // every file of a matching-layout batch.
+      return { ...col, role: s.role, slug: s.slug, label: s.label,
+               imported: s.imported, prevRole: s.prevRole };
+    }),
+  };
+}
+
+// `configs` with every other scan re-synced from `configs[srcIdx]`. Scans with
+// no preview yet or a different layout are left alone; a late preview is
+// re-synced when it lands (see the preview effect).
+function propagateFrom(configs: ScanConfig[], srcIdx: number): ScanConfig[] {
+  const src = configs[srcIdx];
+  if (!src?.preview) return configs;
+  return configs.map((c, i) => (i === srcIdx ? c : (propagateSettings(src, c) ?? c)));
+}
+
 export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCloudImportWizardProps) {
   const [stepIdx, setStepIdx] = useState(0);
   const [configs, setConfigs] = useState<ScanConfig[]>(() => inputs.map(blankScanConfig));
   const [applyToAll, setApplyToAll] = useState(false);
+  // The scan whose settings "apply to all" copies from: the one the box was
+  // ticked on, then whichever scan was edited last. State for the review gate
+  // (which compares layouts against it); mirrored in refs so setConfigs
+  // updaters — including the preview effect's, which outlives any one render —
+  // read the current values rather than a stale closure.
+  const [sourceIdx, setSourceIdx] = useState(0);
+  const applyToAllRef = useRef(false);
+  const sourceIdxRef = useRef(0);
   // Furthest scan the user has reached via Next. For a multi-scan import we only
   // enable the Import button once they've either stepped through every scan
   // (maxStepReached === last) or checked "apply to all" — otherwise it's too easy
@@ -618,7 +721,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
               return acc ? [Math.min(acc[0], s[0]), Math.min(acc[1], s[1])]
                          : [s[0], s[1]];
             }, null);
-            return prev.map((c, idx) => {
+            const seeded = prev.map((c, idx) => {
               let base = idx === i
                 ? { ...c, preview, loading: false, warning: preview.warning ?? null,
                     columns, autoOnly: columns.length === 0 }
@@ -643,6 +746,13 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                 shift: { x: shared[0], y: shared[1], z: 0 },
               };
             });
+            // With "apply to all" on, a preview landing late must not leave its
+            // scan at defaults: the box was already ticked, Import is already
+            // enabled on the strength of it, and this scan was never shown the
+            // settings. Re-sync every scan from the source — which also covers
+            // the source's OWN preview arriving after the tick, and the source's
+            // shift being re-seeded by the suggestion this preview just shared.
+            return applyToAllRef.current ? propagateFrom(seeded, sourceIdxRef.current) : seeded;
           });
         } catch (e) {
           if (cancelled) return;
@@ -657,9 +767,26 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputs]);
 
+  // Apply `fn` to the scan on screen and, while "apply to all" is on, re-sync
+  // every matching scan from the result IN THE SAME UPDATE. Every per-scan
+  // setter goes through here: the box used to copy once, when ticked, so any
+  // edit made afterwards (a rename, most visibly) landed on the current scan
+  // only while the box still read as checked and still unlocked Import.
+  const editCurrent = useCallback((fn: (c: ScanConfig) => ScanConfig) => {
+    if (applyToAllRef.current) {
+      // The last-edited scan is the source from now on, so a late preview is
+      // synced to what the user last did, wherever they did it.
+      sourceIdxRef.current = stepIdx;
+      setSourceIdx(stepIdx);
+    }
+    setConfigs((prev) => {
+      const next = prev.map((c, i) => (i === stepIdx ? fn(c) : c));
+      return applyToAllRef.current ? propagateFrom(next, stepIdx) : next;
+    });
+  }, [stepIdx]);
+
   const updateColumn = useCallback((colIndex: number, patch: Partial<ColumnConfig>) => {
-    setConfigs((prev) => prev.map((c, i) => {
-      if (i !== stepIdx) return c;
+    editCurrent((c) => {
       // Assigning an exclusive (singleton) role demotes any OTHER column that
       // already holds it to 'skip' — the role can only live on one column, and a
       // silent duplicate would orphan the loser under a deduped slug. Only kicks
@@ -684,8 +811,8 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
           return col;
         }),
       };
-    }));
-  }, [stepIdx]);
+    });
+  }, [editCurrent]);
 
   // Toggle a column's Import checkbox. For a remappable (ASCII) column this
   // also moves the role to/from 'skip' so the existing positional plan
@@ -693,48 +820,42 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   // held before the untick is stashed in `prevRole` so re-ticking restores it
   // rather than stranding the column on 'skip'.
   const setColumnImported = useCallback((colIndex: number, imported: boolean) => {
-    setConfigs((prev) => prev.map((c, i) => {
-      if (i !== stepIdx) return c;
-      return {
-        ...c,
-        columns: c.columns.map((col) => {
-          if (col.index !== colIndex) return col;
-          if (!col.remappable) return { ...col, imported };
-          if (!imported) {
-            return { ...col, imported: false, prevRole: col.role, role: 'skip' };
-          }
-          // Re-tick: restore the previous role, falling back to a carried
-          // scalar when there is nothing to restore (a column that arrived as
-          // 'skip' from auto-detect and is now being opted in).
-          return { ...col, imported: true, role: col.prevRole ?? 'extra', prevRole: null };
-        }),
-      };
+    editCurrent((c) => ({
+      ...c,
+      columns: c.columns.map((col) => {
+        if (col.index !== colIndex) return col;
+        if (!col.remappable) return { ...col, imported };
+        if (!imported) {
+          return { ...col, imported: false, prevRole: col.role, role: 'skip' };
+        }
+        // Re-tick: restore the previous role, falling back to a carried
+        // scalar when there is nothing to restore (a column that arrived as
+        // 'skip' from auto-detect and is now being opted in).
+        return { ...col, imported: true, role: col.prevRole ?? 'extra', prevRole: null };
+      }),
     }));
-  }, [stepIdx]);
+  }, [editCurrent]);
 
   const setRgbIs255 = useCallback((v: boolean) => {
-    setConfigs((prev) => prev.map((c, i) => i === stepIdx ? { ...c, rgbIs255: v } : c));
-  }, [stepIdx]);
+    editCurrent((c) => ({ ...c, rgbIs255: v }));
+  }, [editCurrent]);
 
   const setShiftEnabled = useCallback((v: boolean) => {
-    setConfigs((prev) => prev.map((c, i) => i === stepIdx
-      ? { ...c, shiftEnabled: v, shiftTouched: true } : c));
-  }, [stepIdx]);
+    editCurrent((c) => ({ ...c, shiftEnabled: v, shiftTouched: true }));
+  }, [editCurrent]);
 
   const setShiftAxis = useCallback((axis: 'x' | 'y' | 'z', v: number) => {
     // Mark it edited so a preview still loading elsewhere in the batch cannot
     // overwrite the value with the shared suggestion.
-    setConfigs((prev) => prev.map((c, i) => i === stepIdx
-      ? { ...c, shift: { ...c.shift, [axis]: v }, shiftTouched: true } : c));
-  }, [stepIdx]);
+    editCurrent((c) => ({ ...c, shift: { ...c.shift, [axis]: v }, shiftTouched: true }));
+  }, [editCurrent]);
 
   // Choosing a unit by hand clears `unitsCertain`: whatever the file declared,
   // the value shown is now the user's choice, and labelling it "detected from
   // file" would be a lie. `unitsTouched` keeps a still-loading preview from
   // overwriting it, exactly as with the shift.
   const setUnits = useCallback((u: LengthUnit) => {
-    setConfigs((prev) => prev.map((c, i) => {
-      if (i !== stepIdx) return c;
+    editCurrent((c) => {
       const next = { ...c, units: u, unitsCertain: false, unitsTouched: true };
 
       // ── Re-derive the suggested shift in the NEW unit ──────────────────
@@ -763,27 +884,31 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         };
       }
       return next;
-    }));
-  }, [stepIdx]);
+    });
+  }, [editCurrent]);
 
   // Import a mobile-platform trajectory file for the current scan. The picked
   // PoseStream is set on this scan (marked an explicit choice) and, since most
   // multi-file imports are one platform pass split across files, auto-populated
   // onto every OTHER scan still at its inherited/empty default — never clobbering
   // a scan the user gave its own trajectory. A bad file shows an inline error.
+  // With "apply to all" on, matching scans follow the source regardless.
   const importTrajectory = useCallback(async () => {
     try {
       const stream = await pickAndParseTrajectory();
       if (!stream) return; // user cancelled the picker
-      setConfigs((prev) => prev.map((c, i) => {
-        if (i === stepIdx) {
-          return { ...c, trajectory: stream, trajectoryExplicit: true, trajectoryError: null };
-        }
-        // Default the other scans to this trajectory, but leave any scan the
-        // user explicitly set to its own choice.
-        if (!c.trajectoryExplicit) return { ...c, trajectory: stream, trajectoryError: null };
-        return c;
-      }));
+      setConfigs((prev) => {
+        const next = prev.map((c, i) => {
+          if (i === stepIdx) {
+            return { ...c, trajectory: stream, trajectoryExplicit: true, trajectoryError: null };
+          }
+          // Default the other scans to this trajectory, but leave any scan the
+          // user explicitly set to its own choice.
+          if (!c.trajectoryExplicit) return { ...c, trajectory: stream, trajectoryError: null };
+          return c;
+        });
+        return applyToAllRef.current ? propagateFrom(next, stepIdx) : next;
+      });
     } catch (err) {
       const msg = err instanceof PoseStreamParseError || err instanceof Error
         ? err.message : String(err);
@@ -792,76 +917,35 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
   }, [stepIdx]);
 
   // Clear the current scan's trajectory and drop its explicit flag (so a later
-  // import on another scan can again populate it by default). Only this scan is
-  // affected — trajectories already inherited by other scans are left in place.
+  // import on another scan can again populate it by default). Without "apply to
+  // all" only this scan is affected — trajectories already inherited by other
+  // scans are left in place.
   const clearTrajectory = useCallback(() => {
-    setConfigs((prev) => prev.map((c, i) => i === stepIdx
-      ? { ...c, trajectory: null, trajectoryExplicit: false, trajectoryError: null } : c));
-  }, [stepIdx]);
+    editCurrent((c) => ({ ...c, trajectory: null, trajectoryExplicit: false, trajectoryError: null }));
+  }, [editCurrent]);
 
-  // Copy the current scan's column config onto every other scan whose column
-  // signature matches (same count + same header names). Mismatches are skipped
-  // with a toast so a 6-col layout never lands on a 4-col file.
-  const applyCurrentToAll = useCallback(() => {
+  // Tick/untick "apply to all". Ticking syncs every matching scan from the one
+  // on screen once (with a toast saying how many), and from then on every edit
+  // re-syncs through `editCurrent` and every late preview through the preview
+  // effect. If this scan's own preview hasn't landed yet there is nothing to
+  // copy — the preview effect performs the sync when it does.
+  const toggleApplyToAll = useCallback((on: boolean) => {
+    applyToAllRef.current = on;
+    setApplyToAll(on);
+    if (!on) return;
+    sourceIdxRef.current = stepIdx;
+    setSourceIdx(stepIdx);
     const src = configs[stepIdx];
-    if (!src || !src.preview) return;
-    const sig = (s: ScanConfig | null) =>
-      s && s.preview
-        ? `${s.columns.length}|${s.columns.map((c) => c.headerName ?? '').join('')}`
-        : null;
-    const srcSig = sig(src);
+    if (!src?.preview) return;
     let applied = 0, skipped = 0;
-    setConfigs((prev) => prev.map((c, i) => {
-      if (i === stepIdx) return c;
-      // Only apply to scans already previewed (we need their signature).
-      if (!c.preview) { skipped++; return c; }
-      if (sig(c) !== srcSig) { skipped++; return c; }
-      applied++;
-      return {
-        ...c,
-        rgbIs255: src.rgbIs255,
-        // Carry the global shift too. It is auto-suggested per file as
-        // floor(min) per axis, so scans of ONE site get DIFFERENT shifts --
-        // measured 25 m and 28 m apart on a three-scan vineyard, because the
-        // scanners stood that far apart. Clouds render at
-        // `world - displayOffset - worldShift`, so scans that disagree about
-        // the shift are drawn in different frames: registration aligns them
-        // correctly in world coordinates and the viewport then re-separates
-        // them by the difference. "Apply to all" has to mean one frame.
-        shiftEnabled: src.shiftEnabled,
-        shift: { ...src.shift },
-        shiftTouched: true,
-        // Units are deliberately NOT carried when the target scan detected its
-        // own. A unit is a property of the individual FILE — a batch can mix a
-        // metre LAS with a feet one — and a detected unit is a fact read from
-        // that file, so overwriting it with a neighbour's choice would rescale
-        // real data on the strength of a UI convenience. Scans that could not
-        // detect one do inherit, which is the case apply-to-all is for: a
-        // directory of unit-less ASCII exports that are all in the same unit.
-        ...(c.unitsCertain ? {} : { units: src.units, unitsTouched: true }),
-        columns: c.columns.map((col, idx) => ({
-          ...col,
-          role: src.columns[idx]?.role ?? col.role,
-          slug: src.columns[idx]?.slug ?? col.slug,
-          label: src.columns[idx]?.label ?? col.label,
-          // Carry the Import choice too — the whole point of apply-to-all is
-          // that the user shouldn't have to untick the same junk column on
-          // every file of a matching-layout batch.
-          imported: src.columns[idx]?.imported ?? col.imported,
-          prevRole: src.columns[idx]?.prevRole ?? col.prevRole,
-        })),
-      };
-    }));
+    configs.forEach((c, i) => {
+      if (i === stepIdx) return;
+      if (propagateSettings(src, c)) applied++; else skipped++;
+    });
+    setConfigs((prev) => propagateFrom(prev, stepIdx));
     if (applied > 0) showToast({ title: `Applied settings to ${applied} other scan(s)`, type: 'success' });
     if (skipped > 0) showToast({ title: `Skipped ${skipped} scan(s) with a different column layout`, type: 'info' });
   }, [configs, stepIdx]);
-
-  // Whenever applyToAll is toggled on, propagate immediately and on subsequent
-  // edits to the current scan. Keep it simple: re-propagate on explicit action.
-  useEffect(() => {
-    if (applyToAll) applyCurrentToAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyToAll]);
 
   const allReady = useMemo(
     () => configs.every((c) => !c.loading && hasXYZ(c)),
@@ -880,6 +964,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
         droppedSlugs: droppedSlugs(c),
         keptSlugs: keptSlugs(c),
         roleOverrides: roleOverrides(c),
+        scalarLabels: scalarLabels(c),
         worldShift: effectiveShift(c),
         units: c.units,
         trajectory: c.trajectory,
@@ -895,10 +980,20 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
     return next;
   });
 
-  // For a single scan there's nothing to step through; for many, require that the
-  // user has either seen every scan (advanced Next to the last) or opted to apply
-  // one scan's settings to all.
-  const reviewedAll = total <= 1 || applyToAll || maxStepReached >= total - 1;
+  // For a single scan there's nothing to step through; for many, every scan must
+  // be either seen (stepped to with Next) or covered by "apply to all" — which
+  // only covers scans whose layout MATCHES the source. A differently-laid-out
+  // scan is skipped by the copy, so ticking the box must not let it import
+  // unseen on its defaults.
+  const unreviewed = useMemo(() => {
+    if (total <= 1) return [] as number[];
+    const srcSig = applyToAll ? layoutSignature(configs[sourceIdx]) : null;
+    return configs
+      .map((_c, i) => i)
+      .filter((i) => i > maxStepReached
+        && !(srcSig !== null && layoutSignature(configs[i]) === srcSig));
+  }, [total, applyToAll, configs, sourceIdx, maxStepReached]);
+  const reviewedAll = unreviewed.length === 0;
 
   const sampleRows = cfg?.preview?.sample_rows ?? [];
 
@@ -1040,7 +1135,13 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                                   data-testid="import-wizard-name"
                                   value={col.label}
                                   placeholder="field name"
-                                  onChange={(e) => updateColumn(col.index, { label: e.target.value, slug: e.target.value })}
+                                  // An in-file column keeps the file's slug —
+                                  // drops, keeps, role overrides and categorical
+                                  // registration all name it by that — so its
+                                  // rename is display-only (see scalarLabels).
+                                  onChange={(e) => updateColumn(col.index, col.remappable
+                                    ? { label: e.target.value, slug: e.target.value }
+                                    : { label: e.target.value })}
                                   className="w-full px-2 py-1 bg-neutral-700 border border-neutral-600 rounded text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500/50"
                                 />
                                 {suggestLabel && (
@@ -1383,7 +1484,7 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
                     type="checkbox"
                     data-testid="import-wizard-apply-all"
                     checked={applyToAll}
-                    onChange={(e) => setApplyToAll(e.target.checked)}
+                    onChange={(e) => toggleApplyToAll(e.target.checked)}
                     className="w-3.5 h-3.5 rounded border-neutral-600 bg-neutral-700 text-blue-500 focus:ring-0 cursor-pointer"
                   />
                   Apply these settings to all scans with the same column layout
@@ -1394,7 +1495,11 @@ export function PointCloudImportWizard({ inputs, onCancel, onComplete }: PointCl
           <div className="flex items-center gap-2">
             {total > 1 && !reviewedAll && (
               <span data-testid="import-wizard-review-hint" className="text-[11px] text-neutral-400">
-                Step through every scan, or check “apply to all”, to import.
+                {applyToAll && unreviewed.every((i) => !configs[i].loading)
+                  ? `Scan${unreviewed.length > 1 ? 's' : ''} ${unreviewed.map((i) => i + 1).join(', ')} `
+                    + `${unreviewed.length > 1 ? 'have' : 'has'} a different column layout — step to `
+                    + `${unreviewed.length > 1 ? 'them' : 'it'} to review.`
+                  : 'Step through every scan, or check “apply to all”, to import.'}
               </span>
             )}
             <button

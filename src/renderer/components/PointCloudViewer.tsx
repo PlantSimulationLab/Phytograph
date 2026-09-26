@@ -1804,14 +1804,14 @@ export default function PointCloudViewer({
                     setBulkImportProgress(b => (b ? { ...b, fraction, hint: message || undefined } : b)),
                   onRunId: (runId) => { bulkImportRunIdRef.current = runId; },
                 },
-                // droppedSlugs / roleOverrides are deliberately left at their
-                // defaults on this path, as they were before units existed —
-                // changing that is a separate question from this one.
-                undefined, undefined,
+                // The wizard's in-file choices: unticked columns, role
+                // reassignments and renames. They used to be left at their
+                // defaults here, so an XML bundle's LAS/PLY scans ignored them.
+                r.droppedSlugs, r.roleOverrides ?? null,
                 // The source unit the wizard resolved. The backend scales
                 // positions to metres by it at session create — there is no
                 // second chance once the session and its octree exist.
-                r.units);
+                r.units, r.scalarLabels ?? null);
               for (const slug of r.categoricalSlugs) registerCategoricalSlug(slug);
               for (const slug of r.continuousSlugs) registerContinuousSlug(slug);
               scan.data = data;

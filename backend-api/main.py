@@ -24408,6 +24408,32 @@ def _apply_role_overrides(extras: "Optional[Dict[str, np.ndarray]]",
     return new_extras, new_meta, timestamp_source
 
 
+def _apply_scalar_labels(extra_dims_meta: "Optional[List[dict]]",
+                         scalar_labels: "Optional[Dict[str, str]]"):
+    """Give in-file scalar columns the display names the user typed in the wizard.
+
+    Display-only by design: the SLUG stays the file's own field name, because
+    every other in-file channel — `drop_slugs`, `role_overrides`, the RIEGL keep
+    list and the renderer's categorical registration — names the column by it.
+    Renaming the slug would leave each of those pointing at a field that no
+    longer exists. Before this existed the wizard's rename box on a LAS/PLY/E57
+    column was sent nowhere at all.
+
+    `{source_slug: label}`, matched case-insensitively like `drop_slugs`. Runs
+    after the drop and role-override passes, so a dropped column is already
+    gone and an unknown slug is simply ignored. Returns the new meta list.
+    """
+    if not scalar_labels or extra_dims_meta is None:
+        return extra_dims_meta
+    wanted = {str(k).strip().lower(): str(v).strip()
+              for k, v in scalar_labels.items() if k and v and str(v).strip()}
+    if not wanted:
+        return extra_dims_meta
+    return [({**ed, "label": wanted[str(ed.get("slug", "")).lower()]}
+             if str(ed.get("slug", "")).lower() in wanted else ed)
+            for ed in extra_dims_meta]
+
+
 # Singleton roles: a cloud carries exactly one column of each, so a wizard column
 # plan must never assign the same one twice. The renderer enforces this too (it
 # demotes a prior holder — see EXCLUSIVE_ROLES in PointCloudImportWizard.tsx);
@@ -29595,13 +29621,21 @@ def _write_octree_labels(octree_dir: _Path, extra_dims: List[dict]) -> None:
     key to a DISPLAY name, leaving the key itself untouched. Written for every
     format, so LAS/LAZ, .riproject and ASCII all agree.
     """
+    mapping = _octree_label_mapping(extra_dims)
+    if not mapping:
+        return
+    (octree_dir / _OCTREE_LABELS_FILENAME).write_text(json.dumps(mapping))
+
+
+def _octree_label_mapping(extra_dims: "Optional[List[dict]]") -> dict:
+    """The slug→label map an octree's sidecar holds. One definition, shared by
+    the sidecar writer and `_build_octree_from_las`'s cache key, so the key can
+    never disagree with what the cached directory actually contains."""
     mapping = {ed["slug"]: ed["label"] for ed in (extra_dims or [])}
     # The time column never rides in `extra_dims` — it is float64 and lives on
     # its own session field — so it needs its label added explicitly.
     mapping.setdefault(_OCTREE_GPS_TIME_ATTRIBUTE, _OCTREE_GPS_TIME_LABEL)
-    if not mapping:
-        return
-    (octree_dir / _OCTREE_LABELS_FILENAME).write_text(json.dumps(mapping))
+    return mapping
 
 
 # How long to keep retrying the octree install before giving up. Windows only
@@ -34421,6 +34455,12 @@ def _build_octree_from_las(
     with open(las_path, "rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
+    # The labels sidecar is part of what the cached directory CONTAINS, so it is
+    # part of its identity. Keyed on the LAS bytes alone, an import whose only
+    # difference is a display name (the wizard's in-file rename, which changes
+    # no byte of the LAS) hit the first import's octree and showed its labels.
+    h.update(b"|labels|")
+    h.update(json.dumps(sorted(_octree_label_mapping(extra_dims_meta).items())).encode("utf-8"))
     cache_key = h.hexdigest()
     cache_dir = _octree_cache_root() / cache_key
 
@@ -34522,6 +34562,9 @@ class CloudSessionCreateRequest(BaseModel):
     # This renames the column at READ time; the source file is never modified.
     # `{}` / None means pure auto-detection, exactly as before.
     role_overrides: Optional[Dict[str, str]] = None
+    # `{source_slug: label}` — in-file scalar columns renamed in the wizard.
+    # Display-only: the slug stays the file's own (see `_apply_scalar_labels`).
+    scalar_labels: Optional[Dict[str, str]] = None
 
 
 class DeleteRegionRequest(BaseModel):
@@ -34957,6 +35000,9 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                 if extra_dims_meta is not None:
                     extra_dims_meta = [ed for ed in extra_dims_meta
                                        if str(ed.get("slug", "")) != _src_key]
+        # The wizard's in-file renames. Label only, after the drop and role
+        # passes — see `_apply_scalar_labels`.
+        extra_dims_meta = _apply_scalar_labels(extra_dims_meta, request.scalar_labels)
         # Intensity and colour are first-class session channels rather than
         # entries in `extras`, so they need dropping explicitly — the wizard
         # offers them a checkbox like any other column.

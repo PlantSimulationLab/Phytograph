@@ -192,7 +192,9 @@ dropdowns in; you correct anything that's wrong before importing:
   brightness.
 - **Rename fields** — a column set to **Scalar** or **Label** shows a name
   box under its dropdown; the name you give it is what appears later in the
-  color-by picker.
+  color-by picker and the Scans panel. For formats that define their own
+  layout (`.las`, `.laz`, `.ply`, `.pcd`, `.e57`, `.ptx`) the rename changes
+  only the displayed name. The field keeps the file's own name underneath.
 - **Global shift** — scans in a projected coordinate system (UTM, state plane)
   carry very large coordinates — hundreds of thousands to millions of metres
   from the meridian/equator. The wizard offers a **Global shift**: a checkbox
@@ -302,11 +304,19 @@ file that declared its unit is never overwritten by a neighbour's.
 Drop multiple files together, or select several at once from the
 **Import** menu. The wizard **steps through each scan** — use **Back** /
 **Next** to move between them, and tick **Apply these settings to all
-scans with the same column layout** to copy one scan's column mapping onto
-the others. So you don't import later scans without reviewing their column
-mapping, the **Import** button stays disabled until you've either stepped
-through to the last scan with **Next** or ticked **Apply these settings to
-all scans**. Each file becomes its own entry in the Scene panel with a
+scans with the same column layout** to copy one scan's settings onto the
+others: column roles, names, **Import** ticks, RGB range, global shift, units
+(where a scan couldn't detect its own) and trajectory. The box stays live
+while it's ticked. Every change you make afterwards, on any scan, is copied
+to all the others, including scans whose preview is still loading.
+
+A scan whose column layout differs (a different number or order of columns,
+different header names, or a different format) is never overwritten. So you
+don't import any scan without reviewing its settings, the **Import** button
+stays disabled until every scan has either been stepped to with **Next** or
+is covered by **Apply these settings to all scans**. If a scan has a
+different layout, the footer names it, and you step to it to review it.
+Each file becomes its own entry in the Scene panel with a
 distinct color; nothing is merged automatically. If you want to merge
 clouds, use [Stitch](register-compare.md#stitch) after import.
 

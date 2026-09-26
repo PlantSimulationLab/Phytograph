@@ -77,8 +77,8 @@ describe('wizard call sites', () => {
       join(process.cwd(), 'src/renderer/components/PointCloudImportWizard.tsx'), 'utf8');
 
     const block = src.slice(
-      src.indexOf('const applyCurrentToAll = useCallback'),
-      src.indexOf('// Whenever applyToAll is toggled on'));
+      src.indexOf('export function propagateSettings('),
+      src.indexOf('function propagateFrom('));
     expect(block.length).toBeGreaterThan(0);
     expect(block).toContain('shiftEnabled: src.shiftEnabled');
     expect(block).toContain('shift: { ...src.shift }');

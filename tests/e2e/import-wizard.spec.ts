@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { join } from 'node:path';
+import { copyFile, mkdir } from 'node:fs/promises';
 import { launchApp, repoRoot, type LaunchedApp } from './helpers/launchApp';
 import { importFiles } from './helpers/importFiles';
 import { completeImportWizard } from './helpers/importWizard';
@@ -346,30 +347,88 @@ test('wizard steps through a multi-file import', async () => {
   await expect(page.locator('[data-testid="scan-row"][data-scan-name="scalars"]')).toBeVisible({ timeout: 20_000 });
 });
 
-test('apply-to-all enables import without stepping through every scan', async () => {
+// Copy a fixture under a new stem, so a multi-scan import gets distinct scan
+// names (the scan row is looked up by name).
+async function fixtureCopies(src: string, stems: string[]): Promise<string[]> {
+  const ext = src.slice(src.lastIndexOf('.'));
+  const dir = test.info().outputPath('apply-all');
+  await mkdir(dir, { recursive: true });
+  return Promise.all(stems.map(async (stem) => {
+    const dest = join(dir, `${stem}${ext}`);
+    await copyFile(join(FIXTURES, src), dest);
+    return dest;
+  }));
+}
+
+// The display labels of the scalar fields a scan actually imported, read from
+// its expanded row in the Scans panel.
+async function importedFieldLabels(page: LaunchedApp['page'], scanName: string): Promise<string[]> {
+  const row = page.locator(`[data-testid="scan-row"][data-scan-name="${scanName}"]`);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  const scanId = await row.getAttribute('data-scan-id');
+  await page.getByTestId(`scan-expand-${scanId}`).click();
+  const cols = page.getByTestId(`scan-columns-${scanId}`);
+  await expect(cols).toBeVisible();
+  const listed = ((await cols.locator('[data-columns]').getAttribute('data-columns')) ?? '').split(',');
+  await page.getByTestId(`scan-expand-${scanId}`).click();
+  return listed;
+}
+
+test('apply-to-all carries edits made AFTER ticking it to every scan', async () => {
+  // THE BUG: the box copied scan 1's settings once, at the moment it was
+  // ticked. A rename made afterwards reached scan 1 only — while the box still
+  // read as checked and still unlocked Import — so scan 2 imported with the
+  // file's original name.
   const { app, page } = session;
-  // Two clouds with the SAME column layout so "apply to all" is meaningful.
-  await importFiles(app, page, 'import-point-cloud', [join(FIXTURES, 'scalars.xyz'), join(FIXTURES, 'scalars.xyz')]);
+  const files = await fixtureCopies('scalars.xyz', ['applyall-a', 'applyall-b']);
+  await importFiles(app, page, 'import-point-cloud', files);
 
   const wizard = page.getByTestId('import-wizard');
   await expect(wizard).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId('import-wizard-step')).toContainText('1 of 2');
-
-  // Still on scan 1 — Import is gated.
   const importBtn = page.getByTestId('import-wizard-import');
   await expect(importBtn).toBeDisabled();
 
-  // Checking "apply to all" tells the wizard the user's choices cover every
-  // scan, so Import enables without visiting the later scan(s).
+  // Tick FIRST — this is the order that lost the rename.
   await page.getByTestId('import-wizard-apply-all').check();
   await expect(importBtn).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByTestId('import-wizard-review-hint')).toBeHidden();
 
-  // Shared-session hygiene: this test never imports, so dismiss the wizard —
-  // its full-screen modal (which swallows Escape) would otherwise block the
-  // File → New reset before the next test.
-  await wizard.getByRole('button', { name: 'Cancel' }).last().click();
+  // The only rename box on scalars.xyz is Deviation (Timestamp and Target
+  // Index are canonical roles, which get none).
+  await page.getByTestId('import-wizard-name').first().fill('Leaf wetness');
+  await importBtn.click();
   await expect(wizard).toBeHidden();
+
+  for (const name of ['applyall-a', 'applyall-b']) {
+    const labels = await importedFieldLabels(page, name);
+    expect(labels, `${name} fields`).toContain('Leaf wetness');
+    expect(labels, `${name} fields`).not.toContain('Deviation');
+  }
+});
+
+test('apply-to-all renames an in-file (PLY) field on every scan', async () => {
+  // An in-file rename used to be sent nowhere at all. It is display-only — the
+  // field keeps the file's own name underneath — which also means both copies
+  // produce byte-identical octree input, so this doubles as the check that a
+  // rename is not lost to the octree cache (keyed on those bytes alone, the
+  // second import reused the first's octree and its labels).
+  const { app, page } = session;
+  const files = await fixtureCopies('tiny-scalars.ply', ['plyall-a', 'plyall-b']);
+  await importFiles(app, page, 'import-point-cloud', files);
+
+  const wizard = page.getByTestId('import-wizard');
+  await expect(wizard).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('import-wizard-apply-all').check();
+  const deviation = page.locator('[data-testid="import-wizard-column"]', { hasText: 'deviation' });
+  await deviation.getByTestId('import-wizard-name').fill('Stem lean');
+  await page.getByTestId('import-wizard-import').click();
+  await expect(wizard).toBeHidden();
+
+  for (const name of ['plyall-a', 'plyall-b']) {
+    const labels = await importedFieldLabels(page, name);
+    expect(labels, `${name} fields`).toContain('Stem lean');
+  }
 });
 
 test('mesh import does not open the wizard', async () => {
