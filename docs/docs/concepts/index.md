@@ -22,7 +22,9 @@ referring to the same physical plant.
 - :material-grid: **[Leaf area density](leaf-area-density.md)** — foliage density per voxel (m²/m³), inverted from how scan beams are intercepted.
 
 - :material-tree: **[Crown metrics](crown-metrics.md)** — fitted crown shape with height, width, volume, and related size measurements.
+- :material-clipboard-list: **[Tree inventory measurements](tree-inventory.md)** — how DBH, stem curve, lean, height and crown measures are defined and fitted, with sources.
 - :material-pine-tree: **[Stem detection & tiling](stem-detection-and-tiling.md)** — automatic trunk seeds, and segmenting large plots in stitched tiles.
 - :material-forest: **[Tree segmentation methods](tree-segmentation-methods.md)** — TreeIso vs. canopy height: how each finds trees, what each assumes, and which to use.
+- :material-forest: **[Stand metrics](stand-metrics.md)** — stems/ha, basal area, QMD, Lorey's height, canopy cover, competition and biomass, with sources.
 
 </div>

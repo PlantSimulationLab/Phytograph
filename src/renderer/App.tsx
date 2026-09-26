@@ -2005,10 +2005,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   // Tell main whether closing right now would destroy work, so the window
   // 'close' / 'before-quit' handlers can confirm first (src/main/quitConfirm.ts).
   //
-  // "Dirty" is just "the scene holds something": there is no project save, so a
+  // "Dirty" is "the scene holds something that is not in a saved project": a
   // cloud is at risk from the moment it is imported, and every edit after that
-  // (crop, erase, filter, bake, label) exists only in RAM. Main cannot read any
-  // of this, hence the push. Runs on every scene change — cheap, and staleness
+  // (crop, erase, filter, bake, label) exists only in RAM until File > Save
+  // Project writes it. Main cannot read any of this, hence the push. Runs on every scene change — cheap, and staleness
   // here means either a missing warning or a spurious one.
   const sceneObjectCount =
     scans.length +
@@ -2016,6 +2016,23 @@ function App({ onResetScene }: { onResetScene: () => void }) {
     scene.state.skeletons.length +
     scene.state.qsms.length +
     scene.state.ladResults.length;
+  // The scene exactly as last saved or opened as a project. Any dispatch makes
+  // a new state object, so "unchanged since the project was saved" is an
+  // identity test. The viewer marks it after a save or an open.
+  const [projectCleanState, setProjectCleanState] = useState<unknown>(null);
+  const sceneStateRef = useRef(scene.state);
+  sceneStateRef.current = scene.state;
+  useEffect(() => {
+    (window as any).__markProjectClean = () => setProjectCleanState(sceneStateRef.current);
+    // Opening a project reuses File → New's reset: free the old sessions and
+    // remount, after which the viewer takes the opened project.
+    (window as any).__resetSceneForProject = () => handleResetToNew();
+    return () => {
+      delete (window as any).__markProjectClean;
+      delete (window as any).__resetSceneForProject;
+    };
+  }, [handleResetToNew]);
+  const unchangedSinceProjectSave = projectCleanState !== null && projectCleanState === scene.state;
   // Clouds whose hand labels changed since they were last exported, pushed by
   // the viewer whenever it changes (for this confirmation and File > New's).
   // Labels are on the cloud from the stroke that paints them, so what is at
@@ -2023,10 +2040,10 @@ function App({ onResetScene }: { onResetScene: () => void }) {
   const [unexportedLabelClouds, setUnexportedLabelClouds] = useState(0);
   useEffect(() => {
     window.electronAPI?.setSceneDirty?.({
-      dirty: sceneObjectCount > 0,
+      dirty: sceneObjectCount > 0 && !unchangedSinceProjectSave,
       unexportedLabelClouds,
     });
-  }, [sceneObjectCount, unexportedLabelClouds]);
+  }, [sceneObjectCount, unexportedLabelClouds, unchangedSinceProjectSave]);
 
   // Subscribe to application-menu commands dispatched from main (src/main/menu.ts).
   // Most menu items map to existing handlers; File → Import routes through the
@@ -2061,6 +2078,12 @@ function App({ onResetScene }: { onResetScene: () => void }) {
         case 'export':
           setSettingsOpen(false);
           (window as any).__openExportPanel?.();
+          break;
+        case 'open-project':
+        case 'save-project':
+        case 'save-project-as':
+          setSettingsOpen(false);
+          (window as any).__projectCommand?.(payload.kind);
           break;
         case 'undo':
           (window as any).__handleUndo?.();

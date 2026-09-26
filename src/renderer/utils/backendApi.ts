@@ -5936,6 +5936,226 @@ export async function fitCrown(
   );
 }
 
+// ==================== TREE INVENTORY ====================
+// One row per segmented tree plus its stem curve, from
+// POST /api/cloud/session/{id}/tree_inventory. Method and sources:
+// docs/docs/concepts/tree-inventory.md. Coordinates are WORLD-frame (the
+// session's world shift added back); a value that could not be measured is
+// null, never NaN.
+
+export interface TreeInventoryDbh {
+  diameter_m: number;
+  center: [number, number, number];
+  rms_m: number;
+  arc_coverage: number;
+  max_gap_deg: number;
+  n_points: number;
+  n_inliers: number;
+  slice_thickness_m: number;
+  method: 'ransac' | 'hough';
+  axial_m: number;
+  flags: string[];
+}
+
+export interface TreeInventoryTree {
+  tree_id: number;
+  n_points: number;
+  bbox_min?: [number, number, number];
+  bbox_max?: [number, number, number];
+  ground_source?: 'height_above_ground' | 'ground_class' | 'tree_min_z';
+  ground_z?: number;
+  stem_base?: [number, number, number];
+  stem_axis?: [number, number, number];
+  breast_height_ref_z?: number;
+  lean_deg?: number;
+  lean_azimuth_deg?: number | null;
+  dbh_m?: number | null;
+  dbh?: TreeInventoryDbh | null;
+  height_m?: number;
+  n_crown_points?: number;
+  crown_base_height_m?: number | null;
+  crown_projected_area_m2?: number | null;
+  crown_diameter_mean_m?: number | null;
+  crown_diameter_equiv_m?: number | null;
+  crown_max_width_m?: number | null;
+  crown_perp_width_m?: number | null;
+  crown_offset_m?: number | null;
+  crown_offset_azimuth_deg?: number | null;
+  crown_ellipse_eccentricity?: number | null;
+  crown_volume_voxel_m3?: number | null;
+  crown_hull_xy?: [number, number][] | null;
+  basal_area_m2?: number | null;
+  slenderness?: number | null;
+  // Competition (stand_metrics.competition), filled in by the stand pass.
+  hegyi_index?: number | null;
+  n_competitors?: number;
+  crown_overlap_m2?: number;
+  crown_overlap_fraction?: number | null;
+  /** The competition search circle reaches past the plot boundary. */
+  edge?: boolean;
+  flags: string[];
+}
+
+/** Stand-level geometry from the inventory run (backend-api/stand_metrics.py). */
+export interface TreeInventoryStand {
+  plot_polygon: [number, number][] | null;
+  plot_area_m2: number | null;
+  plot_source: 'ground_class' | 'all_points' | 'none';
+  crown_union_area_m2: number;
+  crown_area_sum_m2: number;
+  competition_radius_m: number;
+}
+
+export interface StemCurveRow {
+  tree_id: number;
+  axial_m: number;
+  height_m: number;
+  x: number;
+  y: number;
+  z: number;
+  diameter_m: number;
+  rms_m: number;
+  arc_coverage: number;
+  n_points: number;
+  ok: boolean;
+}
+
+export interface TreeInventoryRequest {
+  breast_height_m: number;
+  fit_method: 'ransac' | 'hough';
+  slice_thickness_m?: number | null;
+  inlier_distance_m?: number | null;
+  stem_curve_step_m?: number | null;
+  voxel_size_m?: number | null;
+  crown_gap_m?: number | null;
+  tree_ids?: number[] | null;
+  min_points?: number;
+  competition_radius_m?: number;
+}
+
+export interface TreeInventoryResponse {
+  success: boolean;
+  trees: TreeInventoryTree[];
+  stem_curve: StemCurveRow[];
+  warnings: string[];
+  params?: Record<string, unknown>;
+  ground_sources?: Record<string, number>;
+  stand?: TreeInventoryStand | null;
+  error?: string | null;
+}
+
+// ---- Batch QSM over tree_instance ----
+
+export interface TreeQSMRequest {
+  tree_ids?: number[] | null;
+  max_points_per_tree?: number;
+  wood_only?: boolean;
+  include_models?: boolean;
+  twig_radius_mm?: number;
+  fork_symmetry?: number;
+}
+
+export interface TreeQSMResult {
+  tree_id: number;
+  success: boolean;
+  error?: string | null;
+  points_in_tree: number;
+  points_used: number;
+  voxel_m: number | null;
+  wood_only: boolean;
+  n_cylinders: number;
+  n_shoots: number;
+  metrics: QSMMetrics | null;
+  cylinders?: QSMCylinder[];
+  shoots?: QSMShoot[];
+}
+
+export interface TreeQSMResponse {
+  success: boolean;
+  results: TreeQSMResult[];
+  warnings: string[];
+  error?: string | null;
+}
+
+// One QSM per segmented tree of a session cloud. Streams per-tree progress
+// then a JSON tail; cancellable via the run id or by aborting the fetch.
+export async function buildTreeQSMs(
+  sessionId: string,
+  request: TreeQSMRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<TreeQSMResponse> {
+  return await fetchJsonWithProgress<TreeQSMResponse>(
+    `/api/cloud/session/${sessionId}/tree_qsm`,
+    request,
+    signal,
+    3600000, // an hour: every tree is a full QSM build
+    onProgress,
+    onRunId,
+  );
+}
+
+// Streams per-tree PHP1 progress then a JSON tail; cancellable via the run id
+// (/api/cancel/{run_id}) or by aborting the fetch.
+export async function runTreeInventory(
+  sessionId: string,
+  request: TreeInventoryRequest,
+  signal?: AbortSignal,
+  onProgress?: BinaryFrameProgress,
+  onRunId?: (runId: string) => void,
+): Promise<TreeInventoryResponse> {
+  return await fetchJsonWithProgress<TreeInventoryResponse>(
+    `/api/cloud/session/${sessionId}/tree_inventory`,
+    request,
+    signal,
+    1800000, // 30 minutes: a large plot is thousands of trees
+    onProgress,
+    onRunId,
+  );
+}
+
+// ==================== PROJECT FILE (.phyto) ====================
+// docs/docs/developers/architecture/project-file.md. The scene document is an
+// opaque blob to the backend (lib/projectDocument.ts owns its format): it is
+// uploaded before a save and downloaded after an open, by token, so the save
+// and open requests themselves are plain JSON with streamed progress.
+
+export async function uploadProjectScene(bytes: Uint8Array): Promise<string> {
+  const response = await fetch(`${getBackendUrl()}/api/project/scene`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: bytes,
+  });
+  if (!response.ok) throw new Error(`Could not stage the scene (HTTP ${response.status}).`);
+  return (await response.json()).token as string;
+}
+
+export async function downloadProjectScene(token: string): Promise<ArrayBuffer> {
+  const response = await fetch(`${getBackendUrl()}/api/project/scene/${token}`);
+  if (!response.ok) throw new Error(`Could not read the project's scene (HTTP ${response.status}).`);
+  return await response.arrayBuffer();
+}
+
+export interface ProjectSaveResult { success: boolean; path?: string; bytes?: number; error?: string }
+export interface ProjectOpenResult {
+  success: boolean; scene_token?: string; session_map?: Record<string, string>;
+  app_version?: string; error?: string;
+}
+
+export async function saveProject(
+  request: { path: string; scene_token: string; session_ids: string[]; octree_ids: string[] },
+  signal?: AbortSignal, onProgress?: BinaryFrameProgress, onRunId?: (runId: string) => void,
+): Promise<ProjectSaveResult> {
+  return await fetchJsonWithProgress<ProjectSaveResult>('/api/project/save', request, signal, 3600000, onProgress, onRunId);
+}
+
+export async function openProject(
+  path: string, signal?: AbortSignal, onProgress?: BinaryFrameProgress, onRunId?: (runId: string) => void,
+): Promise<ProjectOpenResult> {
+  return await fetchJsonWithProgress<ProjectOpenResult>('/api/project/open', { path }, signal, 3600000, onProgress, onRunId);
+}
+
 // ==================== QSM LEAF RECONSTRUCTION (Phase 1) ====================
 // Procedurally add leaves to a built QSM. The response mirrors the plant/mesh
 // shape (PlantMeshResponseLike) so plantResponseToMeshData() consumes it and

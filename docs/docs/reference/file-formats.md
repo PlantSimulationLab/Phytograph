@@ -415,6 +415,95 @@ CSV (`.obj`, `.ply`, or `.stl`, your choice) and `mesh_file` names the
 one belonging to each row. That export writes several files, so it asks
 for a **folder** instead of a save location.
 
+### Tree list CSV
+
+[Run a tree inventory](../workflows/tree-inventory.md) exports a tree list
+with **one row per measured tree**. Lengths are metres, areas m², volumes
+m³, and angles degrees (azimuths clockwise from +y). Coordinates are world
+coordinates. A value that could not be measured is left empty. How each
+value is measured, and the source it follows, is on
+[Tree inventory measurements](../concepts/tree-inventory.md).
+
+| Column | Meaning |
+|---|---|
+| `scan_name` | The cloud the inventory ran on. |
+| `tree_id` | The `tree_instance` id. |
+| `species`, `status`, `label` | Your entries from the Tree Table. `status` is one of `live`, `dead`, `damaged`, `uncertain`, or empty. |
+| `stem_x`, `stem_y` | Stem base position: where the stem axis meets the terrain. |
+| `ground_z` | Terrain elevation at the stem base. |
+| `dbh_m` | Diameter at breast height. |
+| `dbh_rms_m` | RMS orthogonal residual of the DBH circle fit. |
+| `dbh_arc_coverage` | Fraction of the circumference (in 10° sectors) holding stem points, 0–1. |
+| `dbh_max_gap_deg` | Largest empty angular gap around the DBH circle. |
+| `dbh_n_inliers` | Points on the DBH circle. |
+| `dbh_method` | `ransac` or `hough`. |
+| `breast_height_ref_z` | The uphill ground elevation breast height was measured from. |
+| `height_m` | Tree height above `ground_z`. |
+| `lean_deg`, `lean_azimuth_deg` | Stem lean from vertical, and the direction it leans toward. The azimuth is empty below 0.5°. |
+| `crown_base_height_m` | Crown base height above `ground_z`. |
+| `crown_projected_area_m2` | Convex-hull area of the crown's vertical projection. |
+| `crown_diameter_mean_m` | Mean of `crown_max_width_m` and `crown_perp_width_m`. |
+| `crown_diameter_equiv_m` | Diameter of the circle with the projected area. |
+| `crown_max_width_m`, `crown_perp_width_m` | Widest crown width, and the width at right angles to it. |
+| `crown_ellipse_eccentricity` | Shape of the projection, 0 (circle) to 1. |
+| `crown_offset_m`, `crown_offset_azimuth_deg` | Horizontal offset of the crown projection's centroid from the stem base, and its direction. |
+| `crown_volume_voxel_m3` | Occupied-voxel crown volume at the chosen voxel size. |
+| `basal_area_m2` | π/4 · DBH². |
+| `slenderness` | Height / DBH (both in metres). |
+| `ground_source` | `height_above_ground`, `ground_class`, or `tree_min_z`. |
+| `n_points` | Points labelled with this tree id. |
+| `flags` | Quality flags, `;`-separated: `few_points`, `partial_arc`, `high_residual`, `no_stem`, `ground_from_tree_min`. |
+| `hegyi_index`, `n_competitors` | Hegyi's competition index, and the trees inside its search radius. |
+| `crown_overlap_m2`, `crown_overlap_fraction` | Summed overlap of this crown's projection with the others', and the share of it covered by at least one. |
+| `edge` | `true` when the competition search circle reaches past the plot boundary (the index is then an underestimate). |
+| `qsm_woody_volume_m3` | Woody volume of the tree's QSM, when **Build QSMs** has run. |
+| `agb_kg`, `agb_method` | Above-ground biomass and the method used, when a biomass method is chosen. Both are empty for trees outside the stand filter and for trees the method could not estimate. |
+
+New columns are only ever appended, so a parser that reads columns by name
+or by position keeps working.
+
+### Stem curve CSV
+
+The stem curve export has **one row per stem slice**, sorted by tree and
+then by distance along the stem.
+
+| Column | Meaning |
+|---|---|
+| `scan_name`, `tree_id` | As in the tree list. |
+| `axial_m` | Distance along the stem axis from the stem base (0.5 m steps). |
+| `height_m` | Height of the slice centre above the stem base's ground. |
+| `x`, `y`, `z` | Slice centre, world coordinates. |
+| `diameter_m` | Fitted stem diameter. |
+| `rms_m`, `arc_coverage`, `n_points` | Fit quality, as for DBH. |
+| `ok` | `true` when the fit had neither `few_points` nor `high_residual` and continued the stem smoothly (0.5–1.5× the previous ok radius). A partial arc alone does not make a slice not-ok. |
+
+### Stand summary CSV
+
+The Stand tab's export has two blocks. First, `metric,value,unit` rows: the
+scan name, plot area and its source (`measured` or `entered`), the minimum
+DBH, whether dead trees were excluded, the tree count, `stems_per_ha`,
+`basal_area_per_ha`, `qmd`, `lorey_height`, `mean_height`, `max_height`,
+`canopy_cover` (0–1), and the biomass method, wood density or species
+group, biomass (kg and Mg/ha), and the counts of trees it could not
+estimate or that lie beyond the equation's range. Then, after a blank line,
+`class,lo,hi,count` rows: `dbh_cm` classes followed by `height_m` classes.
+
+### QSM metrics CSV
+
+One row per tree of a batch QSM, failed trees included:
+
+| Column | Meaning |
+|---|---|
+| `scan_name`, `tree_id` | As in the tree list. |
+| `success`, `error` | Whether the QSM was built, and why not. |
+| `points_in_tree`, `points_used`, `voxel_m`, `wood_only` | The tree's points, those used (after the wood filter and voxel thinning), the voxel edge (empty when not thinned), and whether only wood points were used. |
+| `n_cylinders`, `n_shoots` | Model size. |
+| `total_woody_volume_m3`, `stem_volume_m3`, `branch_volume_m3` | Woody volumes. |
+| `trunk_diameter_mm`, `tcsa_m2` | Trunk diameter and cross-sectional area at the base cylinder. |
+| `tree_height_m`, `total_length_m` | Model height and summed cylinder length. |
+| `n_scaffolds`, `n_shoots_total`, `max_rank` | Branching structure (see [QSM](../concepts/qsm.md)). |
+| `canopy_width_m`, `canopy_height_m` | Canopy extent of the model. |
+
 ## Skeletons
 
 | Format | Import | Export | Notes |

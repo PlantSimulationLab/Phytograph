@@ -11,42 +11,6 @@ import pytest
 import main
 
 
-class TestFitCircleThrough3Points:
-    def test_three_points_on_unit_circle_recovers_center_and_radius(self):
-        pts = np.array([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
-        center, radius = main.fit_circle_through_3_points(pts)
-        assert center is not None
-        assert np.allclose(center, [0.0, 0.0], atol=1e-9)
-        assert radius == pytest.approx(1.0, abs=1e-9)
-
-    def test_collinear_points_return_none(self):
-        pts = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
-        center, radius = main.fit_circle_through_3_points(pts)
-        assert center is None and radius is None
-
-    def test_wrong_point_count_returns_none(self):
-        pts = np.array([[0.0, 0.0], [1.0, 0.0]])
-        center, radius = main.fit_circle_through_3_points(pts)
-        assert center is None and radius is None
-
-
-class TestFitCircleLeastSquares:
-    def test_recovers_unit_circle_from_noisy_samples(self):
-        rng = np.random.default_rng(42)
-        thetas = np.linspace(0, 2 * np.pi, 50, endpoint=False)
-        points = np.column_stack([np.cos(thetas), np.sin(thetas)])
-        # Add small radial noise so it's a real least-squares problem
-        points += rng.normal(0, 0.005, size=points.shape)
-        result = main.fit_circle_least_squares(points)
-        assert result["success"] is True
-        assert np.allclose(result["center"], [0.0, 0.0], atol=0.02)
-        assert result["radius"] == pytest.approx(1.0, abs=0.02)
-
-    def test_too_few_points_returns_failure(self):
-        result = main.fit_circle_least_squares(np.array([[0.0, 0.0], [1.0, 0.0]]))
-        assert result == {"success": False}
-
-
 class TestSkeletonMetrics:
     def test_skeleton_length_from_edges_sums_segment_lengths(self):
         # NB: main.py defines two functions named calculate_skeleton_length —

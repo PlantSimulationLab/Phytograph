@@ -81,6 +81,7 @@ by the four stages of a typical processing pipeline.
 - :phytograph-triangulate: **[Triangulate a mesh](triangulate.md)** — fit leaf surfaces to measure the leaf-angle distribution and *G(θ)*, or reconstruct a surface with Ball Pivot, Poisson, Alpha Shape, or Delaunay.
 
 - :phytograph-fit-crown: **[Fit a crown & metrics](fit-crown.md)** — wrap the canopy in a fitted shape and read off height, volume, and width.
+- :material-clipboard-list: **[Run a tree inventory](tree-inventory.md)** — a tree list of stem position, DBH, height, crown base and crown size for every segmented tree.
 
 - :phytograph-dem: **[Generate a DEM](generate-dem.md)** — build a bare-earth DTM, a top-of-canopy DSM, or a canopy height model.
 

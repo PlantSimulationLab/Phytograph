@@ -105,6 +105,8 @@ nav:
       - Plant models: concepts/plant-models.md
       - Leaf area density: concepts/leaf-area-density.md
       - Crown metrics: concepts/crown-metrics.md
+      - Tree inventory measurements: concepts/tree-inventory.md
+      - Stand metrics: concepts/stand-metrics.md
       - Stem detection & tiling: concepts/stem-detection-and-tiling.md
       - Tree segmentation methods: concepts/tree-segmentation-methods.md
   - Workflows:
@@ -128,6 +130,7 @@ nav:
       - 3. Reconstruction & analysis:
           - Triangulate a mesh: workflows/triangulate.md
           - Fit a crown & metrics: workflows/fit-crown.md
+          - Run a tree inventory: workflows/tree-inventory.md
           - Generate a DEM: workflows/generate-dem.md
           - Extract a skeleton: workflows/extract-skeleton.md
           - Build a QSM: workflows/build-qsm.md
@@ -155,6 +158,7 @@ nav:
           - Backend sidecar: developers/architecture/backend.md
           - Version lock: developers/architecture/version-lock.md
           - Large clouds: developers/architecture/large-clouds.md
+          - Project file: developers/architecture/project-file.md
           - ML point classification: developers/architecture/ml.md
       - Development:
           - developers/development/index.md

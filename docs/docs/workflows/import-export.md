@@ -733,6 +733,37 @@ Use `.json` if you want to do further analysis programmatically. Use
 As with the other object types, clicking a format opens a save dialog; the file
 is written where you choose and a toast confirms it.
 
+## Projects
+
+A **project** (`.phyto`) saves the whole scene into one self-contained file
+and opens it again exactly as you left it. It contains:
+
+- every point cloud with all its points and scalar fields, including edits
+  you have not baked. Undo still works on those edits after reopening;
+- every mesh, skeleton, QSM and LAD result, with their positions;
+- colour modes, point size, measurements and picked points, the scene
+  origin and the camera;
+- the tree inventory, with your species, status and label entries.
+
+The file does **not** refer back to the files you imported. It holds the
+data itself, so you can move it to another computer or send it to someone.
+It is as large as the clouds in it.
+
+| Command | Shortcut | |
+|---------|----------|---|
+| **File → Save Project** | <kbd>Cmd/Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Save to the current project file, or ask for a name the first time. |
+| **File → Save Project As…** | | Save under a new name. |
+| **File → Open Project…** | <kbd>Cmd/Ctrl</kbd>+<kbd>O</kbd> | Open a project. It **replaces** the current scene, so you are asked first when the scene is not empty. |
+
+A save runs in the background with a progress bar you can cancel. A
+cancelled or failed save leaves any existing project file untouched.
+
+!!! note "What a project does not keep"
+    Undo history from before the save, app-wide settings (theme, the class
+    palette library), and the live growth state of a generated plant. The
+    plant's mesh, parameters and seed are kept, so it can be regenerated, but
+    it cannot be grown on from its saved age.
+
 ## What's next
 
 - **[Viewer navigation](viewer-navigation.md)** — get comfortable moving the camera.

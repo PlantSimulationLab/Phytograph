@@ -172,6 +172,9 @@ export type MenuCommandPayload =
   | { kind: 'import-qsm' }
   | { kind: 'import-riegl' }
   | { kind: 'export' }
+  | { kind: 'open-project' }
+  | { kind: 'save-project' }
+  | { kind: 'save-project-as' }
   | { kind: 'undo' }
   | { kind: 'redo' }
   | { kind: 'select-all' }

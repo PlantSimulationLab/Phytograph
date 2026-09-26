@@ -1070,6 +1070,25 @@ export function CameraController({
     };
     (window as any).__frameSelection = frameSelection;
     (window as any).__frameSceneOrigin = frameSceneOrigin;
+    // Restore a saved view (an opened project) in DISPLAY space. Counts as the
+    // user's own camera, so the new-content auto-frame leaves it alone.
+    (window as any).__setCameraPose = (
+      position: [number, number, number], target: [number, number, number], up?: [number, number, number],
+    ) => {
+      camera.position.set(position[0], position[1], position[2]);
+      if (up) camera.up.set(up[0], up[1], up[2]);
+      if (controlsRef.current) {
+        controlsRef.current.target.set(target[0], target[1], target[2]);
+        controlsRef.current.update();
+      } else {
+        camera.lookAt(target[0], target[1], target[2]);
+      }
+      camera.updateMatrixWorld();
+      lastUserMoveAtRef.current = performance.now();
+      userMovedCameraRef.current = true;
+      hasFramedContentRef.current = true;
+      framedRobustRef.current = true;
+    };
     // Test hook: read live camera + controls + scene state without poking
     // R3F's internal store. Used by the M2 verification smoke test.
     // Test hook for the M2 smoke test: read camera + auto-frame latch + bounds.

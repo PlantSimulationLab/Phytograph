@@ -70,6 +70,7 @@ export const TOOLS_MENU: ToolMenuSection[] = [
       { id: 'cloud-qsm', label: 'Build QSM…' },
       { id: 'compute-lad', label: 'Compute Leaf Area Density…' },
       { id: 'fit-crown', label: 'Fit Crown & Metrics…' },
+      { id: 'tree-inventory', label: 'Tree Inventory' },
     ],
   },
   {

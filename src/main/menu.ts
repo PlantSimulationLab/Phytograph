@@ -88,6 +88,21 @@ export function installApplicationMenu(getMainWindow: () => BrowserWindow | null
         },
         { type: 'separator' },
         {
+          label: 'Open Project…',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => send({ kind: 'open-project' }),
+        },
+        {
+          label: 'Save Project',
+          accelerator: 'CmdOrCtrl+Shift+S',
+          click: () => send({ kind: 'save-project' }),
+        },
+        {
+          label: 'Save Project As…',
+          click: () => send({ kind: 'save-project-as' }),
+        },
+        { type: 'separator' },
+        {
           label: 'Import',
           submenu: [
             { label: 'Auto-detect…', click: () => send({ kind: 'import-auto' }) },

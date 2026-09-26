@@ -5378,6 +5378,386 @@ def fit_crown_endpoint(request: CrownFitRequest, http_request: Request):
         request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
+# ==================== TREE INVENTORY ====================
+
+class TreeInventoryRequest(BaseModel):
+    """Measure every segmented tree of a cloud session (see tree_inventory.py
+    and docs/docs/concepts/tree-inventory.md for the method and its sources).
+    Unset fields take the method's documented defaults."""
+    breast_height_m: float = 1.3
+    fit_method: str = "ransac"          # 'ransac' | 'hough'
+    slice_thickness_m: Optional[float] = None
+    inlier_distance_m: Optional[float] = None
+    stem_curve_step_m: Optional[float] = None
+    voxel_size_m: Optional[float] = None
+    crown_gap_m: Optional[float] = None
+    # Restrict to these tree_instance ids; None/[] measures every tree.
+    tree_ids: Optional[List[int]] = None
+    # Trees with fewer hit points than this are skipped (and counted).
+    min_points: int = 50
+    # Search radius of Hegyi's competition index (stand_metrics.competition).
+    competition_radius_m: float = 6.0
+
+
+class _InventoryCloudChanged(Exception):
+    pass
+
+
+class _SessionTreeReader:
+    """One tree at a time out of a cloud session, for the tree inventory and
+    the per-tree batch QSM.
+
+    The whole cloud is never copied: `index()` makes one chunked pass over the
+    columns collecting the (row, tree id) pairs of the eligible points - alive,
+    a real return (never a sky/miss point), tree id > 0 - and sorts them by tree
+    ONCE. Each tree is then one contiguous range of that order, and `gather()`
+    copies just that tree's rows out of the (possibly memory-mapped) session
+    arrays under the lock. Peak memory is the index (16 B per tree point) plus
+    one tree.
+
+    The arrays are captured at construction; a bake or compaction replaces
+    them, which would make the index point at other points, so every locked
+    read first checks they are still the session's and raises
+    _InventoryCloudChanged otherwise."""
+
+    def __init__(self, sess: "CloudSession"):
+        self.sess = sess
+        with _cloud_session_lock:
+            self.tree_col = sess.extras.get(TREE_INSTANCE_SLUG)
+            self.positions = sess.positions
+            self.deleted = sess.deleted
+            self.extras = dict(sess.extras)
+            self.world_shift = (np.asarray(sess.world_shift, dtype=np.float64).copy()
+                                if sess.world_shift is not None else np.zeros(3))
+            self.n = int(len(self.positions))
+        self.idx = np.zeros(0, np.int64)
+        self.labels = np.zeros(0, np.int64)
+        self._watched: set = set()
+
+    def column(self, slug: str):
+        """A snapshot column; reading it through the reader also WATCHES it,
+        so a replacement (re-running Segment Wood, a new DEM) mid-run is
+        reported instead of silently mixing old and new labels."""
+        self._watched.add(slug)
+        return self.extras.get(slug)
+
+    def check_locked(self) -> None:
+        # Identity of every array the index or a gather depends on: a bake
+        # replaces positions, an undo (reset_edits) replaces `deleted`, and a
+        # re-run tool replaces its column.
+        if (self.sess.positions is not self.positions
+                or self.sess.deleted is not self.deleted
+                or self.sess.extras.get(TREE_INSTANCE_SLUG) is not self.tree_col
+                or any(self.sess.extras.get(k) is not self.extras.get(k) for k in self._watched)):
+            raise _InventoryCloudChanged()
+        self.sess.last_accessed = time.time()
+
+    def index(self, tree_ids, progress, on_chunk=None) -> None:
+        """Build the per-tree index. `on_chunk(positions_chunk, keep)` sees each
+        chunk's rows and its alive-and-hit mask (under no lock: `positions_chunk`
+        is a copy) - the inventory uses it for the ground grid and plot hull."""
+        miss_col = self.column(_MISS_SLUG)
+        idx_parts, lab_parts = [], []
+        for a, b in session_store.iter_ranges(self.n):
+            _cancel_checkpoint(progress)
+            with _cloud_session_lock:
+                self.check_locked()
+                keep = ~np.asarray(self.deleted[a:b])
+                if miss_col is not None:
+                    keep &= np.asarray(miss_col[a:b]) == 0
+                lab = np.asarray(self.tree_col[a:b])
+                chunk = (np.asarray(self.positions[a:b], dtype=np.float64)
+                         if on_chunk is not None else None)
+            if on_chunk is not None:
+                on_chunk(chunk + self.world_shift, keep, a, b)
+            sel = keep & np.isfinite(lab) & (lab > 0.5)
+            idx_parts.append(np.flatnonzero(sel).astype(np.int64) + a)
+            lab_parts.append(np.rint(lab[sel]).astype(np.int64))
+        idx = np.concatenate(idx_parts) if idx_parts else np.zeros(0, np.int64)
+        labels = np.concatenate(lab_parts) if lab_parts else np.zeros(0, np.int64)
+        if tree_ids:
+            want = np.isin(labels, np.asarray(tree_ids, dtype=np.int64))
+            idx, labels = idx[want], labels[want]
+        # Stable sort: each tree's rows stay ascending, so its gather walks the
+        # (memory-mapped) columns forward.
+        order = np.argsort(labels, kind="stable")
+        self.idx, self.labels = idx[order], labels[order]
+
+    def ranges(self):
+        """[(tree_id, start, end)] over the sorted index."""
+        if len(self.labels) == 0:
+            return []
+        cuts = np.flatnonzero(np.diff(self.labels)) + 1
+        starts = np.concatenate([[0], cuts]).tolist()
+        ends = np.concatenate([cuts, [len(self.labels)]]).tolist()
+        return [(int(self.labels[s0]), s0, s1) for s0, s1 in zip(starts, ends)]
+
+    def gather(self, s0: int, s1: int, slugs=()):
+        """(world-frame positions (k, 3) float64, {slug: values}) for one tree."""
+        ids = self.idx[s0:s1]
+        with _cloud_session_lock:
+            self.check_locked()
+            pts = np.asarray(self.positions[ids], dtype=np.float64)
+            cols = {slug: np.asarray(self.extras[slug][ids], dtype=np.float64)
+                    for slug in slugs if self.extras.get(slug) is not None}
+        return pts + self.world_shift, cols
+
+
+def _do_tree_inventory(sess: "CloudSession", request: TreeInventoryRequest, progress=None) -> dict:
+    """Tree list + stem curves + stand geometry, one tree at a time through
+    `_SessionTreeReader`. The stand pass (plot boundary, canopy union,
+    competition) runs over the finished tree list (stand_metrics.py)."""
+    import tree_inventory as ti
+    import stand_metrics as sm
+
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    def _fail(msg, warnings=()):
+        return {"success": False, "trees": [], "stem_curve": [], "warnings": list(warnings),
+                "stand": None, "error": msg}
+
+    fields = ("breast_height_m", "fit_method", "slice_thickness_m", "inlier_distance_m",
+              "stem_curve_step_m", "voxel_size_m", "crown_gap_m")
+    try:
+        params = ti.InventoryParams.from_dict({k: getattr(request, k) for k in fields})
+    except ValueError as e:
+        return _fail(str(e))
+    if not (request.competition_radius_m > 0 and math.isfinite(request.competition_radius_m)):
+        return _fail("competition_radius_m must be positive")
+
+    _cancel_checkpoint(progress)
+    _report(0.02, "Indexing trees")
+    reader = _SessionTreeReader(sess)
+    if reader.tree_col is None:
+        return _fail("This cloud has no tree labels. Run Segment Trees first.")
+    hag_col = reader.column(HEIGHT_ABOVE_GROUND_SLUG)
+    ground_col = reader.column(GROUND_CLASS_SLUG)
+
+    warnings: list = []
+    # Index + label (8 B each), the argsort's order and the gathered copies.
+    estimate = reader.n * 32
+    try:
+        with _ADMISSION.admit(estimate, f"tree inventory on {reader.n:,} pts"):
+            # Built whenever ground labels exist, even beside a height-above-
+            # ground column: a DEM covering only part of the plot leaves some
+            # trees NaN there, and those fall back to this grid per query.
+            ground_grid = ti.GroundGrid() if ground_col is not None else None
+            # The plot boundary: the convex hull of the ground points, or of all
+            # the real returns when nothing is labelled ground.
+            plot_hull = sm.HullAccumulator()
+
+            def on_chunk(chunk, keep, a, b):
+                if ground_col is not None:
+                    g = keep & (np.asarray(ground_col[a:b]) == GROUND_CLASS_GROUND)
+                    if g.any():
+                        ground_grid.add(chunk[g])
+                        plot_hull.add(chunk[g, :2])
+                elif keep.any():
+                    plot_hull.add(chunk[keep, :2])
+
+            reader.index(request.tree_ids, progress, on_chunk=on_chunk)
+            spans = reader.ranges()
+            if not spans:
+                return _fail("No labelled tree points to measure.")
+
+            trees, curve = [], []
+            skipped = 0
+            for i, (tid, s0, s1) in enumerate(spans):
+                _cancel_checkpoint(progress)
+                _report(0.05 + 0.85 * i / len(spans), f"Measuring tree {i + 1}/{len(spans)}")
+                if s1 - s0 < request.min_points:
+                    skipped += 1
+                    continue
+                pts, cols = reader.gather(s0, s1, (HEIGHT_ABOVE_GROUND_SLUG,))
+                try:
+                    out = ti.measure_tree(pts, params=params, hag=cols.get(HEIGHT_ABOVE_GROUND_SLUG),
+                                          ground_grid=ground_grid, tree_id=tid)
+                except Exception as e:  # noqa: BLE001 - one bad tree must not sink the list
+                    logger.warning("tree inventory: tree %s failed", tid, exc_info=True)
+                    warnings.append(f"Tree {tid}: {e}")
+                    continue
+                trees.append(out["tree"])
+                curve.extend(out["stem_curve"])
+    except _InventoryCloudChanged:
+        return _fail("The cloud changed while the inventory ran. Run it again.", warnings)
+
+    if skipped:
+        warnings.append(f"{skipped} tree(s) with fewer than {request.min_points} points were skipped.")
+
+    stand = None
+    if trees and request.tree_ids:
+        # Competition and canopy cover describe a tree's neighbours and the
+        # whole canopy; computed over a requested SUBSET they would silently
+        # ignore every tree left out.
+        warnings.append("Stand metrics and competition need every tree, so they were "
+                        "skipped for this subset of trees.")
+    elif trees:
+        _cancel_checkpoint(progress)
+        _report(0.92, "Stand metrics")
+        geom = sm.stand_geometry(trees, plot_polygon=plot_hull.hull,
+                                 competition_radius_m=request.competition_radius_m,
+                                 check=lambda: _cancel_checkpoint(progress))
+        for t in trees:
+            t.update(geom["competition"].get(str(t["tree_id"]), {}))
+        del geom["competition"]
+        geom["plot_source"] = ("none" if plot_hull.hull is None
+                               else "ground_class" if ground_col is not None else "all_points")
+        stand = geom
+
+    _report(1.0, "Finalizing")
+    return {
+        "success": bool(trees), "trees": trees, "stem_curve": curve,
+        "warnings": warnings, "params": params.to_dict(), "stand": stand,
+        # How many trees took their ground from each source. Per tree, since a
+        # partial DEM mixes them within one plot.
+        "ground_sources": {src: sum(1 for t in trees if t.get("ground_source") == src)
+                           for src in ("height_above_ground", "ground_class", "tree_min_z")},
+        "error": None if trees else "No tree could be measured.",
+    }
+
+
+@app.post("/api/cloud/session/{session_id}/tree_inventory")
+def session_tree_inventory(session_id: str, request: TreeInventoryRequest, http_request: Request):
+    """Tree list + stem curves + stand geometry for every segmented tree.
+    Streams per-tree progress then a JSON tail; cancellable through the run-id
+    token (checked between trees and between indexing chunks), admission-gated
+    inside."""
+    sess = _get_cloud_session(session_id)
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_tree_inventory(sess, request, progress=progress),
+                                    allow_nan=False).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+# Per-tree point budget ceiling for the batch QSM. The skeleton's cost climbs
+# steeply with its input (38 s / 2.6 GB at 2 M points, see _SKELETON_MAX_POINTS),
+# and a batch pays it once per tree, so a budget a single QSM could afford is
+# hours over a plot.
+_TREE_QSM_MAX_POINTS = 500_000
+
+
+class TreeQSMRequest(BaseModel):
+    """One QSM per segmented tree of a session (docs/docs/concepts/
+    stand-metrics.md#batch-qsm). The QSM options mirror QSMBuildRequest."""
+    tree_ids: Optional[List[int]] = None
+    # Per-tree point budget; a larger tree is voxel-thinned to it. 60 000 is the
+    # single-tree QSM's budget.
+    max_points_per_tree: int = 60000
+    # Use only wood_class == wood points when the cloud carries wood labels.
+    wood_only: bool = True
+    # Return each tree's cylinders/shoots (for the scene) or only its metrics.
+    include_models: bool = True
+    twig_radius_mm: float = 4.23
+    w_growthlength: float = 1.0
+    w_area: float = 0.0
+    w_colinear: float = 0.0
+    axis_termination: bool = True
+    fork_symmetry: float = 0.75
+
+
+def _do_tree_qsm(sess: "CloudSession", request: TreeQSMRequest, progress=None) -> dict:
+    """The batch QSM: `_SessionTreeReader` hands over one tree at a time, and
+    each goes through `_qsm_pipeline`, the same stages as a single QSM build.
+    A tree that fails is reported with its error; the rest carry on."""
+    import tree_inventory as ti
+
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+        _cancel_checkpoint(progress)
+
+    if not (1000 <= request.max_points_per_tree <= _TREE_QSM_MAX_POINTS):
+        return {"success": False, "results": [], "warnings": [],
+                "error": (f"max_points_per_tree must be between 1,000 and "
+                          f"{_TREE_QSM_MAX_POINTS:,}")}
+    _report(0.01, "Indexing trees")
+    reader = _SessionTreeReader(sess)
+    if reader.tree_col is None:
+        return {"success": False, "results": [], "warnings": [],
+                "error": "This cloud has no tree labels. Run Segment Trees first."}
+    wood_col = reader.column(WOOD_CLASS_SLUG)
+    wood_only = bool(request.wood_only and wood_col is not None)
+    warnings: list = []
+    if request.wood_only and wood_col is None:
+        warnings.append("No wood labels: QSMs were built from all of each tree's points.")
+
+    results: list = []
+    qsm_req = QSMBuildRequest(
+        twig_radius_mm=request.twig_radius_mm, w_growthlength=request.w_growthlength,
+        w_area=request.w_area, w_colinear=request.w_colinear,
+        axis_termination=request.axis_termination, fork_symmetry=request.fork_symmetry)
+    try:
+        # The index, plus one tree's QSM working set (the skeleton's peak RSS
+        # grows with its input, capped here by the per-tree budget).
+        estimate = reader.n * 24 + request.max_points_per_tree * 2000
+        with _ADMISSION.admit(estimate, f"tree QSMs on {reader.n:,} pts"):
+            reader.index(request.tree_ids, progress)
+            spans = reader.ranges()
+            if not spans:
+                return {"success": False, "results": [], "warnings": warnings,
+                        "error": "No labelled tree points."}
+            n_trees = len(spans)
+            for i, (tid, s0, s1) in enumerate(spans):
+                base = 0.02 + 0.97 * i / n_trees
+                step = 0.97 / n_trees
+                label = f"Tree {i + 1}/{n_trees}"
+                _report(base, f"{label}: reading points")
+                pts, cols = reader.gather(s0, s1, (WOOD_CLASS_SLUG,) if wood_only else ())
+                n_tree = len(pts)
+                if wood_only:
+                    pts = pts[cols[WOOD_CLASS_SLUG] == WOOD_CLASS_WOOD]
+                keep, voxel = ti.voxel_thin(pts, request.max_points_per_tree)
+                pts = pts[keep]
+                rec = {"tree_id": tid, "points_in_tree": int(n_tree), "points_used": int(len(pts)),
+                       "voxel_m": voxel, "wood_only": wood_only, "success": False, "error": None,
+                       "n_cylinders": 0, "n_shoots": 0, "metrics": None}
+                if len(pts) < 50:
+                    rec["error"] = (f"{len(pts)} {'wood ' if wood_only else ''}points; "
+                                    "a QSM needs at least 50.")
+                    results.append(rec)
+                    continue
+                try:
+                    qsm, m = _qsm_pipeline(
+                        pts, qsm_req, lambda f, msg: _report(base + step * f, f"{label}: {msg}"))
+                    resp = _qsm_to_response(qsm, m, points_used=len(pts)).dict()
+                    rec.update(success=True, n_cylinders=resp["n_cylinders"],
+                               n_shoots=resp["n_shoots"], metrics=resp["metrics"])
+                    if request.include_models:
+                        rec["cylinders"] = resp["cylinders"]
+                        rec["shoots"] = resp["shoots"]
+                except ScanCancelled:
+                    raise
+                except _QSMEmpty:
+                    rec["error"] = "Skeleton extraction produced no nodes (too sparse or disconnected)."
+                except Exception as e:  # noqa: BLE001 - one tree must not sink the batch
+                    logger.warning("tree QSM: tree %s failed", tid, exc_info=True)
+                    rec["error"] = f"QSM build failed: {e}"
+                results.append(rec)
+    except _InventoryCloudChanged:
+        return {"success": False, "results": results, "warnings": warnings,
+                "error": "The cloud changed while the QSMs were built. Run it again."}
+
+    built = sum(1 for r in results if r["success"])
+    _report(1.0, "Done")
+    return {"success": built > 0, "results": results, "warnings": warnings,
+            "error": None if built else "No QSM could be built."}
+
+
+@app.post("/api/cloud/session/{session_id}/tree_qsm")
+def session_tree_qsm(session_id: str, request: TreeQSMRequest, http_request: Request):
+    """One QSM per segmented tree. Streams per-tree, per-stage progress then a
+    JSON tail; cancellable between stages; admission-gated inside."""
+    sess = _get_cloud_session(session_id)
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_tree_qsm(sess, request, progress=progress),
+                                    allow_nan=False).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
 # ==================== GROUND SEGMENTATION ====================
 
 class GroundSegmentationRequest(BaseModel):
@@ -18957,269 +19337,6 @@ def order_skeleton_points_with_mapping(skeleton_nodes: dict, edges: list, block_
     return ordered, id_to_idx
 
 
-# Legacy function for API compatibility
-def fit_circle_ransac(points_2d: np.ndarray, n_iterations: int = 100,
-                       threshold_ratio: float = 0.02, min_inliers_ratio: float = 0.5) -> dict:
-    """
-    Robust circle fitting using RANSAC.
-
-    Args:
-        points_2d: Nx2 array of 2D points
-        n_iterations: Number of RANSAC iterations
-        threshold_ratio: Inlier threshold as fraction of estimated radius
-        min_inliers_ratio: Minimum fraction of points that must be inliers
-
-    Returns:
-        dict with center, radius, inliers, rmse, confidence
-    """
-    n_points = len(points_2d)
-    if n_points < 3:
-        return {"success": False, "error": "Need at least 3 points"}
-
-    # Initial estimate for threshold
-    centroid = np.mean(points_2d, axis=0)
-    est_radius = np.median(np.linalg.norm(points_2d - centroid, axis=1))
-    threshold = threshold_ratio * est_radius
-
-    best_inliers = []
-    best_center = centroid
-    best_radius = est_radius
-
-    for _ in range(n_iterations):
-        # Random sample of 3 points
-        idx = np.random.choice(n_points, size=min(3, n_points), replace=False)
-        sample = points_2d[idx]
-
-        # Fit circle through 3 points
-        try:
-            center, radius = fit_circle_through_3_points(sample)
-            if center is None or radius <= 0 or radius > est_radius * 5:
-                continue
-        except:
-            continue
-
-        # Count inliers
-        distances = np.abs(np.linalg.norm(points_2d - center, axis=1) - radius)
-        inliers = np.where(distances < threshold)[0]
-
-        if len(inliers) > len(best_inliers):
-            best_inliers = inliers
-            best_center = center
-            best_radius = radius
-
-    # Refine with all inliers using least squares
-    if len(best_inliers) >= 3:
-        inlier_points = points_2d[best_inliers]
-        refined = fit_circle_least_squares(inlier_points, best_center, best_radius)
-        if refined["success"]:
-            best_center = refined["center"]
-            best_radius = refined["radius"]
-
-            # Recalculate inliers with refined model
-            distances = np.abs(np.linalg.norm(points_2d - best_center, axis=1) - best_radius)
-            best_inliers = np.where(distances < threshold)[0]
-
-    # Calculate RMSE on inliers
-    if len(best_inliers) > 0:
-        inlier_distances = np.linalg.norm(points_2d[best_inliers] - best_center, axis=1)
-        rmse = np.sqrt(np.mean((inlier_distances - best_radius) ** 2))
-        confidence = len(best_inliers) / n_points
-    else:
-        rmse = None
-        confidence = 0.0
-
-    return {
-        "success": len(best_inliers) >= n_points * min_inliers_ratio,
-        "center": best_center,
-        "radius": best_radius,
-        "inliers": best_inliers,
-        "rmse": rmse,
-        "confidence": confidence
-    }
-
-
-def fit_circle_through_3_points(points: np.ndarray) -> tuple:
-    """
-    Fit a circle through exactly 3 points.
-    Returns (center, radius) or (None, None) if collinear.
-    """
-    if len(points) != 3:
-        return None, None
-
-    ax, ay = points[0]
-    bx, by = points[1]
-    cx, cy = points[2]
-
-    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if abs(d) < 1e-10:  # Collinear
-        return None, None
-
-    ux = ((ax*ax + ay*ay) * (by - cy) + (bx*bx + by*by) * (cy - ay) + (cx*cx + cy*cy) * (ay - by)) / d
-    uy = ((ax*ax + ay*ay) * (cx - bx) + (bx*bx + by*by) * (ax - cx) + (cx*cx + cy*cy) * (bx - ax)) / d
-
-    center = np.array([ux, uy])
-    radius = np.linalg.norm(points[0] - center)
-
-    return center, radius
-
-
-def fit_circle_least_squares(points_2d: np.ndarray, center_init: np.ndarray = None,
-                              radius_init: float = None) -> dict:
-    """
-    Fit circle using least squares (for refinement).
-    """
-    from scipy.optimize import least_squares
-
-    if len(points_2d) < 3:
-        return {"success": False}
-
-    if center_init is None:
-        center_init = np.mean(points_2d, axis=0)
-    if radius_init is None:
-        radius_init = np.median(np.linalg.norm(points_2d - center_init, axis=1))
-
-    def residuals(params):
-        cx, cy, r = params
-        center = np.array([cx, cy])
-        distances = np.linalg.norm(points_2d - center, axis=1)
-        return distances - r
-
-    try:
-        result = least_squares(residuals, [center_init[0], center_init[1], radius_init],
-                              method='lm', max_nfev=100)
-        cx, cy, r = result.x
-        rmse = np.sqrt(np.mean(result.fun ** 2))
-        return {
-            "success": True,
-            "center": np.array([cx, cy]),
-            "radius": abs(r),
-            "rmse": rmse
-        }
-    except:
-        return {"success": False}
-
-
-def adaptive_slice_extraction(
-    points: np.ndarray,
-    principal_direction: np.ndarray,
-    num_slices: Optional[int] = None,
-    slice_thickness: Optional[float] = None,
-    min_points_per_slice: int = 10,
-    use_local_pca: bool = True,
-    fit_circles: bool = True,
-    use_ransac: bool = True,
-    ransac_iterations: int = 100,
-    ransac_threshold: float = 0.02
-) -> tuple:
-    """
-    Extract skeleton using adaptive slicing along principal direction.
-    Uses local PCA to orient each slice perpendicular to local stem direction.
-
-    Returns:
-        slices: List of slice information dicts
-        slice_thickness: The thickness used
-    """
-    # Project points onto principal axis
-    centroid = np.mean(points, axis=0)
-    projections = np.dot(points - centroid, principal_direction)
-
-    # Get bounds along principal axis
-    h_min = np.min(projections)
-    h_max = np.max(projections)
-    h_range = h_max - h_min
-
-    if h_range <= 0:
-        return [], 0
-
-    # Determine slice thickness
-    if slice_thickness is not None:
-        thickness = slice_thickness
-    elif num_slices is not None:
-        thickness = h_range / num_slices
-    else:
-        # Auto: aim for ~50 slices, but ensure each has enough points
-        target_slices = min(50, len(points) // (min_points_per_slice * 2))
-        target_slices = max(10, target_slices)
-        thickness = h_range / target_slices
-
-    # Create slices
-    slices = []
-    current_h = h_min + thickness / 2
-
-    # Local direction tracking for smoothness
-    local_direction = principal_direction.copy()
-
-    while current_h < h_max:
-        # Get points in this slice (along principal direction)
-        mask = (projections >= current_h - thickness/2) & (projections < current_h + thickness/2)
-        slice_points = points[mask]
-
-        if len(slice_points) >= min_points_per_slice:
-            # Compute local direction using local PCA
-            if use_local_pca and len(slice_points) >= 10:
-                try:
-                    local_dir, _, _ = compute_pca_direction(slice_points)
-                    # Ensure consistent direction (don't flip 180 degrees)
-                    if np.dot(local_dir, local_direction) < 0:
-                        local_dir = -local_dir
-                    # Smooth transition: blend with previous direction
-                    local_direction = 0.7 * local_dir + 0.3 * local_direction
-                    local_direction = local_direction / np.linalg.norm(local_direction)
-                except:
-                    pass  # Keep previous direction
-
-            # Slice center point (along the axis)
-            slice_center_point = centroid + current_h * principal_direction
-
-            # Project slice points onto plane perpendicular to local direction
-            points_2d, u1, u2 = project_to_plane(slice_points, local_direction, slice_center_point)
-
-            # Circle fitting
-            diameter = None
-            fit_rmse = None
-            num_inliers = None
-            confidence = None
-            center_3d = np.mean(slice_points, axis=0)  # Default to centroid
-
-            if fit_circles and len(points_2d) >= 4:
-                if use_ransac:
-                    result = fit_circle_ransac(
-                        points_2d,
-                        n_iterations=ransac_iterations,
-                        threshold_ratio=ransac_threshold
-                    )
-                else:
-                    result = fit_circle_least_squares(points_2d)
-                    if result["success"]:
-                        result["confidence"] = 1.0
-                        result["inliers"] = list(range(len(points_2d)))
-
-                if result.get("success"):
-                    center_2d = result["center"]
-                    diameter = result["radius"] * 2
-                    fit_rmse = result.get("rmse")
-                    num_inliers = len(result.get("inliers", []))
-                    confidence = result.get("confidence", 0.0)
-
-                    # Convert 2D center back to 3D
-                    center_3d = slice_center_point + center_2d[0] * u1 + center_2d[1] * u2
-
-            slices.append({
-                "center": center_3d.tolist(),
-                "height": float(current_h),
-                "diameter": diameter,
-                "num_points": len(slice_points),
-                "num_inliers": num_inliers,
-                "fit_rmse": fit_rmse,
-                "local_direction": local_direction.tolist(),
-                "confidence": confidence
-            })
-
-        current_h += thickness
-
-    return slices, thickness
-
-
 def remove_outlier_skeleton_points(slices: list, threshold_factor: float = 2.5) -> list:
     """
     Remove skeleton points that deviate significantly from the local trajectory.
@@ -20018,6 +20135,64 @@ def _qsm_to_response(qsm, m, points_used: int = 0) -> QSMBuildResponse:
     )
 
 
+class _QSMEmpty(Exception):
+    """The skeleton had no nodes: the cloud is too sparse or disconnected."""
+
+
+def _qsm_pipeline(points: np.ndarray, request: "QSMBuildRequest", report):
+    """Stages B-F of the QSM build on `points`, returning (qsm, metrics).
+    `report(fraction, message)` is called at every stage boundary (and is where
+    callers put their cancel checkpoint). Shared by the single-tree build and the
+    per-tree batch over a session's `tree_instance` labels, so the two can never
+    drift apart. Raises _QSMEmpty when the skeleton has no nodes."""
+    from qsm.skeleton import extract_skeleton
+    from qsm.segments import segments_to_qsm, SegmentOptions
+    from qsm.cylinders import fit_qsm_cylinders
+    from qsm.radius import correct_radii, RadiusCorrectionOptions
+    from qsm.continuation import retag_ranks, ContinuationOptions
+    from qsm.metrics import compute_metrics
+
+    # B: skeleton.
+    report(0.15, "Extracting skeleton")
+    graph = extract_skeleton(points)
+    if len(graph) == 0:
+        raise _QSMEmpty()
+
+    # C: segments + shoot rank (HEADLINE).
+    report(0.45, "Segmenting shoots")
+    qsm = segments_to_qsm(graph, SegmentOptions(
+        w_growthlength=request.w_growthlength,
+        w_area=request.w_area,
+        w_colinear=request.w_colinear,
+    ))
+
+    # D: robust cylinder fit + SurfCov/mad (replaces provisional radii).
+    report(0.65, "Fitting cylinders")
+    qsm = fit_qsm_cylinders(qsm, points)
+
+    # E: radius correction (monotone taper + parent cap + twig anchor).
+    report(0.85, "Correcting radii")
+    qsm = correct_radii(qsm, RadiusCorrectionOptions(
+        twig_radius=request.twig_radius_mm / 1000.0,
+    ))
+
+    # F: axis termination -- allow a shoot to END at a codominant fork. Runs
+    # AFTER radius correction because the discriminator (sibling radius
+    # symmetry) is only separable on corrected radii: measured on the redbud,
+    # symmetry at the true fork is 0.50 provisional / 0.39 raw-fit / 0.90
+    # corrected. Only rank + shoot_id change, so the per-shoot taper above
+    # still ran along the full physical axis (which is correct -- a
+    # trunk-plus-scaffold is one smooth taper even when it is two shoots).
+    report(0.92, "Resolving shoot ranks")
+    qsm = retag_ranks(qsm, ContinuationOptions(
+        enabled=request.axis_termination,
+        fork_symmetry=request.fork_symmetry,
+    ))
+
+    report(0.95, "Computing metrics")
+    return qsm, compute_metrics(qsm)
+
+
 def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
     """Build a true QSM from a dormant-tree point cloud, returning the dict form
     of QSMBuildResponse. `progress(fraction, message)` (optional) is called as the
@@ -20030,13 +20205,6 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
     The headline output is the per-shoot rank: continuous shoots classified by
     topological branching order with axis continuation (trunk=0, scaffolds=1, ...).
     """
-    from qsm.skeleton import extract_skeleton
-    from qsm.segments import segments_to_qsm, SegmentOptions
-    from qsm.cylinders import fit_qsm_cylinders
-    from qsm.radius import correct_radii, RadiusCorrectionOptions
-    from qsm.continuation import retag_ranks, ContinuationOptions
-    from qsm.metrics import compute_metrics
-
     def _report(frac, msg):
         if progress is not None:
             progress(frac, msg)
@@ -20082,49 +20250,14 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
                 ),
             ).dict()
 
-        # B: skeleton.
-        _report(0.15, "Extracting skeleton")
-        graph = extract_skeleton(points)
-        if len(graph) == 0:
+        try:
+            qsm, m = _qsm_pipeline(points, request, _report)
+        except _QSMEmpty:
             return QSMBuildResponse(
                 success=False, points_used=len(points),
                 error="Skeleton extraction produced no nodes (cloud too sparse "
                       "or disconnected)",
             ).dict()
-
-        # C: segments + shoot rank (HEADLINE).
-        _report(0.45, "Segmenting shoots")
-        qsm = segments_to_qsm(graph, SegmentOptions(
-            w_growthlength=request.w_growthlength,
-            w_area=request.w_area,
-            w_colinear=request.w_colinear,
-        ))
-
-        # D: robust cylinder fit + SurfCov/mad (replaces provisional radii).
-        _report(0.65, "Fitting cylinders")
-        qsm = fit_qsm_cylinders(qsm, points)
-
-        # E: radius correction (monotone taper + parent cap + twig anchor).
-        _report(0.85, "Correcting radii")
-        qsm = correct_radii(qsm, RadiusCorrectionOptions(
-            twig_radius=request.twig_radius_mm / 1000.0,
-        ))
-
-        # F: axis termination -- allow a shoot to END at a codominant fork. Runs
-        # AFTER radius correction because the discriminator (sibling radius
-        # symmetry) is only separable on corrected radii: measured on the redbud,
-        # symmetry at the true fork is 0.50 provisional / 0.39 raw-fit / 0.90
-        # corrected. Only rank + shoot_id change, so the per-shoot taper above
-        # still ran along the full physical axis (which is correct -- a
-        # trunk-plus-scaffold is one smooth taper even when it is two shoots).
-        _report(0.92, "Resolving shoot ranks")
-        qsm = retag_ranks(qsm, ContinuationOptions(
-            enabled=request.axis_termination,
-            fork_symmetry=request.fork_symmetry,
-        ))
-
-        _report(0.95, "Computing metrics")
-        m = compute_metrics(qsm)
 
         _report(1.0, "Done")
         return _qsm_to_response(qsm, m, points_used=len(points)).dict()
@@ -37714,6 +37847,344 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
     )
     _cloud_sessions[new_id] = new_sess
     return new_sess
+
+
+# ==================== PROJECT FILE (.phyto) ====================
+# One self-contained file per scene: docs/docs/developers/architecture/
+# project-file.md. The container and the session schema are project_file.py;
+# this section snapshots live sessions into it and restores them out of it.
+#
+# The renderer's scene document travels as an opaque blob in both directions
+# (POST /api/project/scene -> token; GET /api/project/scene/{token}): the
+# renderer owns its format, the backend stores the bytes verbatim, and the
+# save/open requests themselves stay plain JSON with streamed progress.
+
+_PROJECT_SCENE_MEMBER = "scene.bin"
+_project_blobs: Dict[str, Tuple[str, float]] = {}   # token -> (path, created)
+_project_blobs_lock = threading.Lock()
+_PROJECT_BLOB_TTL_S = 3600.0
+
+
+def _project_blob_dir() -> _Path:
+    d = _octree_cache_root().parent / ".project-blobs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _project_blob_new() -> Tuple[str, _Path]:
+    """A fresh token and the file its blob lives in; drops expired blobs."""
+    now = time.time()
+    with _project_blobs_lock:
+        for tok, (p, t0) in list(_project_blobs.items()):
+            if now - t0 > _PROJECT_BLOB_TTL_S:
+                _project_blobs.pop(tok, None)
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        token = uuid.uuid4().hex
+        path = _project_blob_dir() / f"{token}.bin"
+        _project_blobs[token] = (str(path), now)
+    return token, path
+
+
+def _project_blob_path(token: str) -> _Path:
+    with _project_blobs_lock:
+        entry = _project_blobs.get(token)
+    if entry is None or not os.path.isfile(entry[0]):
+        raise HTTPException(status_code=404, detail="Unknown or expired scene token.")
+    return _Path(entry[0])
+
+
+def _project_blob_drop(token: str) -> None:
+    with _project_blobs_lock:
+        entry = _project_blobs.pop(token, None)
+    if entry:
+        try:
+            os.unlink(entry[0])
+        except OSError:
+            pass
+
+
+@app.post("/api/project/scene")
+async def project_scene_upload(http_request: Request):
+    """Stage the renderer's scene document (an opaque blob) for a save.
+    `async def` only to read the body, which is streamed to disk in chunks
+    off the event loop."""
+    token, path = _project_blob_new()
+    f = await run_in_threadpool(open, path, "wb")
+    size = 0
+    try:
+        async for chunk in http_request.stream():
+            if chunk:
+                size += len(chunk)
+                await run_in_threadpool(f.write, chunk)
+    finally:
+        await run_in_threadpool(f.close)
+    return {"token": token, "bytes": size}
+
+
+@app.get("/api/project/scene/{token}")
+def project_scene_download(token: str):
+    """The scene blob of an opened project; one download, then it is gone."""
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+    path = _project_blob_path(token)
+    return FileResponse(str(path), media_type="application/octet-stream",
+                        background=BackgroundTask(_project_blob_drop, token))
+
+
+class ProjectSaveRequest(BaseModel):
+    path: str
+    scene_token: str
+    session_ids: List[str] = []
+    # Octree cache ids the scene displays beyond the sessions' own (e.g. a
+    # synthetic scan's), so reopening needs no reconvert.
+    octree_ids: List[str] = []
+
+
+class ProjectOpenRequest(BaseModel):
+    path: str
+
+
+def _project_session_snapshot(sess: "CloudSession") -> dict:
+    """The fields `project_file.write_session` writes, captured under the
+    lock. Big arrays are captured by reference (a bake REPLACES them, so the
+    captured ones stay valid and self-consistent); the `deleted` mask, which
+    edits flip IN PLACE, is copied."""
+    with _cloud_session_lock:
+        f = {name: getattr(sess, name, None) for name in project_file_mod().SESSION_ARRAYS}
+        f["deleted"] = np.array(sess.deleted, dtype=bool)
+        f["extras"] = dict(sess.extras)
+        f["world_shift"] = None if sess.world_shift is None else np.array(sess.world_shift)
+        f["deleted_history"] = list(sess.deleted_history or [])
+        f["label_history"] = {
+            slug: [{"stroke_id": d.stroke_id, "encoding": d.encoding,
+                    "changed_count": d.changed_count, "idx": d.idx, "prev": d.prev,
+                    "starts": d.starts, "lengths": d.lengths, "prev_float": d.prev_float}
+                   for d in deltas]
+            for slug, deltas in (sess.label_history or {}).items()}
+        bm = sess.backfilled_misses
+        f["backfilled_misses"] = dict(bm) if bm else None
+        for k in project_file_mod().SESSION_SCALARS:
+            v = getattr(sess, k, None)
+            if hasattr(v, "model_dump"):
+                v = v.model_dump()
+            f[k] = v
+    return f
+
+
+def project_file_mod():
+    import project_file
+    return project_file
+
+
+def _do_project_save(request: ProjectSaveRequest, progress=None) -> dict:
+    import zipfile
+    pf = project_file_mod()
+
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+        _cancel_checkpoint(progress)
+
+    target = _Path(request.path)
+    if not target.parent.is_dir():
+        return {"success": False, "error": f"Folder does not exist: {target.parent}"}
+    blob = _project_blob_path(request.scene_token)
+    sessions = [(sid, _get_cloud_session(sid)) for sid in dict.fromkeys(request.session_ids)]
+    n_total = sum(int(len(s.positions)) for _sid, s in sessions)
+    partial = target.with_name(target.name + ".partial")
+    octrees: list = []
+    try:
+        # The deleted-mask copies plus one chunk buffer.
+        with _ADMISSION.admit(n_total + (64 << 20), f"save project ({n_total:,} pts)"):
+            with zipfile.ZipFile(partial, "w", allowZip64=True) as zf:
+                _report(0.02, "Writing scene")
+                zi = zipfile.ZipInfo(_PROJECT_SCENE_MEMBER, date_time=time.localtime()[:6])
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                with open(blob, "rb") as src, zf.open(zi, "w", force_zip64=True) as dst:
+                    _shutil.copyfileobj(src, dst, 16 << 20)
+                entries = []
+                wanted_octrees = list(dict.fromkeys(request.octree_ids))
+                for i, (sid, sess) in enumerate(sessions):
+                    _report(0.05 + 0.75 * i / max(1, len(sessions)), f"Saving cloud {i + 1}/{len(sessions)}")
+                    fields = _project_session_snapshot(sess)
+                    entry = pf.write_session(zf, sid, fields, check=lambda: _cancel_checkpoint(progress))
+                    entries.append(entry)
+                    for k in ("octree_cache_id", "rendered_octree_cache_id", "miss_octree_cache_id"):
+                        if fields.get(k):
+                            wanted_octrees.append(fields[k])
+                for j, cid in enumerate(dict.fromkeys(wanted_octrees)):
+                    _report(0.8 + 0.18 * j / max(1, len(wanted_octrees)), "Saving display octrees")
+                    try:
+                        if pf.write_octree(zf, cid, _octree_cache_root() / pf.check_cache_id(cid)):
+                            octrees.append(cid)
+                    except pf.ProjectError:
+                        continue
+                pf.write_manifest(zf, app_version=BACKEND_VERSION, sessions=entries, octrees=octrees)
+        os.replace(partial, target)
+    except BaseException:
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        _project_blob_drop(request.scene_token)
+    _report(1.0, "Saved")
+    return {"success": True, "path": str(target), "bytes": int(target.stat().st_size),
+            "sessions": len(sessions), "octrees": len(octrees)}
+
+
+@app.post("/api/project/save")
+def project_save(request: ProjectSaveRequest, http_request: Request):
+    """Write the scene (staged blob) and every listed cloud session into one
+    .phyto file. Streams progress; cancellable; writes to `<path>.partial` and
+    renames over the target only when complete."""
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_project_save(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
+
+
+def _project_restore_session(zf, key: str) -> "CloudSession":
+    """A NEW session (new id) from a saved one: columns stream into a
+    memory-mapped store for a large cloud, into RAM for a small one - the
+    size rule import uses."""
+    pf = project_file_mod()
+    sid = uuid.uuid4().hex[:8]
+    doc_n = int(pf.read_json(zf, f"sessions/{pf.check_name(key)}/session.json")["n"])
+    store = _new_session_store(sid, doc_n) if _session_should_use_store(doc_n) else None
+    allocate = None
+    if store is not None:
+        def allocate(name, shape, dtype):
+            return store.allocate_column(name, dtype, shape[1:])
+    try:
+        f = pf.read_session(zf, key, allocate)
+    except BaseException:
+        if store is not None:
+            store.delete()
+        raise
+    deltas = {
+        slug: [_LabelDelta(stroke_id=d["stroke_id"], encoding=d["encoding"],
+                           idx=d.get("idx"), prev=d.get("prev"), starts=d.get("starts"),
+                           lengths=d.get("lengths"), prev_float=d.get("prev_float"),
+                           changed_count=int(d.get("changed_count", 0)))
+               for d in entries]
+        for slug, entries in f["label_history"].items()}
+    column_plan = f.get("column_plan")
+    if isinstance(column_plan, dict):
+        try:
+            column_plan = ColumnPlan(**column_plan)
+        except Exception:
+            column_plan = None
+    now = time.time()
+    sess = CloudSession(
+        session_id=sid, source_path=f.get("source_path") or "<project>",
+        ascii_format=f.get("ascii_format"), column_plan=column_plan,
+        positions=f["positions"], colors=f.get("colors"), intensity=f.get("intensity"),
+        extras=f["extras"], extra_dims_meta=list(f.get("extra_dims_meta") or []),
+        deleted=f["deleted"], deleted_history=f["deleted_history"],
+        octree_cache_id=f.get("octree_cache_id"), created_at=now, last_accessed=now,
+        world_shift=f.get("world_shift"), deleted_base=f.get("deleted_base"),
+        backfilled_misses=f.get("backfilled_misses"),
+        timestamps=f.get("timestamps"), beam_origins=f.get("beam_origins"),
+        label_history=deltas, derived_fields=dict(f.get("derived_fields") or {}),
+    )
+    for k in ("miss_octree_cache_id", "miss_octree_origin", "crs_epsg", "source_units",
+              "source_unit_scale", "gps_time_encoding", "rendered_octree_cache_id",
+              "octree_pose", "octree_point_count", "octree_stale_gen"):
+        if f.get(k) is not None:
+            setattr(sess, k, f[k])
+    for k in ("normals_stale", "backfilled_misses_stale", "backfilled_misses_moved"):
+        setattr(sess, k, bool(f.get(k)))
+    sess.unrestorable_hit_count = int(f.get("unrestorable_hit_count") or 0)
+    if store is not None:
+        # Store column name -> slug, as `_session_reattach_store` reads it.
+        store.set_attr("extras", dict(zip(_project_extra_cols(zf, key), f["extras"])))
+        store.set_attr("extras_order", list(f["extras"]))
+        store.flush()
+        sess.store = store
+    return sess
+
+
+def _project_extra_cols(zf, key: str) -> List[str]:
+    pf = project_file_mod()
+    doc = pf.read_json(zf, f"sessions/{pf.check_name(key)}/session.json")
+    return [e["member"] for e in doc["extras"]]
+
+
+def _do_project_open(request: ProjectOpenRequest, progress=None) -> dict:
+    pf = project_file_mod()
+
+    def _report(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+        _cancel_checkpoint(progress)
+
+    restored: Dict[str, "CloudSession"] = {}
+    try:
+        with pf.open_zip(request.path) as zf:
+            manifest = pf.read_manifest(zf)
+            total_n = sum(int(s.get("n", 0)) for s in manifest["sessions"])
+            with _ADMISSION.admit(min(total_n * 16, memory_budget.admission_budget_bytes()),
+                                  f"open project ({total_n:,} pts)"):
+                octs = manifest.get("octrees", [])
+                for j, cid in enumerate(octs):
+                    _report(0.02 + 0.2 * j / max(1, len(octs)), "Installing display octrees")
+                    cache_dir = _octree_cache_root() / cid
+                    with _octree_build_lock(cid):
+                        if (cache_dir / "metadata.json").is_file():
+                            continue
+                        staging = cache_dir.parent / (cid + ".staging")
+                        if staging.exists():
+                            _shutil.rmtree(staging)
+                        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+                        pf.extract_octree(zf, cid, staging)
+                        _install_octree_dir(staging, cache_dir)
+                sessions = manifest["sessions"]
+                for i, s in enumerate(sessions):
+                    _report(0.25 + 0.7 * i / max(1, len(sessions)), f"Opening cloud {i + 1}/{len(sessions)}")
+                    restored[s["key"]] = _project_restore_session(zf, s["key"])
+                token, path = _project_blob_new()
+                with zf.open(_PROJECT_SCENE_MEMBER) as src, open(path, "wb") as dst:
+                    _shutil.copyfileobj(src, dst, 16 << 20)
+    except pf.ProjectError as e:
+        _project_drop_restored(restored)
+        return {"success": False, "error": str(e)}
+    except BaseException:
+        _project_drop_restored(restored)
+        raise
+    _sweep_cloud_sessions()
+    with _cloud_session_lock:
+        for sess in restored.values():
+            _cloud_sessions[sess.session_id] = sess
+    _report(1.0, "Opened")
+    return {"success": True, "scene_token": token,
+            "session_map": {old: s.session_id for old, s in restored.items()},
+            "app_version": manifest.get("app_version")}
+
+
+def _project_drop_restored(restored: Dict[str, "CloudSession"]) -> None:
+    for s in restored.values():
+        if s.store is not None:
+            try:
+                s.store.delete()
+            except Exception:
+                pass
+
+
+@app.post("/api/project/open")
+def project_open(request: ProjectOpenRequest, http_request: Request):
+    """Restore a .phyto file: install its octrees, create NEW sessions from its
+    saved ones, and stage its scene blob (fetch it with GET
+    /api/project/scene/{token}). Streams progress; cancellable; a failure
+    leaves no half-registered session behind."""
+    run_id, cancel_event = _new_cancel_token()
+    return _bin_frame_streaming_response(
+        lambda progress: json.dumps(_do_project_open(request, progress=progress)).encode("utf-8"),
+        request=http_request, cancel_event=cancel_event, run_id=run_id)
 
 
 @app.post("/api/cloud/session/merge")

@@ -8,9 +8,9 @@ import { OctreeRefreshQueue, type OctreeRefreshReason, type OctreeRefreshRunner 
 import { poseFromMatrix, renderPivot } from '../lib/octreePoseDecompose';
 import { composeCloudPose, hasStoredPose, transformBoundsAabb, transformGroundZ, transformPoint, unposePoint } from '../lib/octreePoseCompose';
 import * as THREE from 'three';
-import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator} from 'lucide-react';
+import { Eye, EyeOff, Maximize2, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Circle, Square, Move3d, Crosshair, Crop, Trash2, Layers, CheckSquare, XSquare, Triangle, Loader2, Box, Merge, ChevronRight, ChevronDown, Download, Plus, Home, Sprout, Trees, CircleDot, Minus, Grid3x3, ChartScatter, ChartColumn, Eraser, Filter, Globe, Search, Dna, Radio, Pencil, FileUp, Copy, Compass, CloudFog, Mountain, X, TreeDeciduous, MousePointerClick, Brush, Layers3, Sparkles, Calculator, ClipboardList} from 'lucide-react';
 import GIF from 'gif.js';
-import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, detectStems, exportLAD, type LADExportResponse } from '../utils/backendApi';
+import { triangulatePointCloud, TriangulationMethod, extractSkeleton, generatePlantModel, generatePlantStreaming, runLidarScan, type LidarScanResult, type LidarScanMaterial, exportPointCloudLasLaz, createPlantSession, advancePlantSession, computeAlignmentDistance, AlignmentDistanceResponse, icpRegisterMeshToCloud, icpRegisterCloudToCloud, icpRegisterMeshToMesh, globalRegisterCloudToCloud, multiScanRegister, type MultiScanRegisterRequest, type ICPRegistrationResponse, type CloudToCloudICPRequest, type SceneType, HeliosTriangulationRequest, heliosTriangulate, computeLAD, type LADRequest, checkTriangulationSpacing, morphPlant, PlantMorphRequest, deletePlantSession, deleteCloudRegion, resetCloudEdits, bakeCloudSession, labelCloudRegion, resetCloudLabelEdits, commitCloudLabels, getCloudLabelSummary, describeBackendError, createCloudSession, sessionFilter, sessionTransform, rebuildSessionOctree, sessionSplit, sessionExtract, sessionExtractByColumn, duplicateCloudSession, sessionSegmentGround, sessionSegmentTrees, sessionSegmentWood, sessionComputeNormals, sessionNormalsStatus, listScalarFields, scalarFieldStatsMulti, computeScalarField, manageScalarField, ExpressionError, type ScalarFieldListResult, segmentGround, segmentTrees, segmentWood, generateDEM, generateSessionDEM, exportDemRaster, type DemInterpMethod, type DemSurfaceType, buildQSM, addQSMLeaves, adjustQSMLeafAngles, type QSMLeavesRequest, type QSMAdjustLeafAnglesRequest, type LeafAngleTriangulationBuffers, type CropOctreeRegion, type BackendPointSource, type OctreeMetadata, type HeliosGrid, backfillMisses, type BackfillMissesRaster, type BinaryFrameProgress, cancelRun, ScanCancelledError, CostWarningError, snapGridToGround, fitCrown, type CrownFitCrown, runTreeInventory, buildTreeQSMs, detectStems, uploadProjectScene, downloadProjectScene, saveProject, openProject, type TreeInventoryTree, type TreeInventoryStand, type TreeQSMResult, type StemCurveRow, exportLAD, type LADExportResponse } from '../utils/backendApi';
 import { showToast } from './Toast';
 import {
   getSettings, getClassPalettes, saveClassPalette, deleteClassPalette,
@@ -29,6 +29,13 @@ import { LADPopup, type LADTriangulationOption } from './LADPopup';
 import { BackfillMissesPopup } from './BackfillMissesPopup';
 import { QSMPopup, type QSMStartOptions } from './QSMPopup';
 import { CrownFitPopup, type CrownFitStartArgs } from './CrownFitPopup';
+import { TreeInventoryPanel, type TreeInventorySettings, type TreeQsmSettings } from './viewer/panels/TreeInventoryPanel';
+import { summarizeStand, standTrees, treeBiomassKg, buildStandCsv, DEFAULT_STAND_SETTINGS, type StandSettings } from '../lib/standSummary';
+import { TreeInventoryOverlay } from './viewer/renderers/TreeInventoryOverlay';
+import { exportBaseName } from '../lib/exportObjects';
+import { encodeProjectScene, decodeProjectScene, rewireOpenedScene, sceneBackendRefs } from '../lib/projectDocument';
+import { setPendingProject, takePendingProject } from '../lib/pendingProject';
+import { buildTreeListCsv, buildStemCurveCsv, buildTreeQsmCsv, carryOverEdits, treeFrameTarget, EMPTY_TREE_EDIT, type TreeEdits, type TreeEdit } from '../lib/treeInventory';
 import { CROWN_SHAPE_LABELS, crownColorForTreeId, allocateCrownColor, type CrownFitScanEligibility } from '../lib/crownFit';
 import {
   buildCrownCsv, crownExportBaseName, crownMeshFileName, joinExportPath, type CrownCsvRow,
@@ -2051,6 +2058,43 @@ export default function PointCloudViewer({
   const [crownFitProgress, setCrownFitProgress] = useState<{ label: string; value: number | null } | null>(null);
   const crownFitAbortRef = useRef<AbortController | null>(null);
   const crownFitRunIdRef = useRef<string | null>(null);
+  // Tree inventory panel, its last result (one cloud at a time), the user's
+  // per-tree entries, and the viewer overlays. The result outlives the panel so
+  // the DBH circles stay on screen after it is closed.
+  const [showTreeInventoryPanel, setShowTreeInventoryPanel] = useState(false);
+  const [treeInventorySettings, setTreeInventorySettings] = useState<TreeInventorySettings>(
+    { breastHeightM: 1.3, fitMethod: 'ransac', voxelSizeM: 0.1, minPoints: 50, competitionRadiusM: 6 });
+  const [treeInventory, setTreeInventory] = useState<{
+    cloudId: string; cloudName: string; worldShift: [number, number, number];
+    /** treeInventoryStateKey(cloud) at run time; see treeInventoryStale. */
+    stateKey: string;
+    trees: TreeInventoryTree[]; stemCurve: StemCurveRow[]; warnings: string[];
+    stand: TreeInventoryStand | null;
+  } | null>(null);
+  // Stand tab settings, and the last batch QSM over the inventory's trees
+  // (its models go to the scene; its per-tree metrics stay here for the table,
+  // the QSM biomass method and the QSM metrics CSV).
+  const [standSettings, setStandSettings] = useState<StandSettings>(DEFAULT_STAND_SETTINGS);
+  const [treeQsmSettings, setTreeQsmSettings] = useState<TreeQsmSettings>({ maxPointsPerTree: 60000, woodOnly: true });
+  const [treeQsm, setTreeQsm] = useState<{ cloudId: string; results: TreeQSMResult[]; woodOnly: boolean } | null>(null);
+  const [treeQsmRunning, setTreeQsmRunning] = useState(false);
+  const [treeQsmProgress, setTreeQsmProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const [treeQsmError, setTreeQsmError] = useState<string | null>(null);
+  const treeQsmAbortRef = useRef<AbortController | null>(null);
+  const treeQsmRunIdRef = useRef<string | null>(null);
+  const [treeInventoryEdits, setTreeInventoryEdits] = useState<TreeEdits>({});
+  const [treeInventoryRunning, setTreeInventoryRunning] = useState(false);
+  const [treeInventoryProgress, setTreeInventoryProgress] = useState<{ label: string; value: number | null } | null>(null);
+  const [treeInventoryError, setTreeInventoryError] = useState<string | null>(null);
+  const [selectedInventoryTreeId, setSelectedInventoryTreeId] = useState<number | null>(null);
+  const [showTreeInventoryOverlays, setShowTreeInventoryOverlays] = useState(true);
+  const treeInventoryAbortRef = useRef<AbortController | null>(null);
+  // Per-cloud memory of the user's own inventory inputs: the species/status/
+  // label entries (with the trees they were typed against, for carry-over) and
+  // an entered plot area. Running another cloud stashes the current one's
+  // here instead of discarding it, and coming back restores it.
+  const treeInventoryStashRef = useRef<Map<string, { trees: TreeInventoryTree[]; edits: TreeEdits; plotAreaM2: number | null }>>(new Map());
+  const treeInventoryRunIdRef = useRef<string | null>(null);
   // Leaf area density popup + results + background task state
   const [showLADPopup, setShowLADPopup] = useState(false);
   // When the LAD modal launches a backfill (a selected scan lacked misses), it
@@ -3177,6 +3221,7 @@ export default function PointCloudViewer({
     if (except !== 'tree-segment') { setShowTreeSegmentPanel(false); setTreeSeedMode(false); }
     if (except !== 'skeleton') setShowSkeletonPanel(false);
     if (except !== 'qsm') setShowQSMPopup(false);
+    if (except !== 'tree-inventory') setShowTreeInventoryPanel(false);
     if (except !== 'export') setShowExportPanel(false);
     if (except !== 'morph') setShowMorphPopup(false);
     if (except !== 'scene-origin') { setShowSceneOriginPanel(false); setOriginPlaceMode(false); }
@@ -9836,6 +9881,7 @@ export default function PointCloudViewer({
       { id: 'cloud-qsm', name: 'Build QSM', keywords: ['qsm', 'cylinder', 'radius', 'shoot', 'rank', 'scaffold', 'structure', 'quantitative'], action: () => { closeAllToolPanels('qsm'); setShowQSMPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: QsmIcon, testId: 'tool-qsm', multiInput: true, isActive: () => showQSMPopup },
       { id: 'compute-lad', name: 'Compute Leaf Area Density', keywords: ['lad', 'leaf area density', 'voxel', 'foliage', 'beer', 'canopy', 'helios'], action: () => { closeAllToolPanels(); setLadReopenSelection(null); setShowLADPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: Grid3x3, testId: 'tool-compute-lad', multiInput: true },
       { id: 'fit-crown', name: 'Fit Crown & Metrics', keywords: ['crown', 'canopy', 'shape', 'ellipsoid', 'prism', 'cone', 'alpha', 'volume', 'height', 'metrics', 'tree'], action: () => { closeAllToolPanels(); setShowCrownFitPopup(true); }, category: 'Point Cloud', requires: null, toolGroup: 'reconstruct', icon: TreeDeciduous, testId: 'tool-fit-crown', multiInput: true, isActive: () => showCrownFitPopup },
+      { id: 'tree-inventory', name: 'Tree Inventory', keywords: ['inventory', 'dbh', 'diameter', 'breast height', 'stem', 'basal area', 'tree list', 'forest', 'lean', 'crown base', 'stem curve', 'taper', 'mensuration'], action: () => { closeAllToolPanels('tree-inventory'); setShowTreeInventoryPanel(!showTreeInventoryPanel); }, category: 'Point Cloud', requires: 'cloud', toolGroup: 'reconstruct', icon: ClipboardList, testId: 'tool-tree-inventory', isActive: () => showTreeInventoryPanel },
 
       // ── Create (geometry + scanner placement — scene-building, not analysis) ──
       { id: 'create-plant', name: 'Generate Plant', keywords: ['helios', 'leaf', 'vegetation', 'build', 'geometry'], action: () => setShowPlantPopup(true), category: 'Create', requires: null, toolGroup: 'create', icon: Sprout, testId: 'tool-plant-generate' },
@@ -9887,7 +9933,7 @@ export default function PointCloudViewer({
     // omitted from deps — they're const-declared below this useMemo (TDZ), and
     // their action closures only run on click, by which point they're defined.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud,
+  }, [editMode, showFilterPanel, showResamplePanel, showComputeNormalsPanel, showScalarFieldsPanel, showTriangulationPopup, showGroundSegmentPanel, showDEMPanel, showWoodSegmentPanel, showTreeSegmentPanel, showSkeletonPanel, showQSMPopup, showCrownFitPopup, showTreeInventoryPanel, showExportPanel, showPlantGrowthPanel, showSceneOriginPanel, showPointPickerPanel, showResizePanel, hasMeshSelected, closeAllToolPanels, toggleCropMode, onSelectAll, onDeselectAll, selectedIds, handleUndo, handleRedo, onOpenSettings, anyScanRegistered, canResampleSelectedCloud,
       // Label Points' isActive and blockedReason read these.
       showLabelPanel, clouds]);
 
@@ -19970,6 +20016,485 @@ export default function PointCloudViewer({
     crownFitRunIdRef.current = null;
   }, []);
 
+  // ---- Tree inventory ----
+  // What an inventory result depends on, beyond the tree labels: the octree it
+  // was measured from (a re-segmentation, DEM, bake or filter rebuilds it), the
+  // pending deletions, and the draft transform the viewer applies on top. When
+  // any of them changes the result no longer describes what is on screen, so
+  // the overlays hide and the panel says to re-run.
+  const treeInventoryStateKey = useCallback((cloud: PointCloudEntry): string => {
+    const e = editStates.get(cloud.id);
+    const t = e?.translation ?? { x: 0, y: 0, z: 0 };
+    const r = e?.rotation ?? { x: 0, y: 0, z: 0 };
+    return [cloud.data.octree?.cacheId ?? '', e?.pendingDeletes?.length ?? 0,
+      t.x, t.y, t.z, r.x, r.y, r.z].join('|');
+  }, [editStates]);
+
+  // The one selected cloud the inventory would run on, and why it can't.
+  const treeInventoryTarget = useMemo(() => {
+    const picked = clouds.filter(c => selectedIds.has(c.id));
+    if (picked.length !== 1) {
+      return { cloud: null, blocked: 'Select one point cloud (after Segment Trees).', ground: null } as const;
+    }
+    const cloud = picked[0];
+    const ranges = cloud.data.octree?.attributeRanges ?? {};
+    const has = (slug: string) => !!(ranges[slug] || cloud.data.scalarFields?.[slug]);
+    const ground = has(HEIGHT_ABOVE_GROUND_ATTRIBUTE) ? 'height_above_ground'
+      : has(GROUND_CLASS_ATTRIBUTE) ? 'ground_class' : 'tree_min_z';
+    if (!cloud.data.octree?.sessionId) {
+      return { cloud, blocked: 'This cloud has no editable session to measure.', ground } as const;
+    }
+    if (!has(TREE_INSTANCE_ATTRIBUTE)) {
+      return { cloud, blocked: 'This cloud has no tree labels. Run Segment Trees first.', ground } as const;
+    }
+    return { cloud, blocked: null, ground } as const;
+  }, [clouds, selectedIds]);
+
+  const handleRunTreeInventory = useCallback(async () => {
+    const cloud = treeInventoryTarget.cloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    if (!cloud || !sessionId || treeInventoryRunning) return;
+    const cloudName = scans.find(s => s.id === cloud.id)?.label ?? cloud.data.fileName ?? 'cloud';
+    const ws = cloud.data.octree?.worldShift;
+    const worldShift: [number, number, number] = ws ? [ws[0], ws[1], ws[2]] : [0, 0, 0];
+    const abort = new AbortController();
+    treeInventoryAbortRef.current = abort;
+    treeInventoryRunIdRef.current = null;
+    setTreeInventoryRunning(true);
+    setTreeInventoryError(null);
+    setTreeInventoryProgress({ label: 'Indexing trees', value: null });
+    try {
+      const res = await runTreeInventory(sessionId, {
+        breast_height_m: treeInventorySettings.breastHeightM,
+        fit_method: treeInventorySettings.fitMethod,
+        voxel_size_m: treeInventorySettings.voxelSizeM,
+        min_points: treeInventorySettings.minPoints,
+        competition_radius_m: treeInventorySettings.competitionRadiusM,
+      }, abort.signal, (value, label) => setTreeInventoryProgress({ label, value }),
+      (runId) => { treeInventoryRunIdRef.current = runId; });
+      if (abort.signal.aborted) return;
+      if (!res.success) {
+        setTreeInventoryError(res.error ?? 'Tree inventory failed.');
+        return;
+      }
+      // Keep the user's species/status/label only for the SAME physical tree:
+      // same cloud, same id, and the stem where it was. Re-running Segment
+      // Trees renumbers instances, so an id alone would move an entry onto a
+      // different tree without a word.
+      // Stash the cloud being replaced, then carry over from this cloud's
+      // own previous run (the live one, or its stash).
+      if (treeInventory && treeInventory.cloudId !== cloud.id) {
+        treeInventoryStashRef.current.set(treeInventory.cloudId, {
+          trees: treeInventory.trees, edits: treeInventoryEdits, plotAreaM2: standSettings.plotAreaM2,
+        });
+      }
+      const previous = treeInventory?.cloudId === cloud.id
+        ? { trees: treeInventory.trees, edits: treeInventoryEdits, plotAreaM2: standSettings.plotAreaM2 }
+        : treeInventoryStashRef.current.get(cloud.id) ?? null;
+      const carried = previous
+        ? carryOverEdits(previous.trees, previous.edits, res.trees)
+        : { edits: {}, dropped: 0 };
+      setTreeInventoryEdits(carried.edits);
+      // An entered plot area belongs to its cloud: never apply plot A's
+      // surveyed area to plot B.
+      if (treeInventory?.cloudId !== cloud.id) {
+        setStandSettings(prev => ({ ...prev, plotAreaM2: previous?.plotAreaM2 ?? null }));
+      }
+      if (carried.dropped > 0) {
+        showToast({
+          type: 'warning', title: 'Tree Inventory',
+          message: `${carried.dropped} tree entr${carried.dropped === 1 ? 'y was' : 'ies were'} dropped: those trees were not found again at the same place.`,
+        });
+      }
+      setTreeInventory({
+        cloudId: cloud.id, cloudName, worldShift, stateKey: treeInventoryStateKey(cloud),
+        trees: res.trees, stemCurve: res.stem_curve, warnings: res.warnings ?? [],
+        stand: res.stand ?? null,
+      });
+      // A new tree list: the previous batch QSM's metrics no longer line up
+      // with it (its models stay in the scene).
+      setTreeQsm(null);
+      setSelectedInventoryTreeId(null);
+      showToast({
+        type: 'success', title: 'Tree Inventory Complete',
+        message: `Measured ${res.trees.length} tree${res.trees.length === 1 ? '' : 's'}.`,
+      });
+    } catch (err) {
+      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      setTreeInventoryError(err instanceof Error ? err.message : 'Tree inventory failed.');
+    } finally {
+      setTreeInventoryRunning(false);
+      setTreeInventoryProgress(null);
+      treeInventoryAbortRef.current = null;
+      treeInventoryRunIdRef.current = null;
+    }
+  }, [treeInventoryTarget, treeInventoryRunning, treeInventorySettings, treeInventory, treeInventoryEdits, treeInventoryStateKey, standSettings.plotAreaM2, scans, showToast]);
+
+  const cancelTreeInventory = useCallback(() => {
+    if (treeInventoryRunIdRef.current) void cancelRun(treeInventoryRunIdRef.current);
+    treeInventoryAbortRef.current?.abort();
+    setTreeInventoryRunning(false);
+    setTreeInventoryProgress(null);
+    treeInventoryAbortRef.current = null;
+    treeInventoryRunIdRef.current = null;
+  }, []);
+
+  const selectInventoryTree = useCallback((treeId: number) => {
+    setSelectedInventoryTreeId(treeId);
+    const t = treeInventory?.trees.find(x => x.tree_id === treeId);
+    const target = t ? treeFrameTarget(t, treeInventory!.worldShift) : null;
+    const frameSelection = (window as any).__frameSelection;
+    if (target && frameSelection) {
+      frameSelection({
+        center: new THREE.Vector3(...target.center),
+        size: new THREE.Vector3(...target.size),
+      });
+    }
+  }, [treeInventory]);
+
+  // Whether the last result still describes its cloud as it is now, and
+  // whether that cloud is the one selected (the panel names both).
+  const treeInventoryCloud = treeInventory ? clouds.find(c => c.id === treeInventory.cloudId) ?? null : null;
+  const treeInventoryStale = !!treeInventory && (!treeInventoryCloud
+    || treeInventoryStateKey(treeInventoryCloud) !== treeInventory.stateKey);
+
+  const hasWoodClassForInventory = !!(treeInventoryTarget.cloud && (
+    treeInventoryTarget.cloud.data.octree?.attributeRanges?.[WOOD_CLASS_ATTRIBUTE]
+    || treeInventoryTarget.cloud.data.scalarFields?.[WOOD_CLASS_ATTRIBUTE]));
+
+  // Woody volume per tree from the last batch QSM of THIS inventory's cloud.
+  const treeQsmVolumes = useMemo(() => {
+    const out: Record<number, number> = {};
+    if (!treeQsm || treeQsm.cloudId !== treeInventory?.cloudId) return out;
+    for (const r of treeQsm.results) {
+      if (r.success && r.metrics) out[r.tree_id] = r.metrics.total_woody_volume_m3;
+    }
+    return out;
+  }, [treeQsm, treeInventory]);
+
+  const standSummary = useMemo(() => (treeInventory
+    ? summarizeStand(treeInventory.trees, treeInventoryEdits, standSettings, {
+      plotAreaM2: treeInventory.stand?.plot_area_m2 ?? null,
+      crownUnionAreaM2: treeInventory.stand?.crown_union_area_m2 ?? null,
+    }, treeQsmVolumes)
+    : null), [treeInventory, treeInventoryEdits, standSettings, treeQsmVolumes]);
+
+  // Per-tree biomass for the table and the tree-list CSV, under the Stand
+  // tab's method; null when no method is chosen. Trees outside the stand
+  // filter (below the minimum DBH, or dead) get null too, so the column and
+  // the stand total agree.
+  const treeBiomass = useMemo(() => {
+    if (!treeInventory || standSettings.biomassMethod === 'none') return null;
+    const inStand = new Set(standTrees(treeInventory.trees, treeInventoryEdits, standSettings).map(t => t.tree_id));
+    const out: Record<number, number | null> = {};
+    for (const t of treeInventory.trees) {
+      out[t.tree_id] = inStand.has(t.tree_id)
+        ? treeBiomassKg(t, standSettings.biomassMethod, standSettings.woodDensity,
+          treeQsmVolumes[t.tree_id], standSettings.jenkinsGroup)
+        : null;
+    }
+    return out;
+  }, [treeInventory, treeInventoryEdits, standSettings, treeQsmVolumes]);
+
+  const exportStandSummary = useCallback(async () => {
+    if (!treeInventory || !standSummary) return;
+    const name = `${exportBaseName(treeInventory.cloudName)}_stand.csv`;
+    const path = await saveTextFileQuiet(buildStandCsv(treeInventory.cloudName, standSummary, standSettings), name);
+    if (path) showToast({ type: 'success', title: 'Tree Inventory', message: `Wrote ${name}.` });
+  }, [treeInventory, standSummary, standSettings, showToast]);
+
+  // One QSM per inventoried tree, in one backend run. Every model lands in the
+  // scene as ONE undoable step.
+  const handleBuildTreeQsms = useCallback(async () => {
+    const cloud = treeInventoryCloud;
+    const sessionId = cloud?.data.octree?.sessionId;
+    if (!treeInventory || !cloud || !sessionId || treeQsmRunning) return;
+    const woodOnly = hasWoodClassForInventory && treeQsmSettings.woodOnly;
+    const abort = new AbortController();
+    treeQsmAbortRef.current = abort;
+    treeQsmRunIdRef.current = null;
+    setTreeQsmRunning(true);
+    setTreeQsmError(null);
+    setTreeQsmProgress({ label: 'Building QSMs', value: null });
+    try {
+      const res = await buildTreeQSMs(sessionId, {
+        tree_ids: treeInventory.trees.map(t => t.tree_id),
+        max_points_per_tree: treeQsmSettings.maxPointsPerTree,
+        wood_only: woodOnly,
+        include_models: true,
+      }, abort.signal, (value, label) => setTreeQsmProgress({ label, value }),
+      (runId) => { treeQsmRunIdRef.current = runId; });
+      if (abort.signal.aborted) return;
+      if (!res.success && res.results.length === 0) {
+        setTreeQsmError(res.error ?? 'No QSM could be built.');
+        return;
+      }
+      const entries: QSMEntry[] = res.results
+        .filter(r => r.success && r.cylinders && r.cylinders.length > 0)
+        .map(r => ({
+          id: crypto.randomUUID(),
+          sourceCloudId: cloud.id,
+          sourceLabel: `${treeInventory.cloudName} tree ${r.tree_id}`,
+          cylinders: r.cylinders!,
+          shoots: r.shoots ?? [],
+          metrics: r.metrics,
+          visible: true,
+        }));
+      if (entries.length > 0) {
+        scene.commit({
+          label: 'Build tree QSMs',
+          actions: entries.map(e => ({ t: 'add' as const, kind: 'qsm' as const, id: e.id, object: e })),
+        });
+      }
+      // Keep only what the table and CSV need; the models live in the scene.
+      setTreeQsm({
+        cloudId: cloud.id, woodOnly,
+        results: res.results.map(({ cylinders: _c, shoots: _s, ...rest }) => rest),
+      });
+      const failed = res.results.filter(r => !r.success).length;
+      showToast({
+        type: failed ? 'warning' : 'success', title: 'Tree QSMs',
+        message: `Built ${entries.length} QSM${entries.length === 1 ? '' : 's'}${failed ? `; ${failed} tree(s) failed (see the QSM metrics CSV)` : ''}.`,
+      });
+    } catch (err) {
+      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      setTreeQsmError(err instanceof Error ? err.message : 'Tree QSM build failed.');
+    } finally {
+      setTreeQsmRunning(false);
+      setTreeQsmProgress(null);
+      treeQsmAbortRef.current = null;
+      treeQsmRunIdRef.current = null;
+    }
+  }, [treeInventoryCloud, treeInventory, treeQsmRunning, treeQsmSettings, hasWoodClassForInventory, scene, showToast]);
+
+  const cancelTreeQsms = useCallback(() => {
+    if (treeQsmRunIdRef.current) void cancelRun(treeQsmRunIdRef.current);
+    treeQsmAbortRef.current?.abort();
+    setTreeQsmRunning(false);
+    setTreeQsmProgress(null);
+    treeQsmAbortRef.current = null;
+    treeQsmRunIdRef.current = null;
+  }, []);
+
+  const exportTreeQsms = useCallback(async () => {
+    if (!treeInventory || !treeQsm) return;
+    const name = `${exportBaseName(treeInventory.cloudName)}_qsm_metrics.csv`;
+    const path = await saveTextFileQuiet(buildTreeQsmCsv(treeInventory.cloudName, treeQsm.results), name);
+    if (path) showToast({ type: 'success', title: 'Tree Inventory', message: `Wrote ${name}.` });
+  }, [treeInventory, treeQsm, showToast]);
+
+  const editInventoryTree = useCallback((treeId: number, patch: Partial<TreeEdit>) => {
+    setTreeInventoryEdits(prev => ({
+      ...prev, [treeId]: { ...EMPTY_TREE_EDIT, ...prev[treeId], ...patch },
+    }));
+  }, []);
+
+  const exportTreeInventory = useCallback(async (which: 'trees' | 'stem-curve') => {
+    if (!treeInventory) return;
+    const base = exportBaseName(treeInventory.cloudName);
+    const [csv, name] = which === 'trees'
+      ? [buildTreeListCsv(treeInventory.cloudName, treeInventory.trees, treeInventoryEdits, {
+        qsmVolumes: treeQsmVolumes, biomassKg: treeBiomass ?? undefined,
+        biomassMethod: standSettings.biomassMethod,
+      }), `${base}_trees.csv`]
+      : [buildStemCurveCsv(treeInventory.cloudName, treeInventory.stemCurve), `${base}_stem_curve.csv`];
+    const path = await saveTextFileQuiet(csv, name);
+    if (path) showToast({ type: 'success', title: 'Tree Inventory', message: `Wrote ${name}.` });
+  }, [treeInventory, treeInventoryEdits, treeQsmVolumes, treeBiomass, standSettings.biomassMethod, showToast]);
+
+  // ---- Project file (.phyto) ----
+  // Save / open the whole scene as one self-contained file
+  // (docs/docs/developers/architecture/project-file.md). The backend writes
+  // the cloud sessions; this side contributes the scene document: the store's
+  // collections plus the viewer state a user expects back.
+  const [projectBusy, setProjectBusy] = useState<{ label: string; value: number | null } | null>(null);
+  const projectAbortRef = useRef<AbortController | null>(null);
+  const projectRunIdRef = useRef<string | null>(null);
+  const projectPathRef = useRef<string | null>(null);
+  const pendingCameraRef = useRef<{ position: number[]; target: number[]; up?: number[] } | null>(null);
+
+  const collectProjectDocument = useCallback(() => {
+    const st = scene.state;
+    const cam = (window as any).__getCameraState?.();
+    const off = displayOffsetRef.current;
+    const toWorld = (v: number[] | null | undefined) => (v ? [v[0] + off.x, v[1] + off.y, v[2] + off.z] : null);
+    return {
+      scene: {
+        scans: st.scans, meshes: st.meshes, skeletons: st.skeletons, qsms: st.qsms,
+        ladResults: st.ladResults, meshPositions: st.meshPositions, meshRotations: st.meshRotations,
+        meshScales: st.meshScales, skeletonPositions: st.skeletonPositions,
+        editStates: st.editStates, labelStates: st.labelStates,
+      },
+      viewer: {
+        cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
+        measurements, pickedPoints, sceneOriginOverride,
+        // The camera in WORLD terms (display + offset): the display offset is
+        // derived from the content and may differ when reopened.
+        camera: cam ? { position: toWorld(cam.position), target: toWorld(cam.target), up: cam.up } : null,
+        treeInventory, treeInventoryEdits, treeQsm, standSettings, treeInventorySettings,
+      },
+    };
+  }, [scene, cloudColorModes, colorMode, selectedScalarField, colormap, colormapOverrides, pointSize,
+    measurements, pickedPoints, sceneOriginOverride, treeInventory, treeInventoryEdits, treeQsm,
+    standSettings, treeInventorySettings]);
+
+  const handleSaveProject = useCallback(async (saveAs: boolean) => {
+    if (projectBusy || !window.electronAPI) return;
+    let path = saveAs ? null : projectPathRef.current;
+    if (!path) {
+      path = await window.electronAPI.dialog.save({
+        title: 'Save Project',
+        defaultPath: 'project.phyto',
+        filters: [{ name: 'Phytograph project', extensions: ['phyto'] }],
+      });
+      if (!path) return;
+      if (!/\.phyto$/i.test(path)) path = `${path}.phyto`;
+    }
+    const abort = new AbortController();
+    projectAbortRef.current = abort;
+    setProjectBusy({ label: 'Saving project…', value: null });
+    try {
+      const doc = collectProjectDocument();
+      const token = await uploadProjectScene(encodeProjectScene(doc));
+      const refs = sceneBackendRefs(scene.state.scans as never);
+      const res = await saveProject({ path, scene_token: token, session_ids: refs.sessionIds, octree_ids: refs.octreeIds },
+        abort.signal, (value, label) => setProjectBusy({ label, value }),
+        (runId) => { projectRunIdRef.current = runId; });
+      if (abort.signal.aborted) return;
+      if (!res.success) throw new Error(res.error ?? 'Save failed.');
+      projectPathRef.current = path;
+      (window as any).__markProjectClean?.();
+      showToast({ type: 'success', title: 'Project Saved', message: `Saved ${path.split(/[\\/]/).pop()}.` });
+    } catch (err) {
+      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      showToast({ type: 'error', title: 'Save Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
+    } finally {
+      setProjectBusy(null);
+      projectAbortRef.current = null;
+      projectRunIdRef.current = null;
+    }
+  }, [projectBusy, collectProjectDocument, scene, showToast]);
+
+  const handleOpenProject = useCallback(async () => {
+    if (projectBusy || !window.electronAPI) return;
+    const st = scene.state;
+    if (st.scans.length + st.meshes.length + st.skeletons.length + st.qsms.length + st.ladResults.length > 0) {
+      const r = await window.electronAPI.dialog.messageBox({
+        type: 'warning', title: 'Open Project', message: 'Open a project?',
+        detail: 'Opening a project replaces the current scene. Unsaved changes will be lost.',
+        buttons: ['Open', 'Cancel'], defaultId: 0, cancelId: 1,
+      });
+      if (r.response !== 0) return;
+    }
+    const picked = await window.electronAPI.dialog.open({
+      title: 'Open Project', filters: [{ name: 'Phytograph project', extensions: ['phyto'] }],
+    });
+    const path = typeof picked === 'string' ? picked : Array.isArray(picked) ? picked[0] : null;
+    if (!path) return;
+    const abort = new AbortController();
+    projectAbortRef.current = abort;
+    setProjectBusy({ label: 'Opening project…', value: null });
+    try {
+      const res = await openProject(path, abort.signal, (value, label) => setProjectBusy({ label, value }),
+        (runId) => { projectRunIdRef.current = runId; });
+      if (abort.signal.aborted) return;
+      if (!res.success || !res.scene_token) throw new Error(res.error ?? 'Open failed.');
+      const doc = decodeProjectScene(await downloadProjectScene(res.scene_token)) as {
+        scene: Record<string, unknown>; viewer: Record<string, unknown>;
+      };
+      // The reset below remounts this component; the opened project waits for
+      // the fresh one (see the mount effect after this block).
+      setPendingProject({ path, doc, sessionMap: res.session_map ?? {} });
+      await (window as any).__resetSceneForProject?.();
+    } catch (err) {
+      if (abort.signal.aborted || err instanceof ScanCancelledError) return;
+      showToast({ type: 'error', title: 'Open Project Failed', message: err instanceof Error ? err.message : 'Unknown error' });
+    } finally {
+      setProjectBusy(null);
+      projectAbortRef.current = null;
+      projectRunIdRef.current = null;
+    }
+  }, [projectBusy, scene, showToast]);
+
+  const cancelProjectOp = useCallback(() => {
+    if (projectRunIdRef.current) void cancelRun(projectRunIdRef.current);
+    projectAbortRef.current?.abort();
+    setProjectBusy(null);
+  }, []);
+
+  useEffect(() => {
+    (window as any).__projectCommand = (kind: string) => {
+      if (kind === 'open-project') void handleOpenProject();
+      else if (kind === 'save-project') void handleSaveProject(false);
+      else if (kind === 'save-project-as') void handleSaveProject(true);
+    };
+    return () => { delete (window as any).__projectCommand; };
+  }, [handleOpenProject, handleSaveProject]);
+
+  // Take an opened project on mount (after the reset that cleared the old
+  // scene). Collections go in as one history-free replace; viewer state
+  // through its setters; the camera once the clouds are in (below).
+  useEffect(() => {
+    const p = takePendingProject();
+    if (!p) return;
+    // One tick later: this is the viewer's MOUNT effect, and React runs a
+    // child's effects before its parents'. The toast host and App's
+    // __markProjectClean register in parent effects, so applying now would
+    // drop the "Project Opened" toast and the clean mark.
+    const timer = setTimeout(() => applyOpenedProject(p), 0);
+    return () => clearTimeout(timer);
+    // Mount-only: the pending project exists exactly once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function applyOpenedProject(p: NonNullable<ReturnType<typeof takePendingProject>>) {
+    const { scene: sc, missing } = rewireOpenedScene(p.doc.scene as never, p.sessionMap);
+    const keys = ['scans', 'meshes', 'skeletons', 'qsms', 'ladResults', 'meshPositions', 'meshRotations',
+      'meshScales', 'skeletonPositions', 'editStates', 'labelStates'] as const;
+    const patch: Record<string, unknown> = { past: [], future: [] };
+    for (const k of keys) if ((sc as Record<string, unknown>)[k] !== undefined) patch[k] = (sc as Record<string, unknown>)[k];
+    scene.dispatch({ c: 'replaceCollection', apply: () => patch as never });
+    const v = p.doc.viewer as Record<string, any>;
+    if (v.cloudColorModes instanceof Map) setCloudColorModes(v.cloudColorModes);
+    if (v.colorMode) setColorMode(v.colorMode);
+    setSelectedScalarField(v.selectedScalarField ?? undefined);
+    if (v.colormap) setColormap(v.colormap);
+    if (v.colormapOverrides instanceof Map) setColormapOverrides(v.colormapOverrides);
+    if (typeof v.pointSize === 'number') setPointSize(v.pointSize);
+    if (Array.isArray(v.measurements)) setMeasurements(v.measurements);
+    if (Array.isArray(v.pickedPoints)) setPickedPoints(v.pickedPoints);
+    setSceneOriginOverride(v.sceneOriginOverride ?? null);
+    if (v.treeInventory) setTreeInventory(v.treeInventory);
+    if (v.treeInventoryEdits) setTreeInventoryEdits(v.treeInventoryEdits);
+    if (v.treeQsm) setTreeQsm(v.treeQsm);
+    if (v.standSettings) setStandSettings(v.standSettings);
+    if (v.treeInventorySettings) setTreeInventorySettings(v.treeInventorySettings);
+    pendingCameraRef.current = v.camera?.position && v.camera?.target ? v.camera : null;
+    projectPathRef.current = p.path;
+    // Clean once the replace has landed.
+    setTimeout(() => (window as any).__markProjectClean?.(), 0);
+    showToast({
+      type: missing.length ? 'warning' : 'success', title: 'Project Opened',
+      message: missing.length
+        ? `Opened ${p.path.split(/[\\/]/).pop()}, but ${missing.length} cloud(s) had no saved data.`
+        : `Opened ${p.path.split(/[\\/]/).pop()}.`,
+    });
+  }
+
+  // The saved camera, once the reopened content is in the scene (so the
+  // display offset is final and the new-content auto-frame has nothing to do).
+  useEffect(() => {
+    const cam = pendingCameraRef.current;
+    if (!cam || scans.length === 0) return;
+    const t = setTimeout(() => {
+      const off = displayOffsetRef.current;
+      const d = (w: number[]): [number, number, number] => [w[0] - off.x, w[1] - off.y, w[2] - off.z];
+      (window as any).__setCameraPose?.(d(cam.position), d(cam.target), cam.up as [number, number, number] | undefined);
+      pendingCameraRef.current = null;
+    }, 300);
+    return () => clearTimeout(t);
+  }, [scans, displayOffset]);
+
   const cancelDEM = useCallback(() => {
     // Stop the backend gridding (frees the scipy/numpy memory), then abort the
     // fetch. DEM streams, so this mirrors triangulation/LAD cancel.
@@ -22068,6 +22593,17 @@ export default function PointCloudViewer({
           );
         })}
 
+        {/* Tree inventory: DBH circles + stem-base markers of the last run,
+            only while its cloud is visible and unchanged since the run. */}
+        {treeInventory && showTreeInventoryOverlays && treeInventoryCloud?.visible && !treeInventoryStale && (
+          <TreeInventoryOverlay
+            trees={treeInventory.trees}
+            worldShift={treeInventory.worldShift}
+            displayOffset={displayOffset}
+            selectedTreeId={selectedInventoryTreeId}
+          />
+        )}
+
         {/* Render all visible skeletons */}
         {skeletons.map(skeleton => {
           if (!skeleton.visible) return null;
@@ -23501,6 +24037,15 @@ export default function PointCloudViewer({
           label={alignDistProgress?.label ?? 'Comparing cloud to mesh…'}
           progress={alignDistProgress?.value ?? null}
           onCancel={cancelAlignDist}
+        />
+      )}
+
+      {projectBusy && (
+        <StatusPill
+          testId="project-busy"
+          label={projectBusy.label}
+          progress={projectBusy.value}
+          onCancel={cancelProjectOp}
         />
       )}
 
@@ -25947,6 +26492,63 @@ export default function PointCloudViewer({
           onSplitCloudsChange={setGroundSplitClouds}
           onSegment={handleGroundSegment}
           onCancel={cancelGroundSegment}
+        />
+      )}
+
+      {/* Tree inventory panel: settings, run, Tree Table, exports. */}
+      {showTreeInventoryPanel && (
+        <TreeInventoryPanel
+          cloudName={treeInventoryTarget.cloud
+            ? (scans.find(s => s.id === treeInventoryTarget.cloud!.id)?.label ?? treeInventoryTarget.cloud.data.fileName ?? null)
+            : null}
+          blockedReason={treeInventoryTarget.blocked}
+          groundSource={treeInventoryTarget.ground}
+          settings={treeInventorySettings}
+          onSettingsChange={patch => setTreeInventorySettings(prev => ({ ...prev, ...patch }))}
+          inProgress={treeInventoryRunning}
+          progressLabel={treeInventoryProgress?.label ?? null}
+          progress={treeInventoryProgress?.value ?? null}
+          error={treeInventoryError}
+          result={treeInventory ? {
+            cloudId: treeInventory.cloudId,
+            cloudName: treeInventory.cloudName, trees: treeInventory.trees,
+            nStemCurveRows: treeInventory.stemCurve.length, warnings: treeInventory.warnings,
+            forSelectedCloud: treeInventoryTarget.cloud?.id === treeInventory.cloudId,
+            stale: treeInventoryStale,
+            qsmVolumes: treeQsmVolumes,
+            biomassKg: treeBiomass,
+            measuredPlotAreaM2: treeInventory.stand?.plot_area_m2 ?? null,
+          } : null}
+          standSettings={standSettings}
+          onStandSettingsChange={patch => setStandSettings(prev => ({ ...prev, ...patch }))}
+          standSummary={standSummary}
+          onExportStand={() => void exportStandSummary()}
+          qsmSettings={treeQsmSettings}
+          onQsmSettingsChange={patch => setTreeQsmSettings(prev => ({ ...prev, ...patch }))}
+          hasWoodClass={hasWoodClassForInventory}
+          qsmInProgress={treeQsmRunning}
+          qsmProgressLabel={treeQsmProgress?.label ?? null}
+          qsmProgress={treeQsmProgress?.value ?? null}
+          qsmError={treeQsmError}
+          qsmResult={treeQsm && treeQsm.cloudId === treeInventory?.cloudId ? {
+            built: treeQsm.results.filter(r => r.success).length,
+            failed: treeQsm.results.filter(r => !r.success).length,
+            woodOnly: treeQsm.woodOnly,
+          } : null}
+          onBuildQsms={() => void handleBuildTreeQsms()}
+          onCancelQsms={cancelTreeQsms}
+          onExportQsms={() => void exportTreeQsms()}
+          edits={treeInventoryEdits}
+          onEdit={editInventoryTree}
+          selectedTreeId={selectedInventoryTreeId}
+          onSelectTree={selectInventoryTree}
+          showOverlays={showTreeInventoryOverlays}
+          onShowOverlaysChange={setShowTreeInventoryOverlays}
+          onRun={handleRunTreeInventory}
+          onCancel={cancelTreeInventory}
+          onExportTrees={() => void exportTreeInventory('trees')}
+          onExportStemCurve={() => void exportTreeInventory('stem-curve')}
+          onClose={() => setShowTreeInventoryPanel(false)}
         />
       )}
 
