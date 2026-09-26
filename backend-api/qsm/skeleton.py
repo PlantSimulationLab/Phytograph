@@ -5,7 +5,9 @@ Verroust-Lazarus / Xu geodesic level-set form, which is fully deterministic and
 bridges occlusion gaps:
 
   1. build a kNN/radius neighbor graph (cKDTree) with Euclidean edge weights;
-  2. pick a root at the tree base (lowest points);
+  2. pick a root at the tree base: the lowest points of the LARGEST connected
+     component (never the global minimum -- a stray patch of unremoved ground
+     below the tree would otherwise become the root and wall the tree off);
   3. TRUE geodesic distance from the root via scipy.sparse.csgraph.dijkstra
      (not hop count);
   4. bin points into level sets by geodesic distance (width = bin_width);
@@ -315,9 +317,18 @@ def extract_skeleton(points: np.ndarray, opts: SkeletonOptions | None = None) ->
     bridge_max = opts.bridge_max if opts.bridge_max is not None else 15.0 * density
     adj, tree, pairs = _build_graph(points, radius, opts.max_neighbors, bridge_max)
 
-    # Root set: lowest points.
+    # Root set: lowest points of the largest connected component. Rooting at the
+    # global minimum let an isolated debris patch below the tree (18 points of
+    # leftover ground, 3 m off and 0.4 m under the trunk base) own the whole root
+    # set: Dijkstra then reached only the patch and the skeleton was one node.
+    # Other components stay unreachable, which the level-set pass already handles.
     z = points[:, 2]
-    root_mask = (z - z.min()) <= opts.root_height
+    if adj.nnz:
+        _, comp = connected_components(adj, directed=False)
+        in_main = comp == np.argmax(np.bincount(comp))
+    else:
+        in_main = np.ones(n, dtype=bool)
+    root_mask = in_main & ((z - z[in_main].min()) <= opts.root_height)
     root_idx = np.where(root_mask)[0]
     if root_idx.size == 0:
         root_idx = np.array([int(np.argmin(z))])

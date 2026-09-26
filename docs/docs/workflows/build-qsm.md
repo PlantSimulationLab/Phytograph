@@ -309,7 +309,9 @@ them, and the hard-coded parameters you can't see in the UI.
 
 1. **Skeleton (geodesic level-set).** A neighbor graph is built over the
    points (a k-d tree radius graph), true geodesic distance from the tree
-   base is computed with Dijkstra, and points are binned into level sets
+   base (the lowest points of the graph's largest connected component, so
+   stray debris below the tree can't become the root) is computed with
+   Dijkstra, and points are binned into level sets
    by that distance. Each connected component in a level becomes one
    skeleton node; adjacent levels are linked into a rooted, acyclic tree.
    Occlusion gaps that would disconnect the crown are **bridged** so the
@@ -412,11 +414,14 @@ These are honest, validated behaviors — not bugs:
 
 ## Common problems
 
-**"It says the cloud is too sparse / produced no nodes."**
+**"No cylinders could be fitted: the skeleton reached only N of M points."**
 The skeleton couldn't connect the crown to the base. Make sure the ground
 is removed but the trunk base is intact, and that the cloud isn't so
 decimated that branches are disconnected. Aggregating multiple scan
-positions helps.
+positions helps. A few stray points left over from ground removal are
+fine: the skeleton roots at the lowest points of the largest connected
+piece of the cloud, so small detached patches below or beside the tree are
+ignored.
 
 **"The trunk radius looks too thin / too thick."**
 On a one-sided scan the trunk's own points are unreliable; the model

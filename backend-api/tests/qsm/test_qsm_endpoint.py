@@ -223,6 +223,36 @@ def test_build_qsm_too_few_points(client):
     assert "50 points" in body["error"]
 
 
+def test_build_qsm_ignores_debris_below_the_tree(client, cloud_points):
+    """A stray patch of unremoved ground below and beside the tree must not
+    become the skeleton root. Rooting at the GLOBAL minimum z let an 18-point
+    patch 3 m off and 0.4 m under a real pistachio's trunk base own the whole
+    root set: Dijkstra reached only the patch and the QSM came back empty (and
+    was reported as a success)."""
+    pts = np.asarray(cloud_points)
+    clean = build_qsm(client, {"points": cloud_points})
+    lo = pts[np.argmin(pts[:, 2])]
+    rng = np.random.default_rng(0)
+    patch = lo + np.array([3.0, 0.0, -0.4]) + rng.uniform(-0.01, 0.01, size=(18, 3))
+    body = build_qsm(client, {"points": np.vstack([pts, patch]).tolist()})
+    assert body["success"] is True, body.get("error")
+    # Same tree, same skeleton. Not exact: _density samples points by index
+    # stride, so appending the patch shifts the sample (measured 204 vs 205).
+    assert clean["n_cylinders"] > 10
+    assert abs(body["n_cylinders"] - clean["n_cylinders"]) <= 0.05 * clean["n_cylinders"]
+
+
+def test_build_qsm_with_no_cylinders_is_a_failure(client):
+    """A skeleton that collapses to one node used to return success=True with
+    zero cylinders -- an empty QSM and no error. It must say it failed and why."""
+    rng = np.random.default_rng(1)
+    blob = rng.uniform(-0.002, 0.002, size=(80, 3))
+    body = build_qsm(client, {"points": blob.tolist()})
+    assert body["success"] is False
+    assert body["n_cylinders"] == 0
+    assert "No cylinders" in body["error"] and "80" in body["error"]
+
+
 def test_build_qsm_twig_radius_option(client, cloud_points):
     """The twig_radius_mm option flows through (a larger anchor yields >= total
     woody volume, since low-coverage tips lean on the larger-anchored taper)."""

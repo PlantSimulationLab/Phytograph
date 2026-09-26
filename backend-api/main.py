@@ -5730,8 +5730,8 @@ def _do_tree_qsm(sess: "CloudSession", request: TreeQSMRequest, progress=None) -
                         rec["shoots"] = resp["shoots"]
                 except ScanCancelled:
                     raise
-                except _QSMEmpty:
-                    rec["error"] = "Skeleton extraction produced no nodes (too sparse or disconnected)."
+                except _QSMEmpty as e:
+                    rec["error"] = str(e)
                 except Exception as e:  # noqa: BLE001 - one tree must not sink the batch
                     logger.warning("tree QSM: tree %s failed", tid, exc_info=True)
                     rec["error"] = f"QSM build failed: {e}"
@@ -20136,7 +20136,9 @@ def _qsm_to_response(qsm, m, points_used: int = 0) -> QSMBuildResponse:
 
 
 class _QSMEmpty(Exception):
-    """The skeleton had no nodes: the cloud is too sparse or disconnected."""
+    """The build produced no cylinders: the cloud is too sparse or disconnected.
+    str(exc) is the user-facing reason, including how much of the cloud the
+    skeleton actually reached."""
 
 
 def _qsm_pipeline(points: np.ndarray, request: "QSMBuildRequest", report):
@@ -20144,7 +20146,7 @@ def _qsm_pipeline(points: np.ndarray, request: "QSMBuildRequest", report):
     `report(fraction, message)` is called at every stage boundary (and is where
     callers put their cancel checkpoint). Shared by the single-tree build and the
     per-tree batch over a session's `tree_instance` labels, so the two can never
-    drift apart. Raises _QSMEmpty when the skeleton has no nodes."""
+    drift apart. Raises _QSMEmpty when no cylinders come out."""
     from qsm.skeleton import extract_skeleton
     from qsm.segments import segments_to_qsm, SegmentOptions
     from qsm.cylinders import fit_qsm_cylinders
@@ -20155,8 +20157,17 @@ def _qsm_pipeline(points: np.ndarray, request: "QSMBuildRequest", report):
     # B: skeleton.
     report(0.15, "Extracting skeleton")
     graph = extract_skeleton(points)
-    if len(graph) == 0:
-        raise _QSMEmpty()
+
+    def _empty():
+        # A 1-node skeleton used to sail through as a "successful" QSM with zero
+        # cylinders -- the user saw an empty result and no error.
+        reached = len(points) - int(graph.meta.get("unreachable_points", 0))
+        return _QSMEmpty(
+            f"No cylinders could be fitted: the skeleton reached only {reached:,} of "
+            f"{len(points):,} points (cloud too sparse or disconnected).")
+
+    if len(graph) < 2:
+        raise _empty()
 
     # C: segments + shoot rank (HEADLINE).
     report(0.45, "Segmenting shoots")
@@ -20165,6 +20176,8 @@ def _qsm_pipeline(points: np.ndarray, request: "QSMBuildRequest", report):
         w_area=request.w_area,
         w_colinear=request.w_colinear,
     ))
+    if not qsm.cylinders:
+        raise _empty()
 
     # D: robust cylinder fit + SurfCov/mad (replaces provisional radii).
     report(0.65, "Fitting cylinders")
@@ -20252,11 +20265,9 @@ def _do_qsm_build(request: QSMBuildRequest, progress=None) -> dict:
 
         try:
             qsm, m = _qsm_pipeline(points, request, _report)
-        except _QSMEmpty:
+        except _QSMEmpty as e:
             return QSMBuildResponse(
-                success=False, points_used=len(points),
-                error="Skeleton extraction produced no nodes (cloud too sparse "
-                      "or disconnected)",
+                success=False, points_used=len(points), error=str(e),
             ).dict()
 
         _report(1.0, "Done")
