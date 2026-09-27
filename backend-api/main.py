@@ -37567,7 +37567,8 @@ def _ensure_label_column_locked(
         return False
     # uint8 covers the default and every ordinary class; a paint beyond it (an
     # instance id) widens the column on the write - see _column_widen_for_locked.
-    sess.extras[slug] = _compact_column(np.full(len(sess.positions), int(default), dtype=np.int64))
+    _session_put_column_locked(
+        sess, slug, _compact_column(np.full(len(sess.positions), int(default), dtype=np.int64)))
     if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
         sess.extra_dims_meta.append({"slug": slug, "label": label})
     return True
@@ -37774,6 +37775,41 @@ def _compact_column(arr: np.ndarray, slug: "Optional[str]" = None) -> np.ndarray
     return np.asarray(arr).astype(dt)
 
 
+def _session_put_column_locked(sess: "CloudSession", slug: str, arr: np.ndarray) -> np.ndarray:
+    """Make `arr` the session's `slug` column and return what the session now
+    holds. On a store-backed session the column is written into the store and
+    the session keeps its memory map; otherwise `arr` itself is kept.
+
+    A store-backed cloud is one too large to hold in RAM, yet every tool
+    column (a class, five normals, a height) used to land in RAM and stay
+    there until the session was next spilled: on a 45.7 M-point scan the five
+    normals columns alone held ~0.9 GB. The slug's existing store column is
+    replaced when there is one (a new file renamed over the old, so a reader
+    still holding the old map keeps a valid one), otherwise a fresh `x<k>`
+    column is added. Caller holds the lock."""
+    store = getattr(sess, "store", None)
+    if store is None:
+        sess.extras[slug] = arr
+        return arr
+    mapping = {col: sl for col, sl in dict(store.attrs.get("extras", {})).items()
+               if store.has_column(col)}
+    current = sess.extras.get(slug)
+    # The column this slug holds now (a rename keeps its map under the old
+    # slug's entry), else the one recorded for it, else a new one.
+    col = store.column_name_of(current) if current is not None else None
+    if col is None:
+        col = next((c for c, sl in mapping.items() if sl == slug), None)
+    if col is None:
+        col = _next_extra_column(store, set(mapping))
+    m = store.replace_column(col, arr) if store.has_column(col) else store.add_column(col, arr)
+    mapping = {c: sl for c, sl in mapping.items() if sl != slug}
+    mapping[col] = slug
+    sess.extras[slug] = m
+    store.set_attr("extras", mapping)
+    store.set_attr("extras_order", list(sess.extras.keys()))
+    return m
+
+
 def _session_compact_extras_locked(sess: "CloudSession") -> None:
     """Compact every scalar column of a session (see _compact_column). A
     store-backed column is rewritten in its store and stays a memory map.
@@ -37810,8 +37846,7 @@ def _column_widen_for_locked(sess: "CloudSession", slug: str, values) -> np.ndar
     else:
         new_dt = None
     new_col = np.asarray(col).astype(new_dt if new_dt is not None else np.float32)
-    sess.extras[slug] = new_col
-    return new_col
+    return _session_put_column_locked(sess, slug, new_col)
 
 
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
@@ -37831,7 +37866,7 @@ def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, value
                     dtype=vals.dtype if vals.dtype.kind in "iub" else np.float32)
     full[~sess.deleted] = vals if vals.dtype.kind in "iub" else vals.astype(np.float32)
     # Narrowest exact type (a class column is 1 B/pt, not 4); see _compact_column.
-    sess.extras[slug] = _compact_column(full, slug)
+    _session_put_column_locked(sess, slug, _compact_column(full, slug))
     # The column was replaced wholesale, so its label deltas (hand edits made
     # against the OLD values) describe nothing that exists any more; an undo
     # would reverse-apply them onto the new result.
@@ -37876,7 +37911,7 @@ def _session_set_full_column_locked(sess: "CloudSession", slug: str, label: str,
             detail=(f"scalar column {slug!r} has shape {arr.shape} but the "
                     f"session has {n} points"),
         )
-    sess.extras[slug] = _compact_column(arr, slug)
+    _session_put_column_locked(sess, slug, _compact_column(arr, slug))
     sess.label_history.pop(slug, None)   # replaced wholesale; see the sibling
     if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
         sess.extra_dims_meta.append({"slug": slug, "label": label})
@@ -41360,15 +41395,15 @@ def session_transform(session_id: str, request: SessionTransformRequest):
             # Rows that never received a normal (deleted/miss, zero-filled) stay
             # zero: rotating a zero vector is a no-op, so no guard is needed.
             _n = _n @ R.T
-            sess.extras[normals_mod.NORMAL_X_SLUG] = _n[:, 0].astype(np.float32)
-            sess.extras[normals_mod.NORMAL_Y_SLUG] = _n[:, 1].astype(np.float32)
-            sess.extras[normals_mod.NORMAL_Z_SLUG] = _n[:, 2].astype(np.float32)
+            for _i, _slug in enumerate((normals_mod.NORMAL_X_SLUG, normals_mod.NORMAL_Y_SLUG,
+                                        normals_mod.NORMAL_Z_SLUG)):
+                _session_put_column_locked(sess, _slug, _n[:, _i].astype(np.float32))
             _norm = np.linalg.norm(_n, axis=1)
             _live = _norm > 0.5
             _vert = np.zeros(len(_n), dtype=np.float32)
             _vert[_live] = np.degrees(np.arccos(
                 np.clip(np.abs(_n[_live, 2]) / _norm[_live], 0.0, 1.0)))
-            sess.extras[normals_mod.VERTICALITY_SLUG] = _vert
+            _session_put_column_locked(sess, normals_mod.VERTICALITY_SLUG, _vert)
 
         # Separate backfilled-miss buffer (session frame). Its `positions` and
         # per-pulse `origins` are geometry and move; `directions` are LAD beam

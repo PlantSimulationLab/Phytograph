@@ -159,11 +159,20 @@ changes and what does not:
   `CloudSession` fields as before; a memmap is an ndarray.
 - **In-place edits persist by themselves.** `deleted |= mask`,
   `positions -= shift`, a label brush writing into an extras column — all go
-  through the map. Wholesale replacements (a bake compacting `positions`, a
-  new `ground_class` column) stay RAM arrays until the session is next
-  evicted, when `_session_write_back_to_store` writes anything that is not
-  already the store's own map (identity, not equality) and updates the
-  extras mapping.
+  through the map.
+- **New and replaced columns go straight into the store.** Every column a
+  tool creates or replaces wholesale (a class, five normals, a height, a
+  scalar-field result, a label column, a widened label column, the normals
+  rotated by an alignment) goes through `_session_put_column_locked`. On a
+  store-backed session, that writes the column into the store under the
+  slug's existing column, or a fresh `x<k>`, and the session keeps the map.
+  These used to stay RAM arrays until the next eviction; on the 45.7 M-point
+  scan the five normals columns alone held ~0.9 GB. A replacement writes a
+  new file and renames it over the old one, so a streaming reader holding
+  the old map keeps a valid one. Anything else that is not already the
+  store's own map (a merge's columns, a bake on a RAM session) is still
+  written by `_session_write_back_to_store` at the next eviction (checked by
+  identity, not equality), which also updates the extras mapping.
 - **Spill is a write-back plus a small pickle.** `_spill_cloud_session`
   writes back, then pickles `_session_detach_for_pickle(sess)` — the session
   with every store-backed array stripped — beside the store. Restore
@@ -801,10 +810,10 @@ fixes above and the app's own settings:
 Before these fixes the workers peaked at 13.0 GB (ground) and 18.5 GB
 (normals), normals took 189 s, and the backend kept 3.6 GB after import and
 4.2 GB after the split. What the backend still keeps after the split is
-mostly columns added to the stored parent: the five normals columns, ~0.9 GB.
-Those stay in RAM until the parent's next spill writes them back
-(`_session_write_back_to_store`). The rest is the 6.3 M-point ground child,
-which is under the store threshold.
+mostly the five normals columns added to the stored parent, ~0.9 GB, which
+at the time stayed in RAM until a spill. They now go straight into the
+store (above). The rest is the 6.3 M-point ground child, which is under the
+store threshold.
 
 ## Benchmark harness
 

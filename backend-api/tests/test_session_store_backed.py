@@ -124,7 +124,8 @@ def test_a_new_column_and_a_compacted_bake_are_written_back_on_spill(stored, cli
     assert res.status_code == 200, res.text
     sess = main._get_cloud_session(sid)
     assert main.GROUND_CLASS_SLUG in sess.extras
-    assert not isinstance(sess.extras[main.GROUND_CLASS_SLUG], np.memmap)   # RAM until spill
+    # Written straight into the store, not held in RAM until a spill.
+    assert sess.store.column_name_of(sess.extras[main.GROUND_CLASS_SLUG]) is not None
     store_dir = Path(sess.store.root)
     monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 0)
     main._sweep_cloud_sessions()
@@ -305,3 +306,60 @@ def test_a_small_split_child_stays_in_ram(stored, client, monkeypatch):
     for c in out["children"]:
         child = main._get_cloud_session(c["session_id"])
         assert child.store is None and not isinstance(child.positions, np.memmap)
+
+
+def test_tool_columns_go_straight_into_the_store(stored, client, monkeypatch):
+    """On a store-backed cloud a tool's columns are written into the store,
+    not held in RAM until the next spill (on a 45.7 M-point scan the five
+    normals columns alone were ~0.9 GB of RAM). A recompute replaces the same
+    store columns rather than adding new ones."""
+    sid, las, tmp = stored
+    sess = main._get_cloud_session(sid)
+    store_dir = Path(sess.store.root)
+    body = {"k": 10, "orientation": "up", "defer_octree": True, "acknowledge_cost": True}
+    assert client.post(f"/api/cloud/session/{sid}/compute_normals", json=body).status_code == 200
+    slugs = [s for s, _ in main.normals_mod.COLUMNS]
+    cols = {s: sess.store.column_name_of(sess.extras[s]) for s in slugs}
+    assert all(cols.values()), cols
+    nz = np.array(sess.extras["nz"])
+    n = np.column_stack([np.asarray(sess.extras[s], dtype=np.float64) for s in ("nx", "ny", "nz")])
+    assert np.allclose(np.linalg.norm(n, axis=1), 1.0, atol=1e-4)   # real normals were stored
+    assert (nz >= 0).all()                                          # 'up' orientation
+    files_before = sorted(p.name for p in store_dir.glob("*.npy"))
+    assert client.post(f"/api/cloud/session/{sid}/compute_normals", json=body).status_code == 200
+    assert {s: sess.store.column_name_of(sess.extras[s]) for s in slugs} == cols
+    assert sorted(p.name for p in store_dir.glob("*.npy")) == files_before
+    meta = json.loads((store_dir / "meta.json").read_text())
+    assert {cols[s]: s for s in slugs}.items() <= meta["attrs"]["extras"].items()
+    # Spill and restore: the columns come back from the store unchanged.
+    monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 0)
+    main._sweep_cloud_sessions()
+    monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 8)
+    back = main._get_cloud_session(sid)
+    np.testing.assert_array_equal(back.extras["nz"], nz)
+    assert back.store.column_name_of(back.extras["nz"]) == cols["nz"]
+
+
+EVERYWHERE = {"kind": "box", "min": [-100, -100, -100], "max": [100, 100, 100]}
+
+
+def test_a_widening_paint_stays_in_the_store_and_undoes(stored, client, monkeypatch):
+    sid, las, tmp = stored
+    sess = main._get_cloud_session(sid)
+    for to_class, stroke in ((3, "a"), (70000, "b")):
+        res = client.post(f"/api/cloud/session/{sid}/label_region", json={
+            "slug": "tree_instance", "strokes": [{"region": EVERYWHERE, "to_class": to_class,
+                                                  "stroke_id": stroke}]})
+        assert res.status_code == 200, res.text
+        col = sess.extras["tree_instance"]
+        assert sess.store.column_name_of(col) is not None
+        assert np.all(np.asarray(col) == to_class)
+    assert sess.extras["tree_instance"].dtype == np.uint32
+    res = client.post(f"/api/cloud/session/{sid}/reset_label_edits",
+                      json={"edit_count": 1, "slug": "tree_instance"})
+    assert res.status_code == 200, res.text
+    assert np.all(np.asarray(sess.extras["tree_instance"]) == 3)
+    monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 0)
+    main._sweep_cloud_sessions()
+    monkeypatch.setattr(main, "_MAX_CLOUD_SESSIONS", 8)
+    assert np.all(np.asarray(main._get_cloud_session(sid).extras["tree_instance"]) == 3)
