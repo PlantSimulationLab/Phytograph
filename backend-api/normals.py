@@ -425,8 +425,11 @@ def compute_normals(points: np.ndarray, *, k: int = DEFAULT_K,
     meta["knn_spacing_p99"] = float(spacing)
     meta["collar_m"] = collar
 
+    # `max_tile_points`: a TLS scan's 1/r^2 density packs most of the cloud
+    # into the few cells around the scanner (see tiled.TilePlan).
     plan = tiled.TilePlan.build(pts[:, :2], buffer_m=collar,
-                                target_points=_tile_target_points())
+                                target_points=_tile_target_points(),
+                                max_tile_points=2 * _tile_target_points())
 
     import memory_budget
     # Per point in a buffered tile: the float64 chunk (24 B), open3d's own copy

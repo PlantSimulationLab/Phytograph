@@ -73,7 +73,10 @@ def run(workdir: str) -> int:
         tool = request["tool"]
         params = request.get("params", {})
         input_path = os.path.join(workdir, "input.npy")
-        points = np.load(input_path)
+        # Normals only reads its input (XY to plan the tiles, then per-tile
+        # gathers), so it maps the file instead of holding a second copy of
+        # the cloud; the pool children already map the same file.
+        points = np.load(input_path, mmap_mode="r" if tool == "normals" else None)
         # The tiled tools can fan their tiles out to a spawn pool; the children
         # memory-map THIS file rather than receiving the points by pickle.
         os.environ["PHYTOGRAPH_TILE_POINTS_NPY"] = input_path

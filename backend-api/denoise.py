@@ -608,7 +608,8 @@ def _denoise_tiled(usable: np.ndarray, method: str, params: Optional[dict],
                       "origin": usable.min(axis=0).tolist()}
         per_point = 40
 
-    plan = tiled.TilePlan.build(usable[:, :2], buffer_m=buffer_m, target_points=_tile_target_points())
+    plan = tiled.TilePlan.build(usable[:, :2], buffer_m=buffer_m, target_points=_tile_target_points(),
+                                max_tile_points=2 * _tile_target_points())
     import memory_budget
     workers = tiled.worker_count(len(plan.tiles()), per_worker_bytes=_tile_target_points() * per_point,
                                  budget_bytes=memory_budget.budget_bytes())

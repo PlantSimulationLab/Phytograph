@@ -205,3 +205,29 @@ def test_collar_is_measured_from_the_kth_neighbour_not_the_first(monkeypatch):
     _tiled(monkeypatch, pts, k=10, meta=small, orientation="none")
     _tiled(monkeypatch, pts, k=60, meta=large, orientation="none")
     assert large["collar_m"] > small["collar_m"]
+
+
+def test_over_full_tiles_are_split_and_still_match_untiled(monkeypatch):
+    """A 1/r^2 cloud puts most points in the cells around the scanner; those
+    are split into sub-tiles (measured: one cell held 77% of a real 45.7 M-point
+    scan and ran on one core). The split must not change the answer."""
+    # Truly 1/r^2 per unit area (log-uniform range), unlike `_tls_density`,
+    # whose sqrt-of-uniform radius is uniform per unit area.
+    rng = np.random.default_rng(5)
+    n = 150_000
+    r = np.exp(rng.uniform(np.log(0.5), np.log(40.0), n))
+    th = rng.uniform(0, 2 * np.pi, n)
+    xy = np.column_stack([r * np.cos(th), r * np.sin(th)])
+    pts = np.column_stack([xy, 0.3 * np.sin(xy[:, 0] * 0.2) + rng.normal(0, 0.005, n)])
+    kw = dict(k=30, orientation="origin", origin=[0.0, 0.0, 2.0])
+    ref = _untiled(monkeypatch, pts, **kw)
+    meta = {}
+    got = _tiled(monkeypatch, pts, target=2000, meta=meta, **kw)
+    assert meta["split_cells"] > 0
+    import tiled
+    unsplit = tiled.TilePlan(pts[:, :2], meta["tile_m"], meta["buffer_m"]).describe()
+    assert meta["points_per_tile_max"] < unsplit["points_per_tile_max"]
+    ang, dot = _angles(ref, got)
+    assert (dot < 0).sum() == 0
+    assert ang.max() < 0.1, f"seam error {ang.max():.4f} deg"
+    assert np.abs(ref[:, 3] - got[:, 3]).max() < 1e-6

@@ -117,3 +117,64 @@ def test_tiled_cloth_filter_agrees_with_untiled_including_at_the_seams():
     assert seam_agree >= 0.99, f"seam-band agreement {seam_agree:.4f}"
     # And both are right: against the generator's truth on hits.
     assert np.mean((tiled_labels == main.GROUND_CLASS_GROUND) == (truth == 1)) >= 0.98
+
+
+def _tls_xy(n=60_000, seed=3):
+    """1/r^2 density around a scanner at the origin, like a terrestrial scan:
+    a uniform grid puts most of it in the few cells around the scanner."""
+    rng = np.random.default_rng(seed)
+    r = np.exp(rng.uniform(np.log(0.2), np.log(30.0), n))   # per-area density ~ 1/r^2
+    th = rng.uniform(0, 2 * np.pi, n)
+    xy = np.column_stack([r * np.cos(th), r * np.sin(th)])
+    # Points exactly on the far edges, which the grid clips into its last cell.
+    xy[:5] = xy[:, :2].max(axis=0)
+    return np.column_stack([xy, rng.normal(0, 0.1, n)])
+
+
+def test_over_full_cells_split_into_sub_tiles_that_partition_the_cloud():
+    xyz = _tls_xy()
+    cap = 500
+    plan = tiled.TilePlan.build(xyz, tile_m=10.0, buffer_m=0.4, max_tile_points=cap)
+    unsplit = tiled.TilePlan.build(xyz, tile_m=10.0, buffer_m=0.4)
+    assert unsplit.describe()["points_per_tile_max"] > 10 * cap, "fixture must be unbalanced"
+    d = plan.describe()
+    assert d["split_cells"] > 0
+    # A block over the cap must be a single sub-cell, i.e. as fine as the
+    # collar allows (edge >= 2x buffer); nothing else exceeds the cap.
+    for t in plan.tiles():
+        if plan.core_count(t) > cap:
+            assert t.sub is not None and t.sub[3] - t.sub[1] == 1 and t.sub[4] - t.sub[2] == 1
+    core_count = np.zeros(len(xyz), dtype=int)
+    for tile in plan.tiles():
+        idx, core = plan.gather(tile)
+        assert core.sum() == plan.core_count(tile)
+        core_count[idx[core]] += 1
+        lo, hi = tile.buf_min, tile.buf_max
+        expected = np.flatnonzero(np.all((xyz[:, :2] >= lo) & (xyz[:, :2] < hi), axis=1))
+        assert set(expected) <= set(idx.tolist()), "collar must be complete"
+        assert np.all((xyz[idx, :2] >= lo) & (xyz[idx, :2] <= hi))
+    assert np.all(core_count == 1), np.unique(core_count, return_counts=True)
+
+
+def test_sub_tiles_never_shrink_below_the_collar():
+    xyz = _tls_xy()
+    plan = tiled.TilePlan.build(xyz, tile_m=10.0, buffer_m=2.0, max_tile_points=50)
+    for tile in plan.tiles():
+        if tile.sub is not None:
+            assert (tile.core_max - tile.core_min).min() >= 2 * 2.0 - 1e-9
+    # Without max_tile_points the grid is uniform, as tree segmentation needs.
+    assert all(t.sub is None for t in tiled.TilePlan.build(xyz, tile_m=10.0, buffer_m=2.0).tiles())
+
+
+def test_split_plan_runs_the_same_through_the_tile_runner():
+    xyz = _tls_xy(20_000)
+    plan = tiled.TilePlan.build(xyz, tile_m=10.0, buffer_m=0.5, max_tile_points=500)
+
+    def neighbours_within(chunk, core):
+        from scipy.spatial import cKDTree
+        return np.array([len(v) for v in cKDTree(chunk[:, :2]).query_ball_point(chunk[:, :2], 0.5)])
+
+    got = tiled.run_tiled(plan, xyz, neighbours_within)
+    from scipy.spatial import cKDTree
+    ref = np.array([len(v) for v in cKDTree(xyz[:, :2]).query_ball_point(xyz[:, :2], 0.5)])
+    assert np.array_equal(got, ref)

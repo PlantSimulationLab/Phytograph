@@ -26168,6 +26168,13 @@ def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
         for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
             env.pop(var, None)
         env["PHYTOGRAPH_SEG_WORKER"] = workdir
+        # macOS libmalloc keeps recently freed LARGE blocks cached in the
+        # process, dirty, so they still count against the machine: measured,
+        # a freed 1.1 GB array stayed in the footprint, and each of a normals
+        # pool's ten children sat on ~1 GB it no longer used. A worker's
+        # arrays are all large and short-lived, so return them to the OS.
+        # Inherited by the tile pool. Costs page re-zeroing, not compute.
+        env.setdefault("MallocLargeCache", "0")
 
         stderr_log = os.path.join(workdir, "worker_stderr.log")
         proc = _spawn_seg_worker(env, stderr_log)
@@ -26323,6 +26330,7 @@ async def _run_killable_admitted(
         for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
             env.pop(var, None)
         env["PHYTOGRAPH_SEG_WORKER"] = workdir
+        env.setdefault("MallocLargeCache", "0")   # see _run_killable_admitted
 
         stderr_log = os.path.join(workdir, "worker_stderr.log")
         proc = _spawn_seg_worker(env, stderr_log)

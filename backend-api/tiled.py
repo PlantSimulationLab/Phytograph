@@ -69,6 +69,10 @@ class Tile:
     core_max: np.ndarray      # (2,) exclusive upper bound
     buf_min: np.ndarray       # (2,)
     buf_max: np.ndarray       # (2,)
+    # (k, x0, y0, x1, y1) when this is the block [x0,x1) x [y0,y1) of a
+    # k x k sub-grid of cell (ix, iy) - see TilePlan's `max_tile_points`.
+    # None for a whole cell.
+    sub: Optional[Tuple[int, int, int, int, int]] = None
 
 
 class TilePlan:
@@ -77,9 +81,24 @@ class TilePlan:
     `order` sorts points by cell; `cell_start[c]:cell_start[c+1]` is cell c's
     range in that order. Tiles are cells; a tile's buffered chunk is the
     union of its 3x3 neighbourhood's ranges filtered to the buffered box.
+
+    `max_tile_points` (opt-in) splits any cell holding more than that many
+    points into sub-tiles: the cell is binned once on a fine k x k sub-grid
+    and a quadtree merges sub-cells into blocks of at most that many points
+    (or single sub-cells). A grid sized from the MEAN density
+    is badly unbalanced on a terrestrial scan, whose density falls as 1/r^2:
+    measured on a real 45.7 M-point TLS scan, one 11 m cell of the normals
+    plan held 35.3 M points (77%), so one pool worker ran 14 GB and most of
+    the wall time on a single core while the rest sat idle. A sub-tile edge
+    never drops below `min_sub_tile_m` (default 2x the buffer), which keeps
+    the collar inside a one-sub-cell ring and its overhead bounded.
+    Callers whose logic depends on the uniform grid itself (tree
+    segmentation's ownership rule) leave it off.
     """
 
-    def __init__(self, xy: np.ndarray, tile_m: float, buffer_m: float):
+    def __init__(self, xy: np.ndarray, tile_m: float, buffer_m: float, *,
+                 max_tile_points: Optional[int] = None,
+                 min_sub_tile_m: Optional[float] = None):
         xy = np.asarray(xy)
         if xy.ndim != 2 or xy.shape[1] < 2:
             raise ValueError("xy must be (N, >=2)")
@@ -108,17 +127,32 @@ class TilePlan:
             cx = np.clip(((xy[:, 0] - self.origin[0]) / self.tile_m).astype(np.int64), 0, self.nx - 1)
             cy = np.clip(((xy[:, 1] - self.origin[1]) / self.tile_m).astype(np.int64), 0, self.ny - 1)
             cell = cx * self.ny + cy
+            if self.nx * self.ny <= np.iinfo(np.uint16).max:
+                cell = cell.astype(np.uint16)     # radix sort; see _MAX_SUB_GRID
             self.order = np.argsort(cell, kind="stable")
             counts = np.bincount(cell, minlength=self.nx * self.ny)
         else:
             self.order = np.zeros(0, dtype=np.int64)
             counts = np.zeros(self.nx * self.ny, dtype=np.int64)
         self.cell_start = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
-        self._xy = xy
+        # XY in CELL order, so a cell's points are one contiguous slice and a
+        # gather never reads at random rows. That matters most for a split
+        # cell's neighbours: each one's neighbourhood includes the dense cell,
+        # and random-row gathers over it measured ~1.4 s per neighbour on a
+        # real TLS scan. 16 B/pt, the same as an unsorted copy would cost.
+        self._xys = (np.asarray(xy[:, :2], dtype=np.float64)[self.order] if self.n
+                     else np.zeros((0, 2), dtype=np.float64))
+        self.max_tile_points = int(max_tile_points) if max_tile_points else None
+        self.min_sub_tile_m = (float(min_sub_tile_m) if min_sub_tile_m is not None
+                               else 2.0 * self.buffer_m)
+        self._tiles: Optional[List[Tile]] = None
+        self._sub_index: dict = {}
+        self._sub_count_cache: dict = {}
 
     @classmethod
     def build(cls, xy: np.ndarray, *, tile_m: Optional[float] = None, buffer_m: float = 0.0,
-              target_points: int = DEFAULT_TARGET_POINTS) -> "TilePlan":
+              target_points: int = DEFAULT_TARGET_POINTS,
+              max_tile_points: Optional[int] = None) -> "TilePlan":
         xy = np.asarray(xy)
         if tile_m is None:
             if len(xy):
@@ -129,7 +163,7 @@ class TilePlan:
                 ext = np.zeros(2)
             tile_m = auto_tile_size(len(xy), (float(ext[0]), float(ext[1])),
                                     target_points=target_points, buffer_m=buffer_m)
-        return cls(xy, tile_m, buffer_m)
+        return cls(xy, tile_m, buffer_m, max_tile_points=max_tile_points)
 
     # ---- geometry ----------------------------------------------------------------
 
@@ -138,6 +172,8 @@ class TilePlan:
         return int(self.cell_start[c]), int(self.cell_start[c + 1])
 
     def tiles(self) -> List[Tile]:
+        if self._tiles is not None:
+            return self._tiles
         out = []
         for ix in range(self.nx):
             for iy in range(self.ny):
@@ -146,40 +182,196 @@ class TilePlan:
                     continue          # an empty core has nothing to label
                 cmin = self.origin + np.array([ix, iy]) * self.tile_m
                 cmax = cmin + self.tile_m
-                out.append(Tile(ix, iy, cmin, cmax, cmin - self.buffer_m, cmax + self.buffer_m))
+                k = self._split_factor(b - a)
+                if k < 2:
+                    out.append(Tile(ix, iy, cmin, cmax, cmin - self.buffer_m, cmax + self.buffer_m))
+                    continue
+                sub_m = self.tile_m / k
+                for x0, y0, x1, y1 in self._quadtree(self._sub_counts(ix, iy, k)):
+                    smin = cmin + np.array([x0, y0]) * sub_m
+                    smax = cmin + np.array([x1, y1]) * sub_m
+                    out.append(Tile(ix, iy, smin, smax, smin - self.buffer_m,
+                                    smax + self.buffer_m, sub=(k, x0, y0, x1, y1)))
+        self._tiles = out
         return out
+
+    # Finest sub-grid a split cell is binned into. The quadtree below merges
+    # its cells back into blocks, so this bounds only the index size.
+    # 250 keeps (k + 2)^2 sub-cell ids inside uint16, which numpy's stable
+    # argsort radix-sorts: measured 0.45 s vs 21.8 s for int64 keys over 36 M.
+    _MAX_SUB_GRID = 250
+
+    def _split_factor(self, count: int) -> int:
+        """Sub-grid resolution k (k x k) for a cell holding `count` points, or
+        1 for no split: as fine as the collar allows, since the quadtree only
+        descends where the points are."""
+        if not self.max_tile_points or count <= self.max_tile_points:
+            return 1
+        floor_m = max(self.min_sub_tile_m, self.buffer_m, 1e-9)
+        k = min(int(self.tile_m // floor_m), self._MAX_SUB_GRID)
+        return k if k >= 2 else 1
+
+    def _quadtree(self, counts: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Non-empty blocks [x0,x1) x [y0,y1) of the sub-grid, halving any
+        block over `max_tile_points` until it fits or is one sub-cell."""
+        csum = np.zeros((counts.shape[0] + 1, counts.shape[1] + 1), dtype=np.int64)
+        csum[1:, 1:] = counts.cumsum(0).cumsum(1)
+
+        def total(x0, y0, x1, y1):
+            return int(csum[x1, y1] - csum[x0, y1] - csum[x1, y0] + csum[x0, y0])
+
+        out, stack = [], [(0, 0, counts.shape[0], counts.shape[1])]
+        while stack:
+            x0, y0, x1, y1 = stack.pop()
+            c = total(x0, y0, x1, y1)
+            if c == 0:
+                continue
+            if c <= self.max_tile_points or (x1 - x0 == 1 and y1 - y0 == 1):
+                out.append((x0, y0, x1, y1))
+                continue
+            xm, ym = (x0 + x1 + 1) // 2 if x1 - x0 > 1 else x1, (y0 + y1 + 1) // 2 if y1 - y0 > 1 else y1
+            for bx0, bx1 in ((x0, xm), (xm, x1)):
+                for by0, by1 in ((y0, ym), (ym, y1)):
+                    if bx1 > bx0 and by1 > by0:
+                        stack.append((bx0, by0, bx1, by1))
+        out.sort()
+        return out
+
+    def _neighbourhood(self, ix: int, iy: int, box=None):
+        """(indices, xy, own) for cell (ix, iy)'s 3x3 neighbourhood, where
+        `own` marks the cell's own points. With `box` = (lo, hi), neighbours'
+        points are kept only inside it; the cell's own points always are."""
+        parts = []
+        for jx in range(max(0, ix - 1), min(self.nx, ix + 2)):
+            for jy in range(max(0, iy - 1), min(self.ny, iy + 2)):
+                a, b = self.cell_range(jx, jy)
+                if b == a:
+                    continue
+                idx, xy = self.order[a:b], self._xys[a:b]
+                is_own = jx == ix and jy == iy
+                if box is not None and not is_own:
+                    # A neighbour sharing this cell's column already lies in
+                    # its x range (and likewise for rows), so only the axis it
+                    # is offset along needs testing - a third of the work on
+                    # the dense cell next to a split one.
+                    m = None
+                    for axis, off in ((0, jx != ix), (1, jy != iy)):
+                        if off:
+                            c = xy[:, axis]
+                            t = (c >= box[0][axis]) & (c < box[1][axis])
+                            m = t if m is None else (m & t)
+                    idx, xy = idx[m], xy[m]
+                parts.append((idx, xy, np.full(len(idx), is_own)))
+        if not parts:
+            return (np.zeros(0, dtype=np.int64), np.zeros((0, 2)), np.zeros(0, dtype=bool))
+        return tuple(np.concatenate([p[i] for p in parts]) for i in range(3))
+
+    def _own_sub_cells(self, ix: int, iy: int, k: int) -> np.ndarray:
+        """(M, 2) sub-cell of each of cell (ix, iy)'s own points, in cell
+        order, clipped into the core (see `_sub`)."""
+        a, b = self.cell_range(ix, iy)
+        cmin = self.origin + np.array([ix, iy]) * self.tile_m
+        s = np.floor((self._xys[a:b] - cmin) / (self.tile_m / k)).astype(np.int64)
+        return np.clip(s, 0, k - 1)
+
+    def _sub_counts(self, ix: int, iy: int, k: int) -> np.ndarray:
+        """k x k core point counts of a split cell, from its own points alone:
+        planning needs only these, so the full neighbourhood index (`_sub`) is
+        built later, one cell at a time, as its blocks are gathered."""
+        key = (ix, iy, k)
+        hit = self._sub_count_cache.get(key)
+        if hit is None:
+            s = self._own_sub_cells(ix, iy, k)
+            hit = np.bincount(s[:, 0] * k + s[:, 1], minlength=k * k).reshape(k, k)
+            self._sub_count_cache[key] = hit
+        return hit
+
+    def _sub(self, ix: int, iy: int, k: int) -> dict:
+        """A split cell's sub-grid index, built once: its buffered
+        neighbourhood sorted by k x k sub-cell, with a ring of one sub-cell
+        around the core for the collar (the sub-cell edge is >= the buffer).
+        A core point's sub-cell comes from ITS OWN cell's binning, clipped into
+        the core, so the blocks partition the cell's points exactly, including
+        points the parent grid clipped onto its far edge."""
+        key = (ix, iy)
+        hit = self._sub_index.get(key)
+        if hit is not None:
+            return hit
+        sub_m = self.tile_m / k
+        cmin = self.origin + np.array([ix, iy]) * self.tile_m
+        idx, xy, own = self._neighbourhood(
+            ix, iy, box=(cmin - self.buffer_m, cmin + self.tile_m + self.buffer_m))
+        s = np.clip(np.floor((xy - cmin) / sub_m).astype(np.int64), -1, k)
+        s[own] = np.clip(s[own], 0, k - 1)
+        side = k + 2
+        cell = ((s[:, 0] + 1) * side + (s[:, 1] + 1)).astype(np.uint16)
+        order = np.argsort(cell, kind="stable")
+        start = np.concatenate([[0], np.cumsum(np.bincount(cell, minlength=side * side))])
+        s = s[order]
+        hit = {"k": k, "side": side, "idx": idx[order], "xy": xy[order], "own": own[order],
+               "sx": s[:, 0].astype(np.int32), "sy": s[:, 1].astype(np.int32),
+               "start": start.astype(np.int64)}
+        self._sub_index[key] = hit
+        return hit
+
+    def _gather_sub(self, tile: Tile) -> Tuple[np.ndarray, np.ndarray]:
+        k, x0, y0, x1, y1 = tile.sub
+        sub = self._sub(tile.ix, tile.iy, k)
+        side, start = sub["side"], sub["start"]
+        # Block plus a one-sub-cell ring; +1 converts to ring-offset indices.
+        # A column's rows [y0-1, y1] are one contiguous range of the sort.
+        spans = [(start[jx * side + y0], start[jx * side + y1 + 2]) for jx in range(x0, x1 + 2)]
+        take = lambda arr: np.concatenate([arr[a:b] for a, b in spans])
+        idx, xy, sx, sy = take(sub["idx"]), take(sub["xy"]), take(sub["sx"]), take(sub["sy"])
+        core = take(sub["own"]) & (sx >= x0) & (sx < x1) & (sy >= y0) & (sy < y1)
+        inside = core | np.all((xy >= tile.buf_min) & (xy < tile.buf_max), axis=1)
+        return idx[inside], core[inside]
 
     def gather(self, tile: Tile) -> Tuple[np.ndarray, np.ndarray]:
         """(indices, core_mask) for a tile's buffered chunk: indices into the
-        original point order, and which of them lie in the tile's core."""
-        parts = []
-        for jx in range(max(0, tile.ix - 1), min(self.nx, tile.ix + 2)):
-            for jy in range(max(0, tile.iy - 1), min(self.ny, tile.iy + 2)):
-                a, b = self.cell_range(jx, jy)
-                if b > a:
-                    parts.append(self.order[a:b])
-        idx = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
-        xy = self._xy[idx, :2]
-        if self.buffer_m > 0:
-            inside = np.all((xy >= tile.buf_min) & (xy < tile.buf_max), axis=1)
-            idx = idx[inside]
-            xy = xy[inside]
-        core = np.all((xy >= tile.core_min) & (xy < tile.core_max), axis=1)
-        # The core cell's own points are exactly its range, so every core point
-        # is present; points on the upper boundary of the LAST cell were clipped
-        # into it by the binning, so accept them as core there too.
-        if tile.ix == self.nx - 1 or tile.iy == self.ny - 1:
-            own_a, own_b = self.cell_range(tile.ix, tile.iy)
-            own = np.isin(idx, self.order[own_a:own_b], assume_unique=False)
-            core |= own
-        return idx, core
+        original point order, and which of them lie in the tile's core.
+
+        The core is the cell's own binned points, exactly - which is what
+        makes every point core of exactly one tile, including points the
+        binning clipped onto the grid's far edge."""
+        if tile.sub is not None:
+            return self._gather_sub(tile)
+        if self.buffer_m <= 0:
+            a, b = self.cell_range(tile.ix, tile.iy)
+            return self.order[a:b], np.ones(b - a, dtype=bool)
+        idx, _xy, own = self._neighbourhood(tile.ix, tile.iy, box=(tile.buf_min, tile.buf_max))
+        return idx, own
+
+    def gathered(self) -> Iterator[Tuple[Tile, np.ndarray, np.ndarray]]:
+        """Yield `(tile, indices, core_mask)` for every tile, lazily, dropping
+        each split cell's sub-grid index once its last block is gathered (the
+        index is the size of the cell's buffered neighbourhood, which for the
+        cell around a TLS scanner is most of the cloud)."""
+        prev = None
+        for tile in self.tiles():
+            key = (tile.ix, tile.iy)
+            if prev is not None and key != prev:
+                self._sub_index.pop(prev, None)
+            prev = key
+            idx, core = self.gather(tile)
+            yield tile, idx, core
+        if prev is not None:
+            self._sub_index.pop(prev, None)
+
+    def core_count(self, tile: Tile) -> int:
+        if tile.sub is not None:
+            k, x0, y0, x1, y1 = tile.sub
+            return int(self._sub_counts(tile.ix, tile.iy, k)[x0:x1, y0:y1].sum())
+        a, b = self.cell_range(tile.ix, tile.iy)
+        return b - a
 
     def describe(self) -> dict:
         tiles = self.tiles()
-        sizes = [self.cell_range(t.ix, t.iy)[1] - self.cell_range(t.ix, t.iy)[0] for t in tiles]
+        sizes = [self.core_count(t) for t in tiles]
         return {
             "n": self.n, "tile_m": self.tile_m, "buffer_m": self.buffer_m,
             "grid": [self.nx, self.ny], "tiles": len(tiles),
+            "split_cells": len({(t.ix, t.iy) for t in tiles if t.sub is not None}),
             "points_per_tile_max": int(max(sizes)) if sizes else 0,
             "points_per_tile_mean": float(np.mean(sizes)) if sizes else 0.0,
         }
@@ -207,12 +399,10 @@ def run_tiled(plan: TilePlan, points: np.ndarray,
     n = plan.n
     out = (np.full(n, fill, dtype=out_dtype) if ncols == 1
            else np.full((n, ncols), fill, dtype=out_dtype))
-    tiles = plan.tiles()
-    total = len(tiles)
-    for k, tile in enumerate(tiles):
+    total = len(plan.tiles())
+    for k, (tile, idx, core) in enumerate(plan.gathered()):
         if should_cancel is not None and should_cancel():
             raise TiledCancelled()
-        idx, core = plan.gather(tile)
         if idx.size == 0:
             continue
         chunk = np.ascontiguousarray(points[idx])
@@ -233,8 +423,7 @@ class TiledCancelled(Exception):
 def iter_tiles(plan: TilePlan, points: np.ndarray) -> Iterator[Tuple[Tile, np.ndarray, np.ndarray, np.ndarray]]:
     """Yield `(tile, indices, core_mask, chunk_points)` for callers that want
     to drive the tiles themselves (a process pool, a streaming writer)."""
-    for tile in plan.tiles():
-        idx, core = plan.gather(tile)
+    for tile, idx, core in plan.gathered():
         if idx.size:
             yield tile, idx, core, np.ascontiguousarray(points[idx])
 
@@ -370,16 +559,19 @@ def run_tiled_parallel(plan: TilePlan, points_path: str, job: Tuple[str, str], *
         return out
     module, name = job
     kwargs = dict(job_kwargs or {})
-    tasks = []
-    for tile in tiles:
-        idx, core = plan.gather(tile)
-        if idx.size:
-            file_idx = idx if file_rows is None else file_rows[idx]
-            tasks.append((points_path, file_idx, idx[core], core, module, name, kwargs))
+    def tasks():
+        # A generator, not a list: the pool's feeder thread pulls tasks only
+        # as fast as the task pipe drains, so just the tiles in flight hold
+        # their index arrays. A list held every tile's at once - ~3x the cloud
+        # in int64 once collars are counted (~1.6 GB at 45.7 M points).
+        for tile, idx, core in plan.gathered():
+            if idx.size:
+                file_idx = idx if file_rows is None else file_rows[idx]
+                yield (points_path, file_idx, idx[core], core, module, name, kwargs)
     ctx = _mp.get_context("spawn")
     done = 0
     with ctx.Pool(processes=max(1, int(workers))) as pool:
-        for idx_core, res_core in pool.imap_unordered(_tile_task, tasks):
+        for idx_core, res_core in pool.imap_unordered(_tile_task, tasks()):
             out[idx_core] = res_core
             done += 1
             if should_cancel is not None and should_cancel():

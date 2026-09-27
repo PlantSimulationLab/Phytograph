@@ -307,6 +307,64 @@ nearest-neighbour spacing is the true one, and spread across the cloud so a
 dense tile does not understate the sparse far field. SOR's threshold is a
 mean over the whole cloud by definition and stays untiled.
 
+**A terrestrial scan defeats a uniform grid.** The tile edge is sized from
+the cloud's *mean* density, but a TLS scan's density falls as 1/r² from the
+scanner. On a real 45.7 M-point scan (`ExampleScan_01_misses.laz`) one 11 m
+normals cell held 35.3 M points (77 %) and one 61 m ground cell held 45.5 M
+(99.5 %). That cell ran on a single pool child, whose peak was 14 GB. It also
+ran on a single core, because each child gets `cores / workers` OpenMP
+threads, so nine children sat idle for most of the run. So `TilePlan` takes
+an opt-in `max_tile_points`:
+
+- A cell over that count is binned once on a fine k × k sub-grid. k is as
+  fine as the collar allows: the sub-cell edge is at least 2× the collar,
+  capped at 250 so sub-cell ids stay in `uint16`.
+- A quadtree then merges sub-cells back into blocks of at most that many
+  points. A block is only allowed over the cap when it is a single sub-cell.
+- Core membership comes from each point's own binning, so the blocks still
+  partition the cloud exactly, far-edge clipping included.
+
+Normals and denoise turn it on at 2× their tile target. Ground can't use it:
+its 15 m cloth collar allows at most a 2 × 2 split of a 61 m cell. Tree
+segmentation keeps the uniform grid, which its ownership rule depends on.
+`tests/test_tiled.py` checks the partition and collar completeness, and
+`tests/test_normals_tiled.py` checks equality with the untiled result on a
+true 1/r² cloud. (That file's older `_tls_density` fixture draws radius as
+the square root of a uniform, which gives a *uniform* areal density despite
+its name.)
+
+Three changes make the plan itself cheap:
+
+- XY is stored in cell order, so a cell's points are one contiguous slice.
+  Each of the dense cell's neighbours builds a neighbourhood that contains
+  the dense cell, and random-row gathers over it cost ~1.4 s per neighbour.
+- Cell ids are sorted as `uint16` where they fit, because numpy
+  radix-sorts 16-bit keys: 0.45 s against 21.8 s for 36 M int64 keys.
+- `plan.gathered()` yields tiles lazily and drops each split cell's index
+  after its last block. `run_tiled_parallel` feeds the pool from that
+  generator, so only tiles in flight hold index arrays. The old task list
+  held every tile's at once, about 3× the cloud in int64 once collars are
+  counted.
+
+The normals worker also memory-maps its input instead of loading it, since
+it only reads XY for the plan and per-tile gathers.
+
+**The seg worker runs with `MallocLargeCache=0`.** macOS libmalloc keeps
+recently freed large blocks cached, still dirty, so they count against the
+machine until the process reuses them. A freed 1.1 GB array stayed in the
+process's footprint, and each of a normals pool's ten children sat on
+~1 GB it no longer used. The worker's arrays are all large and short-lived,
+so `_run_killable_admitted` sets the variable, and the tile pool inherits it.
+It is not set on the backend. Measured there, it made LAS writes about twice
+as slow (a 45 M-point split took 58 s instead of 47 s). The backend's
+cache is bounded and reused by its next allocation.
+
+On the 45.7 M-point scan, Compute Normals went from 182 s and a 20.6 GB total
+peak (worker plus pool) to 87 s and 6.6 GB. Ground segmentation stays 12 s
+and goes from 12.1 to 6.6 GB. Its one remaining large child is CSF on the
+whole dense cell. Reducing that needs a different CSF input (for example,
+only the point that decides each cloth particle's height), not a finer tile.
+
 **Point-local tools stream instead.** `_iter_session_hit_positions` yields a
 session's surviving hits in 2 M-row blocks (deletions, misses, world shift
 and translation applied) under a per-block lock; cloud-to-mesh distance
@@ -699,15 +757,30 @@ serialises concurrent builds on a machine that cannot hold them side by side
 — on a 16 GB laptop (8 GB budget) the three converts of a 100 M split run
 one after another instead of stacking to 14 GB.
 
-Read the peaks with two caveats. They are resident-set sizes of the backend
-plus its children, so they include the session's memory-mapped pages (file-
-backed, reclaimable by the OS under pressure — about 1.9 GB here) and
-PotreeConverter's own working set during the rebuild stages; they are an
-upper bound on what the machine must find, not on what it must keep.
-Attributing the remainder (the worker's input copy, the tile plan's sort,
-CSF per tile) with a per-process breakdown is the next measurement, and the
-converter's footprint at 100 M decides how many rebuilds may overlap under
-the budget.
+Read those peaks with care. They are resident-set sizes, so they include the
+session's memory-mapped pages. Those pages are file-backed and the OS can drop
+them under pressure. They also leave out memory the OS has compressed, which
+is real. The bench now also records the macOS **physical footprint** of the
+backend and of its children, separately. Footprint counts anonymous and
+compressed memory and never memmapped pages, which makes it the number to
+judge pressure by.
+
+On a real 45.7 M-point TLS scan, footprint above baseline, with all the
+tiling fixes above:
+
+| Stage | Time | Backend peak | Workers peak |
+|---|---|---|---|
+| import (store-backed) | 27 s | 1.5 GB | 1.8 GB (converter) |
+| ground segmentation | 14 s | 1.9 GB | 6.6 GB |
+| compute normals | 92 s | 3.9 GB | 6.5 GB |
+| split into ground + plant | 58 s | 6.6 GB | 3.9 GB |
+| delete region + rebuild | 28 s | 5.9 GB | 2.0 GB |
+
+These numbers are from a run with `MallocLargeCache=0` on the backend too,
+which is why the split and delete are slower than in production. Before the
+fixes, the workers peaked at 13.0 GB (ground) and 18.5 GB (normals). The
+backend sat on 3.6 GB of freed-but-cached memory right after import, but only
+154 MB once that cache was off.
 
 ## Benchmark harness
 
@@ -721,8 +794,18 @@ column and a `target_index`/`target_count` pair.
 `PHYTO_BENCH=1`) drives import → ground segmentation → DTM → split →
 delete + rebuild → LAZ export through the real HTTP API and records wall time and
 peak resident memory of the backend *and its children* per stage, plus the
-agreement of the CSF result with the generator's ground truth. Results land
-in `perf/bench-large-<N>M-<timestamp>.json`.
+agreement of the CSF result with the generator's ground truth. Each stage
+also records:
+
+- the macOS physical footprint, split into the backend's peak, the workers'
+  peak, and the backend's footprint left once the stage ends;
+- its octree share: the session → LAS write, the whole cache build, and
+  PotreeConverter alone, with the points converted. These are summed across
+  threads, so a parallel split can exceed its wall time.
+
+Results land in `perf/bench-large-<N>M-<timestamp>.json`.
+`PHYTO_BENCH_LAS=/path/to.laz` runs the same workflow on a real file instead
+of a generated one.
 
 ```bash
 cd backend-api

@@ -15,7 +15,8 @@ Gated behind PHYTO_BENCH=1 so the normal suite / CI never runs it. Run with:
         backend-api/venv/bin/python -m pytest tests/bench -s --no-cov
 
 `PHYTO_BENCH_POINTS` is a comma-separated list of point counts (default
-10e6); `PHYTO_BENCH_MISSES` the miss fraction (default 0.1). The generated
+10e6); `PHYTO_BENCH_MISSES` the miss fraction (default 0.1). `PHYTO_BENCH_LAS` runs
+the same workflow on a real LAS/LAZ instead of a generated cloud. The generated
 LAS is cached under `tmp/bench/` next to the repo so a second run pays only
 the pipeline, not the generator.
 """
@@ -42,27 +43,73 @@ pytestmark = pytest.mark.skipif(not _BENCH, reason="set PHYTO_BENCH=1 to run the
 
 
 def _point_counts() -> list[int]:
+    if os.environ.get("PHYTO_BENCH_LAS"):
+        return [0]      # the real file decides
     raw = os.environ.get("PHYTO_BENCH_POINTS", "10e6")
     return [int(float(x)) for x in raw.split(",") if x.strip()]
 
 
+def _footprint_bytes(pid: int) -> int:
+    """macOS physical footprint of `pid` (anonymous + compressed memory: what
+    the OS cannot simply drop). RSS also counts clean pages of the memmapped
+    session store, which are reclaimable, so on a store-backed cloud RSS
+    overstates real pressure. 0 off macOS or on error."""
+    if sys.platform != "darwin":
+        return 0
+    import ctypes
+    lib = getattr(_footprint_bytes, "_lib", None)
+    if lib is None:
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+        _footprint_bytes._lib = lib
+    buf = (ctypes.c_uint64 * 32)()      # rusage_info_v2 (16 B uuid + u64 fields)
+    if lib.proc_pid_rusage(int(pid), 2, ctypes.byref(buf)) != 0:
+        return 0
+    return int(buf[2 + 7])              # skip the uuid; ri_phys_footprint
+
+
+def _footprint_split() -> "tuple[int, int]":
+    """(this process, all children) physical footprint."""
+    import psutil
+    me = psutil.Process()
+    kids = 0
+    for c in me.children(recursive=True):
+        try:
+            kids += _footprint_bytes(c.pid)
+        except Exception:
+            pass
+    return _footprint_bytes(me.pid), kids
+
+
+def _footprint_tree() -> int:
+    return sum(_footprint_split())
+
+
 class PeakRss:
-    """Sample RSS of this process + children at 5 Hz; keep the peak."""
+    """Sample RSS and physical footprint of this process + children at 5 Hz;
+    keep each peak."""
 
     def __init__(self):
         import memory_budget
         self._mb = memory_budget
         self.peak = 0
+        self.peak_footprint = 0
+        self.peak_self = 0
+        self.peak_children = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
         while not self._stop.is_set():
             self.peak = max(self.peak, self._mb.rss_bytes(include_children=True))
+            me, kids = _footprint_split()
+            self.peak_footprint = max(self.peak_footprint, me + kids)
+            self.peak_self = max(self.peak_self, me)
+            self.peak_children = max(self.peak_children, kids)
             self._stop.wait(0.2)
 
     def __enter__(self):
         self.peak = self._mb.rss_bytes(include_children=True)
+        self.peak_footprint = _footprint_tree()
         self._thread.start()
         return self
 
@@ -91,6 +138,12 @@ def bench_root(tmp_path_factory):
 
 @pytest.fixture(params=_point_counts(), ids=lambda n: f"{n // 1_000_000}M")
 def big_las(request):
+    if os.environ.get("PHYTO_BENCH_LAS"):
+        # A real scan instead of the generator (PHYTO_BENCH_LAS=/path/to.laz).
+        import laspy
+        path = Path(os.environ["PHYTO_BENCH_LAS"])
+        with laspy.open(str(path)) as rd:
+            return int(rd.header.point_count), path
     n = request.param
     misses = float(os.environ.get("PHYTO_BENCH_MISSES", "0.1"))
     cache = REPO_ROOT / "tmp" / "bench"
@@ -115,24 +168,70 @@ def test_large_cloud_workflow(client, big_las, bench_root, monkeypatch):
     monkeypatch.setattr(main, "_COST_WARNING_SECONDS", 1e9)   # measure, never prompt
     stages: dict[str, dict] = {}
     baseline = memory_budget.rss_bytes(include_children=True)
+    baseline_fp = _footprint_tree()
+
+    # Octree share of each stage: the session -> LAS write that feeds the
+    # converter, the whole cache build (hash + converter + install), and the
+    # converter alone. Summed over threads, so a parallel split can exceed
+    # the stage's wall time. This is what decides whether a custom
+    # out-of-core octree builder would pay off.
+    octree = {"las_write": 0.0, "build": 0.0, "converter": 0.0, "converter_points": 0}
+    octree_lock = threading.Lock()
+
+    def _timed(name, fn, count=None):
+        def wrapper(*a, **kw):
+            t = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                with octree_lock:
+                    octree[name] += time.perf_counter() - t
+                    if count is not None:
+                        octree["converter_points"] += count(*a, **kw) or 0
+        return wrapper
+
+    monkeypatch.setattr(main, "_session_to_las", _timed("las_write", main._session_to_las))
+    monkeypatch.setattr(main, "_build_octree_from_las", _timed("build", main._build_octree_from_las))
+    monkeypatch.setattr(main, "_run_potree_converter", _timed(
+        "converter", main._run_potree_converter,
+        count=lambda las, *_a, **_k: main._las_point_count(las)))
 
     def stage(name):
         class _S:
             def __enter__(self_):
+                with octree_lock:
+                    for k in octree:
+                        octree[k] = 0
                 self_.t = time.perf_counter()
                 self_.peak = PeakRss().__enter__()
                 return self_
 
             def __exit__(self_, *exc):
                 self_.peak.__exit__(*exc)
+                import gc
+                gc.collect()
+                end_self = _footprint_split()[0]
                 stages[name] = {
                     "seconds": round(time.perf_counter() - self_.t, 2),
                     "peak_rss_bytes": int(self_.peak.peak),
                     "peak_rss_over_baseline_bytes": int(self_.peak.peak - baseline),
+                    "peak_footprint_over_baseline_bytes": int(self_.peak.peak_footprint - baseline_fp),
+                    "peak_footprint_self_bytes": int(self_.peak.peak_self),
+                    "peak_footprint_children_bytes": int(self_.peak.peak_children),
+                    "end_footprint_self_bytes": int(end_self),
+                    "octree": {k: (round(v, 2) if isinstance(v, float) else v)
+                               for k, v in octree.items()},
                 }
                 print(f"[bench {n // 1_000_000}M] {name}: {stages[name]['seconds']}s, "
                       f"peak {memory_budget.fmt_bytes(self_.peak.peak)} "
-                      f"(+{memory_budget.fmt_bytes(self_.peak.peak - baseline)})", flush=True)
+                      f"(+{memory_budget.fmt_bytes(self_.peak.peak - baseline)}), footprint "
+                      f"+{memory_budget.fmt_bytes(self_.peak.peak_footprint - baseline_fp)} "
+                      f"(backend peak {memory_budget.fmt_bytes(self_.peak.peak_self)}, "
+                      f"workers peak {memory_budget.fmt_bytes(self_.peak.peak_children)}, "
+                      f"backend after {memory_budget.fmt_bytes(end_self)}); octree: "
+                      f"las {octree['las_write']:.1f}s, build {octree['build']:.1f}s, "
+                      f"converter {octree['converter']:.1f}s over "
+                      f"{octree['converter_points']:,} pts", flush=True)
                 return False
         return _S()
 
