@@ -376,6 +376,13 @@ import { plantResponseToMeshData } from '../lib/plantMeshData';
 import { serializeQsm, sanitizeQsmFilename, qsmExtForFormat, type QSMExportFormat } from '../lib/qsmExport';
 import { serializeMeshObj, serializeMeshPly, serializeMeshStl, sanitizeMeshName } from '../lib/meshExport';
 
+// Appended to the Segment Trees completion toast when the cloud has never been
+// through Ground Segmentation (`ground_warning`). Worded as a reminder because
+// that is all it knows: the file may have arrived ground-free.
+const TREE_GROUND_REMINDER =
+  "This cloud hasn't been through Ground Segmentation. If it still contains ground, " +
+  'run that first — otherwise ground under each crown is counted as part of that tree.';
+
 // Child-cloud name suffix for a `ground_class` value, shared by the octree and
 // flat ground-split paths so the two can't drift apart. The fallback keeps an
 // unexpected class distinguishable instead of producing duplicate row names.
@@ -1374,11 +1381,11 @@ export default function PointCloudViewer({
   const [treeTiling, setTreeTiling] = useState<'auto' | 'on' | 'off'>('auto');
   const [treeTileBufferM, setTreeTileBufferM] = useState(10);
   // Method + canopy-height (CHM) knobs; see backend-api/chm_trees.py. Not
-  // reseeded on open: min spacing / height are tree-architecture distances,
+  // reseeded on open: crown scale / height are tree-architecture distances,
   // not survey-scale ones, and an empty cell (null) lets the backend use
-  // min spacing ÷ 7.
+  // crown scale ÷ 12.
   const [treeMethod, setTreeMethod] = useState<TreeSegmentMethod>('treeiso');
-  const [treeChmMinSpacing, setTreeChmMinSpacing] = useState<number>(CHM_TREE_DEFAULTS.minSpacing);
+  const [treeChmCrownScale, setTreeChmCrownScale] = useState<number>(CHM_TREE_DEFAULTS.crownScale);
   const [treeChmMinHeight, setTreeChmMinHeight] = useState<number>(CHM_TREE_DEFAULTS.minHeight);
   const [treeChmCell, setTreeChmCell] = useState<number | null>(null);
   // Refine controls (post-segmentation merge/split of the tree_instance field).
@@ -14466,6 +14473,15 @@ export default function PointCloudViewer({
               pointCount: idxs.length,
               bounds: { min: bmin, max: bmax, center, size },
               fileName: `${baseName} (${suffix})`,
+              // Keep the column, as the session split does: it is the record
+              // that Ground Segmentation ran, which Segment Trees reads to decide
+              // whether to remind the user to remove ground first.
+              scalarFields: {
+                [GROUND_CLASS_ATTRIBUTE]: {
+                  values: new Float32Array(idxs.length).fill(classValue),
+                  min: 1, max: 2,
+                },
+              },
             },
             visible: true,
             color,
@@ -15297,7 +15313,7 @@ export default function PointCloudViewer({
       tiling: treeTiling,
       tile_buffer_m: treeTileBufferM,
       method: treeMethod,
-      chm_min_spacing: treeChmMinSpacing,
+      chm_crown_scale: treeChmCrownScale,
       chm_min_height: treeChmMinHeight,
       ...(treeChmCell != null ? { chm_cell: treeChmCell } : {}),
     };
@@ -15393,6 +15409,7 @@ export default function PointCloudViewer({
               ? `Segmented ${meta.point_count.toLocaleString()} points into ${splitCount} tree cloud${splitCount === 1 ? '' : 's'}.`
               : `Segmented ${meta.point_count.toLocaleString()} points into ${numTrees.toLocaleString()} tree${numTrees === 1 ? '' : 's'}.`,
             fusionWarning,
+            meta.ground_warning ? TREE_GROUND_REMINDER : null,
           ].filter(Boolean).join(' '),
         });
         return;
@@ -15500,18 +15517,18 @@ export default function PointCloudViewer({
         if (splitChildren > 0) onHideScan(id);
       }
 
-      // A fusion warning outranks the ground advisory: it says the tree COUNT
-      // is wrong, which makes every downstream per-tree number wrong too,
-      // whereas un-removed ground is a quality hint. Neither is a failure — the
-      // labels are applied either way.
+      // A fusion warning says the tree COUNT is wrong, so it turns the toast
+      // red; the ground reminder only rides along (it reports that Ground
+      // Segmentation was never run, not that ground was found). Neither is a
+      // failure — the labels are applied either way.
       showToast({
-        type: (response.ground_warning || response.fusion_warning) ? 'error' : 'success',
+        type: response.fusion_warning ? 'error' : 'success',
         title: 'Tree Segmentation Complete',
-        message: response.fusion_warning
-          ? `Segmented ${response.num_trees} trees. ${response.fusion_warning}`
-          : response.ground_warning
-            ? `Found ${response.num_trees} trees, but ground looks present — run Ground Segmentation first for best results.`
-            : `Segmented ${response.num_trees} trees.`,
+        message: [
+          `Segmented ${response.num_trees} trees.`,
+          response.fusion_warning,
+          response.ground_warning ? TREE_GROUND_REMINDER : null,
+        ].filter(Boolean).join(' '),
       });
     } catch (error) {
       // User cancelled (Cancel button aborted the fetch, or the split pill's
@@ -15535,7 +15552,7 @@ export default function PointCloudViewer({
       treeSegmentAbortRef.current = null;
       treeSplitRunIdRef.current = null;
     }
-  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM, treeMethod, treeChmMinSpacing, treeChmMinHeight, treeChmCell]);
+  }, [selectedIds, clouds, buildPointSource, onUpdateCloud, onAddCloud, onHideScan, treeRegStrength1, treeRegStrength2, treeDecimateRes1, treeDecimateRes2, treeMaxGap, treeMaxOutlierGap, treeSplitClouds, treeSeedPoints, treeTiling, treeTileBufferM, treeMethod, treeChmCrownScale, treeChmMinHeight, treeChmCell]);
 
   // Fill the seed list with one seed per trunk found in the breast-height
   // layer, and turn seed mode on so they are drawn for review before running.
@@ -26631,11 +26648,11 @@ export default function PointCloudViewer({
       {showTreeSegmentPanel && selectedIds.size === 1 && (
         <TreeSegmentPanel
           method={treeMethod}
-          chmMinSpacing={treeChmMinSpacing}
+          chmCrownScale={treeChmCrownScale}
           chmMinHeight={treeChmMinHeight}
           chmCell={treeChmCell}
           onMethodChange={(m) => { setTreeMethod(m); setTreeSegmentCostWarning(null); }}
-          onChmMinSpacingChange={setTreeChmMinSpacing}
+          onChmCrownScaleChange={setTreeChmCrownScale}
           onChmMinHeightChange={setTreeChmMinHeight}
           onChmCellChange={setTreeChmCell}
           regStrength1={treeRegStrength1}

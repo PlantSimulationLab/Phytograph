@@ -129,11 +129,14 @@ export function treeSegmentDefaultsForExtent(horizontalExtentM: number): TreeSeg
   return { decimateRes1, decimateRes2, maxGap, maxOutlierGap };
 }
 
-// Canopy-height (CHM) method defaults — mirror DEFAULT_MIN_SPACING_M /
+// Canopy-height (CHM) method defaults — mirror DEFAULT_CROWN_SCALE_M /
 // DEFAULT_MIN_HEIGHT_M in backend-api/chm_trees.py. Unlike the TreeIso voxel
 // sizes above these are NOT seeded from extent: they are distances set by the
-// trees (how close two tops stand, how tall a tree is), not by the survey.
+// trees (how wide the smaller crowns are, how tall a tree is), not by the
+// survey. 2.5 m was at or near the best crown scale on every stand measured,
+// planted and natural (see WINDOW_PER_SCALE in chm_trees.py); it errs small on
+// purpose, since too small splits crowns visibly and too large merges trees.
 export const CHM_TREE_DEFAULTS = {
-  minSpacing: 2.0,
+  crownScale: 2.5,
   minHeight: 2.0,
 } as const;

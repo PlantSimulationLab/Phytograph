@@ -18,6 +18,14 @@ from tests.test_cloud_session import cache_root, decode_streamed_json  # noqa: F
 ROWS, COLS = 4, 5
 DX, DY = 3.5, 4.0          # tree spacing (m) — narrower than a crown
 CROWN_R = 2.4              # crown radius: neighbours overlap by ~1.4 m
+# The best crown scale for these 4.8 m-wide crowns (3.0-3.5 m measured). NOT
+# the trunk spacing in general — that it equals DX here is a coincidence.
+SPACING = 3.5
+
+
+def _seg(points, **kw):
+    kw.setdefault("crown_scale", SPACING)
+    return chm_trees.segment_trees_chm(points, **kw)
 SLOPE = 0.08               # ground rises 8 cm per metre in x
 
 
@@ -86,7 +94,7 @@ def _recovered(truth, labels, bar=0.7):
 
 def test_touching_crowns_come_back_one_per_tree():
     points, truth, _, _ = _plantation()
-    labels = chm_trees.segment_trees_chm(points)
+    labels = _seg(points)
     n_trees = ROWS * COLS
     assert abs(int(labels.max()) - n_trees) <= 2, f"found {labels.max()} trees, expected {n_trees}"
     assert _recovered(truth, labels) >= 0.8 * n_trees, _recovered(truth, labels)
@@ -96,7 +104,7 @@ def test_stem_points_join_the_crown_above_them():
     """A stem under a crown belongs to that tree — the reason every point takes
     the label of the CHM cell it falls in, not only the canopy returns."""
     points, truth, _, _ = _plantation()
-    labels = chm_trees.segment_trees_chm(points)
+    labels = _seg(points)
     stems = np.arange(len(points)) >= len(points) - 25 * ROWS * COLS
     for t in np.unique(truth):
         crown_label = np.bincount(labels[(truth == t) & ~stems]).argmax()
@@ -104,19 +112,19 @@ def test_stem_points_join_the_crown_above_them():
         assert np.mean(stem_labels == crown_label) > 0.9, (t, np.unique(stem_labels))
 
 
-def test_min_spacing_is_read():
+def test_crown_scale_is_read():
     """The main knob must change the RESULT, not just travel through the params
     (see project memory: TreeIso's max_outlier_gap was wired end to end and
     read by nothing)."""
     points, _, _, _ = _plantation()
-    fine = chm_trees.segment_trees_chm(points, min_spacing=2.0).max()
-    coarse = chm_trees.segment_trees_chm(points, min_spacing=8.0).max()
+    fine = _seg(points).max()
+    coarse = _seg(points, crown_scale=14.0).max()
     assert coarse < fine / 2, (fine, coarse)
 
 
 def test_min_height_drops_low_canopy():
     points, _, _, _ = _plantation()
-    labels = chm_trees.segment_trees_chm(points, min_height=50.0)
+    labels = _seg(points, min_height=50.0)
     assert labels.max() == 0
 
 
@@ -126,7 +134,7 @@ def test_seeds_take_ids_one_to_s_and_keep_the_other_trees():
     trees continue from S+1."""
     points, truth, tops, _ = _plantation()
     chosen = [0, 7, 13]
-    labels = chm_trees.segment_trees_chm(points, seeds=tops[chosen])
+    labels = _seg(points, seeds=tops[chosen])
     for sid, tree in enumerate(chosen, start=1):
         near = np.linalg.norm(points[:, :2] - tops[tree, :2], axis=1) < 0.5
         assert np.mean(labels[near] == sid) > 0.95, sid
@@ -142,22 +150,24 @@ def test_off_centre_seed_takes_over_its_crowns_automatic_top():
     tree = 8
     seed = tops[[tree]].copy()
     seed[0, 0] += 0.9                     # 0.9 m off the top, still in the crown
-    labels = chm_trees.segment_trees_chm(points, seeds=seed)
+    labels = _seg(points, seeds=seed)
     mine = labels[truth == tree + 1]
-    assert np.mean(mine == 1) > 0.85, np.unique(mine, return_counts=True)
+    # 0.8, not higher: an off-centre marker shifts the compact watershed a
+    # little toward the seed. Without the takeover this scores ~0.12.
+    assert np.mean(mine == 1) > 0.8, np.unique(mine, return_counts=True)
 
 
 def test_two_seeds_split_a_crown_the_automatic_pass_merged():
-    """The correction seeds exist for: a large min_spacing merges neighbours,
+    """The correction seeds exist for: a too-large crown scale merges neighbours,
     and a seed on each of two merged trees gives them back one each."""
     points, truth, tops, _ = _plantation()
-    auto = chm_trees.segment_trees_chm(points, min_spacing=8.0)
+    auto = _seg(points, crown_scale=14.0)
     a, b = 5, 6                       # neighbours in one row, ~3 m apart
     near_a = np.linalg.norm(points[:, :2] - tops[a, :2], axis=1) < 0.5
     near_b = np.linalg.norm(points[:, :2] - tops[b, :2], axis=1) < 0.5
     merged = np.bincount(auto[near_a]).argmax() == np.bincount(auto[near_b]).argmax()
-    assert merged, "fixture precondition: min_spacing=8 should merge these two"
-    seeded = chm_trees.segment_trees_chm(points, min_spacing=8.0, seeds=tops[[a, b]])
+    assert merged, "fixture precondition: crown_scale=14 should merge these two"
+    seeded = _seg(points, crown_scale=14.0, seeds=tops[[a, b]])
     assert np.mean(seeded[near_a] == 1) > 0.95
     assert np.mean(seeded[near_b] == 2) > 0.95
 
@@ -168,9 +178,9 @@ def test_ground_points_and_lowest_return_agree():
     the same trees."""
     points, truth, _, ground_pts = _plantation()
     meta_g: dict = {}
-    with_ground = chm_trees.segment_trees_chm(points, ground=ground_pts, meta=meta_g)
+    with_ground = _seg(points, ground=ground_pts, meta=meta_g)
     meta_l: dict = {}
-    lowest = chm_trees.segment_trees_chm(points, meta=meta_l)
+    lowest = _seg(points, meta=meta_l)
     assert meta_g["ground_source"] == "ground_class"
     assert meta_l["ground_source"] == "lowest_return"
     n_trees = ROWS * COLS
@@ -195,14 +205,14 @@ def test_sparse_returns_still_find_every_tree(density):
     in were left empty, splitting crowns into islands and minting a "treetop"
     on every lone cell."""
     points, truth, _, _ = _plantation(density=density)
-    labels = chm_trees.segment_trees_chm(points)
+    labels = _seg(points)
     n_trees = ROWS * COLS
     assert abs(int(labels.max()) - n_trees) <= 2, labels.max()
     assert _recovered(truth, labels) >= 0.8 * n_trees, _recovered(truth, labels)
 
 
-def test_default_cell_follows_min_spacing_not_density():
-    assert chm_trees.default_cell(2.0) == pytest.approx(2.0 / 7.0)
+def test_default_cell_follows_crown_scale_not_density():
+    assert chm_trees.default_cell(2.4) == pytest.approx(0.2)
     assert chm_trees.default_cell(2.0) < chm_trees.default_cell(4.0)
     assert chm_trees.default_cell(0.1) == chm_trees.CELL_MIN_M
     assert chm_trees.default_cell(100.0) == chm_trees.CELL_MAX_M
@@ -217,7 +227,8 @@ def test_empty_input():
 def test_inline_endpoint_runs_chm(client):
     points, truth, _, _ = _plantation()
     res = client.post("/api/segment/trees",
-                      json={"points": points.tolist(), "method": "chm"})
+                      json={"points": points.tolist(), "method": "chm",
+                            "chm_crown_scale": SPACING})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["success"] is True, body.get("error")
@@ -226,9 +237,9 @@ def test_inline_endpoint_runs_chm(client):
     assert _recovered(truth, np.asarray(body["labels"])) >= 0.8 * ROWS * COLS
 
 
-def test_inline_endpoint_rejects_bad_spacing(client):
+def test_inline_endpoint_rejects_bad_crown_scale(client):
     res = client.post("/api/segment/trees",
-                      json={"points": [[0, 0, 0]] * 20, "method": "chm", "chm_min_spacing": 0})
+                      json={"points": [[0, 0, 0]] * 20, "method": "chm", "chm_crown_scale": 0})
     assert res.status_code == 422
 
 
@@ -252,11 +263,75 @@ def test_session_endpoint_runs_chm_and_keeps_ground_at_zero(client, cache_root, 
         main._session_add_extra_column(sess, main.GROUND_CLASS_SLUG,
                                        main.GROUND_CLASS_LABEL, gclass)
 
-    res = client.post(f"/api/cloud/session/{sid}/segment_trees", json={"method": "chm"})
+    res = client.post(f"/api/cloud/session/{sid}/segment_trees", json={"method": "chm", "chm_crown_scale": SPACING})
     assert res.status_code == 200, res.text
     body = res.json()
     assert abs(body["num_trees"] - ROWS * COLS) <= 2
     assert body["chm"]["ground_source"] == "ground_class"
+    assert body["ground_warning"] is False     # ground-segmented: no reminder
     tree = main._cloud_sessions[sid].extras["tree_instance"]
     assert np.all(tree[is_ground] == 0)
     assert _recovered(truth, np.asarray(tree[~is_ground]).astype(int)) >= 0.8 * ROWS * COLS
+
+
+def _natural_stand(seed, n_target=60, size=40.0, dmin=4.0, hmin=10.0, hmax=25.0,
+                   crown_k=0.16, density=25.0):
+    """An irregular stand: random positions at least `dmin` apart, heights
+    uniform in [hmin, hmax], crown radius crown_k * height (+-15%), seen from
+    above as the upper envelope of the crowns. Returns (points, truth)."""
+    rng = np.random.default_rng(seed)
+    centres = []
+    for _ in range(20000):
+        if len(centres) >= n_target:
+            break
+        p = rng.uniform(0, size, 2)
+        if all(np.hypot(*(p - q)) >= dmin for q in centres):
+            centres.append(p)
+    c = np.array(centres)
+    h = rng.uniform(hmin, hmax, len(c))
+    r = crown_k * h * rng.uniform(0.85, 1.15, len(c))
+    xy = rng.uniform(-2, size + 2, (int(density * size * size), 2))
+    top = np.full(len(xy), -np.inf)
+    owner = np.full(len(xy), -1)
+    for k in range(len(c)):
+        d2 = ((xy - c[k]) ** 2).sum(axis=1)
+        dome = h[k] - 0.35 * h[k] * d2 / r[k] ** 2
+        dome[d2 > r[k] ** 2] = -np.inf
+        better = dome > top
+        top[better] = dome[better]
+        owner[better] = k
+    keep = np.isfinite(top)
+    xy, top, owner = xy[keep], top[keep], owner[keep]
+    depth = np.where(rng.random(len(xy)) < 0.3, rng.uniform(0, 0.3, len(xy)) * top, 0.0)
+    return np.c_[xy, top - depth + rng.normal(0, 0.1, len(xy))], owner + 1
+
+
+def test_default_crown_scale_suits_an_irregular_natural_stand():
+    """The 2.5 m default was first fitted on a plantation, so it must also hold
+    where nothing is in rows: trees 4.4 m apart on average, 10-25 m tall. The
+    default is 91% right here (the best of any single value); typing the
+    trunk spacing instead (4.4 m) would drop it to ~75%, the reason the setting
+    is a crown scale and not a spacing."""
+    right = []
+    for seed in range(3):
+        points, truth = _natural_stand(seed)
+        labels = chm_trees.segment_trees_chm(points)       # the default
+        right.append(_recovered(truth, labels, bar=0.5) / len(np.unique(truth)))
+    assert np.mean(right) >= 0.85, right
+
+
+def test_session_chm_reminds_when_ground_was_never_segmented(client, cache_root, tmp_path):
+    """A cloud that never went through Ground Segmentation gets the reminder:
+    the CHM method takes the lowest returns as terrain, so any ground left in
+    is labelled as part of the tree above it."""
+    points, _, _, _ = _plantation(density=15.0)
+    f = tmp_path / "no_ground_seg.xyz"
+    np.savetxt(f, points, fmt="%.4f")
+    sid = decode_streamed_json(client.post(
+        "/api/cloud/session/create",
+        json={"source_path": str(f), "ascii_format": "x y z"},
+    ).content)["session_id"]
+    res = client.post(f"/api/cloud/session/{sid}/segment_trees",
+                      json={"method": "chm", "chm_crown_scale": SPACING})
+    assert res.status_code == 200, res.text
+    assert res.json()["ground_warning"] is True

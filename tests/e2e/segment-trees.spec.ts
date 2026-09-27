@@ -351,8 +351,8 @@ test('warns when the split distance is set above the intra-tree gap', async () =
 const CHM_FIXTURE = join(repoRoot, 'tests', 'e2e', 'fixtures', 'chm-plantation.xyz');
 
 // Run from the open panel and return the tree count the completion toast
-// reports ("… points into N trees.").
-async function runAndReadTreeCount(page: LaunchedApp['page']): Promise<number> {
+// reports ("… points into N trees.") with the toast's full text.
+async function runAndReadTreeCount(page: LaunchedApp['page']): Promise<{ n: number; text: string }> {
   const doneToasts = page
     .locator('[data-testid="toast-success"]')
     .filter({ hasText: 'Tree Segmentation Complete' });
@@ -364,7 +364,7 @@ async function runAndReadTreeCount(page: LaunchedApp['page']): Promise<number> {
   const text = (await doneToasts.first().textContent()) ?? '';
   const m = text.match(/into ([\d,]+) trees?\./);
   expect(m, `no tree count in the toast: ${text}`).not.toBeNull();
-  return parseInt(m![1].replace(/,/g, ''), 10);
+  return { n: parseInt(m![1].replace(/,/g, ''), 10), text };
 }
 
 async function openChmPanelOn(app: LaunchedApp['app'], page: LaunchedApp['page']) {
@@ -386,24 +386,32 @@ test('canopy height finds one tree per touching crown, and its spacing is read',
   // ones appear with their defaults.
   await expect(page.getByTestId('tree-reg-strength2')).toHaveCount(0);
   await expect(page.getByTestId('tree-tiling')).toHaveCount(0);
-  await expect(page.getByTestId('tree-chm-min-spacing')).toHaveValue('2');
+  await expect(page.getByTestId('tree-chm-crown-scale')).toHaveValue('2.5');
   await expect(page.getByTestId('tree-chm-min-height')).toHaveValue('2');
   await expect(page.getByTestId('tree-chm-cell')).toHaveValue('');
 
-  const found = await runAndReadTreeCount(page);
+  // This plantation's crowns are 4.8 m wide and 3.5 m is its best crown
+  // scale (the 2.5 m default over-splits it a little), so set it the way a
+  // user tuning by symptom would end up.
+  await page.getByTestId('tree-chm-crown-scale').fill('3.5');
+  await page.getByTestId('tree-chm-crown-scale').blur();
+  const { n: found, text } = await runAndReadTreeCount(page);
+  // The fixture was never ground-segmented, so the toast carries the
+  // reminder — the only place a user learns ground would join the trees.
+  expect(text).toContain("hasn't been through Ground Segmentation");
   expect(found, 'the plantation holds 20 trees').toBeGreaterThanOrEqual(18);
   expect(found).toBeLessThanOrEqual(22);
   await expect(page.getByTestId('scalar-overlay'))
     .toHaveAttribute('data-active-scalar', 'tree_instance', { timeout: 30_000 });
 
   // The main knob must change the RESULT (TreeIso's split distance was once
-  // wired end to end and read by nothing). Treetops at least 8 m apart cannot
-  // be 20 trees on a 14 × 12 m plot.
+  // wired end to end and read by nothing). A 14 m crown scale cannot find 20
+  // trees on a 14 × 12 m plot.
   await resetToFreshScene(session.app, session.page);
   await openChmPanelOn(app, page);
-  await page.getByTestId('tree-chm-min-spacing').fill('8');
-  await page.getByTestId('tree-chm-min-spacing').blur();
-  const coarse = await runAndReadTreeCount(page);
+  await page.getByTestId('tree-chm-crown-scale').fill('14');
+  await page.getByTestId('tree-chm-crown-scale').blur();
+  const { n: coarse } = await runAndReadTreeCount(page);
   expect(coarse).toBeLessThanOrEqual(6);
   expect(coarse).toBeGreaterThanOrEqual(1);
 });

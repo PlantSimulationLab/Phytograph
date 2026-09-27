@@ -8188,12 +8188,14 @@ class TreeSegmentationRequest(BaseModel):
     # TreeIso fuses touching crowns). See chm_trees.py. The TreeIso fields
     # above are ignored for 'chm', and the chm_* fields below for 'treeiso'.
     method: Literal["treeiso", "chm"] = "treeiso"
-    chm_cell: Optional[float] = Field(None, gt=0)  # CHM cell (m); None = chm_min_spacing / 7
+    chm_cell: Optional[float] = Field(None, gt=0)  # CHM cell (m); None = chm_crown_scale / 12
     chm_min_height: float = Field(2.0, ge=0)        # canopy lower than this is not a tree
-    chm_min_spacing: float = Field(2.0, gt=0)       # closest two treetops may stand (m)
+    # Roughly the width of the smaller crowns (m), NOT the trunk spacing; sets
+    # the treetop window, cell and smoothing (see chm_trees.WINDOW_PER_SCALE).
+    chm_crown_scale: float = Field(2.5, gt=0)
 
 
-_CHM_PARAM_FIELDS = ("chm_cell", "chm_min_height", "chm_min_spacing")
+_CHM_PARAM_FIELDS = ("chm_cell", "chm_min_height", "chm_crown_scale")
 
 
 class TreeSegmentationResponse(BaseModel):
@@ -8202,6 +8204,8 @@ class TreeSegmentationResponse(BaseModel):
     labels: List[int] = []          # 0 = unassigned, 1..N = tree ids
     num_trees: int = 0
     num_points: int = 0
+    # True when no ground labels came with the points, i.e. Ground Segmentation
+    # has not been run — a reminder, not a claim that ground is present.
     ground_warning: bool = False
     # Present (with success=False and no error) when the workload is above the
     # cost guideline and the caller hasn't set `acknowledge_cost`. Carries
@@ -8490,29 +8494,6 @@ def _auto_treeiso_decimation(points: np.ndarray, p) -> None:
     target2 = 2.0 * p.decimate_res1
     if p.decimate_res2 <= 0.101 and target2 > p.decimate_res2:
         p.decimate_res2 = round(target2, 3)
-
-
-def _looks_like_ground_present(points: np.ndarray) -> bool:
-    """Cheap advisory heuristic: is there a broad, flat, dense layer at the bottom?
-
-    TreeIso expects ground-removed input. We flag (never block) when the lowest
-    vertical slab holds a large share of points spread across the full XY extent
-    — the signature of an un-removed ground surface."""
-    if len(points) < 100:
-        return False
-    z = points[:, 2]
-    z0, z1 = float(np.min(z)), float(np.max(z))
-    span = z1 - z0
-    if span <= 1e-6:
-        return False
-    slab = points[z <= z0 + 0.05 * span]
-    if len(slab) < 50:
-        return False
-    frac = len(slab) / len(points)
-    xy_extent = np.ptp(points[:, :2], axis=0)
-    slab_extent = np.ptp(slab[:, :2], axis=0)
-    wide = bool(np.all(slab_extent > 0.6 * np.maximum(xy_extent, 1e-6)))
-    return bool(frac > 0.12 and wide)
 
 
 # --- Multi-trunk (row-fusion) advisory -------------------------------------- #
@@ -8854,8 +8835,7 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
             return TreeSegmentationResponse(
                 success=True, labels=[int(x) for x in labels],
                 num_trees=int(len(np.unique(labels[labels > 0]))), num_points=n_full,
-                ground_warning=(not ground_excluded) and await run_in_threadpool(
-                    _looks_like_ground_present, pts),
+                ground_warning=not ground_excluded,
             )
 
         ti_params_for_cost = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
@@ -8884,11 +8864,10 @@ async def segment_trees_points(request: TreeSegmentationRequest, http_request: R
                     success=False, num_points=n_full, cost_warning=warning,
                 )
 
-        # Skip the advisory ground heuristic when the caller already handed us
-        # ground labels to exclude — the ground is gone from `pts`.
-        ground_warning = (not ground_excluded) and await run_in_threadpool(
-            _looks_like_ground_present, pts,
-        )
+        # The ground reminder: no ground labels came with the points, i.e.
+        # Ground Segmentation has not been run (see `session_segment_trees`
+        # for why this is a fact, not a geometric guess).
+        ground_warning = not ground_excluded
         seeds = (
             np.asarray(request.seed_points, dtype=np.float64)
             if request.seed_points else None
@@ -40389,7 +40368,8 @@ def _chm_param_dict(request: TreeSegmentationRequest) -> dict:
 
 
 async def _session_segment_trees_chm(session_id: str, sess, request, http_request,
-                                     *, pts, plant_mask, ground_pts, seeds):
+                                     *, pts, plant_mask, ground_pts, seeds,
+                                     no_ground_labels):
     """The method='chm' branch of `session_segment_trees`: the same inputs
     (ground and misses excluded, labels scattered back onto every survivor),
     minus what only TreeIso needs. No cost prompt or tiling — the CHM is one
@@ -40413,7 +40393,8 @@ async def _session_segment_trees_chm(session_id: str, sess, request, http_reques
     num_trees = int(labels.max()) if labels.size else 0
     return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key,
             "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": None,
-            "tiling": None, "chm": meta or None, **rebuild_meta}
+            "tiling": None, "chm": meta or None, "ground_warning": no_ground_labels,
+            **rebuild_meta}
 
 
 @app.post("/api/cloud/session/{session_id}/segment_trees")
@@ -40447,6 +40428,14 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         # Folded into plant_mask so misses stay tree id 0 (and are dropped at
         # rebuild). See _session_survivor_hit_mask.
         is_hit = _session_survivor_hit_mask(sess)
+    # The ground reminder: set when Ground Segmentation has never run on this
+    # cloud. Deliberately a FACT, not a guess from the geometry — the old
+    # geometric heuristic it replaces flagged the ground-removed
+    # poplar tile and missed plain ground on a synthetic cloud. The column
+    # survives deletion and splitting, so a cloud whose ground was segmented
+    # and removed is not reminded; one whose file arrived ground-free is, and
+    # the message is worded as a reminder for that reason.
+    no_ground_labels = ground_col is None
     # TreeIso sees only non-ground HIT points; ground AND misses stay id 0.
     plant_mask = (~is_ground) & is_hit
     n_plant = int(plant_mask.sum())
@@ -40465,6 +40454,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
         return await _session_segment_trees_chm(
             session_id, sess, request, http_request, pts=pts, plant_mask=plant_mask,
             ground_pts=pts[is_ground & is_hit], seeds=seeds,
+            no_ground_labels=no_ground_labels,
         )
 
     ti_param_dict = {k: getattr(request, k) for k in _TREEISO_PARAM_FIELDS}
@@ -40522,7 +40512,7 @@ async def session_segment_trees(session_id: str, request: SessionTreeSegmentRequ
     num_trees = int(labels.max()) if labels.size else 0
     # How the run was tiled, and how many trees may have been cut off by a
     # tile's buffer (tiled_trees.py) - the renderer surfaces a warning.
-    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": fusion_warning, "tiling": tiling_meta or None, **meta}
+    return {"session_id": session_id, "point_count": int(len(pts)), "cache_id": cache_key, "cache_dir": str(cache_dir), "num_trees": num_trees, "fusion_warning": fusion_warning, "tiling": tiling_meta or None, "ground_warning": no_ground_labels, **meta}
 
 
 def _translate_octree_in_place(cache_id: Optional[str],

@@ -18,8 +18,9 @@ found where they are visible:
      when the cloud has them, otherwise a coarse lowest-return surface
      (a ground-removed cloud still reaches down to understory and stem bases);
   2. CHM = highest HAG per cell, pit-filled and lightly smoothed;
-  3. one marker per treetop: local maxima at least `min_spacing` apart and at
-     least `min_height` tall; a user seed replaces the automatic tops near it;
+  3. one marker per treetop: local maxima in a window scaled to the
+     `crown_scale` and at least `min_height` tall; a user seed replaces the
+     automatic tops near it;
   4. marker-controlled watershed on the inverted CHM, masked to canopy taller
      than `min_height`, gives each tree its crown footprint;
   5. every point takes the id of the crown above it, so a stem or understory
@@ -38,19 +39,47 @@ import numpy as np
 # ground points. Coarse on purpose: under a closed canopy a small cell holds no
 # low returns at all and would read a crown's underside as "ground".
 GROUND_CELL_M = 5.0
-# Default CHM cell as a fraction of `min_spacing`, and its bounds. Tied to the
-# crown scale, NOT the point spacing: resolution has to resolve the valley
-# between two crowns, however sparse the returns (empty cells are filled, see
-# HOLE_FILL_M). Measured on the synthetic plantation (3.5 m spacing): a 0.3 m
-# cell recovered 20/20 trees at 8, 15, 30 and 60 returns/m²; a 0.6 m cell lost
-# 3-11 of them at every density. The first rule (2.5x the point spacing) made
-# the cell COARSER exactly when the data got sparser, and lost 17 of 20 trees
-# at 8 returns/m².
-CELL_PER_MIN_SPACING = 1.0 / 7.0
+# Everything scale-dependent follows ONE user-facing distance, the crown
+# scale S: roughly the width of the smaller crowns in the stand. It is NOT the
+# trunk-to-trunk spacing, though it was briefly named that: the best S tracks
+# the shape of the crown tops, and in a sparse stand it sits well below the
+# spacing (synthetic natural stand, trees 4.4 m apart: best S 2.5 m, 91% of
+# trees; S near the measured spacing, 4.0-5.0 m, merges them: 68-76%). Before that it was a
+# "min spacing" that was really the window diameter, which on the poplar tile
+# needed 1.25-1.5 m for trunks 2.4-2.7 m apart.
+#
+# The rule, scored by per-tree IoU (a tree is right at IoU >= 0.5):
+#   window diameter = WINDOW_PER_SCALE x S    (local-maximum footprint)
+#   cell            = S / CELL_DIVISOR        (clamped to CELL_MIN/MAX)
+#   smoothing sigma = one cell
+# and S = 2.5 m is at or near the best on every stand measured, not one site:
+#   poplar ALS tile, 6 hand-labelled trees (bad_segment_example_handlabels.laz):
+#       S 2.0-2.5 -> 6/6 at IoU 0.80-0.86; 2.75 merges a pair, 3.0 three
+#   synthetic plantation 3.5 x 4 m: S 3.0-3.5 -> 20/20; 2.5 -> 20-25 (splits)
+#   synthetic uniform stand, 3.1 m apart, 8-12 m tall: S 2.0-3.5 -> 99-100%
+#   synthetic natural, sparse (4.4 m apart, 10-25 m tall): best 2.5 -> 91%
+#   synthetic natural, dense mixed heights (2.5 m apart, 6-20 m): best 2.0 ->
+#       64%, 2.5 -> 56% - the method's real limit; 93% of those trees are
+#       visible from above, so it is not occlusion. A height-scaled window
+#       (window = k x local height, as in Popescu & Wynne 2004) was tried and
+#       gained at most 5 points, so it was not adopted.
+# Errors are asymmetric: too small an S splits crowns (visible), too large
+# merges trees (easy to miss), so the guidance is to err low.
+#
+# The cell is tied to the crown scale, never the point spacing: a 0.3 m cell
+# recovered 20/20 synthetic trees at 8-60 returns/m² while 0.6 m lost 3-11 at
+# every density, and the first rule (2.5x point spacing) made the cell coarser
+# exactly as data got sparser (17 of 20 trees lost at 8 returns/m²). Empty
+# cells are filled instead (HOLE_FILL_M).
+WINDOW_PER_SCALE = 0.55
+CELL_DIVISOR = 12.0
 CELL_MIN_M = 0.1
 CELL_MAX_M = 1.0
 DEFAULT_MIN_HEIGHT_M = 2.0
-DEFAULT_MIN_SPACING_M = 2.0
+DEFAULT_CROWN_SCALE_M = 2.5
+# A seed takes over the automatic treetops within this share of the crown
+# scale, so the tops it replaces are those of its own crown.
+SEED_TAKEOVER_PER_SCALE = 0.5
 # Watershed compactness, in metres of canopy height per metre from the marker
 # (see the watershed call). Small: it only has to break ties on flat tops.
 COMPACTNESS_PER_M = 0.03
@@ -78,9 +107,9 @@ def pit_fill_chm(chm: np.ndarray) -> np.ndarray:
     return out
 
 
-def default_cell(min_spacing: float) -> float:
-    """CHM cell for a treetop spacing (see CELL_PER_MIN_SPACING)."""
-    return float(np.clip(CELL_PER_MIN_SPACING * min_spacing, CELL_MIN_M, CELL_MAX_M))
+def default_cell(crown_scale: float) -> float:
+    """CHM cell for a crown scale (see CELL_DIVISOR)."""
+    return float(np.clip(crown_scale / CELL_DIVISOR, CELL_MIN_M, CELL_MAX_M))
 
 
 def _fill_nearest(grid: np.ndarray) -> np.ndarray:
@@ -163,7 +192,7 @@ def segment_trees_chm(
     *,
     cell: Optional[float] = None,
     min_height: float = DEFAULT_MIN_HEIGHT_M,
-    min_spacing: float = DEFAULT_MIN_SPACING_M,
+    crown_scale: float = DEFAULT_CROWN_SCALE_M,
     smooth_sigma: Optional[float] = None,
     ground: Optional[np.ndarray] = None,
     seeds: Optional[np.ndarray] = None,
@@ -173,18 +202,20 @@ def segment_trees_chm(
 
     Args:
         points: (N, 3) non-ground points.
-        cell: CHM cell size (m); None = min_spacing / 7 (see default_cell).
+        cell: CHM cell size (m); None = crown_scale / 12 (see default_cell).
         min_height: canopy lower than this above ground is not a tree.
-        min_spacing: the closest two treetops may stand (m); the local-maximum
-            window's diameter. The main knob: lower it if neighbouring trees
-            are merged, raise it if one crown is split.
+        crown_scale: roughly the width of the smaller crowns in the stand
+            (m). The main knob, and it sets the treetop window, the cell and
+            the smoothing: lower it if neighbouring trees are merged, raise it
+            if one crown is split. Not the trunk spacing (see
+            WINDOW_PER_SCALE).
         smooth_sigma: Gaussian smoothing of the CHM (m); None = one cell (the
             usual 3x3 CHM filter). More smoothing loses a low crown beside a
             tall one; less turns canopy roughness into false treetops.
         ground: optional (M, 3) ground points for the DTM.
         seeds: optional (S, 3) user treetops/trunks. Each yields exactly one
             tree, with ids 1..S in seed order, and takes over any automatic
-            treetop within `min_spacing`; the other automatic trees follow
+            treetop within half the `crown_scale`; the other automatic trees follow
             as S+1.. .
         meta: optional dict receiving the resolved parameters.
     """
@@ -195,10 +226,10 @@ def segment_trees_chm(
     n = len(pts)
     if n == 0:
         return np.zeros(0, dtype=np.int64)
-    if not (min_spacing > 0):
-        raise ValueError("min_spacing must be positive")
+    if not (crown_scale > 0):
+        raise ValueError("crown_scale must be positive")
     if cell is None or not (cell > 0):
-        cell = default_cell(min_spacing)
+        cell = default_cell(crown_scale)
     cell = float(cell)
     if smooth_sigma is None:
         smooth_sigma = cell
@@ -232,7 +263,7 @@ def segment_trees_chm(
         chm = ndi.gaussian_filter(chm, sigma=smooth_sigma / cell, mode="nearest")
     canopy = occupied & (chm >= min_height)
 
-    peaks = (chm == ndi.maximum_filter(chm, footprint=_disk(0.5 * min_spacing / cell),
+    peaks = (chm == ndi.maximum_filter(chm, footprint=_disk(0.5 * WINDOW_PER_SCALE * crown_scale / cell),
                                        mode="nearest")) & canopy
     # A flat top reads as several adjacent maxima; each plateau is ONE top.
     auto, n_auto = ndi.label(peaks, structure=np.ones((3, 3)))
@@ -241,7 +272,7 @@ def segment_trees_chm(
     markers = np.zeros(chm.shape, dtype=np.int64)
     if n_seeds:
         # Seeds CORRECT the automatic treetops rather than replace all of them:
-        # a seed takes over every automatic top within `min_spacing` of it
+        # a seed takes over every automatic top within half the crown scale
         # (two seeds on a crown the automatic pass merged split it; one seed
         # on a crown it split joins it), and every other automatic top still
         # yields a tree. Seeding only the trees that came out wrong is the
@@ -252,7 +283,7 @@ def segment_trees_chm(
         if n_auto:
             centres = np.array(ndi.center_of_mass(peaks, auto, range(1, n_auto + 1)))
             d = np.linalg.norm(centres[:, None, :] - sij[None, :, :], axis=2) * cell
-            drop = np.flatnonzero((d < min_spacing).any(axis=1)) + 1
+            drop = np.flatnonzero((d < SEED_TAKEOVER_PER_SCALE * crown_scale).any(axis=1)) + 1
             auto[np.isin(auto, drop)] = 0
         for k, (i, j) in enumerate(sij, start=1):
             markers[i, j] = k
@@ -279,7 +310,7 @@ def segment_trees_chm(
 
     if meta is not None:
         meta.update(method="chm", cell=cell, min_height=float(min_height),
-                    min_spacing=float(min_spacing), smooth_sigma=float(smooth_sigma),
+                    crown_scale=float(crown_scale), smooth_sigma=float(smooth_sigma),
                     ground_source="ground_class" if ground is not None and len(ground) >= 10
                     else "lowest_return",
                     num_trees=int(labels.max()) if labels.size else 0)

@@ -361,6 +361,8 @@ def test_session_segment_trees_appends_instance_column(client, cache_root, tmp_p
 
     res = client.post(f"/api/cloud/session/{sid}/segment_trees", json={})
     assert res.status_code == 200, res.text
+    # Never ground-segmented: the reminder is set.
+    assert res.json()["ground_warning"] is True
     attr_names = {a["name"] for a in res.json().get("attributes", [])}
     assert "tree_instance" in attr_names, attr_names
     sess = main._cloud_sessions[sid]
@@ -403,6 +405,8 @@ def test_session_segment_trees_excludes_labeled_ground(client, cache_root, tmp_p
 
     res = client.post(f"/api/cloud/session/{sid}/segment_trees", json={})
     assert res.status_code == 200, res.text
+    # Ground-segmented (the column exists): no reminder.
+    assert res.json()["ground_warning"] is False
     tree = main._cloud_sessions[sid].extras["tree_instance"]
     assert len(tree) == n
     is_ground = gclass == main.GROUND_CLASS_GROUND

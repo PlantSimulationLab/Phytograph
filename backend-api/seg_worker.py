@@ -204,7 +204,7 @@ def run(workdir: str) -> int:
             labels = chm_trees.segment_trees_chm(
                 points, cell=params.get("chm_cell"),
                 min_height=float(params.get("chm_min_height", chm_trees.DEFAULT_MIN_HEIGHT_M)),
-                min_spacing=float(params.get("chm_min_spacing", chm_trees.DEFAULT_MIN_SPACING_M)),
+                crown_scale=float(params.get("chm_crown_scale", chm_trees.DEFAULT_CROWN_SCALE_M)),
                 ground=ground, seeds=seeds, meta=cmeta)
             np.save(os.path.join(workdir, "output.npy"), np.asarray(labels))
             with open(os.path.join(workdir, "result.json"), "w") as f:

@@ -51,8 +51,12 @@ with [Segment ground points](segment-ground.md). You have two options:
   height** also uses the labelled ground points as its terrain model; on a
   ground-removed cloud it uses the lowest returns instead.
 
-If ground appears to still be present *and unlabelled* when you run the tool,
-Phytograph warns you (but still runs).
+If the cloud has never been through Ground Segmentation, the completion
+message reminds you (the run still completes). The reminder is based only on
+that history, not on the points, so it also appears for a file whose ground was
+removed before import; ignore it in that case. For **Canopy height** the
+reminder matters most: ground points under a crown are counted as part of that
+tree.
 
 ## Steps
 
@@ -65,14 +69,20 @@ Phytograph warns you (but still runs).
    (`Cmd/Ctrl-K` → "Segment Trees").
 4. Choose the **Method** (see [Choose a method](#choose-a-method)). For
    **Canopy height**, the settings are:
-    - **Min tree spacing (m)** — the closest two treetops can stand. The main
-      setting: lower it if neighbouring trees come out as one, raise it if one
-      crown is split into several. Default `2.0`; the spacing between trees in a
-      row is a good starting point.
+    - **Crown scale (m)** — roughly the width of the smaller crowns in the
+      stand. It is *not* the distance between trunks: in an open stand the
+      best value is well below the spacing. It is the main setting and it
+      sizes everything else. Default `2.5`, which suited every stand it was
+      checked on, planted or natural (see
+      [Tree segmentation methods](../concepts/tree-segmentation-methods.md#how-the-settings-were-calibrated)).
+      Tune it by what you see: lower it if neighbouring trees come out as one,
+      raise it if one crown is split into several. **If unsure, err low** —
+      too small splits crowns, which is easy to see; too large merges trees,
+      which is easy to miss.
     - **Min tree height (m)** — canopy lower than this above the ground is not a
       tree and stays unassigned. Default `2.0`.
     - **CHM cell (m)** — grid size of the canopy height model. Leave it empty
-      (*auto*) to use one seventh of **Min tree spacing** (kept between 0.1 and
+      (*auto*) to use one twelfth of **Crown scale** (kept between 0.1 and
       1 m). It follows the crown size rather than the point density, so sparse
       scans get a fine grid too; a coarse grid merges neighbouring trees.
 
@@ -140,8 +150,8 @@ What a seed does depends on the method:
 - **TreeIso** — ambiguous segments are assigned to their nearest seed. A seed
   re-assigns whole segments, so it can join a tree that came out split, but it
   **cannot** separate trees TreeIso has already merged into one segment.
-- **Canopy height** — a seed replaces any automatic treetop within
-  **Min tree spacing** of it, and every other tree is still found
+- **Canopy height** — a seed replaces any automatic treetop within half the
+  **Crown scale** of it, and every other tree is still found
   automatically. So you only seed the trees that came out wrong: put a seed on
   each of two merged trees to split them, or one seed on a crown that was split
   to join it. Seeded trees get IDs `1`…`n` in the order you placed them.

@@ -79,7 +79,7 @@ def test_no_async_handler_without_an_await():
 # call hides in between. `_treeiso_cost_warning` is a full-N cKDTree plus up to
 # twelve full-N np.unique passes — measured 5.4 s + up to 69 s at 8 M points,
 # and it fires on the FIRST Segment Trees click.
-_MUST_BE_THREADPOOLED = ("_treeiso_cost_warning", "_looks_like_ground_present")
+_MUST_BE_THREADPOOLED = ("_treeiso_cost_warning",)
 
 
 def test_expensive_probes_are_never_called_inline_from_an_async_handler():

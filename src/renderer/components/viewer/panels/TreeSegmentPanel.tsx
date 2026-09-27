@@ -12,11 +12,11 @@ import type { TreeSegmentMethod } from '../../../utils/backendApi';
 interface TreeSegmentPanelProps {
   // 'treeiso' shows the TreeIso knobs; 'chm' the canopy-height ones.
   method: TreeSegmentMethod;
-  chmMinSpacing: number;
+  chmCrownScale: number;
   chmMinHeight: number;
-  chmCell: number | null;   // null = the backend's default, min spacing ÷ 7
+  chmCell: number | null;   // null = the backend's default, crown scale ÷ 12
   onMethodChange: (m: TreeSegmentMethod) => void;
-  onChmMinSpacingChange: (n: number) => void;
+  onChmCrownScaleChange: (n: number) => void;
   onChmMinHeightChange: (n: number) => void;
   onChmCellChange: (n: number | null) => void;
   regStrength1: number;
@@ -65,11 +65,11 @@ interface TreeSegmentPanelProps {
 
 export function TreeSegmentPanel({
   method,
-  chmMinSpacing,
+  chmCrownScale,
   chmMinHeight,
   chmCell,
   onMethodChange,
-  onChmMinSpacingChange,
+  onChmCrownScaleChange,
   onChmMinHeightChange,
   onChmCellChange,
   regStrength1,
@@ -168,18 +168,18 @@ export function TreeSegmentPanel({
         <>
           <div className="mb-3">
             <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
-              Min tree spacing (m)
+              Crown scale (m)
               <InfoHint
-                data-testid="tree-chm-min-spacing-help"
-                label="Min tree spacing"
-                text="The closest two treetops can stand. The main setting: lower it if neighbouring trees come out as one, raise it if one crown is split into several trees. About the distance between trees in a row is a good start."
+                data-testid="tree-chm-crown-scale-help"
+                label="Crown scale"
+                text="Roughly the width of the smaller crowns in the stand — not the distance between trunks. The default (2.5 m) suits most stands, planted or natural. Lower it if neighbouring trees come out as one; raise it if one crown is split into several trees. If unsure, err low: too small splits crowns (easy to spot), too large merges trees (easy to miss)."
               />
             </label>
             <DebouncedNumberInput
-              data-testid="tree-chm-min-spacing"
-              value={chmMinSpacing}
-              onCommit={onChmMinSpacingChange}
-              min={0.3} max={30} step={0.1}
+              data-testid="tree-chm-crown-scale"
+              value={chmCrownScale}
+              onCommit={onChmCrownScaleChange}
+              min={0.5} max={30} step={0.1}
               disabled={inProgress}
               className="w-full bg-neutral-700 text-neutral-200 text-xs rounded px-2 py-1 border border-neutral-600"
             />
@@ -208,7 +208,7 @@ export function TreeSegmentPanel({
               <InfoHint
                 data-testid="tree-chm-cell-help"
                 label="CHM cell"
-                text="Grid size of the canopy height model. Leave empty to use one seventh of the min tree spacing, which resolves the dip between neighbouring crowns at any point density. Raise it only to smooth out very bumpy crowns — a coarse grid merges neighbouring trees."
+                text="Grid size of the canopy height model. Leave empty to use one twelfth of the crown scale, which resolves the dip between neighbouring crowns at any point density. Raise it only to smooth out very bumpy crowns — a coarse grid merges neighbouring trees."
               />
             </label>
             <ChmCellInput value={chmCell} onCommit={onChmCellChange} disabled={inProgress} />
@@ -325,7 +325,7 @@ export function TreeSegmentPanel({
             data-testid="tree-seed-mode-help"
             label="Seed trunks"
             text={method === 'chm'
-              ? "Correct the result by marking trees yourself. Turn this on, then left-click a trunk or treetop in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and replaces any automatic treetop within the min tree spacing of it; every other tree is still found automatically. Seed just the trees that came out wrong — two seeds split a merged pair, one seed joins a split crown."
+              ? "Correct the result by marking trees yourself. Turn this on, then left-click a trunk or treetop in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and replaces any automatic treetop within half the crown scale of it; every other tree is still found automatically. Seed just the trees that came out wrong — two seeds split a merged pair, one seed joins a split crown."
               : "Guide the result by marking trunks yourself. Turn this on, then left-click each trunk in the viewer (the camera locks); right-click removes the last seed. Each seed yields exactly one tree and ambiguous segments are assigned to their nearest seed — use it when neighbouring trees split automatically. Seeds can't separate trees TreeIso has already merged into one segment; for that, lower λ₂ or use Canopy height."}
           />
         </label>
@@ -538,7 +538,7 @@ export function TreeSegmentPanel({
   );
 }
 
-// Optional CHM cell: empty = "auto" (null, the backend uses min spacing ÷ 7).
+// Optional CHM cell: empty = "auto" (null, the backend uses crown scale ÷ 12).
 // A text draft rather than DebouncedNumberInput, because that one has
 // no empty state — the repo's pattern for an optional number field (see
 // CLAUDE.md, "Numeric input fields"). Only a finite positive parse commits.

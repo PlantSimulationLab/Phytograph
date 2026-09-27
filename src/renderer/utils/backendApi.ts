@@ -1490,9 +1490,9 @@ export interface TreeSegmentationRequest {
   // watershed for airborne / closed canopy (backend-api/chm_trees.py). The
   // TreeIso fields above are ignored for 'chm', the chm_* ones for 'treeiso'.
   method?: TreeSegmentMethod;
-  chm_cell?: number | null;      // metres; null/absent = chm_min_spacing / 7
+  chm_cell?: number | null;      // metres; null/absent = chm_crown_scale / 12
   chm_min_height?: number;       // metres above ground
-  chm_min_spacing?: number;      // metres between treetops
+  chm_crown_scale?: number;      // metres; about the width of the smaller crowns
 }
 
 export type TreeSegmentMethod = 'treeiso' | 'chm';
@@ -4521,6 +4521,9 @@ export interface CloudSessionBakeResult extends OctreeMetadata {
   // trees were probably fused into one and `num_trees` is too low. Surfaced as
   // a warning toast — it is the only signal that a plausible count is wrong.
   fusion_warning?: string | null;
+  // Segment Trees: true when the cloud has never been through Ground
+  // Segmentation (no ground_class column). A reminder, not a detection.
+  ground_warning?: boolean;
   // Segment Trees: how the run was tiled (backend-api/tiled_trees.py), when
   // it was. `trees_truncated` > 0 means some trees may have been cut off by a
   // tile's buffer and the buffer should be widened.

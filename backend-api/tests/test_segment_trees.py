@@ -103,8 +103,9 @@ def test_endpoint_inline(client):
     assert len(body["labels"]) == len(points)
     assert body["num_trees"] >= 2
     assert min(body["labels"]) == 1
-    # ground-removed fixture -> no false ground warning
-    assert body["ground_warning"] is False
+    # No ground labels were sent, so the reminder fires — it reports that
+    # Ground Segmentation has not been run, not that ground was detected.
+    assert body["ground_warning"] is True
 
 
 @requires_treeiso
@@ -143,7 +144,11 @@ def test_seed_points_yield_one_instance_per_seed(client):
 
 
 @requires_treeiso
-def test_ground_warning_fires_when_ground_present(client):
+def test_ground_reminder_fires_whenever_no_ground_labels_are_sent(client):
+    """The reminder is a fact about the cloud's history, not a guess from its
+    geometry: a cloud with a plain ground layer and no ground labels gets it.
+    (The geometric heuristic it replaced fired on the ground-REMOVED poplar
+    tile and missed this kind of ground on a synthetic cloud.)"""
     points, _ = _load_fixture()
     rng = np.random.RandomState(0)
     lo = points.min(axis=0)
@@ -191,7 +196,7 @@ def test_ground_class_labels_exclude_ground(client):
     assert np.all(labels[: len(ground)] == 0)     # ground excluded → unassigned
     assert int((labels[len(ground):] > 0).sum()) > 0  # plant points segmented
     assert body["num_trees"] >= 2
-    assert body["ground_warning"] is False        # heuristic suppressed
+    assert body["ground_warning"] is False        # labels sent: no reminder
 
 
 def test_too_few_points(client):
