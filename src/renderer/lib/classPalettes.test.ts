@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  validatePalette, paletteErrors, nextFreeClassValue,
+  validatePalette, paletteErrors, nextFreeClassValue, distinctClassColor,
   paletteToScheme, paletteToIndexScheme, paletteIndexMaps,
   makePreset, makeEmptyPalette, parsePalette, parsePaletteList, defaultSlugForPreset,
   ASPRS_CLASSES, UNCLASSIFIED_VALUE, USER_CLASS_MIN,
@@ -100,6 +100,32 @@ describe('nextFreeClassValue', () => {
 
   it('skips taken values', () => {
     expect(nextFreeClassValue(OK)).toBe(66);
+  });
+});
+
+describe('distinctClassColor', () => {
+  const dist = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+  it('never hands a new class Unclassified\'s grey', () => {
+    const grey: [number, number, number] = [0.55, 0.55, 0.55];
+    const c = distinctClassColor([grey]);
+    expect(dist(c, grey)).toBeGreaterThan(0.25);
+    // Saturated, not another neutral.
+    expect(Math.max(...c) - Math.min(...c)).toBeGreaterThan(0.3);
+  });
+
+  it('successive additions each get a colour unlike all their siblings', () => {
+    const colors: [number, number, number][] = [[0.55, 0.55, 0.55]];
+    for (let i = 0; i < 8; i++) {
+      const c = distinctClassColor(colors);
+      for (const e of colors) expect(dist(c, e)).toBeGreaterThan(0.15);
+      colors.push(c);
+    }
+  });
+
+  it('is deterministic', () => {
+    const existing: [number, number, number][] = [[0.55, 0.55, 0.55], [0.4, 0.26, 0.13]];
+    expect(distinctClassColor(existing)).toEqual(distinctClassColor(existing));
   });
 });
 

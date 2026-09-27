@@ -220,7 +220,9 @@ the result as a palette of your own.
   classification the cloud already
   carries, a new class instead continues **that column's** numbering — Tree 3
   after Tree 2 — because those ids are data the segmentation wrote, not a
-  vocabulary you chose.
+  vocabulary you chose. Each new class starts with a colour that is distinct
+  from every class already in the palette (never Unclassified's grey); click
+  its swatch to change it.
 - Class values run from 0 to 255, the range of the LAS classification byte.
   **Instance** columns, which number objects rather than classes (a
   `tree_instance` from [Separate trees](segment-trees.md), or any column whose

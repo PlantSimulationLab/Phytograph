@@ -6,6 +6,7 @@ import {
   validatePalette,
   paletteErrors,
   nextFreeClassValue,
+  distinctClassColor,
   slugifyLabelColumn,
   validateLabelColumn,
   UNCLASSIFIED_VALUE,
@@ -157,8 +158,12 @@ export function ClassPaletteEditor({
           value,
           label: derivedNumbering && sharedStem ? `${sharedStem}${value}` : 'New class',
           // Match the colour the viewer already draws for this id, so a class
-          // added here and a class the segmentation wrote look alike.
-          color: derivedNumbering ? treeInstanceColor(value) : ([0.6, 0.6, 0.6] as RGB),
+          // added here and a class the segmentation wrote look alike. A class
+          // of the user's own gets a colour distinct from its siblings, never
+          // Unclassified's grey.
+          color: derivedNumbering
+            ? treeInstanceColor(value)
+            : distinctClassColor(d.classes.map((c) => c.color)),
         }],
       };
     });

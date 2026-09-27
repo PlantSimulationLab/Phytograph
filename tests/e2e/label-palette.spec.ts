@@ -118,6 +118,34 @@ test('a user-defined class can be created and painted', async () => {
     .toBe(60);
 });
 
+test('editing a class: Backspace deletes text, and a new class gets its own colour', async () => {
+  const { page } = await openLabelTool();
+  await openEditor(page);
+
+  await page.getByTestId('palette-add-class').click();
+  const rows = page.getByTestId('palette-class-row');
+  const newRow = rows.last();
+
+  // A new class must not reuse Unclassified's grey (or any sibling's colour),
+  // or it paints invisibly over unlabelled points.
+  const newColor = await newRow.getByTestId('palette-class-color').inputValue();
+  const others = await rows.evaluateAll((els) => els.slice(0, -1).map((el) =>
+    (el.querySelector('[data-testid="palette-class-color"]') as HTMLInputElement).value));
+  expect(others.length).toBeGreaterThan(0);
+  expect(others).not.toContain(newColor);
+
+  // Real keystrokes, not fill(): the bug was a viewer-wide keydown handler
+  // (the label lasso's "pop the last vertex") swallowing Backspace, which
+  // fill() never dispatches.
+  const label = newRow.getByTestId('palette-class-label');
+  await label.click();
+  await label.press('ControlOrMeta+a');
+  await label.pressSequentially('Mistletoe');
+  await label.press('Backspace');
+  await label.press('Backspace');
+  await expect(label).toHaveValue('Mistlet');
+});
+
 test('a saved palette survives closing and reopening the tool', async () => {
   const { page, panel } = await openLabelTool();
   const editor = await openEditor(page);

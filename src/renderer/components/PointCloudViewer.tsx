@@ -8231,7 +8231,12 @@ export default function PointCloudViewer({
       if (e.key === 'Enter' && editMode !== 'none') {
         // 'label' shares the polygon lasso, so Enter must close it there too.
         if (editMode === 'crop' || editMode === 'label') {
-          if (cropDrawState === 'drawing-polygon') {
+          // Not while typing: Enter in a panel field (a class name, a crop
+          // coordinate) confirms the field; it must not close the lasso.
+          const el = document.activeElement as HTMLElement | null;
+          const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+            || el.tagName === 'SELECT' || el.isContentEditable);
+          if (cropDrawState === 'drawing-polygon' && !typing) {
             e.preventDefault();
             closePolygonFrom(polygonInProgress);
             return;
@@ -8374,10 +8379,18 @@ export default function PointCloudViewer({
           }
         }
       }
-      // Backspace: pop the last polygon vertex while drawing.
+      // Backspace: pop the last polygon vertex while drawing. Guarded on focus
+      // like the picker's branch above: the Label tool's lasso is armed the
+      // whole time its panel is open, so without the guard every Backspace in
+      // the Edit classes names/values was eaten instead of deleting a character.
       if (e.key === 'Backspace' && (editMode === 'crop' || editMode === 'label') && cropDrawState === 'drawing-polygon') {
-        e.preventDefault();
-        setPolygonInProgress(prev => prev.slice(0, -1));
+        const el = document.activeElement as HTMLElement | null;
+        const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+          || el.tagName === 'SELECT' || el.isContentEditable);
+        if (!typing) {
+          e.preventDefault();
+          setPolygonInProgress(prev => prev.slice(0, -1));
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);

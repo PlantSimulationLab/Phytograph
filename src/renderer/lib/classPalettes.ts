@@ -16,6 +16,7 @@ import type { ClassDef, CategoricalScheme } from './classification';
 import {
   ORGAN_SCHEME_CLASSES, WOOD_SCHEME_CLASSES, ASPRS_CLASS_LIST,
   LAS_CLASSIFICATION_ATTRIBUTE, GROUND_CLASS_ATTRIBUTE, GROUND_SCHEME_CLASSES,
+  treeInstanceColor,
 } from './classification';
 import type { RGB } from './colormaps';
 
@@ -257,6 +258,32 @@ export function nextFreeClassValue(palette: ClassPalette, startAt?: number): num
     if (!used.has(v)) return v;
   }
   return max;
+}
+
+/**
+ * A colour for a newly added class that stands apart from every colour the
+ * palette already uses — above all Unclassified's grey, which a hardcoded
+ * default used to duplicate, so a fresh class painted invisibly over
+ * unlabelled points until the user thought to recolour it.
+ *
+ * Candidates are the golden-angle hues the tree-instance colouring already
+ * uses (well spread, saturated, never grey); the one farthest from its nearest
+ * existing colour wins. Deterministic, so the same palette always offers the
+ * same next colour.
+ */
+export function distinctClassColor(existing: readonly RGB[], candidates = 64): RGB {
+  let best: RGB = treeInstanceColor(1);
+  let bestDist = -1;
+  for (let k = 1; k <= candidates; k++) {
+    const c = treeInstanceColor(k);
+    let nearest = Infinity;
+    for (const e of existing) {
+      const d = (c[0] - e[0]) ** 2 + (c[1] - e[1]) ** 2 + (c[2] - e[2]) ** 2;
+      if (d < nearest) nearest = d;
+    }
+    if (nearest > bestDist) { bestDist = nearest; best = c; }
+  }
+  return best;
 }
 
 // ── Scheme bridge ────────────────────────────────────────────────────────────
