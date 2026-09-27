@@ -16907,6 +16907,7 @@ def _create_lidar_scan_session(r: dict, retained_standard_fields: Optional[List[
         created_at=time.time(),
         last_accessed=time.time(),
     )
+    _session_compact_extras_locked(sess)   # is_miss & co. as integers, see _compact_column
 
     # Register the session FIRST — it (positions + is_miss) is what powers the
     # miss overlay and LAD, neither of which reads the octree. The Potree octree
@@ -33252,12 +33253,13 @@ class _LabelDelta:
         propagate loop is what blows the memory budget.
 
     `prev` is uint8 because class values are a single byte (MANUAL_CLASS_MIN..MAX)
-    — a 4x saving over float32, lossless GIVEN that invariant. `prev_float` is
-    the escape hatch for a column that holds non-integral or out-of-range values
-    (e.g. a palette bound to an imported float column, or an instance id above
-    255), where the uint8 assumption would silently corrupt the rollback. It is
-    float32 because the COLUMN is: every value it can hold round-trips exactly,
-    so a wider integer type would buy nothing (see LABEL_INSTANCE_CLASS_MAX).
+    — lossless GIVEN that invariant. `prev_float` is the escape hatch for a
+    column that holds non-integral or out-of-range values (e.g. a palette bound
+    to an imported float column, or an instance id above 255), where the uint8
+    assumption would silently corrupt the rollback. float32 holds every such
+    value exactly: a label value never exceeds LABEL_INSTANCE_CLASS_MAX (2^24),
+    whether the column itself is float32 or a compacted integer type
+    (_compact_column).
     """
     stroke_id: str
     encoding: str                                  # 'sparse' | 'runs'
@@ -33328,14 +33330,16 @@ def _encode_label_delta(
 
 def _apply_label_delta_reverse(col: np.ndarray, delta: _LabelDelta) -> None:
     """Restore the prior values this delta recorded, in place on `col`."""
+    # The recorded values came OUT of this column, whose type only ever widens
+    # (_column_widen_for_locked), so they fit whatever type it has now.
     if delta.encoding == "runs":
         for start, length, value in zip(delta.starts, delta.lengths, delta.prev):
-            col[start:start + length] = float(value)
+            col[start:start + length] = value
         return
     if delta.prev_float is not None:
         col[delta.idx] = delta.prev_float
     else:
-        col[delta.idx] = delta.prev.astype(np.float32, copy=False)
+        col[delta.idx] = delta.prev
 
 
 def _trim_label_history_locked(sess: "CloudSession", slug: str) -> int:
@@ -35536,6 +35540,9 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             # (role overrides, unticked scalars, ASCII-captured origins) is
             # written into the store and the session left holding its maps.
             _session_write_back_to_store(sess, attach=True)
+        # Whole-number columns (classes, flags, indices, ids) into their
+        # narrowest integer type - 1-2 B/pt instead of 4. See _compact_column.
+        _session_compact_extras_locked(sess)
         # Build the octree from a HITS-ONLY LAS so far-field misses (~20 km) don't
         # poison its bounding box / camera framing. Misses stay in the session
         # (is_miss + true coords) for LAD and the on-demand miss overlay.
@@ -36488,7 +36495,8 @@ def label_cloud_region(session_id: str, request: LabelRegionRequest):
                 history.append(_encode_label_delta(
                     stroke.stroke_id, changed_idx, col[changed_idx].copy(),
                 ))
-                col[changed_idx] = target[changing].astype(np.float32)
+                col = _column_widen_for_locked(sess, slug, target[changing])
+                col[changed_idx] = target[changing]
             applied.append({
                 "stroke_id": stroke.stroke_id,
                 "selected_count": selected_count,
@@ -37252,7 +37260,7 @@ def _ensure_label_column_locked(
     label: str,
     default: int = MANUAL_CLASS_UNLABELED,
 ) -> bool:
-    """Create the (N,) float32 manual-label column if absent. Returns True if it
+    """Create the (N,) manual-label column if absent (narrowest integer type). Returns True if it
     was created. Caller holds `_cloud_session_lock`.
 
     The column is FULL-LENGTH and ABSOLUTE-indexed (one entry per row of
@@ -37283,7 +37291,9 @@ def _ensure_label_column_locked(
                         f"the session has {sess.positions.shape[0]} points"),
             )
         return False
-    sess.extras[slug] = np.full(len(sess.positions), float(default), dtype=np.float32)
+    # uint8 covers the default and every ordinary class; a paint beyond it (an
+    # instance id) widens the column on the write - see _column_widen_for_locked.
+    sess.extras[slug] = _compact_column(np.full(len(sess.positions), int(default), dtype=np.int64))
     if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
         sess.extra_dims_meta.append({"slug": slug, "label": label})
     return True
@@ -37342,6 +37352,18 @@ def _session_observed_classes_locked(sess: "CloudSession") -> dict:
         if slug == _MISS_SLUG or col is None:
             continue
         vals = col[editable]
+        if vals.dtype.kind in "iu":
+            # A compacted integer column (see _compact_column): whole numbers by
+            # construction, and a bincount beats a sort for small unsigned ranges.
+            if vals.size == 0:
+                continue
+            if vals.dtype.kind == "u" and vals.dtype.itemsize <= 2:
+                uniq = np.flatnonzero(np.bincount(vals))
+            else:
+                uniq = np.unique(vals)
+            if len(uniq) <= _OBSERVED_CLASSES_MAX:
+                out[slug] = [int(v) for v in uniq]
+            continue
         # Integer-valued only: a continuous column (reflectance, timestamp) has
         # no class list, and `np.unique` over millions of floats is wasted work.
         finite = np.isfinite(vals)
@@ -37398,6 +37420,126 @@ def _session_robust_color_stats_locked(sess: "CloudSession") -> dict:
     return out
 
 
+# ── Compact scalar columns ─────────────────────────────────────────────────
+#
+# Most per-point scalar columns hold WHOLE numbers: class labels (ground, wood,
+# noise, manual), tree and instance ids, the miss flag, scan-grid row/column
+# indices (with a -1 "no cell" sentinel), return numbers, LAS standard dims and
+# flags. Held as float32 they cost 4 B/pt each; held as the narrowest integer
+# type that covers their values they cost 1-2 (uint32 at worst for large id
+# ranges). This is a STORAGE decision only: every reader already converts
+# (np.rint / float64 / ==), and the octree and exports write float32 extra dims
+# as before, so nothing downstream sees a different value.
+#
+# Two rules keep it safe:
+#   * the type is chosen from the column's CONTENT: a column with any
+#     non-integral or non-finite value stays float32, and a -1 sentinel makes
+#     it signed. The one slug rule is the other way round: columns whose
+#     MEANING is continuous (_FLOAT_ONLY_SLUGS: normals, the timestamp display
+#     copy, height above ground) stay float32 even when a given cloud happens
+#     to hold only whole numbers in them (a flat plane's normals are 0/1);
+#   * a column is only ever WIDENED to fit a write (`_column_widen_for_locked`),
+#     never written with numpy's silent wrap-around cast. Widening only grows
+#     the range, so a label undo, which restores values the column held
+#     before, always fits.
+
+_COMPACT_INT_DTYPES = tuple(np.dtype(t) for t in
+                            (np.uint8, np.int8, np.uint16, np.int16, np.uint32, np.int32))
+_COMPACT_SCAN_ROWS = 4_000_000
+
+
+def _narrow_int_dtype(lo: float, hi: float) -> "Optional[np.dtype]":
+    """The first (narrowest) of _COMPACT_INT_DTYPES holding [lo, hi], or None."""
+    for dt in _COMPACT_INT_DTYPES:
+        info = np.iinfo(dt)
+        if lo >= info.min and hi <= info.max:
+            return dt
+    return None
+
+
+def _integral_range(arr: np.ndarray) -> "Optional[tuple]":
+    """(min, max) when every value is a finite whole number, else None.
+    Scanned in blocks, so a memory-mapped column is never copied whole."""
+    a = arr
+    if a.dtype.kind in "iub":
+        if a.size == 0:
+            return (0, 0)
+        return (int(np.min(a)), int(np.max(a)))
+    if a.dtype.kind != "f":
+        return None
+    lo, hi = np.inf, -np.inf
+    for start in range(0, len(a), _COMPACT_SCAN_ROWS):
+        c = np.asarray(a[start:start + _COMPACT_SCAN_ROWS])
+        if not np.isfinite(c).all() or not (c == np.rint(c)).all():
+            return None
+        if c.size:
+            lo = min(lo, float(c.min()))
+            hi = max(hi, float(c.max()))
+    return (0, 0) if not np.isfinite(lo) else (lo, hi)
+
+
+def _float_only_slugs() -> set:
+    """Columns that stay float32 whatever values they hold (see above)."""
+    return ({slug for slug, _label in normals_mod.COLUMNS}
+            | {"timestamp", HEIGHT_ABOVE_GROUND_SLUG})
+
+
+def _compact_column(arr: np.ndarray, slug: "Optional[str]" = None) -> np.ndarray:
+    """`arr` in the narrowest integer type that holds it exactly, or float32
+    when it is not all whole numbers (or exceeds int32), or when `slug` names a
+    continuous quantity (_float_only_slugs). Returns `arr` itself when it
+    already has that type."""
+    if slug is not None and slug in _float_only_slugs():
+        return arr if arr.dtype == np.float32 else np.asarray(arr, dtype=np.float32)
+    r = _integral_range(arr)
+    dt = _narrow_int_dtype(*r) if r is not None else None
+    if dt is None:
+        dt = np.dtype(np.float32)
+    if arr.dtype == dt:
+        return arr
+    return np.asarray(arr).astype(dt)
+
+
+def _session_compact_extras_locked(sess: "CloudSession") -> None:
+    """Compact every scalar column of a session (see _compact_column). A
+    store-backed column is rewritten in its store and stays a memory map.
+    Caller holds the lock (or owns a session nobody else can see yet)."""
+    for slug, arr in list(sess.extras.items()):
+        new = _compact_column(arr, slug)
+        if new is arr:
+            continue
+        store = getattr(sess, "store", None)
+        name = store.column_name_of(arr) if store is not None else None
+        if name is not None:
+            new = store.replace_column(name, new)
+        sess.extras[slug] = new
+
+
+def _column_widen_for_locked(sess: "CloudSession", slug: str, values) -> np.ndarray:
+    """The session's `slug` column, widened first if `values` would not fit
+    its integer type (a float column takes anything). Returns the column to
+    write into - possibly a new array, so callers must use the return value.
+    Caller holds the lock."""
+    col = sess.extras[slug]
+    if col.dtype.kind == "f":
+        return col
+    vals = np.asarray(values)
+    if vals.size == 0:
+        return col
+    r = _integral_range(vals)
+    if r is not None:
+        info = np.iinfo(col.dtype)
+        if r[0] >= info.min and r[1] <= info.max:
+            return col
+        cr = _integral_range(col)
+        new_dt = _narrow_int_dtype(min(r[0], cr[0]), max(r[1], cr[1])) if cr else None
+    else:
+        new_dt = None
+    new_col = np.asarray(col).astype(new_dt if new_dt is not None else np.float32)
+    sess.extras[slug] = new_col
+    return new_col
+
+
 def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, values: np.ndarray) -> None:
     """Append (or replace) a per-point scalar extra-dim column on the session
     array. `values` is aligned to the SURVIVING points (positions[~deleted]);
@@ -37410,9 +37552,12 @@ def _session_add_extra_column(sess: "CloudSession", slug: str, label: str, value
 
     NOTE for scalar-field arithmetic: use `_session_set_full_column_locked`, for
     the same reason in a different shape — see that helper below."""
-    full = np.zeros(len(sess.positions), dtype=np.float32)
-    full[~sess.deleted] = values.astype(np.float32)
-    sess.extras[slug] = full
+    vals = np.asarray(values)
+    full = np.zeros(len(sess.positions),
+                    dtype=vals.dtype if vals.dtype.kind in "iub" else np.float32)
+    full[~sess.deleted] = vals if vals.dtype.kind in "iub" else vals.astype(np.float32)
+    # Narrowest exact type (a class column is 1 B/pt, not 4); see _compact_column.
+    sess.extras[slug] = _compact_column(full, slug)
     # The column was replaced wholesale, so its label deltas (hand edits made
     # against the OLD values) describe nothing that exists any more; an undo
     # would reverse-apply them onto the new result.
@@ -37457,7 +37602,7 @@ def _session_set_full_column_locked(sess: "CloudSession", slug: str, label: str,
             detail=(f"scalar column {slug!r} has shape {arr.shape} but the "
                     f"session has {n} points"),
         )
-    sess.extras[slug] = arr.astype(np.float32, copy=False)
+    sess.extras[slug] = _compact_column(arr, slug)
     sess.label_history.pop(slug, None)   # replaced wholesale; see the sibling
     if slug not in {ed["slug"] for ed in sess.extra_dims_meta}:
         sess.extra_dims_meta.append({"slug": slug, "label": label})
@@ -38204,10 +38349,13 @@ def _merge_sessions_locked(sessions: List["CloudSession"]) -> "CloudSession":
         for s, m, c in zip(sessions, survs, counts):
             col = s.extras.get(slug)
             if col is not None:
-                parts.append(np.asarray(col, dtype=np.float32)[m])
+                parts.append(np.asarray(col)[m])
             else:
-                parts.append(np.zeros(c, dtype=np.float32))
-        extras[slug] = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+                parts.append(np.zeros(c, dtype=np.uint8))
+        # Each input keeps its own type; the concatenation promotes to one
+        # that holds them all, and compaction then narrows it again.
+        extras[slug] = (_compact_column(np.concatenate(parts), slug) if parts
+                        else np.zeros(0, dtype=np.uint8))
 
     # Normals are the one column family the zero-fill above cannot honestly
     # extend. For a scalar like `ground_class`, 0 is a usable "unknown". For a
@@ -38537,6 +38685,8 @@ def _project_restore_session(zf, key: str) -> "CloudSession":
         store.set_attr("extras_order", list(f["extras"]))
         store.flush()
         sess.store = store
+    # A project saved before columns were compacted holds them as float32.
+    _session_compact_extras_locked(sess)
     return sess
 
 
@@ -40740,7 +40890,7 @@ def session_scalar_field_manage(session_id: str,
                 # editable, and a view would alias a memmap.
                 _session_set_full_column_locked(
                     sess, new_slug, label,
-                    np.array(sess.extras[slug], dtype=np.float32, copy=True))
+                    np.array(sess.extras[slug], copy=True))
                 if slug in sess.derived_fields:
                     sess.derived_fields[new_slug] = sess.derived_fields[slug]
                 result = {"slug": new_slug, "duplicated_from": slug, "label": label}

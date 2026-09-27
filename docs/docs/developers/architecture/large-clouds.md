@@ -9,9 +9,41 @@ sessions, tiled processing, streaming import) builds on these pieces.
 
 ## What a cloud costs
 
-A `CloudSession` stores positions as float64 (24 B/pt), every scalar column
-as float32 (4 B/pt each), colours as three uint16 (6 B/pt), intensity as
-uint16 (2 B/pt), timestamps as float64 (8 B/pt), and a one-byte delete mask.
+A `CloudSession` stores positions as float64 (24 B/pt), colours as three
+uint16 (6 B/pt), intensity as uint16 (2 B/pt), timestamps as float64
+(8 B/pt), and a one-byte delete mask. A scalar column is float32 (4 B/pt)
+unless every value is a whole number. Then it is stored in the narrowest
+integer type that holds its values: 1 B/pt for a class label, flag or small
+index, 2 for row/column indices, 4 (uint32) only for a large id range.
+
+**Compact integer columns.** Most columns on a processed cloud are whole
+numbers: `ground_class`, `wood_class`, noise and manual classes,
+`tree_instance`, `is_miss`, `row_index`/`column_index` (with a −1 sentinel,
+so signed), `target_index`/`target_count`, and the LAS standard dims and
+flags. A segmented TLS scan carrying eight of them used to spend 32 B/pt on
+them. It now spends about 12 B/pt, and HAG is the only one that stays
+float32.
+
+The type is chosen from the column's **content** (`_compact_column`),
+except that columns whose meaning is continuous (normals, the timestamp
+display copy, height above ground) stay float32 even when one cloud happens
+to hold only whole numbers in them. It is chosen at the places columns are born: import, every tool's
+result column (`_session_add_extra_column`), computed fields, merge,
+duplicate, synthetic scans, and project open (which also compacts the float32
+columns of older projects). A column with any fraction or NaN stays float32.
+
+It is **storage only.** Every reader already converts (`np.rint`, float64,
+`==`), and the octree and every export write float32 extra dims exactly as
+before, so no value changes anywhere downstream.
+
+The one hazard is an in-place write that does not fit: numpy's setitem cast
+would silently wrap 256 into 0 in a uint8 column. So the two in-place writers,
+painting (`label_region`) and label undo, go through
+`_column_widen_for_locked`, which widens the column first (an instance id of
+70 000 moves a uint8 column to uint32). Widening only grows the range, so an
+undo, which restores values the column held before, always fits.
+`memory_budget.bytes_per_point` still charges 4 B per scalar column, a
+conservative overestimate. Pinned by `backend-api/tests/test_compact_columns.py`.
 A typical terrestrial LAS import is ~57 B/pt; a RIEGL position with its
 thirteen attributes is ~87 B/pt. So:
 
