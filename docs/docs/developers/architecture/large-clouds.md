@@ -198,6 +198,20 @@ materialises a full copy of the hits — the tiled runner (next section) is the
 answer for neighbourhood tools, and per-block reads for the point-local ones
 (C2M, DEM pre-binning).
 
+### Split and extract children are born in a store
+
+`_session_subset_by_indices_locked` builds every split, extract and crop
+child. It used to gather the child's rows into RAM whatever its size.
+Splitting the 45.7 M-point store-backed scan by ground class left the
+39.3 M-point child holding 1.95 GB of RAM for good, next to a parent that
+held almost none. A child over `_session_should_use_store` is now gathered
+`DEFAULT_CHUNK_ROWS` at a time into its own `<id>.store`, the same way an
+import is: every column is a map and `extras` / `extras_order` are recorded.
+A failed gather deletes the directory. A child below the threshold stays in
+RAM, as before. `tests/test_session_store_backed.py` checks that the values
+match the parent's rows, and that the child deletes, bakes, exports and
+removes its store like any store-backed cloud.
+
 ### A bake re-homes the store
 
 `bake` removes deleted rows for good. Only an explicit **Permanently apply
@@ -349,15 +363,23 @@ Three changes make the plan itself cheap:
 The normals worker also memory-maps its input instead of loading it, since
 it only reads XY for the plan and per-tile gathers.
 
-**The seg worker runs with `MallocLargeCache=0`.** macOS libmalloc keeps
-recently freed large blocks cached, still dirty, so they count against the
-machine until the process reuses them. A freed 1.1 GB array stayed in the
-process's footprint, and each of a normals pool's ten children sat on
-~1 GB it no longer used. The worker's arrays are all large and short-lived,
-so `_run_killable_admitted` sets the variable, and the tile pool inherits it.
-It is not set on the backend. Measured there, it made LAS writes about twice
-as slow (a 45 M-point split took 58 s instead of 47 s). The backend's
-cache is bounded and reused by its next allocation.
+**Every backend process runs with `MallocLargeCache=0`.** macOS libmalloc
+keeps recently freed large blocks cached in the process. `footprint(1)`
+reports them as `MALLOC_LARGE`, dirty, with 0 bytes reclaimable, so they count
+against the machine until the process reuses them. `malloc_zone_pressure_relief`
+releases none of it. Measured:
+
+- A freed 1.1 GB array stayed in the footprint.
+- Each of a normals pool's ten children sat on ~1 GB it no longer used.
+- The backend held 1.1–2.8 GB after a 45.7 M-point import, and 5.6 GB after
+  the split below, with ~360 MB of live arrays.
+
+`spawnChild` (`src/main/backend.ts`) and `scripts/dev.mjs` set the variable
+for the backend, unless the shell already set it. `_run_killable_admitted`
+sets it again for a seg worker started any other way, and the tile pool
+inherits it. The cost, from alternating runs: the octree LAS write goes from
+4.2 to 4.8 s at 45.7 M points, and import is ~4 % slower. The variable is
+ignored off macOS. `src/main/memoryBudgetEnv.test.ts` pins both spawn paths.
 
 On the 45.7 M-point scan, Compute Normals went from 182 s and a 20.6 GB total
 peak (worker plus pool) to 87 s and 6.6 GB. Ground segmentation stays 12 s
@@ -766,21 +788,23 @@ compressed memory and never memmapped pages, which makes it the number to
 judge pressure by.
 
 On a real 45.7 M-point TLS scan, footprint above baseline, with all the
-tiling fixes above:
+fixes above and the app's own settings:
 
-| Stage | Time | Backend peak | Workers peak |
-|---|---|---|---|
-| import (store-backed) | 27 s | 1.5 GB | 1.8 GB (converter) |
-| ground segmentation | 14 s | 1.9 GB | 6.6 GB |
-| compute normals | 92 s | 3.9 GB | 6.5 GB |
-| split into ground + plant | 58 s | 6.6 GB | 3.9 GB |
-| delete region + rebuild | 28 s | 5.9 GB | 2.0 GB |
+| Stage | Time | Backend peak | Workers peak | Backend after |
+|---|---|---|---|---|
+| import (store-backed) | 30 s | 1.6 GB | 2.0 GB (converter) | 0.15 GB |
+| ground segmentation | 15 s | 1.9 GB | 6.6 GB | 0.2 GB |
+| compute normals | 95 s | 3.9 GB | 6.7 GB | 1.0 GB |
+| split into ground + plant | 50 s | 4.0 GB | 3.7 GB | 1.5 GB |
+| delete region + rebuild | 21 s | 3.3 GB | 2.0 GB | 1.6 GB |
 
-These numbers are from a run with `MallocLargeCache=0` on the backend too,
-which is why the split and delete are slower than in production. Before the
-fixes, the workers peaked at 13.0 GB (ground) and 18.5 GB (normals). The
-backend sat on 3.6 GB of freed-but-cached memory right after import, but only
-154 MB once that cache was off.
+Before these fixes the workers peaked at 13.0 GB (ground) and 18.5 GB
+(normals), normals took 189 s, and the backend kept 3.6 GB after import and
+4.2 GB after the split. What the backend still keeps after the split is
+mostly columns added to the stored parent: the five normals columns, ~0.9 GB.
+Those stay in RAM until the parent's next spill writes them back
+(`_session_write_back_to_store`). The rest is the 6.3 M-point ground child,
+which is under the store threshold.
 
 ## Benchmark harness
 

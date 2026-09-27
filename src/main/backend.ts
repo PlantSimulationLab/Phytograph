@@ -404,6 +404,12 @@ function spawnChild(binPath: string, port: number): void {
         PHYTOGRAPH_RESOURCES: resourcesRoot(),
         PHYTOGRAPH_BACKEND_PORT: String(port),
         PHYTOGRAPH_OCTREE_CACHE_ROOT: resolveOctreeCacheRoot(),
+        // macOS libmalloc otherwise keeps freed large blocks cached in the
+        // process, dirty and unreclaimable: measured, the backend held 1.1-2.8 GB
+        // of freed arrays after a 45.7 M-point import and 5.6 GB after a split,
+        // with ~360 MB of live data. Off costs ~15% on the octree LAS write
+        // (4.2 -> 4.8 s at 45.7 M). Ignored off macOS. See large-clouds.md.
+        MallocLargeCache: process.env.MallocLargeCache ?? '0',
         ...memoryBudgetEnv(),
       },
     });

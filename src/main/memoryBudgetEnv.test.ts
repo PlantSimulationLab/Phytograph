@@ -75,3 +75,21 @@ describe('memory budget setting → dev uvicorn env', () => {
     expect(devSrc).toMatch(/if \(process\.env\.PHYTOGRAPH_MEMORY_BUDGET_BYTES\) return \{\};/);
   });
 });
+
+/**
+ * macOS libmalloc keeps freed large blocks cached, dirty, in the process; the
+ * backend sat on GBs of freed arrays (`footprint` reports them as MALLOC_LARGE
+ * dirty, 0 reclaimable). Both backend spawn paths turn the cache off. Silent if
+ * dropped: everything still works, it just holds memory it no longer uses.
+ */
+describe('backend spawn env disables the macOS large-allocation cache', () => {
+  it('packaged / electron . path', () => {
+    const env = backendSrc.match(/env:\s*\{([\s\S]*?)\},/);
+    expect(env![1]).toMatch(/MallocLargeCache:\s*process\.env\.MallocLargeCache \?\? '0'/);
+  });
+
+  it('dev uvicorn path', () => {
+    const uvicornEnv = devSrc.match(/env:\s*\{[^}]*PHYTOGRAPH_OCTREE_CACHE_ROOT[^}]*\}/);
+    expect(uvicornEnv![0]).toMatch(/MallocLargeCache:\s*process\.env\.MallocLargeCache \?\? '0'/);
+  });
+});

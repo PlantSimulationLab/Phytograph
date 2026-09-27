@@ -38040,27 +38040,67 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
     O(N) total across all K children."""
     import time
     new_id = uuid.uuid4().hex[:8]
-    # Fancy indexing already returns a fresh array — no .copy() needed on top.
+    take = np.asarray(take)
+    n_take = int(take.shape[0])
+    # A subset big enough to live in a store is gathered straight into its
+    # own, DEFAULT_CHUNK_ROWS at a time, as an import would have put it. It
+    # used to be gathered into RAM whatever its size: splitting a 45.7 M-point
+    # store-backed scan by ground class left a 39.3 M-point child holding
+    # 1.95 GB of RAM for good, next to a parent that held almost none.
+    store = _new_session_store(new_id, n_take) if _session_should_use_store(n_take) else None
+    extra_cols: Dict[str, str] = {}
+
+    def _gather(name: str, arr, dtype=None):
+        if arr is None:
+            return None
+        src = np.asarray(arr) if dtype is None else np.asarray(arr, dtype=dtype)
+        if store is None:
+            return src[take]        # fancy indexing already returns a fresh array
+        m = store.allocate_column(name, src.dtype, src.shape[1:])
+        for a, b in session_store.iter_ranges(n_take):
+            m[a:b] = src[take[a:b]]
+        return m
+
+    try:
+        extras = {}
+        for k, v in sess.extras.items():
+            col = f"x{len(extra_cols)}"
+            extra_cols[col] = k
+            extras[k] = _gather(col, v)
+        deleted = (store.allocate_column("deleted", np.bool_) if store is not None
+                   else np.zeros(n_take, dtype=bool))
+        if store is not None:
+            store.set_attr("extras", extra_cols)
+            store.set_attr("extras_order", list(extras.keys()))
+        positions = _gather("positions", sess.positions)
+        colors = _gather("colors", sess.colors)
+        intensity = _gather("intensity", sess.intensity)
+        timestamps = _gather("timestamps", sess.timestamps)
+        beam_origins = _gather("beam_origins", sess.beam_origins, dtype=np.float64)
+    except BaseException:
+        if store is not None:
+            root = store.root
+            store.close()
+            _delete_session_store_dir(root)
+        raise
     new_sess = CloudSession(
         session_id=new_id,
         source_path=sess.source_path,  # provenance label only
         ascii_format=sess.ascii_format,
         column_plan=sess.column_plan,
-        positions=sess.positions[take],
-        colors=sess.colors[take] if sess.colors is not None else None,
-        intensity=sess.intensity[take] if sess.intensity is not None else None,
-        extras={k: v[take] for k, v in sess.extras.items()},
+        positions=positions,
+        colors=colors,
+        intensity=intensity,
+        extras=extras,
         extra_dims_meta=list(sess.extra_dims_meta),
         # Carry the float64 timestamps onto the subset so the moving-platform LAD
         # join key survives a split/crop with full precision (and stays aligned).
-        timestamps=(np.asarray(sess.timestamps)[take]
-                    if sess.timestamps is not None else None),
+        timestamps=timestamps,
         # Same reasoning for the per-pulse beam origins, which are the ground-truth
         # LAD origin source that BYPASSES the timestamp join entirely — dropping
         # them silently downgraded a split/extract/duplicate of a moving-platform
         # scan to the less-accurate join (or to a static origin) with no warning.
-        beam_origins=(np.asarray(sess.beam_origins, dtype=np.float64)[take]
-                      if sess.beam_origins is not None else None),
+        beam_origins=beam_origins,
         gps_time_encoding=getattr(sess, "gps_time_encoding", None),
         # Inherit the parent's import shift so the subset's stored positions stay
         # in the same (shifted) space and still restore to world coords on read.
@@ -38071,7 +38111,7 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         # the positions it copies are metres already.)
         source_units=getattr(sess, "source_units", None),
         source_unit_scale=getattr(sess, "source_unit_scale", None),
-        deleted=np.zeros(len(take), dtype=bool),
+        deleted=deleted,
         deleted_history=[],
         octree_cache_id=None,
         # Every parent hit the child does not take (a sibling tree, the ground a
@@ -38083,6 +38123,7 @@ def _session_subset_by_indices_locked(sess: "CloudSession", take: np.ndarray) ->
         created_at=time.time(),
         last_accessed=time.time(),
     )
+    new_sess.store = store
     _cloud_sessions[new_id] = new_sess
     return new_sess
 

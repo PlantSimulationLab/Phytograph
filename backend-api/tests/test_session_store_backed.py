@@ -4,8 +4,9 @@ Above `_session_store_min_points()` (forced to 0 here) an import allocates
 its columns in a `SessionStore` and the session holds memmaps, so the cloud
 is disk-backed from the first chunk; edits through the maps persist on their
 own; eviction writes back only what is not a map yet plus a small pickle;
-restore hands the maps back; delete removes the directory. Sessions born
-with RAM arrays (a split child) get a store at their first eviction. Every
+restore hands the maps back; delete removes the directory. A split or
+extract child over the threshold is gathered straight into its own store;
+sessions born with RAM arrays get one at their first eviction. Every
 behaviour is driven through the real HTTP API.
 """
 import json
@@ -237,3 +238,70 @@ def test_scaling_a_memory_mapped_column_does_not_copy_it(tmp_path, monkeypatch):
     plain = np.ones((4, 3))
     scaled = main._scale_positions_to_metres(plain, 2.0)
     assert scaled is not plain and np.all(plain == 1.0) and np.all(scaled == 2.0)
+
+
+def _decode(res):
+    assert res.status_code == 200, res.text
+    b = res.content
+    return decode_streamed_json(b) if (b[:1].isspace() or b[:4] == b"PHP1") else res.json()
+
+
+def test_a_split_child_is_gathered_into_its_own_store(stored, client):
+    """Measured on a 45.7 M-point scan: split by ground class, the 39.3 M-point
+    child held 1.95 GB of RAM for good while its store-backed parent held
+    almost none. A child over the threshold is now born store-backed."""
+    sid, las, tmp = stored
+    parent = main._get_cloud_session(sid)
+    cls = np.array(parent.extras["las_classification"])
+    pos = np.array(parent.positions)
+    refl = np.array(parent.extras["reflectance"])
+    out = _decode(client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                              json={"slug": "las_classification"}))
+    children = {int(c["value"]): c["session_id"] for c in out["children"]}
+    assert set(children) == set(np.unique(cls).tolist())
+    for value, cid in children.items():
+        child = main._get_cloud_session(cid)
+        assert child.store is not None and child.store.root.parent == tmp / "sessions"
+        for f in ("positions", "intensity", "deleted"):
+            assert child.store.is_own(f, getattr(child, f)), f
+        for slug, arr in child.extras.items():
+            assert child.store.column_name_of(arr) is not None, slug
+        rows = np.flatnonzero(cls == value)
+        np.testing.assert_array_equal(child.positions, pos[rows])
+        np.testing.assert_array_equal(child.extras["reflectance"], refl[rows])
+        assert not child.deleted.any()
+        assert list(child.extras) == list(parent.extras)
+
+    # The child edits and exports like any store-backed cloud, and deleting it
+    # removes its store.
+    cid = children[int(cls[0])]
+    child = main._get_cloud_session(cid)
+    n = len(child.positions)
+    res = client.post(f"/api/cloud/session/{cid}/delete_region",
+                      json={"region": {"kind": "box", "min": [0, 0, 0], "max": [2.5, 2.5, 5],
+                                       "invert": False}})
+    assert res.status_code == 200, res.text
+    gone = res.json()["deleted_count"]
+    assert 0 < gone < n
+    _decode(client.post(f"/api/cloud/session/{cid}/bake"))
+    child = main._get_cloud_session(cid)
+    assert len(child.positions) == n - gone and child.store.n == n - gone
+    dest = tmp / "child.las"
+    _decode(client.post("/api/pointcloud/export", json={
+        "source": {"session_id": cid, "source_path": str(las)}, "format": "las",
+        "dest_path": str(dest)}))
+    import laspy
+    assert len(laspy.read(str(dest)).points) == n - gone
+    store_root = child.store.root
+    assert client.delete(f"/api/cloud/session/{cid}").json()["deleted"] is True
+    assert not store_root.exists()
+
+
+def test_a_small_split_child_stays_in_ram(stored, client, monkeypatch):
+    sid, las, tmp = stored
+    monkeypatch.setenv("PHYTOGRAPH_SESSION_STORE_MIN_POINTS", "1000000000")
+    out = _decode(client.post(f"/api/cloud/session/{sid}/extract_by_column",
+                              json={"slug": "las_classification"}))
+    for c in out["children"]:
+        child = main._get_cloud_session(c["session_id"])
+        assert child.store is None and not isinstance(child.positions, np.memmap)

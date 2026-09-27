@@ -192,7 +192,11 @@ async function runOnce(cmd, args) {
         cwd: backendDir,
         // Point the dev backend at the same cache the Electron protocol handler
         // reads, so both ends of the octree pipeline agree on the dir.
-        env: { ...process.env, PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot, ...devMemoryBudgetEnv() },
+        // MallocLargeCache: see spawnChild in src/main/backend.ts.
+        env: {
+          ...process.env, PHYTOGRAPH_OCTREE_CACHE_ROOT: devOctreeCacheRoot,
+          MallocLargeCache: process.env.MallocLargeCache ?? '0', ...devMemoryBudgetEnv(),
+        },
       },
     );
     let stderrTail = '';
