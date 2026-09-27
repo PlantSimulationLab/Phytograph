@@ -165,10 +165,18 @@ export function TreeInventoryPanel({
 
       {/* Settings */}
       <div className="grid grid-cols-5 gap-2 mb-2 text-[10px] text-neutral-400">
-        <label className="flex flex-col gap-0.5">
-          Breast height
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1">
+            Breast height
+            <InfoHint
+              data-testid="tree-inventory-breast-height-help"
+              label="Breast height"
+              text="Height above the uphill ground, measured along the stem, where DBH is taken. 1.3 m is the international convention; 4.5 ft (1.37 m) is the US one. Changes DBH, basal area and every stand total built on them."
+            />
+          </span>
           <select
             data-testid="tree-inventory-breast-height"
+            aria-label="Breast height"
             value={settings.breastHeightM === 1.37 ? '1.37' : '1.3'}
             onChange={e => onSettingsChange({ breastHeightM: parseFloat(e.target.value) })}
             disabled={inProgress}
@@ -177,11 +185,19 @@ export function TreeInventoryPanel({
             <option value="1.3">1.3 m</option>
             <option value="1.37">4.5 ft (1.37 m)</option>
           </select>
-        </label>
-        <label className="flex flex-col gap-0.5">
-          Circle search
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1">
+            Circle search
+            <InfoHint
+              data-testid="tree-inventory-fit-method-help"
+              label="Circle search"
+              text="How the stem's points are picked out of the breast-height slice before the final circle fit. RANSAC tries many three-point circles and keeps the one most points agree with; randomized Hough votes for centres and radii. Both ignore branches and noise, and both end in the same precise fit. If a cluttered stem gets a no_stem or high_residual flag with one, the other is worth a try."
+            />
+          </span>
           <select
             data-testid="tree-inventory-fit-method"
+            aria-label="Circle search"
             value={settings.fitMethod}
             onChange={e => onSettingsChange({ fitMethod: e.target.value as 'ransac' | 'hough' })}
             disabled={inProgress}
@@ -190,22 +206,38 @@ export function TreeInventoryPanel({
             <option value="ransac">RANSAC</option>
             <option value="hough">Randomized Hough</option>
           </select>
-        </label>
-        <label className="flex flex-col gap-0.5">
-          Crown voxel (m)
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1">
+            Crown voxel (m)
+            <InfoHint
+              data-testid="tree-inventory-voxel-help"
+              label="Crown voxel (m)"
+              text="Only affects the crown volume column. The crown is cut into cubes of this size and the volume is the number of cubes holding at least one point. Smaller cubes follow the foliage and report less volume (and too small reports gaps where the scan is sparse); larger cubes fill the gaps and approach the crown's envelope. Use roughly 2-3x the point spacing in the crown, and the same value when comparing trees or plots."
+            />
+          </span>
           <DebouncedNumberInput
             data-testid="tree-inventory-voxel"
+            aria-label="Crown voxel (m)"
             value={settings.voxelSizeM}
             onCommit={n => onSettingsChange({ voxelSizeM: n })}
             min={0.01} max={2} step={0.05} debounceMs={0}
             disabled={inProgress}
             className="bg-neutral-700 text-neutral-200 rounded px-1 py-0.5 w-full"
           />
-        </label>
-        <label className="flex flex-col gap-0.5">
-          Min points / tree
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1">
+            Min points / tree
+            <InfoHint
+              data-testid="tree-inventory-min-points-help"
+              label="Min points / tree"
+              text="Segments with fewer points than this are skipped, so stray fragments from the tree segmentation don't become trees. The skipped count is reported in a warning."
+            />
+          </span>
           <DebouncedNumberInput
             data-testid="tree-inventory-min-points"
+            aria-label="Min points / tree"
             value={settings.minPoints}
             onCommit={n => onSettingsChange({ minPoints: n })}
             parse={s => parseInt(s, 10)}
@@ -213,18 +245,26 @@ export function TreeInventoryPanel({
             disabled={inProgress}
             className="bg-neutral-700 text-neutral-200 rounded px-1 py-0.5 w-full"
           />
-        </label>
-        <label className="flex flex-col gap-0.5" title="Search radius of Hegyi's competition index">
-          Competition (m)
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1">
+            Competition (m)
+            <InfoHint
+              data-testid="tree-inventory-competition-help"
+              label="Competition (m)"
+              text="Radius for each tree's competition index (the CI column; Hegyi 1974): how crowded a tree is by its neighbours. Every tree with a DBH within this distance of the stem adds its DBH divided by this tree's DBH, divided by the distance between them, so bigger and closer neighbours count more. Higher CI means more competition. A radius near the crown radius of the larger trees is typical. Trees closer than this to the plot edge are marked in the CSV's edge column, because their neighbours outside the plot are missing and their CI reads low."
+            />
+          </span>
           <DebouncedNumberInput
             data-testid="tree-inventory-competition-radius"
+            aria-label="Competition (m)"
             value={settings.competitionRadiusM}
             onCommit={n => onSettingsChange({ competitionRadiusM: n })}
             min={0.5} max={50} step={0.5} debounceMs={0}
             disabled={inProgress}
             className="bg-neutral-700 text-neutral-200 rounded px-1 py-0.5 w-full"
           />
-        </label>
+        </div>
       </div>
 
       {groundSource && (

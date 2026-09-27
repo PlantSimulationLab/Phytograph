@@ -103,6 +103,16 @@ test('ground -> DEM -> trees -> inventory -> stand -> QSMs on known stems', asyn
     await expect(panel).toBeVisible();
     await expect(page.getByTestId('tree-inventory-ground-source'))
       .toHaveAttribute('data-ground-source', 'height_above_ground');
+    // Every setting explains itself on hover: the two that are not
+    // self-explanatory say what they change.
+    await page.getByTestId('tree-inventory-competition-help').hover();
+    await expect(page.getByRole('tooltip')).toContainText('competition index (the CI column');
+    await page.getByTestId('tree-inventory-voxel-help').hover();
+    await expect(page.getByRole('tooltip')).toContainText('Only affects the crown volume column');
+    for (const key of ['breast-height', 'fit-method', 'min-points']) {
+      await expect(page.getByTestId(`tree-inventory-${key}-help`)).toBeVisible();
+    }
+    await page.mouse.move(0, 0);
     await expect(page.getByTestId('tree-inventory-run')).toBeEnabled();
     await page.getByTestId('tree-inventory-run').click();
     const summary = page.getByTestId('tree-inventory-summary');

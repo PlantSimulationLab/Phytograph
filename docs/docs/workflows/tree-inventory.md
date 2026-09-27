@@ -41,11 +41,11 @@ Sky/miss points and deleted points are never measured.
 
     | Setting | Default | Meaning |
     |---------|---------|---------|
-    | **Breast height** | 1.3 m | Or 4.5 ft (1.37 m), the US convention. |
+    | **Breast height** | 1.3 m | Where DBH is taken, above the uphill ground and along the stem. Or 4.5 ft (1.37 m), the US convention. |
     | **Circle search** | RANSAC | The robust search that finds the stem's points in a slice: RANSAC, or the randomized Hough transform. Both are refined by the same precise fit. |
-    | **Crown voxel** | 0.10 m | Cube size for the voxel crown volume. The volume depends on it. |
+    | **Crown voxel** | 0.10 m | Only affects crown volume: the number of cubes of this size that hold a point. Smaller cubes report less volume, larger ones approach the crown envelope. Use roughly 2–3× the crown's point spacing, and one value across trees you compare. |
     | **Min points / tree** | 50 | Trees with fewer points are skipped (and counted in a warning). |
-    | **Competition** | 6 m | Search radius of Hegyi's competition index. |
+    | **Competition** | 6 m | Search radius of each tree's competition index (the **CI** column). Every neighbour with a DBH within the radius adds its DBH ÷ this tree's DBH ÷ their distance, so bigger, closer neighbours count more. Trees closer than this to the plot edge are marked in the CSV's `edge` column, since their outside neighbours are missing. |
 
 3. Click **Run inventory**. The bar shows which tree is being measured.
    **Cancel** stops it between trees.
