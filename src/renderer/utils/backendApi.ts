@@ -1808,6 +1808,18 @@ export interface LADRequest {
   terrain_follow?: boolean;
   safety_fraction?: number;
   dem?: LADDemRaster;
+  // Which column drives the leaf/wood split. Omitted: `wood_class` when the cloud
+  // carries it. `slug: null` turns the split off.
+  wood_split?: LADWoodSplit;
+}
+
+/** A leaf/wood classification column for LAD and which of its values are wood
+ * and which leaf (every other value counts as unclassified). `wood_class` needs
+ * no values — it already uses 1 = wood, 2 = leaf. */
+export interface LADWoodSplit {
+  slug: string | null;
+  wood_values?: number[];
+  leaf_values?: number[];
 }
 
 export interface LADVoxelResult {
@@ -4410,6 +4422,9 @@ export interface BackfillMissesResult {
   // a sky miss — a fully transmitted beam — when it was actually extinguished at
   // the deleted hit. 0 on an uncropped cloud.
   restored_deleted_hits?: number;
+  // Data-quality notes about the scan's pulse columns (rounded GPS time, lost
+  // return numbers) — the misses were still reconstructed, but may be misplaced.
+  warnings?: string[];
 }
 
 /** The angular raster of the scan being backfilled, forwarded to the backend so

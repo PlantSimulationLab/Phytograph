@@ -759,3 +759,54 @@ class TestWoodAxisGuard:
         flat = np.zeros((10, 3, 3))
         assert acc.add_triangles(flat) == 0
         assert acc.count == 0
+
+
+class TestWoodSplitFromAnotherColumn:
+    """A classification made outside Phytograph (LAS classification byte, its
+    own codes) drives the same split once the user says which values are wood
+    and which leaf -- bit-for-bit the result of the equivalent `wood_class`."""
+
+    def _inline_run(self, cols, wood_split=None):
+        d = np.loadtxt(_FIXTURE_XYZ)
+        scan = main.HeliosScanEntry(
+            points=d[:, :3].tolist(), scalar_columns=cols, origin=_FIXTURE_ORIGIN,
+            n_theta=2600, n_phi=5200, theta_min=0, theta_max=180,
+            phi_min=0, phi_max=360, return_type="single")
+        grid = main.HeliosGrid(center=[0, 0, 0.5], size=[1, 1, 1], nx=1, ny=1, nz=1)
+        return main._do_lad_computation(main.LADComputeRequest(
+            scans=[scan], grid=grid, lmax=0.04, max_aspect_ratio=10,
+            min_voxel_hits=1, wood_split=wood_split))
+
+    def test_remapped_column_matches_wood_class(self):
+        pytest.importorskip("pyhelios")
+        d = np.loadtxt(_FIXTURE_XYZ)
+        hit = d[:, 3] == 0
+        rng = np.random.default_rng(0)
+        wood = np.zeros(len(d))
+        wood[hit] = rng.choice([main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF], int(hit.sum()))
+        # The same labels in an external scheme: 7 = stem, 3/4 = needles.
+        ext = np.where(wood == main.WOOD_CLASS_WOOD, 7.0,
+                       np.where(rng.random(len(d)) < 0.5, 3.0, 4.0))
+        ext[~hit] = 3.0          # a miss's value in the user column must not count
+        miss = d[:, 3].tolist()
+
+        ref = self._inline_run({"is_miss": miss, "wood_class": wood.tolist()})
+        got = self._inline_run(
+            {"is_miss": miss, "las_classification": ext.tolist()},
+            main.LADWoodSplit(slug="las_classification", wood_values=[7], leaf_values=[3, 4]))
+        assert ref["success"] and got["success"], (ref.get("error"), got.get("error"))
+        assert got["has_wood_classification"] is True
+        a, b = ref["cells"][0], got["cells"][0]
+        assert b["wood_hit_count"] == a["wood_hit_count"]
+        assert b["leaf_hit_count"] == a["leaf_hit_count"]
+        assert b["wad"] == pytest.approx(a["wad"], rel=1e-9)
+        assert b["lad"] == pytest.approx(a["lad"], rel=1e-9)
+
+    def test_split_can_be_turned_off(self):
+        pytest.importorskip("pyhelios")
+        d = np.loadtxt(_FIXTURE_XYZ)
+        wood = np.where(d[:, 3] == 0, main.WOOD_CLASS_WOOD, 0.0)
+        r = self._inline_run({"is_miss": d[:, 3].tolist(), "wood_class": wood.tolist()},
+                             main.LADWoodSplit(slug=None))
+        assert r["success"], r.get("error")
+        assert r["has_wood_classification"] is False

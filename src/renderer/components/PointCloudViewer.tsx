@@ -7278,6 +7278,9 @@ export default function PointCloudViewer({
             continue;
           }
           totalRecovered += res.backfilled;
+          if (res.warnings && res.warnings.length > 0) {
+            showToast({ type: 'info', title: `Backfill Misses: ${cloud.data.fileName ?? cloud.id}`, message: res.warnings.join(' ') });
+          }
           // Reflect the recovered misses on the scan: gate the toggle and adopt
           // the rebuilt miss octree (its fresh sha1 remounts MissOctree even
           // though the hits cacheId is unchanged). Don't fabricate a scanOrigin

@@ -2,7 +2,7 @@
 // component state — safe to unit-test directly.
 import * as THREE from 'three';
 import type { AlignedArrays, CloudFilters, FilterRange, HitPoints, MeshData, ShapeType, MeshColorMode, LADVoxel, PointCloudData, ScalarField } from './pointCloudTypes';
-import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry } from '../utils/backendApi';
+import type { GThetaOverrideSpec, HeliosGrid, HeliosScanEntry, HeliosTriangulationRequest, LADDemRaster, LADRequest, LADScanEntry, LADWoodSplit } from '../utils/backendApi';
 import type { Scan } from './scan';
 import { poseStreamToWire, shiftPoseStream } from './poseStream';
 import { sampleColormapInto, type ColormapName } from './colormaps';
@@ -1392,6 +1392,8 @@ export function buildLADRequest(
     // between the surface and the lowest cell.
     dem?: LADDemRaster;
     safetyFraction?: number;
+    // Leaf/wood split column; omit for the default (`wood_class` when present).
+    woodSplit?: LADWoodSplit;
   },
 ): LADRequest {
   const requestScans: LADScanEntry[] = scans.map(scan => {
@@ -1506,6 +1508,7 @@ export function buildLADRequest(
     ...(params.occlusionThresholdM !== undefined
       ? { occlusion_threshold_m: params.occlusionThresholdM } : {}),
     ...(params.fillOccluded ? { fill_occluded: true } : {}),
+    ...(params.woodSplit !== undefined ? { wood_split: params.woodSplit } : {}),
     // G(theta) for moving-platform scans (no-op for static); omit to let the
     // backend default it to 0.5 (spherical) with a warning.
     ...(params.gtheta !== undefined ? { gtheta: params.gtheta } : {}),

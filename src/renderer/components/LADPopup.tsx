@@ -8,6 +8,8 @@ import type { MeshData } from '../lib/pointCloudTypes';
 import { hasData, hasParams, isBackfillEligible, detectedReturnMode } from '../lib/scan';
 import { isMovingScan } from '../lib/scanParameters';
 import { buildLADRequest, extractReuseMeshPayload, type ReuseMeshPayload } from '../lib/pointCloudHelpers';
+import { WOOD_SPLIT_OFF, woodSplitColumns, defaultWoodSplitChoice, buildWoodSplit } from '../lib/ladWoodSplit';
+import { WOOD_CLASS_ATTRIBUTE } from '../lib/classification';
 import { InfoHint } from './InfoHint';
 import { SelectAllHeader } from './SelectAllHeader';
 
@@ -222,6 +224,11 @@ export function LADPopup({
   // parameter so a user can enter a literature value directly.
   const [occlusionThresholdStr, setOcclusionThresholdStr] = useState('');
   const [fillOccluded, setFillOccluded] = useState(false);
+  // Leaf/wood split column. null = not chosen yet, so the default follows the
+  // selection (wood_class when every scan has it); see lib/ladWoodSplit.
+  const [woodChoice, setWoodChoice] = useState<string | null>(null);
+  const [woodValuesStr, setWoodValuesStr] = useState('');
+  const [leafValuesStr, setLeafValuesStr] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   // --- Direct G(θ) / leaf-angle-distribution override (the third source) ------
@@ -306,6 +313,13 @@ export function LADPopup({
     ),
     [selectedScans],
   );
+
+  const woodColumns = useMemo(() => woodSplitColumns(selectedScans), [selectedScans]);
+  // A choice the current selection no longer offers falls back to the default.
+  const effectiveWoodChoice = (woodChoice === WOOD_SPLIT_OFF
+    || (woodChoice !== null && woodColumns.some(c => c.slug === woodChoice)))
+    ? woodChoice
+    : defaultWoodSplitChoice(woodColumns);
 
   // Any moving-platform scan in the selection switches the inversion to the
   // beam-based (Gtheta) path, which needs a supplied G(θ) and skips triangulation.
@@ -478,6 +492,12 @@ export function LADPopup({
     // "snapped to ground" (Meshes panel), `grid.column_offsets` is already set and
     // travels through buildLADRequest verbatim, so the inversion follows the terrain
     // shown in the viewport. Nothing to do here.
+    const wood = buildWoodSplit(effectiveWoodChoice, woodValuesStr, leafValuesStr);
+    if (wood.error) {
+      setError(wood.error);
+      return;
+    }
+
     const request = buildLADRequest(selectedScans, grid, {
       lmax,
       maxAspectRatio,
@@ -486,6 +506,7 @@ export function LADPopup({
       occlusionThresholdM,
       fillOccluded,
       gthetaSpec,
+      woodSplit: wood.split,
     });
 
     // Reuse: extract the filtered mesh (vertices/indices) with per-triangle scan
@@ -525,7 +546,7 @@ export function LADPopup({
 
     onStartLAD(request, selectedScans.map(s => s.color), gridMeshId, reuseMesh, newTri, selectedScans);
     onClose();
-  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, occlusionThresholdStr, fillOccluded, anyMoving, useSuppliedGtheta, gthetaSpatial, nz, gthetaProfileRows, gthetaMethod, gthetaConstStr, gthetaDewit, gthetaBetaMuStr, gthetaBetaNuStr, buildValueSpec, onStartLAD, onClose]);
+  }, [reuseTri, reuseScansMissing, selectedScans, selectedGrid, lmaxStr, maxAspectRatioStr, minVoxelHitsStr, elementWidthStr, occlusionThresholdStr, fillOccluded, anyMoving, useSuppliedGtheta, gthetaSpatial, nz, gthetaProfileRows, gthetaMethod, gthetaConstStr, gthetaDewit, gthetaBetaMuStr, gthetaBetaNuStr, buildValueSpec, effectiveWoodChoice, woodValuesStr, leafValuesStr, onStartLAD, onClose]);
 
   if (!isOpen) return null;
 
@@ -971,6 +992,58 @@ export function LADPopup({
                 <span>Return type: <span className="text-neutral-200">multi-return</span> (full-waveform; detected from the per-pulse columns in the data)</span>
               ) : (
                 <span>Return type: <span className="text-neutral-200">single-return</span></span>
+              )}
+            </div>
+          )}
+
+          {/* Leaf / wood split: which classification column (if any) splits each
+              voxel's area into leaf and wood. */}
+          {selectedScans.length > 0 && (
+            <div data-testid="lad-wood-split">
+              <label className="text-[10px] text-neutral-400 mb-1 flex items-center gap-1">
+                Leaf / wood split
+                <InfoHint
+                  data-testid="lad-wood-split-help"
+                  label="Leaf / wood split"
+                  text="Splits each voxel's area into leaf and wood by the share of its returns in each class. Wood / Leaf Segmentation writes the Wood Class column (1 = wood, 2 = leaf). To use a classification made elsewhere, such as the LAS classification byte, pick its column and enter which of its values are wood and which are leaf. Other values count as unclassified. Keep wood points in the cloud rather than deleting them: a deleted return inside the grid reads as a transmitted beam."
+                />
+              </label>
+              <select
+                data-testid="lad-wood-column"
+                value={effectiveWoodChoice}
+                onChange={(e) => setWoodChoice(e.target.value)}
+                className="w-full bg-neutral-800 border border-neutral-600 rounded px-2 py-1.5 text-xs text-neutral-200"
+              >
+                <option value={WOOD_SPLIT_OFF}>Off (leaf and wood together)</option>
+                {woodColumns.map(c => (
+                  <option key={c.slug} value={c.slug}>{c.label}</option>
+                ))}
+              </select>
+              {effectiveWoodChoice !== WOOD_SPLIT_OFF && effectiveWoodChoice !== WOOD_CLASS_ATTRIBUTE && (
+                <div className="grid grid-cols-2 gap-3 mt-2">
+                  <div>
+                    <label className="text-[10px] text-neutral-400 mb-1 block">Wood values</label>
+                    <input
+                      type="text"
+                      data-testid="lad-wood-values"
+                      value={woodValuesStr}
+                      onChange={(e) => setWoodValuesStr(e.target.value)}
+                      placeholder="e.g. 4"
+                      className="w-full bg-neutral-800 border border-neutral-600 rounded px-2 py-1.5 text-xs text-neutral-200"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-neutral-400 mb-1 block">Leaf values</label>
+                    <input
+                      type="text"
+                      data-testid="lad-leaf-values"
+                      value={leafValuesStr}
+                      onChange={(e) => setLeafValuesStr(e.target.value)}
+                      placeholder="e.g. 1-3, 5"
+                      className="w-full bg-neutral-800 border border-neutral-600 rounded px-2 py-1.5 text-xs text-neutral-200"
+                    />
+                  </div>
+                </div>
               )}
             </div>
           )}

@@ -9302,6 +9302,16 @@ def _resolve_gtheta_value_spec(spec: "GThetaValueSpec", beam_zenith) -> float:
     raise ValueError(f"Unknown G(theta) spec kind '{spec.kind}'.")
 
 
+class LADWoodSplit(BaseModel):
+    """The leaf/wood classification a LAD run splits by. `slug` None turns the
+    split off; otherwise the named column's `wood_values` count as wood and its
+    `leaf_values` as leaf, every other value as unclassified. `wood_class`
+    needs no values (it already uses 1 = wood, 2 = leaf)."""
+    slug: Optional[str] = None
+    wood_values: List[float] = []
+    leaf_values: List[float] = []
+
+
 class LADComputeRequest(BaseModel):
     """Request model for leaf area density computation.
 
@@ -9375,6 +9385,9 @@ class LADComputeRequest(BaseModel):
     # never folded into total_leaf_area. Off by default: reporting occlusion is always
     # correct, whereas filling it is a modelling choice the user should opt into.
     fill_occluded: bool = False
+    # Which column drives the leaf/wood split (see `_resolve_lad_wood_column`).
+    # Omitted: `wood_class` when the cloud carries it.
+    wood_split: Optional[LADWoodSplit] = None
 
 class LADCell(BaseModel):
     """A single voxel result."""
@@ -10104,6 +10117,12 @@ def _session_multireturn_columns_for_triangulation(session_id: str):
     # C++ multi-return path; single-return clouds with dummy target_count==1
     # columns must stay on the single-return path.
     if not np.any(tc > 1):
+        return {}
+    # Columns that no longer identify pulses would mislead the first-return
+    # filter (a lost return order reads every return as first; rounded times
+    # merge pulses into one beam). Triangulate them as single-return instead.
+    audit = _audit_pulse_columns(ts, tc, ti)
+    if audit["return_order_lost"] or audit["timestamps_rounded"]:
         return {}
     return {"target_index": ti, "target_count": tc, "timestamp": ts}
 _HELIOS_MERGED_MESSAGE = (
@@ -11163,7 +11182,194 @@ def _lad_flags(has_timestamp: bool, is_multi: bool, has_misses: bool,
             "has_misses": has_misses, "has_grid": has_grid}
 
 
-def _lad_labels_vals(column_getter, n: int):
+# Returns the pulse audit reads at most (contiguous file-order blocks beyond it,
+# since a pulse's returns sit next to each other in acquisition order), and the
+# share of returns that must be implicated before a column is called broken --
+# a handful of coincidences in a merged multi-scan cloud is not an export defect.
+_PULSE_AUDIT_MAX_POINTS = 10_000_000
+_PULSE_AUDIT_TOLERANCE = 0.01
+# With no target_count to compare against, a group is only impossible past the
+# most returns any discrete-return scanner records for one pulse.
+_PULSE_AUDIT_MAX_RETURNS = 15
+
+
+def _audit_pulse_columns(timestamps, target_count=None, target_index=None,
+                         is_miss=None) -> dict:
+    """Check whether a cloud's per-return pulse columns still identify pulses.
+
+    Helios groups returns into beams by exact shared `timestamp` and orders them
+    within a beam by `target_index`. Two export defects break that silently, and
+    both were found in a real TLS delivery (a CloudCompare round-trip):
+
+    * `timestamps_rounded` -- gps_time stored at float32 precision, so ~10-60
+      distinct pulses (a degree apart in direction) share one timestamp. The
+      tell needs no scanner geometry: a timestamp group holding MORE returns
+      than its pulses declare in `target_count` cannot be one pulse. The LAD
+      inversion would treat each group as one beam, and gap-fill would take the
+      rounding quantum for the pulse period.
+    * `return_order_lost` -- two returns of one pulse (by timestamp) claiming
+      the same `target_index`, i.e. return_number rewritten on export. Checked
+      only while the timestamps identify pulses. A CONSTANT index is not
+      evidence: a tree segmented out of a scan legitimately keeps only "return
+      1 of k" when the later returns landed behind it, and that is exactly the
+      case hidden-return inference exists for (test_las_read_chunked pins it).
+
+    Only real returns are audited (`is_miss` == 0 when given). Returns a dict
+    with both flags plus `checked` (returns examined), `oversize_returns`
+    (returns in impossible groups) and `max_group` (largest group seen).
+    """
+    import numpy as np
+
+    out = {"return_order_lost": False, "timestamps_rounded": False,
+           "checked": 0, "oversize_returns": 0, "max_group": 0,
+           "max_target_count": 0}
+
+    def _hits(a):
+        a = np.asarray(a)
+        return a[np.asarray(is_miss) == 0] if is_miss is not None else a
+
+    tc_all = None
+    if target_count is not None:
+        tc_all = np.asarray(target_count, dtype=np.float64)
+        tc_hits = _hits(tc_all)
+        tc_hits = tc_hits[np.isfinite(tc_hits)]
+        if tc_hits.size:
+            out["max_target_count"] = int(tc_hits.max())
+
+    if timestamps is None:
+        return out
+    ts = np.asarray(timestamps, dtype=np.float64)
+    mask = np.isfinite(ts)
+    if is_miss is not None:
+        mask &= np.asarray(is_miss) == 0
+    idx = np.flatnonzero(mask)
+    if idx.size > _PULSE_AUDIT_MAX_POINTS:
+        n_blocks = 10
+        block = _PULSE_AUDIT_MAX_POINTS // n_blocks
+        firsts = np.linspace(0, idx.size - block, n_blocks).astype(np.int64)
+        idx = np.concatenate([idx[f:f + block] for f in firsts])
+    if idx.size < 2:
+        return out
+    t = ts[idx]
+    order = np.argsort(t, kind="stable")
+    st = t[order]
+    starts = np.flatnonzero(np.r_[True, st[1:] != st[:-1]])
+    sizes = np.diff(np.r_[starts, st.size])
+    if tc_all is not None and out["max_target_count"] > 0:
+        tc = tc_all[idx][order]
+        tc = np.where(np.isfinite(tc) & (tc >= 1), tc, 1.0)
+        allowed = np.maximum.reduceat(tc, starts)
+    else:
+        allowed = np.full(sizes.shape, float(_PULSE_AUDIT_MAX_RETURNS))
+    over = sizes > allowed
+    out["checked"] = int(st.size)
+    out["max_group"] = int(sizes.max())
+    out["oversize_returns"] = int(sizes[over].sum())
+    out["timestamps_rounded"] = bool(
+        out["oversize_returns"] > _PULSE_AUDIT_TOLERANCE * st.size)
+
+    # Duplicate return numbers within a pulse. Meaningful only while the
+    # timestamps identify pulses (a rounded group legitimately repeats indices).
+    if (target_index is not None and not out["timestamps_rounded"]
+            and out["max_target_count"] > 1):
+        ti = np.asarray(target_index, dtype=np.float64)[idx]
+        o2 = np.lexsort((ti, t))
+        ts2, ti2 = t[o2], ti[o2]
+        dup = (ts2[1:] == ts2[:-1]) & (ti2[1:] == ti2[:-1])
+        if int(dup.sum()) > _PULSE_AUDIT_TOLERANCE * st.size:
+            out["return_order_lost"] = True
+    return out
+
+
+def _pulse_audit_warnings(audit: Optional[dict], label: str, *,
+                          at_import: bool, stripped: bool = False) -> List[str]:
+    """Plain-language warnings for an `_audit_pulse_columns` result."""
+    if not audit:
+        return []
+    out: List[str] = []
+    if audit.get("return_order_lost"):
+        out.append(
+            f"{label}: returns of the same pulse share a return number, so the "
+            "order of returns within each pulse was lost (typically an export that "
+            "rewrote return_number). "
+            + ("The return-number column was not imported. " if at_import else
+               "It is ignored. ")
+            + "Leaf area density orders each pulse's returns by range instead, but "
+            "cannot tell whether returns removed by a crop lay before or beyond the "
+            "voxel grid. Re-export with the scanner's original return numbers to "
+            "restore that.")
+    if audit.get("timestamps_rounded"):
+        checked = max(int(audit.get("checked") or 0), 1)
+        pct = 100.0 * float(audit.get("oversize_returns") or 0) / checked
+        if at_import:
+            consequence = (
+                "For a static scan, leaf area density will treat each return as its "
+                "own pulse rather than grouping returns by timestamp, and Backfill "
+                "Misses, which "
+                "reconstructs the scan pattern from the timestamps, may place misses "
+                "wrongly.")
+        elif stripped:
+            consequence = (
+                "The timestamps were not used to group returns into pulses: each "
+                "return was inverted as its own pulse.")
+        else:
+            consequence = (
+                "Pulses that share a timestamp are grouped as one beam here, so the "
+                "result is unreliable.")
+        out.append(
+            f"{label}: {pct:.0f}% of returns share a timestamp with more returns than "
+            f"their pulse recorded (up to {audit.get('max_group', 0)} at a single "
+            "time), so the GPS times were rounded on export (e.g. stored as 32-bit "
+            "floats) and no longer identify individual pulses. " + consequence
+            + " Re-export with full-precision (64-bit) GPS time for exact results.")
+    return out
+
+
+def _resolve_lad_wood_column(column_getter, wood_split, miss=None):
+    """The (N,) wood/leaf class the LAD split reads, in the `wood_class`
+    convention (1 = wood, 2 = leaf, 0 = unclassified), or None for no split.
+
+    `wood_split` None keeps the default: the `wood_class` column when present.
+    A spec with `slug` None turns the split off. Otherwise the named column is
+    remapped -- its `wood_values` to 1, `leaf_values` to 2, anything else to 0
+    -- and misses are forced to 0 whatever the column holds for them, since a
+    user column may well use 0 as a real class. `wood_class` with no values
+    given is read as-is.
+    """
+    import numpy as np
+
+    if wood_split is None:
+        return column_getter(WOOD_CLASS_SLUG)
+    slug = getattr(wood_split, "slug", None)
+    if not slug:
+        return None
+    src = column_getter(slug)
+    if src is None:
+        raise ValueError(
+            f"The leaf/wood column '{slug}' is not on this scan. Choose a column "
+            "every selected scan carries, or turn the leaf/wood split off.")
+    wood_values = list(getattr(wood_split, "wood_values", None) or [])
+    leaf_values = list(getattr(wood_split, "leaf_values", None) or [])
+    if slug == WOOD_CLASS_SLUG and not wood_values and not leaf_values:
+        return src
+    if not wood_values and not leaf_values:
+        raise ValueError(
+            f"Say which values of '{slug}' are wood and which are leaf.")
+    overlap = set(wood_values) & set(leaf_values)
+    if overlap:
+        raise ValueError(
+            f"Value(s) {sorted(overlap)} of '{slug}' are listed as both wood and leaf.")
+    src = np.rint(np.asarray(src, dtype=np.float64))
+    out = np.zeros(src.shape, dtype=np.float64)
+    out[np.isin(src, np.asarray(wood_values, dtype=np.float64))] = WOOD_CLASS_WOOD
+    out[np.isin(src, np.asarray(leaf_values, dtype=np.float64))] = WOOD_CLASS_LEAF
+    if miss is not None:
+        out[np.asarray(miss) != 0] = 0.0
+    return out
+
+
+def _lad_labels_vals(column_getter, n: int, strip_rounded_timestamps: bool = False,
+                     wood_split=None):
     """Assemble the (labels, vals, flags) a LAD builder feeds Helios.
 
     `column_getter(slug)` returns the aligned (N,) float array for a slug or None.
@@ -11181,16 +11387,35 @@ def _lad_labels_vals(column_getter, n: int):
     sets the same flag C++-side. Returns labels (list[str]), vals ((N,k)|None),
     flags (see `_lad_flags`, plus `has_wood_class` when the cloud carries a
     wood/leaf classification).
+
+    The pulse columns are audited first (`_audit_pulse_columns`, result in
+    `flags["pulse_audit"]`). A lost return order drops target_index/count (the
+    inversion then orders a pulse's returns by range). ROUNDED timestamps are
+    dropped only when `strip_rounded_timestamps` -- the inversion of a static
+    scan, where merging ~10-60 pulses into one beam is worse than inverting each
+    return as its own pulse. Backfill passes False (gap-fill has nothing else to
+    reconstruct the raster from) and a moving scan keeps them for the
+    trajectory join; both warn instead. `flags["timestamps_stripped"]` records it.
     """
     import numpy as np
 
     ts = column_getter('timestamp')
     has_timestamp = ts is not None
-    is_multi = has_timestamp and all(
-        column_getter(c) is not None for c in ('target_index', 'target_count'))
     miss = column_getter(_MISS_SLUG)
     has_miss_column = miss is not None
     has_misses = has_miss_column and bool(np.any(np.asarray(miss) != 0))
+    audit = None
+    stripped = False
+    if has_timestamp:
+        audit = _audit_pulse_columns(ts, column_getter('target_count'),
+                                     column_getter('target_index'), miss)
+        if audit["timestamps_rounded"] and strip_rounded_timestamps:
+            has_timestamp = False
+            stripped = True
+    is_multi = has_timestamp and all(
+        column_getter(c) is not None for c in ('target_index', 'target_count'))
+    if audit is not None and audit["return_order_lost"]:
+        is_multi = False
 
     labels: List[str] = []
     cols: list = []
@@ -11227,7 +11452,11 @@ def _lad_labels_vals(column_getter, n: int):
     # UNCLASSIFIED -- which every miss is, because the classifier runs on hit
     # survivors only and `_append_backfilled_misses` zero-fills new columns for the
     # miss rows. Consumers must treat 0 as "no class", never as a class.
-    wood = column_getter(WOOD_CLASS_SLUG)
+    #
+    # `wood_split` (see LADWoodSplit) lets the user name ANOTHER column -- a
+    # classifier run outside Phytograph usually lands in the LAS classification
+    # byte -- or turn the split off; it is remapped onto this same convention.
+    wood = _resolve_lad_wood_column(column_getter, wood_split, miss)
     has_wood = wood is not None
     if has_wood:
         labels.append(WOOD_CLASS_SLUG)
@@ -11236,11 +11465,15 @@ def _lad_labels_vals(column_getter, n: int):
     vals = np.column_stack(cols).astype(np.float64) if cols else None
     flags = _lad_flags(has_timestamp, is_multi, has_misses, has_grid)
     flags["has_wood_class"] = has_wood
+    flags["pulse_audit"] = audit
+    flags["timestamps_stripped"] = stripped
     return labels, vals, flags
 
 
 def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: bool = True,
-                           restore_mask: "Optional[np.ndarray]" = None):
+                           restore_mask: "Optional[np.ndarray]" = None,
+                           strip_rounded_timestamps: bool = False,
+                           wood_split=None):
     """Surviving session points as in-RAM arrays for the LAD path — no disk, no
     source-file read.
 
@@ -11283,7 +11516,9 @@ def _session_to_lad_arrays(sess: "CloudSession", origin, include_backfilled: boo
             return np.asarray(sess.timestamps, dtype=np.float64)[keep]
         return sess.extras[slug][keep] if slug in sess.extras else None
 
-    labels, vals, flags = _lad_labels_vals(_get, xyz.shape[0])
+    labels, vals, flags = _lad_labels_vals(
+        _get, xyz.shape[0], strip_rounded_timestamps=strip_rounded_timestamps,
+        wood_split=wood_split)
 
     # Per-pulse beam origins from LAS ExtraBytes (ground truth) — surfaced to the
     # LAD caller so it can use them directly and bypass the timestamp join. Subset
@@ -11449,7 +11684,8 @@ def _append_backfilled_misses(xyz, dirs, labels, vals, flags, backfilled):
     return xyz, dirs, labels, vals, flags
 
 
-def _inline_to_lad_arrays(points: list, scalar_columns: Optional[dict], origin):
+def _inline_to_lad_arrays(points: list, scalar_columns: Optional[dict], origin,
+                          wood_split=None):
     """Inline synthetic points (+ aligned scalar_columns) as LAD arrays. Same
     contract as _session_to_lad_arrays.
     """
@@ -11467,11 +11703,12 @@ def _inline_to_lad_arrays(points: list, scalar_columns: Optional[dict], origin):
             return np.asarray(scalar_columns[slug])
         return None
 
-    labels, vals, flags = _lad_labels_vals(_get, n)
+    labels, vals, flags = _lad_labels_vals(_get, n, wood_split=wood_split)
     return xyz, dirs, labels, vals, flags
 
 
-def _las_to_lad_arrays(file_path: str, origin):
+def _las_to_lad_arrays(file_path: str, origin, strip_rounded_timestamps: bool = False,
+                       wood_split=None):
     """LAD arrays from a BINARY LAS/LAZ scan file.
 
     The ASCII sibling below locates the per-pulse columns by tokenizing the
@@ -11513,11 +11750,13 @@ def _las_to_lad_arrays(file_path: str, origin):
                 break
 
     dirs = _directions_from_origin(xyz, origin)
-    labels, vals, flags = _lad_labels_vals(lambda slug: cache.get(slug), xyz.shape[0])
+    labels, vals, flags = _lad_labels_vals(lambda slug: cache.get(slug), xyz.shape[0], strip_rounded_timestamps=strip_rounded_timestamps,
+                                           wood_split=wood_split)
     return xyz, dirs, labels, vals, flags
 
 
-def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
+def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin, strip_rounded_timestamps: bool = False,
+                        wood_split=None):
     """Legacy fallback: read a scan file once into LAD arrays (used only
     when a scan has neither a live session nor inline points — e.g. a stale
     session id that fell back to the source file). Locates x/y/z plus any
@@ -11531,7 +11770,8 @@ def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
 
     ext = os.path.splitext(file_path)[1].lower().lstrip('.')
     if ext in _LAS_EXTENSIONS:
-        return _las_to_lad_arrays(file_path, origin)
+        return _las_to_lad_arrays(file_path, origin, strip_rounded_timestamps=strip_rounded_timestamps,
+                                  wood_split=wood_split)
     _require_ascii_scan_file(file_path, "Leaf-area-density's file fallback")
 
     fmt = ascii_format or _detect_ascii_format(file_path)
@@ -11567,7 +11807,8 @@ def _file_to_lad_arrays(file_path: str, ascii_format: Optional[str], origin):
     def _get(slug):
         return np.asarray(extra_rows[slug], dtype=np.float64) if slug in col_idx else None
 
-    labels, vals, flags = _lad_labels_vals(_get, xyz.shape[0])
+    labels, vals, flags = _lad_labels_vals(_get, xyz.shape[0], strip_rounded_timestamps=strip_rounded_timestamps,
+                                           wood_split=wood_split)
     return xyz, dirs, labels, vals, flags
 
 
@@ -12521,8 +12762,15 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     # (a crop to the grid must not delete the transmitted beams
                     # that crossed it); deleted hits inside it are warned about.
                     _del_inside, _del_outside = _deleted_hit_grid_masks(sess, request.grid)
+                    # A static scan with rounded timestamps inverts each return
+                    # as its own pulse; a moving one keeps them for the
+                    # trajectory join (see `_lad_labels_vals`).
                     xyz, dirs, labels, vals, scan_flags = _session_to_lad_arrays(
-                        sess, origin, restore_mask=_del_outside)
+                        sess, origin, restore_mask=_del_outside,
+                        strip_rounded_timestamps=(
+                            scan_entry.trajectory is None
+                            and getattr(sess, "beam_origins", None) is None),
+                        wood_split=request.wood_split)
                     n_deleted_in_grid = int(_del_inside.sum())
                     n_unrestorable = int(getattr(sess, "unrestorable_hit_count", 0) or 0)
                 if n_deleted_in_grid == 0 and n_unrestorable == 0:
@@ -12572,15 +12820,22 @@ def _do_lad_computation(request: "LADComputeRequest", progress=None,
                     )
             elif scan_entry.points:
                 xyz, dirs, labels, vals, scan_flags = _inline_to_lad_arrays(
-                    scan_entry.points, scan_entry.scalar_columns, origin)
+                    scan_entry.points, scan_entry.scalar_columns, origin,
+                    wood_split=request.wood_split)
             elif scan_entry.file_path:
                 if not os.path.isfile(scan_entry.file_path):
                     raise ValueError(f"Scan file not found: {scan_entry.file_path}")
                 xyz, dirs, labels, vals, scan_flags = _file_to_lad_arrays(
-                    scan_entry.file_path, scan_entry.ascii_format, origin)
+                    scan_entry.file_path, scan_entry.ascii_format, origin,
+                    strip_rounded_timestamps=scan_entry.trajectory is None,
+                    wood_split=request.wood_split)
             else:
                 raise ValueError("Scan entry has no points, file_path, or session_id")
             scan_multi = scan_flags["multi"]
+            warnings.extend(_pulse_audit_warnings(
+                scan_flags.get("pulse_audit"),
+                f"Scan '{getattr(scan_entry, 'label', None) or os.path.basename(scan_entry.file_path or '') or scan_idx + 1}'",
+                at_import=False, stripped=bool(scan_flags.get("timestamps_stripped"))))
 
             # Resolve a per-beam emission origin so the beam-based (Gtheta) inversion
             # can read each beam's own origin (carried as origin_x/y/z, frustum-culled
@@ -26168,13 +26423,7 @@ def _run_poisson_isolated(points: "np.ndarray", normals, depth: int):
         for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
             env.pop(var, None)
         env["PHYTOGRAPH_SEG_WORKER"] = workdir
-        # macOS libmalloc keeps recently freed LARGE blocks cached in the
-        # process, dirty, so they still count against the machine: measured,
-        # a freed 1.1 GB array stayed in the footprint, and each of a normals
-        # pool's ten children sat on ~1 GB it no longer used. A worker's
-        # arrays are all large and short-lived, so return them to the OS.
-        # Inherited by the tile pool. Costs page re-zeroing, not compute.
-        env.setdefault("MallocLargeCache", "0")
+        env.setdefault("MallocLargeCache", "0")   # see _run_killable_admitted
 
         stderr_log = os.path.join(workdir, "worker_stderr.log")
         proc = _spawn_seg_worker(env, stderr_log)
@@ -26330,7 +26579,13 @@ async def _run_killable_admitted(
         for var in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_LIBRARY_PATH"):
             env.pop(var, None)
         env["PHYTOGRAPH_SEG_WORKER"] = workdir
-        env.setdefault("MallocLargeCache", "0")   # see _run_killable_admitted
+        # macOS libmalloc keeps recently freed LARGE blocks cached in the
+        # process, dirty, so they still count against the machine: measured,
+        # a freed 1.1 GB array stayed in the footprint, and each of a normals
+        # pool's ten children sat on ~1 GB it no longer used. A worker's
+        # arrays are all large and short-lived, so return them to the OS.
+        # Inherited by the tile pool. Costs page re-zeroing, not compute.
+        env.setdefault("MallocLargeCache", "0")
 
         stderr_log = os.path.join(workdir, "worker_stderr.log")
         proc = _spawn_seg_worker(env, stderr_log)
@@ -33978,6 +34233,9 @@ class LasReadResult:
     timestamps: Optional[np.ndarray] = None
     gps_time_encoding: Optional[str] = None
     beam_origins: Optional[np.ndarray] = None
+    # Import-time data-quality notes (see `_audit_pulse_columns`), surfaced on
+    # the import toast beside the miss warnings.
+    warnings: List[str] = field(default_factory=list)
 
 
 # Rows per laspy chunk on the import read. 2 M rows of a full point-format-3
@@ -34361,6 +34619,26 @@ def _read_las_into_arrays(las_path: _Path, store=None,
                 # consumer prefers the float64 one when both are present.
                 timestamps = _cand
 
+    # Audit the pulse columns once, here, where every source format passes
+    # (ASCII, E57, PLY ... are all normalised to LAS first). A return number
+    # that no longer orders a pulse's returns is worse than none -- Helios would
+    # read every return as the first -- so it is not imported; rounded GPS time
+    # is kept (Backfill has nothing else to rebuild the raster from, and a
+    # moving scan still joins its trajectory on it) and flagged.
+    read_warnings: List[str] = []
+    if timestamps is not None or "target_index" in extras:
+        _audit = _audit_pulse_columns(
+            timestamps, extras.get("target_count"), extras.get("target_index"),
+            extras.get(_MISS_SLUG))
+        if _audit["return_order_lost"]:
+            extras.pop("target_index", None)
+            extra_dims_meta = [m for m in extra_dims_meta if m.get("slug") != "target_index"]
+            for _col, _slug in list(extra_cols.items()):
+                if _slug == "target_index":
+                    del extra_cols[_col]
+                    _drop(_col)
+        read_warnings = _pulse_audit_warnings(_audit, "This file", at_import=True)
+
     if store is not None:
         store.set_attr("extras", extra_cols)
         store.set_attr("extras_order", list(extras.keys()))
@@ -34373,6 +34651,7 @@ def _read_las_into_arrays(las_path: _Path, store=None,
         timestamps=timestamps,
         gps_time_encoding=gps_time_encoding,
         beam_origins=beam_origins,
+        warnings=read_warnings,
     )
 
 
@@ -35260,6 +35539,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         extra_dims_meta = _las.extra_dims_meta
         timestamps = _las.timestamps
         gps_time_encoding = _las.gps_time_encoding
+        read_warnings = list(_las.warnings or [])
         # Beam origins: for LAS/LAZ they're read from ExtraBytes by
         # `_read_las_into_arrays`. For the ASCII/XYZ path the 1 mm LAS can't carry
         # them (origins are world/UTM coords needing full precision), so prefer the
@@ -35675,6 +35955,9 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
     if scan_meta and scan_meta.get("warnings"):
         miss_info.setdefault("warnings", []).extend(
             str(w) for w in scan_meta["warnings"])
+    # Pulse-column audit (rounded GPS time, lost return numbers) from the read.
+    if read_warnings:
+        miss_info.setdefault("warnings", []).extend(read_warnings)
 
     # Surface the LAS GPS-time encoding so the renderer can record it on the cloud
     # and the user knows which clock the per-point time uses. A GPS Week Time clock
@@ -36109,6 +36392,10 @@ def _do_backfill_misses(sess, request, xyz, dirs, labels, vals, flags, progress=
         "already_had_misses": False,
         "miss_octree_cache_id": miss_cache_id,
         "restored_deleted_hits": int(n_restored),
+        # Rounded timestamps are the only raster clue gap-fill has here, so it
+        # uses them anyway; say so rather than let the misses read as exact.
+        "warnings": _pulse_audit_warnings(
+            flags.get("pulse_audit"), "This scan", at_import=True),
     }
 
 

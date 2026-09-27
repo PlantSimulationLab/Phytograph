@@ -25,6 +25,12 @@ If a scan already retains misses, there's nothing to do. If it has
 neither a timestamp nor a row/column grid, misses **can't** be recovered —
 re-import the scan in a format that keeps them (E57 / structured PLY).
 
+Without row/column indices, the timestamps have to resolve individual pulses.
+If the GPS time was rounded on export (for example stored as a 32-bit float),
+many pulses share one time and the rebuilt scan pattern can be wrong. The
+import and Backfill Misses both warn about this. Re-export with 64-bit GPS
+time for a trustworthy result.
+
 !!! warning "The scanner position is required, not optional"
 
     Miss directions are measured **from the scanner**: each recovered ray is

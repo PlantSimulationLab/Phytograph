@@ -32,6 +32,17 @@ surface.
   `.ptx`**, which collapses each pulse to one echo and can't carry those
   columns. See
   [Single- vs multi-return scans](../concepts/leaf-area-density.md#single-vs-multi-return-scans).
+- **Full-precision GPS time.** Returns are grouped into pulses by their exact
+  timestamp, so the timestamps must tell pulses apart. A round-trip that stores
+  GPS time as a 32-bit float (common with CloudCompare scalar fields) rounds it
+  to tens of microseconds, coarser than a terrestrial scanner's pulse clock, so
+  many pulses end up sharing one time. Phytograph checks this at import and
+  warns. For a static scan, LAD then inverts each return as its own pulse,
+  and Backfill Misses may place misses wrongly, because it rebuilds the scan
+  pattern from those same timestamps. The import also checks for returns of
+  one pulse that share a return number (an export that rewrote
+  `return_number`), and drops that column when it finds them. Re-export with
+  64-bit GPS time and the scanner's own return numbers for exact results.
 - **Crop in Phytograph, and outside the grid.** Points you delete outside the
   voxel grid are still fed to the inversion (a deletion keeps the coordinates),
   so a crop to the tree changes nothing. Points deleted **inside** the grid (a
@@ -305,7 +316,17 @@ density reported as LAD. To split it:
 
 1. Run [**Segment Wood / Leaf**](segment-wood.md) on the cloud first. It adds a
    `wood_class` column to the session.
-2. Compute LAD as usual. The split happens automatically — no extra option.
+2. Compute LAD as usual. **Leaf / wood split** in the LAD dialog starts on
+   **Wood Class** whenever every selected scan has it.
+
+**A classification made elsewhere** works too, for example your own classifier's
+output in the LAS classification byte or in an extra dimension. Under **Leaf /
+wood split**, pick that column and enter which of its values are **wood** and
+which are **leaf** (whole numbers; lists and ranges such as `1, 3` or `2-5`).
+Any value you don't list counts as unclassified. Sky/miss points never count,
+whatever the column holds for them. The list shows only columns that every
+selected scan carries. Choose **Off** to report plant area density without a
+split.
 
 Each voxel then reports **LAD** (one-sided leaf area per m³), **WAD** (total
 woody *surface* area per m³) and **PAD** (their sum).
