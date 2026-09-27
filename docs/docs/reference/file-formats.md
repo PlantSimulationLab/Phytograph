@@ -46,8 +46,8 @@ Python backend and rendered tile-by-tile, so files far larger than the
 browser's ~512 MB string limit load without exhausting memory. This applies
 to every supported point-cloud format: ASCII (`.xyz`/`.txt`/`.csv`/`.pts`/`.asc`/`.ascii`)
 via pandas, `.ply` (parsed directly, scalar fields preserved — see below),
-`.pcd` (via open3d, position + color only), and `.las`/`.laz` (passed straight
-through). If the source XML provides an `<ASCII_format>` tag
+`.pcd` (streamed, every field preserved — see below), and `.las`/`.laz`
+(passed straight through). If the source XML provides an `<ASCII_format>` tag
 for an XYZ-family file, Phytograph forwards it to the parser; recognised
 column tokens are `x`, `y`, `z`, `r`/`g`/`b` (0–1 range),
 `r255`/`g255`/`b255` (0–255 range, normalised to 0–1 on read),
@@ -130,11 +130,21 @@ Phytograph's own spelling and in the `normal_x` / `scalar_nx` spellings
 CloudCompare writes, so a round trip keeps the normals recognisable as normals
 instead of splitting them into three unrelated scalar columns.
 
-`.pcd` clouds are read via open3d, which carries position and color only —
-PCD scalar fields are **not** preserved. If you need scalar fields from a
-`.pcd`, convert it to `.ply` or to `.xyz` with the columns named in an
-`<ASCII_format>` tag. `.las`/`.laz` clouds retain their native extra
-dimensions.
+`.pcd` clouds (ASCII and binary) are streamed in blocks, never read whole,
+and keep **every single-valued field**. `x y z` become positions, a packed
+`rgb`/`rgba` becomes colour, `intensity`/`reflectance` becomes intensity, and
+normals come in as `nx`/`ny`/`nz`. Everything else (curvature, labels, …)
+becomes a scalar field under its own name. A field with `COUNT` above 1 (a
+feature histogram, say) is skipped. Points with non-finite coordinates (the
+empty pixels of an organised cloud) are dropped. A `binary_compressed` PCD
+cannot be streamed, so it is read through open3d and carries position and
+colour only. `.las`/`.laz` clouds retain their native extra dimensions.
+
+Point positions keep the **source file's own precision** for every format.
+The intermediate LAS Phytograph builds for display is quantized to 1 mm, but
+the cloud itself never is, so sub-millimetre detail in a `.ply`, `.pcd`,
+`.xyz` or `.ptx` survives import. `.e57` is the exception for now: its
+positions are stored at 1 mm.
 
 `.e57` clouds carry **intensity** and **RGB colour** when the file records them
 (both are surfaced in the import wizard and become color-mappable in the viewer);

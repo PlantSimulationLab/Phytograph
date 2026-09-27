@@ -27398,12 +27398,78 @@ def _intensity_to_las_uint16(values: "np.ndarray",
     return np.clip(scaled, 0, 65535).astype(np.uint16)
 
 
+class _PositionSink:
+    """Where a converter writes the FULL-PRECISION coordinates of the points it
+    converts: the session's source-of-truth positions.
+
+    The LAS a converter writes is 1 mm-quantized (it only feeds the octree), so
+    positions must come from the source itself. They used to be gathered as a
+    list of chunks and concatenated at the end, holding two full copies at the
+    peak, and the session then read positions back out of the LAS as well and
+    threw them away: three copies of the largest column for one import.
+
+    A converter now reports the exact count first (`allocate(n)`) and writes
+    each chunk into place (`write`). The destination is chosen by the caller:
+    `make_store(n)` returns a session store for a cloud large enough to be
+    store-backed (the column is then a memory map, never a RAM copy), or None
+    for RAM. Without a `make_store` it is always RAM."""
+
+    def __init__(self, make_store: "Optional[Callable[[int], Optional[session_store.SessionStore]]]" = None):
+        self._make_store = make_store
+        self.array: Optional[np.ndarray] = None
+        self.store: "Optional[session_store.SessionStore]" = None
+        self.filled = 0
+
+    def allocate(self, n: int) -> np.ndarray:
+        n = int(n)
+        self.store = self._make_store(n) if self._make_store is not None else None
+        if self.store is not None:
+            self.array = self.store.allocate_column("positions", np.float64, (3,))
+        else:
+            self.array = np.empty((n, 3), dtype=np.float64)
+        self.filled = 0
+        return self.array
+
+    def write(self, xyz: np.ndarray) -> None:
+        m = int(len(xyz))
+        if self.array is None or self.filled + m > len(self.array):
+            raise RuntimeError("position sink overflow: the converter under-counted its points")
+        self.array[self.filled:self.filled + m] = xyz
+        self.filled += m
+
+    def write_columns(self, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> None:
+        """`write` for three separate coordinate columns, without stacking
+        them into a temporary (N, 3) first."""
+        m = int(len(x))
+        if self.array is None or self.filled + m > len(self.array):
+            raise RuntimeError("position sink overflow: the converter under-counted its points")
+        sl = slice(self.filled, self.filled + m)
+        self.array[sl, 0] = x
+        self.array[sl, 1] = y
+        self.array[sl, 2] = z
+        self.filled += m
+
+    def result(self) -> np.ndarray:
+        if self.array is None:
+            return np.empty((0, 3), dtype=np.float64)
+        if self.filled != len(self.array):
+            raise RuntimeError(
+                f"position sink holds {self.filled} of {len(self.array)} points: "
+                "the converter over-counted")
+        return self.array
+
+
 def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 column_plan: "Optional[ColumnPlan]" = None,
                 capture_full_xyz: bool = False,
                 capture_origins: bool = False,
+                positions_sink: "Optional[_PositionSink]" = None,
                 ) -> "tuple[int, List[dict], Optional[np.ndarray], Optional[np.ndarray]]":
     """Stream an XYZ-family ASCII file into a LAS file via laspy in chunks.
+
+    With `capture_full_xyz`, the source-precision positions are written into
+    `positions_sink` (a RAM one when none is given) after a single pre-pass
+    that counts the kept rows - see _PositionSink.
 
     PotreeConverter 2.x accepts only LAS/LAZ; XYZ goes through here first.
     Streaming keeps peak memory bounded by `chunk_rows` * (cols × 8B), not
@@ -27502,58 +27568,69 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
     skiprows = _ascii_skiprows(str(source_path))
     sep = _ascii_pandas_sep(str(source_path))
 
-    chunk_rows = 2_000_000
+    chunk_rows = 500_000
 
-    # Normalise the intensity/reflectance column to the LAS uint16 field by its
-    # GLOBAL finite range so the gradient is consistent across chunk boundaries.
-    # A per-chunk min/max would rescale each 2M-row chunk independently, banding
-    # the cloud at chunk seams. Scan just that one column first (cheap); skip the
-    # pass when there's no intensity column to map.
+    # ONE pre-pass over just the x/y/z (and intensity) columns, for three
+    # things the stream below needs up front:
+    #   * the data MIN, the LAS offset, so projected clouds (UTM northings
+    #     ~5.4e6 m) fit the 32-bit int range (with offset 0 and 1 mm scale only
+    #     +-2.1 km is representable);
+    #   * the intensity/reflectance column's GLOBAL finite range, so its uint16
+    #     mapping is consistent across chunks (a per-chunk min/max would band
+    #     the cloud at chunk seams);
+    #   * the exact number of rows the stream will keep (x, y, z all present),
+    #     so the full-precision positions go straight into a preallocated
+    #     destination instead of a list of chunks and a concatenate.
+    # These used to be two separate passes over the file.
     intensity_lo = intensity_hi = None
-    if intensity_role is not None:
-        # Read just that column by POSITION (not via names=, which may be
-        # narrower than the file's field count for a partial column plan).
-        intensity_pos = names.index(intensity_role)
-        gmin, gmax = np.inf, -np.inf
-        for col_chunk in pd.read_csv(
-            source_path, sep=sep, header=None,
-            usecols=[intensity_pos], comment="#",
-            skiprows=skiprows, chunksize=chunk_rows, engine="c",
-        ):
-            vals = col_chunk.iloc[:, 0].to_numpy(dtype=np.float64)
-            vals = vals[np.isfinite(vals)]
-            if vals.size:
-                gmin = min(gmin, float(vals.min()))
-                gmax = max(gmax, float(vals.max()))
-        if np.isfinite(gmin) and np.isfinite(gmax):
-            intensity_lo, intensity_hi = gmin, gmax
     try:
-        # Offset the LAS to the data's MIN coordinate so projected clouds (UTM
-        # northings ~5.4e6 m) fit the 32-bit int range — with offset 0 and 1 mm
-        # scale only ±2.1 km is representable. Cheap pre-pass over just x/y/z
-        # (laspy re-applies the offset on read, so coordinates are unchanged
-        # downstream). Inside the try so a column-format mismatch here raises the
-        # same actionable 400 as the main stream below, not a raw ValueError.
+        # Inside the try so a column-format mismatch here raises the same
+        # actionable 400 as the main stream below, not a raw ValueError.
         xyz_pos = [names.index(r) for r in ("x", "y", "z")]
-        order = np.argsort(np.argsort(xyz_pos))  # usecols sorts by position; map back to x,y,z
+        intensity_pos = names.index(intensity_role) if intensity_role is not None else None
+        usecols = sorted(set(xyz_pos + ([intensity_pos] if intensity_pos is not None else [])))
+        col_of = {pos: k for k, pos in enumerate(usecols)}
+        xyz_idx = [col_of[pos] for pos in xyz_pos]
         xyz_min = np.array([np.inf, np.inf, np.inf])
+        gmin, gmax = np.inf, -np.inf
+        kept_rows = 0
         for col_chunk in pd.read_csv(
             source_path, sep=sep, header=None,
-            usecols=xyz_pos, comment="#",
+            usecols=usecols, comment="#",
             skiprows=skiprows, chunksize=chunk_rows, engine="c",
         ):
-            arr = col_chunk.to_numpy(dtype=np.float64)[:, order]
-            arr = arr[np.isfinite(arr).all(axis=1)]
-            if arr.size:
-                xyz_min = np.minimum(xyz_min, arr.min(axis=0))
+            block = col_chunk.to_numpy(dtype=np.float64)
+            del col_chunk
+            # The stream keeps rows whose x/y/z are present (dropna), so count
+            # exactly that; the offset uses the FINITE ones. Column by column,
+            # so no copy of the block is made.
+            present = np.ones(len(block), dtype=bool)
+            finite = np.ones(len(block), dtype=bool)
+            for k in xyz_idx:
+                present &= ~np.isnan(block[:, k])
+                finite &= np.isfinite(block[:, k])
+            kept_rows += int(present.sum())
+            if finite.any():
+                xyz_min = np.minimum(xyz_min, [float(block[finite, k].min()) for k in xyz_idx])
+            if intensity_pos is not None:
+                vals = block[:, col_of[intensity_pos]]
+                vals = vals[np.isfinite(vals)]
+                if vals.size:
+                    gmin = min(gmin, float(vals.min()))
+                    gmax = max(gmax, float(vals.max()))
+        if intensity_pos is not None and np.isfinite(gmin) and np.isfinite(gmax):
+            intensity_lo, intensity_hi = gmin, gmax
         header.offsets = np.floor(np.where(np.isfinite(xyz_min), xyz_min, 0.0))
 
-        full_xyz_chunks: "Optional[list]" = [] if capture_full_xyz else None
+        xyz_sink = None
+        if capture_full_xyz:
+            xyz_sink = positions_sink if positions_sink is not None else _PositionSink()
+            xyz_sink.allocate(kept_rows)
         origin_chunks: "Optional[list]" = [] if origin_cols is not None else None
         total_points = _xyz_to_las_stream(
             source_path, out_las, header, names, skiprows, sep, chunk_rows,
             rgb_cols, rgb_is_255, intensity_role, intensity_lo, intensity_hi,
-            extra_dims, full_xyz_out=full_xyz_chunks,
+            extra_dims, xyz_sink=xyz_sink,
             origin_cols=origin_cols, origins_out=origin_chunks,
             ts_dim=ts_dim,
         )
@@ -27573,10 +27650,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
                 f"format."
             ),
         ) from e
-    full_xyz = None
-    if full_xyz_chunks is not None:
-        full_xyz = (np.concatenate(full_xyz_chunks, axis=0)
-                    if full_xyz_chunks else np.empty((0, 3), dtype=np.float64))
+    full_xyz = xyz_sink.result() if xyz_sink is not None else None
     origins = None
     if origin_chunks is not None:
         origins = (np.concatenate(origin_chunks, axis=0)
@@ -27589,7 +27663,7 @@ def _xyz_to_las(source_path: _Path, ascii_format: Optional[str], out_las: _Path,
 def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
                        chunk_rows, rgb_cols, rgb_is_255, intensity_role,
                        intensity_lo, intensity_hi, extra_dims,
-                       full_xyz_out: "Optional[list]" = None,
+                       xyz_sink: "Optional[_PositionSink]" = None,
                        origin_cols: "Optional[Dict[str, str]]" = None,
                        origins_out: "Optional[list]" = None,
                        ts_dim: "Optional[dict]" = None) -> int:
@@ -27600,13 +27674,13 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
     The LAS this writes is quantized to the header's 1 mm scale — fine as the
     octree's input (the octree is a display cache) but NOT precise enough to be
     the session's source-of-truth array (1 mm shatters precision-sensitive ops
-    like triangulation; see CloudSession.positions). When `full_xyz_out` is a
-    list, the FULL-PRECISION float64 xyz of each written chunk (already
-    NaN-filtered, in LAS point order) is appended to it, so the caller can
-    populate the session positions directly from the source instead of reading
-    them back from the quantized LAS. The chunks are filtered identically to the
-    LAS write here, so the concatenation aligns point-for-point with the LAS-
-    derived colors/intensity/extras.
+    like triangulation; see CloudSession.positions). So the FULL-PRECISION
+    float64 xyz of each written chunk (already NaN-filtered, in LAS point order)
+    goes into `xyz_sink` (see _PositionSink), sized by the pre-pass in
+    `_xyz_to_las` to exactly the rows kept here; the caller populates the
+    session positions from it instead of reading them back from the quantized
+    LAS. The rows are filtered identically to the LAS write, so they align
+    point-for-point with the LAS-derived colors/intensity/extras.
 
     When `origins_out` is a list, the per-pulse beam origins are captured the same
     way: `origin_cols` maps each canonical slug ('origin_x'/'_y'/'_z') to its
@@ -27651,9 +27725,9 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
             record.x = cx
             record.y = cy
             record.z = cz
-            if full_xyz_out is not None:
-                # Stash the unquantized xyz of this chunk for the session array.
-                full_xyz_out.append(np.column_stack([cx, cy, cz]))
+            if xyz_sink is not None:
+                # The unquantized xyz of this chunk, written into place.
+                xyz_sink.write_columns(cx, cy, cz)
             if origins_out is not None and origin_cols is not None:
                 # Stash the full-precision beam origins of this chunk, stacked in
                 # x,y,z order (regardless of source column order) and filtered to
@@ -27713,7 +27787,8 @@ def _xyz_to_las_stream(source_path, out_las, header, names, skiprows, sep,
     return total_points
 
 
-def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
+def _ply_to_las(source_path: _Path, out_las: _Path,
+                positions_sink: "Optional[_PositionSink]" = None) -> tuple[int, List[dict]]:
     """Convert a PLY to LAS via plyfile so it can feed the PotreeConverter
     octree pipeline, preserving scalar fields as LAS extra dimensions.
 
@@ -27864,14 +27939,23 @@ def _ply_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
                         if intensity_col is not None else None)
 
     idx = np.flatnonzero(keep)
+    # The session's positions at the PLY's own precision (the LAS below is
+    # 1 mm-quantized): into `positions_sink` when the caller wants them.
+    if positions_sink is not None:
+        positions_sink.allocate(n)
     with laspy.open(str(out_las), mode="w", header=header) as writer:
         for _start in range(0, n, _LAS_WRITE_CHUNK):
             blk = idx[_start:_start + _LAS_WRITE_CHUNK]
             m = int(blk.shape[0])
             record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
-            record.x = np.asarray(vertex["x"][blk], dtype=np.float64)
-            record.y = np.asarray(vertex["y"][blk], dtype=np.float64)
-            record.z = np.asarray(vertex["z"][blk], dtype=np.float64)
+            bx = np.asarray(vertex["x"][blk], dtype=np.float64)
+            by = np.asarray(vertex["y"][blk], dtype=np.float64)
+            bz = np.asarray(vertex["z"][blk], dtype=np.float64)
+            if positions_sink is not None:
+                positions_sink.write_columns(bx, by, bz)
+            record.x = bx
+            record.y = by
+            record.z = bz
             if rgb_cols:
                 # PLY RGB is 0-255 (uint8); LAS RGB is uint16. *256 keeps
                 # perceptual brightness and lets the renderer right-shift to
@@ -27932,48 +28016,218 @@ def _pcd_viewpoint_origin(source_path: _Path) -> Optional[list]:
     return None
 
 
-def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
-    """Convert a PCD to LAS so it can feed the PotreeConverter octree pipeline.
+def _pcd_read_header(source_path: _Path) -> dict:
+    """Parse a PCD v0.7 header: FIELDS/SIZE/TYPE/COUNT, WIDTH/HEIGHT/POINTS,
+    VIEWPOINT, and DATA (ascii | binary | binary_compressed) plus the byte
+    offset where the data begins. Raises a 400 for a file that is not PCD."""
+    info: dict = {}
+    with open(source_path, "rb") as f:
+        while True:
+            line = f.readline()
+            if not line:
+                raise HTTPException(status_code=400,
+                                    detail=f"{source_path.name}: PCD header has no DATA line.")
+            text = line.decode("ascii", errors="replace").strip()
+            if not text or text.startswith("#"):
+                continue
+            key, _, rest = text.partition(" ")
+            key = key.upper()
+            vals = rest.split()
+            if key == "DATA":
+                info["data"] = (vals[0] if vals else "").lower()
+                info["offset"] = f.tell()
+                break
+            info[key] = vals
+    try:
+        fields = info["FIELDS"]
+        sizes = [int(v) for v in info["SIZE"]]
+        types = [v.upper() for v in info["TYPE"]]
+        counts = [int(v) for v in info.get("COUNT", ["1"] * len(fields))]
+        n = int(info["POINTS"][0]) if "POINTS" in info else (
+            int(info["WIDTH"][0]) * int(info.get("HEIGHT", ["1"])[0]))
+    except (KeyError, ValueError, IndexError) as e:
+        raise HTTPException(status_code=400, detail=f"{source_path.name}: malformed PCD header ({e}).")
+    if not (len(fields) == len(sizes) == len(types) == len(counts)):
+        raise HTTPException(status_code=400,
+                            detail=f"{source_path.name}: PCD header FIELDS/SIZE/TYPE/COUNT disagree.")
+    return {"fields": fields, "sizes": sizes, "types": types, "counts": counts,
+            "n": n, "data": info["data"], "offset": info["offset"]}
 
-    PCD goes through open3d (`_load_ply_pcd_arrays`), which carries position and
-    RGB only — PCD's ascii/binary/binary_compressed variants make robust scalar
-    parsing more than this is worth for now, so scalar fields are not preserved.
+
+_PCD_KIND = {"F": "f", "I": "i", "U": "u"}
+
+
+def _pcd_dtype(h: dict) -> np.dtype:
+    """The packed per-point record of a binary PCD. Repeated names (PCL's `_`
+    padding) get unique names; a COUNT > 1 field is a sub-array."""
+    parts, seen = [], {}
+    for name, size, typ, cnt in zip(h["fields"], h["sizes"], h["types"], h["counts"]):
+        base = name
+        k = seen.get(base, 0)
+        seen[base] = k + 1
+        uname = base if k == 0 else f"{base}__{k}"
+        kind = _PCD_KIND.get(typ)
+        if kind is None:
+            raise HTTPException(status_code=400, detail=f"PCD field {name}: unknown TYPE {typ}.")
+        dt = np.dtype(f"<{kind}{size}")
+        parts.append((uname, dt, (cnt,)) if cnt > 1 else (uname, dt))
+    return np.dtype(parts)
+
+
+def _pcd_iter_chunks(source_path: _Path, h: dict, chunk_rows: int):
+    """Yield dicts {field: 1-D array} of `chunk_rows` points at a time, for
+    ASCII (pandas, C parser) and binary (a memory map, so a chunk is a view
+    of the file). COUNT > 1 fields come through as `name_0`, `name_1`, …"""
+    if h["data"] == "binary":
+        dt = _pcd_dtype(h)
+        need = h["offset"] + h["n"] * dt.itemsize
+        if _os.path.getsize(source_path) < need:
+            raise HTTPException(status_code=400,
+                                detail=f"{source_path.name}: PCD data is truncated.")
+        mm = np.memmap(source_path, dtype=dt, mode="r", offset=h["offset"], shape=(h["n"],))
+        for a in range(0, h["n"], chunk_rows):
+            block = mm[a:a + chunk_rows]
+            out = {}
+            for name in dt.names:
+                col = block[name]
+                if col.ndim == 2:
+                    for k in range(col.shape[1]):
+                        out[f"{name}_{k}"] = np.asarray(col[:, k])
+                else:
+                    out[name] = np.asarray(col)
+            yield out
+        del mm
+        return
+    if h["data"] == "ascii":
+        names = []
+        for name, cnt in zip(h["fields"], h["counts"]):
+            names += [name] if cnt == 1 else [f"{name}_{k}" for k in range(cnt)]
+        with open(source_path, "rb") as f:
+            f.seek(h["offset"])
+            for chunk in pd.read_csv(f, sep=r"\s+", header=None, names=names,
+                                     chunksize=chunk_rows, engine="c", dtype=np.float64):
+                yield {c: chunk[c].to_numpy() for c in names}
+        return
+    raise HTTPException(status_code=400, detail=f"PCD DATA {h['data']!r} is not supported.")
+
+
+def _pcd_unpack_rgb(v: np.ndarray, declared_float: bool) -> np.ndarray:
+    """PCL packs RGB into one 32-bit field, usually declared `F` and holding the
+    integer's BITS (an ASCII file writes those bits as a float, so they are
+    recovered by rounding to float32 and reinterpreting); a `U`/`I` field holds
+    the integer itself. Returns (m, 3) uint8."""
+    arr = np.asarray(v)
+    bits = (arr.astype(np.float32).view(np.uint32) if declared_float
+            else arr.astype(np.uint64).astype(np.uint32))
+    return np.column_stack([(bits >> 16) & 255, (bits >> 8) & 255, bits & 255]).astype(np.uint8)
+
+
+def _pcd_to_las(source_path: _Path, out_las: _Path,
+                positions_sink: "Optional[_PositionSink]" = None) -> tuple[int, List[dict]]:
+    """Convert a PCD to LAS for the octree, streaming, and keep every field.
+
+    ASCII and binary PCD are read in `_LAS_WRITE_CHUNK` blocks (binary through a
+    memory map), so the whole file is never in RAM. Every single-valued numeric
+    field is kept: x/y/z, packed rgb/rgba as LAS RGB, intensity/reflectance as
+    LAS intensity (normalised by its GLOBAL range), and the rest - normals
+    (canonical nx/ny/nz), curvature, labels, … - as float32 scalar fields, a
+    timestamp as float64 gps_time. Points with non-finite x/y/z (an organised
+    cloud's empty pixels) are dropped. The session's positions go into
+    `positions_sink` at the file's own precision, not the LAS's 1 mm.
+
+    binary_compressed (LZF, one compressed block per column) cannot be streamed,
+    so it goes through open3d as before: positions and RGB only.
+
     A non-identity PCD `VIEWPOINT` translation is stashed (keyed by the output
-    LAS path) so create_cloud_session can auto-populate the scan origin, the same
-    channel E57 uses. Returns (total_points, []).
-    """
+    LAS path) so create_cloud_session can populate the scan origin. Returns
+    (total_points, extra_dims)."""
     import laspy  # local: only when this code path runs
 
-    positions, colors, _ = _load_ply_pcd_arrays(str(source_path))
+    h = _pcd_read_header(source_path)
+    if h["data"] == "binary_compressed":
+        n = _pcd_to_las_open3d(source_path, out_las, positions_sink)
+        extra_out: List[dict] = []
+    else:
+        fields = h["fields"]
+        single = [f for f, c in zip(fields, h["counts"]) if c == 1]
+        if not all(c in single for c in ("x", "y", "z")):
+            raise HTTPException(status_code=400,
+                                detail=f"{source_path.name}: PCD has no x/y/z fields. Got: {fields}")
+        rgb_col = next((c for c in ("rgb", "rgba") if c in single), None)
+        rgb_is_float = rgb_col is not None and h["types"][fields.index(rgb_col)] == "F"
+        intensity_col = next((c for c in single if c.lower() in ("intensity", "reflectance")), None)
+        reserved = {"x", "y", "z", "_"} | ({rgb_col} if rgb_col else set()) | (
+            {intensity_col} if intensity_col else set())
+        extra_dims: List[dict] = []
+        used: set = set()
+        for col in single:
+            if col in reserved:
+                continue
+            slug = _PLY_NORMAL_ALIASES.get(col.lower(), _sanitize_extra_dim_name(col))
+            base, i = slug, 1
+            while slug in used:
+                slug = f"{base[:29]}_{i}"
+                i += 1
+            used.add(slug)
+            extra_dims.append({"col": col, "slug": slug, "label": _humanize_extra_dim_label(col)})
+        extra_dims, ts_dim = _split_timestamp_extra_dim(extra_dims)
 
-    n = len(positions)
-    header = laspy.LasHeader(point_format=3, version="1.4")
-    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
-    # Offset to the data min so projected (e.g. UTM) coordinates fit the LAS
-    # 32-bit int range — see _session_to_las for the full rationale.
-    header.offsets = (np.floor(positions[:, :3].min(axis=0)) if n else np.zeros(3))
+        # Pass 1: the kept count, the offset, the intensity range, the clock.
+        n = 0
+        xyz_min = np.full(3, np.inf)
+        ilo, ihi = np.inf, -np.inf
+        ts_absolute = False
+        for ch in _pcd_iter_chunks(source_path, h, _LAS_WRITE_CHUNK):
+            xyz = np.column_stack([np.asarray(ch[a], dtype=np.float64) for a in ("x", "y", "z")])
+            keep = np.isfinite(xyz).all(axis=1)
+            n += int(keep.sum())
+            if keep.any():
+                xyz_min = np.minimum(xyz_min, xyz[keep].min(axis=0))
+            if intensity_col is not None:
+                iv = np.asarray(ch[intensity_col], dtype=np.float64)[keep]
+                iv = iv[np.isfinite(iv)]
+                if iv.size:
+                    ilo, ihi = min(ilo, float(iv.min())), max(ihi, float(iv.max()))
+            if ts_dim is not None:
+                tv = np.asarray(ch[ts_dim["col"]], dtype=np.float64)[keep]
+                if tv.size and np.nanmax(np.abs(tv)) > _GPS_WEEK_SECONDS:
+                    ts_absolute = True
 
-    # open3d has already materialised the whole cloud (its reader is not
-    # chunked), so the LAS is written in `_LAS_WRITE_CHUNK` blocks to keep the
-    # laspy record - the second full copy this converter used to hold - down
-    # to one block, the same shape as `_ply_to_las`.
-    with laspy.open(str(out_las), mode="w", header=header) as writer:
-        for _start in range(0, n, _LAS_WRITE_CHUNK):
-            _end = min(n, _start + _LAS_WRITE_CHUNK)
-            m = _end - _start
-            record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
-            record.x = positions[_start:_end, 0].astype(np.float64)
-            record.y = positions[_start:_end, 1].astype(np.float64)
-            record.z = positions[_start:_end, 2].astype(np.float64)
-            if colors is not None:
-                # open3d colors are 0-1 floats; LAS RGB is uint16. Scale to 8-bit then
-                # *256 to match the `_xyz_to_las` / `_ply_to_las` convention.
-                rgb8 = np.clip(colors[_start:_end] * 255.0, 0, 255).astype(np.uint16)
-                record.red = rgb8[:, 0] * 256
-                record.green = rgb8[:, 1] * 256
-                record.blue = rgb8[:, 2] * 256
-            writer.write_points(record)
-            del record
+        header = laspy.LasHeader(point_format=3, version="1.4")
+        header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+        header.offsets = np.floor(xyz_min) if n else np.zeros(3)
+        for ed in extra_dims:
+            header.add_extra_dim(laspy.ExtraBytesParams(name=ed["slug"], type=np.float32))
+        if ts_absolute:
+            _mark_gps_time_absolute(header)
+        if positions_sink is not None:
+            positions_sink.allocate(n)
+
+        # Pass 2: write.
+        with laspy.open(str(out_las), mode="w", header=header) as writer:
+            for ch in _pcd_iter_chunks(source_path, h, _LAS_WRITE_CHUNK):
+                xyz = np.column_stack([np.asarray(ch[a], dtype=np.float64) for a in ("x", "y", "z")])
+                keep = np.isfinite(xyz).all(axis=1)
+                m = int(keep.sum())
+                if m == 0:
+                    continue
+                xyz = xyz[keep]
+                if positions_sink is not None:
+                    positions_sink.write(xyz)
+                record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
+                record.x, record.y, record.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+                if rgb_col is not None:
+                    rgb8 = _pcd_unpack_rgb(np.asarray(ch[rgb_col])[keep], rgb_is_float).astype(np.uint16)
+                    record.red, record.green, record.blue = rgb8[:, 0] * 256, rgb8[:, 1] * 256, rgb8[:, 2] * 256
+                if intensity_col is not None and np.isfinite(ilo):
+                    record.intensity = _intensity_to_las_uint16(
+                        np.asarray(ch[intensity_col], dtype=np.float64)[keep], ilo, ihi)
+                if ts_dim is not None:
+                    record.gps_time = np.asarray(ch[ts_dim["col"]], dtype=np.float64)[keep]
+                for ed in extra_dims:
+                    record[ed["slug"]] = np.asarray(ch[ed["col"]], dtype=np.float32)[keep]
+                writer.write_points(record)
+        extra_out = [{"slug": ed["slug"], "label": ed["label"]} for ed in extra_dims]
 
     # Surface a non-identity sensor origin from the PCD VIEWPOINT, if any, via
     # the same per-output-LAS channel E57 uses. Only origin is recoverable from
@@ -27987,8 +28241,36 @@ def _pcd_to_las(source_path: _Path, out_las: _Path) -> tuple[int, List[dict]]:
             "miss_count": 0,
             "unplaceable_miss_count": 0,
         }
+    return n, extra_out
 
-    return n, []
+
+def _pcd_to_las_open3d(source_path: _Path, out_las: _Path,
+                       positions_sink: "Optional[_PositionSink]" = None) -> int:
+    """binary_compressed PCD through open3d (its reader is not chunked):
+    positions and RGB. Positions go into the sink at full precision."""
+    import laspy
+    positions, colors, _ = _load_ply_pcd_arrays(str(source_path))
+    n = len(positions)
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+    header.offsets = (np.floor(positions[:, :3].min(axis=0)) if n else np.zeros(3))
+    if positions_sink is not None:
+        positions_sink.allocate(n)
+    with laspy.open(str(out_las), mode="w", header=header) as writer:
+        for _start in range(0, n, _LAS_WRITE_CHUNK):
+            _end = min(n, _start + _LAS_WRITE_CHUNK)
+            m = _end - _start
+            xyz = np.asarray(positions[_start:_end, :3], dtype=np.float64)
+            if positions_sink is not None:
+                positions_sink.write(xyz)
+            record = laspy.ScaleAwarePointRecord.zeros(m, header=header)
+            record.x, record.y, record.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+            if colors is not None:
+                rgb8 = np.clip(colors[_start:_end] * 255.0, 0, 255).astype(np.uint16)
+                record.red, record.green, record.blue = rgb8[:, 0] * 256, rgb8[:, 1] * 256, rgb8[:, 2] * 256
+            writer.write_points(record)
+            del record
+    return n
 
 
 # Scanner pose recovered from the most recent header-bearing conversion, keyed by
@@ -29041,7 +29323,8 @@ def _ptx_scan_params(block: _PtxBlock, model: _PtxGridModel,
 
 
 def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
-                block_index: Optional[int] = None):
+                block_index: Optional[int] = None,
+                make_store: "Optional[Callable[[int], Optional[session_store.SessionStore]]]" = None):
     """Convert a PTX to LAS, recovering sky/miss points from the structured grid.
 
     PTX is a COMPLETE rectangular raster: every beam the scanner fired gets a
@@ -29160,12 +29443,26 @@ def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
     # Every array is preallocated and filled by slice rather than concatenated
     # from per-chunk pieces: at 19.9 M cells `positions` alone is 0.48 GB, and a
     # concatenate would hold both copies at the peak of an already heavy import.
-    positions = np.empty((total, 3), dtype=np.float64)
-    out_intensity = np.zeros(total, dtype=np.uint16) if inten_span > 0 else None
-    out_colors = np.zeros((total, 3), dtype=np.uint16) if any_color else None
-    out_miss = np.empty(total, dtype=np.float32)
-    out_row = np.empty(total, dtype=np.float32)
-    out_col = np.empty(total, dtype=np.float32)
+    #
+    # With `make_store` (the arrays path only), a block large enough to be a
+    # store-backed session gets its arrays allocated IN that store - memory
+    # maps, filled in place - rather than in RAM and copied out later.
+    store = make_store(total) if (make_store is not None and out_las is None) else None
+
+    def _out(name, shape, dtype, zero):
+        if store is not None:
+            return store.allocate_column(name, dtype, tuple(shape[1:]))   # zero-filled
+        return (np.zeros if zero else np.empty)(shape, dtype=dtype)
+
+    positions = _out("positions", (total, 3), np.float64, False)
+    out_intensity = _out("intensity", (total,), np.uint16, True) if inten_span > 0 else None
+    out_colors = _out("colors", (total, 3), np.uint16, True) if any_color else None
+    out_miss = _out("x0", (total,), np.float32, False)
+    out_row = _out("x1", (total,), np.float32, False)
+    out_col = _out("x2", (total,), np.float32, False)
+    if store is not None:
+        store.set_attr("extras", {"x0": _MISS_SLUG, "x1": "row_index", "x2": "column_index"})
+        store.set_attr("extras_order", [_MISS_SLUG, "row_index", "column_index"])
     written = 0
     miss_total = 0
     for block, model, (rot_pts, rot_dir, trans) in zip(blocks, models, poses):
@@ -29261,13 +29558,16 @@ def _ptx_to_las(source_path: _Path, out_las: "Optional[_Path]",
 
 
 def _ptx_to_arrays(source_path: _Path,
-                   block_index: Optional[int] = None) -> "tuple[LasReadResult, dict]":
-    """One PTX block straight to in-RAM arrays — no intermediate LAS.
+                   block_index: Optional[int] = None,
+                   make_store: "Optional[Callable[[int], Optional[session_store.SessionStore]]]" = None,
+                   ) -> "tuple[LasReadResult, dict]":
+    """One PTX block straight to session arrays — no intermediate LAS; into a
+    session store (memory maps) when `make_store` returns one for its size.
 
     The named entry point for `_ptx_to_las(..., out_las=None)`; see its docstring
     for why the LAS round trip is worth skipping.
     """
-    return _ptx_to_las(source_path, None, block_index=block_index)
+    return _ptx_to_las(source_path, None, block_index=block_index, make_store=make_store)
 
 
 def _las_extra_dim_labels(source_path: _Path) -> List[dict]:
@@ -29333,6 +29633,7 @@ def _source_scan_count(source_path: _Path) -> int:
 def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _Path,
                    column_plan: "Optional[ColumnPlan]" = None,
                    scan_index: Optional[int] = None,
+                   positions_sink: "Optional[_PositionSink]" = None,
                    ) -> "tuple[_Path, bool, List[dict], Optional[np.ndarray], Optional[np.ndarray]]":
     """Get a LAS file path for `source_path`, converting from another format
     if needed.
@@ -29342,13 +29643,16 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
     carried scalar attributes (read from the header for LAS/LAZ; derived during
     conversion for XYZ/PLY; empty for PCD, which carries position + RGB only).
 
-    `full_xyz` is the (N,3) float64 SOURCE-PRECISION coordinate array for the
-    XYZ-family branch, where the LAS we synthesise is 1 mm-quantized and so must
-    not be the session's source of truth (1 mm shatters triangulation). It is
-    None for every other branch: LAS/LAZ keep their own header scale (the user's
-    original precision), and PLY/PCD/E57 already read positions losslessly into
-    their LAS. Callers that need the session array use `full_xyz` when present
-    and otherwise fall back to reading the LAS.
+    `full_xyz` is the (N,3) float64 SOURCE-PRECISION coordinate array for every
+    converted format (XYZ family, PLY, PCD, PTX): the LAS we synthesise is
+    1 mm-quantized and so must not be the session's source of truth (1 mm
+    shatters triangulation). It is written into `positions_sink` when the
+    caller passes one (the session store, for a large cloud - see
+    _PositionSink), else into RAM. None for LAS/LAZ, which keep their own
+    header scale (the user's original precision), and for E57, whose converter
+    still reads positions back from its LAS (a known 1 mm residual). Callers
+    that need the session array use `full_xyz` when present and otherwise fall
+    back to reading the LAS.
 
     `beam_origins` is the (N,3) float64 per-pulse origin array for the XYZ-family
     branch when the column plan carried an ox/oy/oz triple, else None — captured
@@ -29367,16 +29671,18 @@ def _source_to_las(source_path: _Path, ascii_format: Optional[str], work_dir: _P
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims, full_xyz, beam_origins = _xyz_to_las(
             source_path, ascii_format, out, column_plan,
-            capture_full_xyz=True, capture_origins=True)
+            capture_full_xyz=True, capture_origins=True, positions_sink=positions_sink)
         return out, True, extra_dims, full_xyz, beam_origins
     if ext == "ply":
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims = _ply_to_las(source_path, out)
-        return out, True, extra_dims, None, None
+        sink = positions_sink if positions_sink is not None else _PositionSink()
+        _, extra_dims = _ply_to_las(source_path, out, positions_sink=sink)
+        return out, True, extra_dims, sink.result(), None
     if ext == "pcd":
         out = work_dir / (source_path.stem + ".las")
-        _, extra_dims = _pcd_to_las(source_path, out)
-        return out, True, extra_dims, None, None
+        sink = positions_sink if positions_sink is not None else _PositionSink()
+        _, extra_dims = _pcd_to_las(source_path, out, positions_sink=sink)
+        return out, True, extra_dims, sink.result(), None
     if ext == "e57":
         out = work_dir / (source_path.stem + ".las")
         _, extra_dims = _e57_to_las(source_path, out, scan_index=scan_index)
@@ -33675,7 +33981,8 @@ def _las_dim_dtype(dim) -> np.dtype:
     return np.dtype(dt) if dt is not None else np.dtype(np.uint8)
 
 
-def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
+def _read_las_into_arrays(las_path: _Path, store=None,
+                          positions: "Optional[np.ndarray]" = None) -> "LasReadResult":
     """Read a LAS file into RAM as the session's source-of-truth arrays, in
     chunks, straight into preallocated columns.
 
@@ -33696,8 +34003,10 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
     `chunk_iterator` slice is written into place, so the peak is the session
     plus one chunk (`_LAS_READ_CHUNK` rows). Columns whose contents are only
     known after the read (constant standard dims, all-zero intensity) are
-    tracked per chunk in their NATIVE dtype and pruned or cast at the end, so
-    the candidates cost 1–2 B/pt while undecided rather than 4.
+    tracked per chunk in their NATIVE dtype and pruned or cast at the end. A
+    candidate standard dim is not even allocated until a chunk shows it varies
+    (back-filled with the constant then), so the ~10 that stay constant - all
+    of them, in a LAS a converter wrote - cost nothing.
 
     With `store` (a `session_store.SessionStore` sized to the file's point
     count) every kept column is allocated IN the store and filled through its
@@ -33725,7 +34034,16 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
         std_dims = list(pf.standard_dimensions)
         extra_dims = list(pf.extra_dimensions)
 
-        positions = _alloc("positions", (n, 3), np.float64)
+        # `positions` given: the converter already wrote the source's FULL-
+        # precision coordinates (see _PositionSink); the LAS's 1 mm copy is
+        # neither allocated nor read.
+        fill_positions = positions is None
+        if fill_positions:
+            positions = _alloc("positions", (n, 3), np.float64)
+        elif len(positions) != n:
+            raise RuntimeError(
+                f"{las_path.name}: {n} points in the converted LAS but {len(positions)} "
+                "full-precision positions")
         has_colors = {"red", "green", "blue"} <= dim_names
         colors = _alloc("colors", (n, 3), np.uint16) if has_colors else None
         intensity = _alloc("intensity", (n,), np.uint16) if "intensity" in dim_names else None
@@ -33794,7 +34112,7 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
         for src_dim, slug in _las_multireturn:
             if src_dim in dim_names and slug not in extras:
                 candidates[src_dim] = {
-                    "arr": np.empty(n, dtype=_las_dim_dtype(pf.dimension_by_name(src_dim))),
+                    "arr": None, "dtype": _las_dim_dtype(pf.dimension_by_name(src_dim)),
                     "slug": slug, "label": _MULTI_RETURN_LABELS[slug],
                     "first": None, "const": True,
                     # The vary-or-drop rule below is WRONG for these two, and
@@ -33827,7 +34145,7 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
                 # A LAS point flag comes back as the label column the export
                 # wrote it from (F9), kept when ANY point has it set.
                 candidates[name] = {
-                    "arr": np.empty(n, dtype=_las_dim_dtype(d)), "slug": f"flag_{name}",
+                    "arr": None, "dtype": _las_dim_dtype(d), "slug": f"flag_{name}",
                     "label": f"LAS flag: {_LAS_FLAG_LABELS[name]}", "first": None,
                     "const": True, "flag": True,
                 }
@@ -33838,7 +34156,7 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
             if slug in extras or name in extras:
                 continue
             candidates[name] = {
-                "arr": np.empty(n, dtype=_las_dim_dtype(d)), "slug": slug,
+                "arr": None, "dtype": _las_dim_dtype(d), "slug": slug,
                 "label": f"LAS {name}", "first": None, "const": True,
             }
         gps: Optional[np.ndarray] = _alloc("timestamps", (n,), np.float64) if "gps_time" in dim_names else None
@@ -33851,9 +34169,10 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
             if m == 0:
                 continue
             sl = slice(off, off + m)
-            positions[sl, 0] = chunk.x
-            positions[sl, 1] = chunk.y
-            positions[sl, 2] = chunk.z
+            if fill_positions:
+                positions[sl, 0] = chunk.x
+                positions[sl, 1] = chunk.y
+                positions[sl, 2] = chunk.z
             if colors is not None:
                 colors[sl, 0] = chunk.red
                 colors[sl, 1] = chunk.green
@@ -33868,12 +34187,20 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
             for name, slug in extra_sources:
                 extras[slug][sl] = np.asarray(chunk[name], dtype=np.float32)
             for name, cand in candidates.items():
+                # Allocated LAZILY: most standard dims are constant (a LAS we
+                # converted ourselves has them all zero), so a full-length array
+                # per candidate - ~10 of them - was pure transient. It appears
+                # only when a chunk first differs, back-filled with the constant.
                 vals = np.asarray(chunk[name])
+                if cand["first"] is None:
+                    cand["first"] = vals.flat[0]
+                if cand["arr"] is None:
+                    if np.all(vals == cand["first"]):
+                        continue
+                    cand["arr"] = np.empty(n, dtype=cand["dtype"])
+                    cand["arr"][:off] = cand["first"]
+                    cand["const"] = False
                 cand["arr"][sl] = vals
-                if cand["const"]:
-                    if cand["first"] is None:
-                        cand["first"] = vals.flat[0]
-                    cand["const"] = bool(np.all(vals == cand["first"]))
             if gps is not None:
                 vals = np.asarray(chunk["gps_time"], dtype=np.float64)
                 gps[sl] = vals
@@ -33892,7 +34219,8 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
             for slug in list(extras):
                 extras[slug] = extras[slug][:off]
             for cand in candidates.values():
-                cand["arr"] = cand["arr"][:off]
+                if cand["arr"] is not None:
+                    cand["arr"] = cand["arr"][:off]
             gps = gps[:off] if gps is not None else None
             n = off
 
@@ -33930,7 +34258,8 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
         for name, cand in candidates.items():
             if cand.get("multireturn"):
                 if _keep_multireturn:
-                    vals32 = cand["arr"].astype(np.float32)
+                    vals32 = (cand["arr"].astype(np.float32) if cand["arr"] is not None
+                              else np.full(n, cand["first"], dtype=np.float32))
                     if store is not None:
                         col = f"x{len(extra_cols)}"
                         extra_cols[col] = cand["slug"]
@@ -33940,7 +34269,8 @@ def _read_las_into_arrays(las_path: _Path, store=None) -> "LasReadResult":
                 del cand["arr"]
                 continue
             if n and (not cand["const"] or (cand.get("flag") and cand["first"])):
-                vals32 = cand["arr"].astype(np.float32)
+                vals32 = (cand["arr"].astype(np.float32) if cand["arr"] is not None
+                          else np.full(n, cand["first"], dtype=np.float32))
                 if store is not None:
                     col = f"x{len(extra_cols)}"
                     extra_cols[col] = cand["slug"]
@@ -34752,7 +35082,9 @@ class BackfillMissesRequest(BaseModel):
 def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _Path,
                              progress=None, cancel_event=None,
                              preloaded: "Optional[LasReadResult]" = None,
-                             preloaded_meta: "Optional[dict]" = None) -> dict:
+                             preloaded_meta: "Optional[dict]" = None,
+                             session_id: "Optional[str]" = None,
+                             preloaded_store: "Optional[session_store.SessionStore]" = None) -> dict:
     """See `_do_create_cloud_session_inner`. This wrapper only guarantees that
     a large import which fails or is cancelled part-way removes the on-disk
     session store it had started filling (the inner body creates it once the
@@ -34761,7 +35093,8 @@ def _do_create_cloud_session(request: CloudSessionCreateRequest, source_path: _P
     try:
         return _do_create_cloud_session_inner(
             request, source_path, progress=progress, cancel_event=cancel_event,
-            preloaded=preloaded, preloaded_meta=preloaded_meta, store_box=store_box)
+            preloaded=preloaded, preloaded_meta=preloaded_meta, store_box=store_box,
+            session_id=session_id, preloaded_store=preloaded_store)
     except BaseException:
         store = store_box.get("store")
         if store is not None and not store_box.get("registered"):
@@ -34776,7 +35109,9 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                                    progress=None, cancel_event=None,
                                    preloaded: "Optional[LasReadResult]" = None,
                                    preloaded_meta: "Optional[dict]" = None,
-                                   store_box: "Optional[dict]" = None) -> dict:
+                                   store_box: "Optional[dict]" = None,
+                                   session_id: "Optional[str]" = None,
+                                   preloaded_store: "Optional[session_store.SessionStore]" = None) -> dict:
     """The heavy worker behind `/api/cloud/session/create`, factored out so it can
     run OFF the event loop under `_bin_frame_streaming_response` and report
     per-stage progress via `progress(fraction, message)`.
@@ -34795,10 +35130,14 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
         if progress is not None:
             progress(fraction, message)
 
-    session_id = uuid.uuid4().hex[:8]
-    store = None
+    # The caller may choose the id: a preloaded store (PTX) was already created
+    # under it, since a store's directory is named after its session.
+    session_id = session_id or uuid.uuid4().hex[:8]
+    store = preloaded_store
     if store_box is None:
         store_box = {}
+    if store is not None:
+        store_box["store"] = store
 
     # Normalise to a LAS in a temp dir, read it fully into RAM, then build the
     # octree from that same LAS. After this the file is never touched again.
@@ -34826,9 +35165,20 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             full_xyz, source_origins = None, None
             _las = preloaded
         else:
+            # A converted format writes its full-precision positions straight
+            # into this sink, which creates the session's on-disk store first
+            # when the cloud is large enough to need one (the same size rule as
+            # below), so the positions are never a RAM copy - see _PositionSink.
+            def _make_store(n: int):
+                if not _session_should_use_store(n):
+                    return None
+                st = _new_session_store(session_id, n)
+                store_box["store"] = st
+                return st
+            pos_sink = _PositionSink(_make_store)
             las_path, las_is_temp, source_extra_dims, full_xyz, source_origins = _source_to_las(
                 source_path, request.ascii_format, tmp_dir, request.column_plan,
-                scan_index=request.scan_index,
+                scan_index=request.scan_index, positions_sink=pos_sink,
             )
             _report(0.25, "Loading points into memory…")
             _cancel_checkpoint(progress)
@@ -34836,9 +35186,13 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
             # _read_las_into_arrays); declare that to the memory budget so two
             # large imports run one after the other instead of both paging.
             n_in_file = _las_point_count(las_path) or 0
+            # Positions already in the sink (and its store, if any) are adopted
+            # as-is; the LAS read then fills only the other columns.
+            sink_positions = full_xyz if (full_xyz is not None and full_xyz is pos_sink.array) else None
+            store = pos_sink.store if sink_positions is not None else None
             # A large cloud is read straight into an on-disk columnar store
             # (memmaps), so it is never held as a RAM copy - see CloudSession.store.
-            if _session_should_use_store(n_in_file):
+            if store is None and _session_should_use_store(n_in_file):
                 store = _new_session_store(session_id, n_in_file)
                 store_box["store"] = store
             with _ADMISSION.admit(
@@ -34847,7 +35201,7 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                         n_extras=len(source_extra_dims or []), colors=True,
                         intensity=True, timestamps=True),
                     f"import {n_in_file:,} pts"):
-                _las = _read_las_into_arrays(las_path, store=store)
+                _las = _read_las_into_arrays(las_path, store=store, positions=sink_positions)
             if store is not None and len(_las.positions) != store.n:
                 # The header over/under-stated the count; the reader trimmed to
                 # what it read, which a fixed-size store cannot hold. Fall back
@@ -34881,8 +35235,11 @@ def _do_create_cloud_session_inner(request: CloudSessionCreateRequest, source_pa
                         f"LAS ({_las.positions.shape[0]}). Please report this file."
                     ),
                 )
-            positions = (store.replace_column("positions", full_xyz)
-                         if store is not None else full_xyz)
+            if full_xyz is _las.positions:
+                positions = full_xyz            # already in place (the sink)
+            else:
+                positions = (store.replace_column("positions", full_xyz)
+                             if store is not None else full_xyz)
         else:
             positions = _las.positions
         colors = _las.colors
@@ -35476,12 +35833,29 @@ def _do_create_multi_cloud_session(request: CloudSessionCreateRequest, source_pa
             # block. Other formats keep the LAS route, which is also how their
             # column plans and precision overrides are applied.
             pre, pre_meta = None, None
+            # A large block decodes straight into its session's on-disk store
+            # (same size rule as every import), under the id that session
+            # will then be created with.
+            pre_sid = uuid.uuid4().hex[:8]
+            pre_store_box: dict = {}
+
+            def _ptx_store(total: int, _sid=pre_sid, _box=pre_store_box):
+                if not _session_should_use_store(total):
+                    return None
+                _box["store"] = _new_session_store(_sid, total)
+                return _box["store"]
             if is_ptx:
-                pre, pre_meta = _ptx_to_arrays(
-                    source_path, block_index=(i if n > 1 else None))
+                try:
+                    pre, pre_meta = _ptx_to_arrays(
+                        source_path, block_index=(i if n > 1 else None), make_store=_ptx_store)
+                except BaseException:
+                    if pre_store_box.get("store") is not None:
+                        pre_store_box["store"].delete()
+                    raise
             entry["session"] = _do_create_cloud_session(
                 sub, source_path, progress=_sub_progress, cancel_event=cancel_event,
-                preloaded=pre, preloaded_meta=pre_meta)
+                preloaded=pre, preloaded_meta=pre_meta,
+                session_id=pre_sid, preloaded_store=pre_store_box.get("store"))
             # Drop this position's arrays before decoding the next one: the
             # session owns them now, and holding a second reference would keep a
             # whole block resident across the loop.

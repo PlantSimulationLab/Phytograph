@@ -40,10 +40,46 @@ straight from plyfile's memory map (binary PLY; an ASCII PLY is parsed into
 RAM by plyfile itself), and the E57 converter converts and writes one scan
 at a time instead of accumulating every scan and concatenating — the LAS
 schema is decided from the scan headers' field lists and the offset placed
-at the first scanner position, both known before a point is read. PCD
-still goes through open3d's whole-file read (its reader is not chunked),
-but writes its LAS in the same blocks, so the laspy record — the second
-full copy that converter used to hold — is one block at a time.
+at the first scanner position, both known before a point is read. PCD has
+its own streaming reader (`_pcd_to_las`): ASCII through pandas' C parser in
+blocks, binary through a memory map, two passes (count/offset/intensity
+range, then write), every single-valued field kept. Only `binary_compressed`
+(LZF, one compressed block per column) still goes through open3d's
+whole-file read.
+
+**Positions go straight to their destination.** A converted format's LAS is
+1 mm-quantized, so the session's positions come from the source. They used
+to be gathered as a list of chunks, concatenated (two copies at the peak),
+and then read back out of the LAS as well and discarded: three copies of the
+largest column. Now each converter reports its exact kept count first and
+writes into a `_PositionSink`. The sink is a RAM array, or, when the cloud is
+large enough to be store-backed, a column of the session's store created
+there and then, so a large cloud's positions are never a RAM copy. The LAS
+read-back then skips positions (`_read_las_into_arrays(positions=...)`).
+This also fixed a silent precision loss: PLY and PCD positions used to be
+read back from the 1 mm LAS. PTX decodes each block straight into its
+session's store the same way (`_ptx_to_arrays(make_store=...)`). E57 still
+reads its positions back from its LAS.
+
+**Candidate dimensions are lazy.** `_read_las_into_arrays` keeps a standard
+LAS dimension (classification, scan angle, user data, …) only if it varies,
+so it used to allocate a full-length array for each of ~10 candidates before
+knowing. It now allocates one only when a chunk first differs from the
+constant, back-filling what came before. A converter-written LAS has them
+all constant, and so allocates none.
+
+Measured on a 10 M-point `x y z intensity` ASCII file, conversion plus
+read-back (`tracemalloc` peak of numpy/Python allocations):
+
+| | Peak | Resident after | Time |
+|---|---|---|---|
+| before | 855 MiB (3.7× positions) | 539 MiB | 5.9 s |
+| after | 516 MiB (2.3× positions) | 310 MiB | 4.7 s |
+
+What remains of the peak is the finished columns plus one pandas chunk.
+`backend-api/tests/test_streaming_readers.py` pins the precision, the
+sink/store adoption for XYZ, PLY, PCD and PTX, and a bound on the XYZ
+conversion's peak.
 
 ### Undo history is deltas, not snapshots
 
