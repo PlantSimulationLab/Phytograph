@@ -391,10 +391,48 @@ inherits it. The cost, from alternating runs: the octree LAS write goes from
 ignored off macOS. `src/main/memoryBudgetEnv.test.ts` pins both spawn paths.
 
 On the 45.7 M-point scan, Compute Normals went from 182 s and a 20.6 GB total
-peak (worker plus pool) to 87 s and 6.6 GB. Ground segmentation stays 12 s
-and goes from 12.1 to 6.6 GB. Its one remaining large child is CSF on the
-whole dense cell. Reducing that needs a different CSF input (for example,
-only the point that decides each cloth particle's height), not a finer tile.
+peak (worker plus pool) to 87 s and 6.6 GB. Ground segmentation went from
+12.1 to 6.6 GB with the allocator setting below, and then to 4.8 GB, at
+~15 % more time, when CSF stopped seeing every point (next).
+
+**CSF sees one point per cloth particle** (`backend-api/csf_reduced.py`).
+Tiling can't shrink ground's dense cell, so this shrinks CSF's input instead.
+In the Apache-2.0 `cloth-simulation-filter` source, the cloth depends on the
+points through only two things:
+
+- the bounding box, which fixes the cloth grid (`CSF::do_cloth`);
+- for each particle, the height of the first point at the smallest squared
+  XY distance to it (`RasterTerrian`). Slope smoothing reads only those
+  heights.
+
+Every other point matters only to the final labelling (`c2cdist`), a
+bilinear interpolation of the settled cloth. So `segment_ground` hands CSF
+the six bounding-box extremes plus every point within a relative 1e-9 of its
+particle's minimum distance (the slack absorbs a fused multiply-add in the
+compiled library; the kept points keep their order, so CSF's first-wins
+tie-break is unchanged). It takes the cloth at full precision from
+`do_cloth_export`, and labels every point in 2 M-row chunks with
+`c2cdist`'s arithmetic.
+
+On the 45.7 M-point scan, CSF saw 11,358 points at a 0.5 m cloth (41,300 at
+0.2 m), and CSF's own peak fell from 1.3 GB to 0.29 GB. The labels matched
+plain CSF on the whole cloud at 0.5 m. At 0.2 m, 4 of 45.7 M differed, and on
+five crops at 0.1/0.2 m, 2 of ~78 M. Every one sat exactly on the threshold
+(|h| − 0.1 = 0 to 12 decimals). There, CSF's strict `<` is decided by
+rounding, and it happens because settled particles take a point's own height
+and elevations sit on a 1 mm grid.
+
+One CSF quirk is reproduced on purpose. A point on the far x edge of a
+grid-aligned cloud reads `col0 + 1 == width`, which in CSF's
+`row * width + col` indexing is the next row's first particle. On the last
+row it is past the array (undefined in CSF), so the index is clamped there.
+`tests/test_csf_reduced.py` pins label equality with plain CSF on 1/r²
+plots, including slope smoothing, duplicate points and that edge.
+
+This does not make ground faster. Its time is the cloth simulation, which
+scales with particles, not points (683 s at a 0.2 m cloth over the whole
+45.7 M scan, either way). The ground worker also memory-maps its input now,
+as normals does.
 
 **Point-local tools stream instead.** `_iter_session_hit_positions` yields a
 session's surviving hits in 2 M-row blocks (deletions, misses, world shift

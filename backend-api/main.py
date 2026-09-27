@@ -17751,9 +17751,7 @@ def segment_ground(
     Raises ImportError if the `CSF` extension is unavailable — the caller turns
     that into a clean error response rather than a 500.
     """
-    import CSF  # SWIG C-extension; import here so a missing dep is catchable
-    import os
-    import tempfile
+    import CSF  # noqa: F401  SWIG C-extension; imported here so a missing dep is catchable
 
     n = len(points)
     if tile is None:
@@ -17764,43 +17762,27 @@ def segment_ground(
             class_threshold=class_threshold, iterations=iterations,
             slope_smooth=slope_smooth, time_step=time_step,
             auto_class_threshold=auto_class_threshold, meta=meta)
-    csf = CSF.CSF()
-    csf.params.bSloopSmooth = bool(slope_smooth)
-    csf.params.cloth_resolution = float(cloth_resolution)
-    csf.params.rigidness = int(rigidness)
-    csf.params.class_threshold = float(class_threshold)
-    csf.params.time_step = float(time_step)
-    # NOTE: the CSF API misspells "iterations" as "interations".
-    csf.params.interations = int(iterations)
-
-    # CSF wants a contiguous float64 Nx3 array.
-    csf.setPointCloud(np.ascontiguousarray(points[:, :3], dtype=np.float64))
-
-    ground_idx, non_ground_idx = CSF.VecInt(), CSF.VecInt()
-    # do_filtering() unconditionally dumps a debug `cloth_nodes.txt` into the
-    # current working directory (hardcoded in the C++ lib). Run it from a temp
-    # dir so the packaged app doesn't litter the user's filesystem, then drop
-    # the artifact.
-    prev_cwd = os.getcwd()
-    cloth_nodes = None
-    with tempfile.TemporaryDirectory() as tmp:
-        try:
-            os.chdir(tmp)
-            csf.do_filtering(ground_idx, non_ground_idx)
-            if auto_class_threshold:
-                # Read the settled cloth before the temp dir is torn down.
-                nodes_path = os.path.join(tmp, "cloth_nodes.txt")
-                if os.path.exists(nodes_path):
-                    cloth_nodes = np.loadtxt(nodes_path)
-        finally:
-            os.chdir(prev_cwd)
-
+    # CSF sees only the points its cloth can depend on (one per cloth
+    # particle, plus the bounding-box extremes) and every point is labelled
+    # against the settled cloth afterwards - see csf_reduced. A dense TLS
+    # scan's CSF working set (~60 B/pt, twice over) was the ground worker's
+    # largest allocation: measured 1.3 GB -> 0.29 GB on 45.7 M points, with
+    # the same labels except points exactly on the threshold, which CSF
+    # itself decides by floating-point rounding (4 of 45.7 M).
+    import csf_reduced
+    grid, cloth, reps = csf_reduced.settle_cloth(
+        points, cloth_resolution=float(cloth_resolution), rigidness=int(rigidness),
+        time_step=float(time_step), iterations=int(iterations),
+        slope_smooth=bool(slope_smooth), class_threshold=float(class_threshold))
+    if meta is not None:
+        meta["csf_points"] = int(len(reps))
+    cloth_nodes = csf_reduced.cloth_nodes(grid, cloth) if auto_class_threshold else None
     if auto_class_threshold and cloth_nodes is not None and cloth_nodes.ndim == 2:
         try:
             # Pull nodes that hung up on vegetation back to local terrain first:
             # the threshold is read off this cloth, so a snagged node biases both
             # the estimate and the classification. Auto path only — the manual
-            # path must keep reproducing CSF's own labels bit-for-bit.
+            # path must keep reproducing CSF's own labels (csf_reduced.ground_mask).
             cloth_nodes, n_desnagged = _desnag_cloth(cloth_nodes)
             height = _height_above_cloth(points[:, :3].astype(np.float64), cloth_nodes)
             threshold, est = _estimate_class_threshold(
@@ -17817,10 +17799,8 @@ def segment_ground(
             # fall through to CSF's own labels at the caller's threshold.
             print(f"[ground] auto class_threshold failed ({e}); using {class_threshold}")
 
-    labels = np.full(n, GROUND_CLASS_PLANT, dtype=np.int32)
-    gi = np.fromiter(ground_idx, dtype=np.int64, count=len(ground_idx))
-    if gi.size:
-        labels[gi] = GROUND_CLASS_GROUND
+    ground = csf_reduced.ground_mask(points, grid, cloth, float(class_threshold))
+    labels = np.where(ground, GROUND_CLASS_GROUND, GROUND_CLASS_PLANT).astype(np.int32)
     if meta is not None:
         meta.setdefault("class_threshold", float(class_threshold))
         meta.setdefault("method", "manual")
