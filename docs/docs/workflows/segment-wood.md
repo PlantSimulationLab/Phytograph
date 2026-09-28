@@ -8,7 +8,8 @@ ground-cropped cloud.
 There are four methods (see **Method** below):
 
 - **Machine learning** (the default, recommended) runs a PointNeXt network trained on about 180
-  hand-labelled real trees plus Helios synthetic scans. It is the most accurate
+  hand-labelled real trees, including dense-crowned and leaf-off orchard trees, plus Helios
+  synthetic scans of every woody library species. It is the most accurate
   method on trees it has never seen (see *How accurate is it?* below) and has
   no tuning knobs. It uses an NVIDIA GPU (Windows/Linux) or Apple-silicon GPU
   when one is available, and otherwise runs on the CPU, at about a minute per
@@ -111,7 +112,14 @@ wood**, the surviving cloud is the leaves, ready for leaf-area analysis.
     trained on (tropical, temperate and boreal), **Machine learning** labels
     wood with an intersection-over-union of about **0.80**, against **0.61**
     for Branch-segment. On leaf-off almond trees, where every point is wood,
-    it keeps about 89 % of the wood where Branch-segment keeps under half.
+    it keeps essentially all of the wood where Branch-segment keeps under half.
+
+    In a **dense crown** where little or no wood is visible (a thick outer
+    leaf layer hides the branches), it labels the crown leaf and marks only
+    the trunk and the branches you could actually see and follow, the way a
+    careful person labelling the scan would. Branches hidden inside the
+    foliage are not reported as wood, because nothing in the scan shows them.
+
     It still leads on clouds thinned to 3 cm point spacing, but by less, and
     on a very sparse cloud a geometric method can occasionally do better, so
     segment before decimating when you can.

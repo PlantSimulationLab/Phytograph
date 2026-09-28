@@ -156,3 +156,51 @@ def test_wood_hit_scatter_is_full_length_and_miss_defaulted(leafcube_session):
         main._session_add_extra_column(sess, main.WOOD_CLASS_SLUG,
                                        main.WOOD_CLASS_LABEL, labels)
     _assert_column_aligned(sess, main.WOOD_CLASS_SLUG)
+
+
+# --- Edits during the run ----------------------------------------------------
+# The endpoint snapshots the hit survivors, releases the lock for the worker,
+# then scatters the labels back over the survivors. The worker is replaced here
+# (it cannot run under TestClient, see above); what is under test is the
+# endpoint's own write-back, which is where an edit made during the run bites.
+
+
+def test_session_segment_wood_refuses_to_write_over_an_edit_made_during_the_run(
+        client, leafcube_session, monkeypatch):
+    sess = main._cloud_sessions[leafcube_session]
+
+    async def run_and_erase(tool, pts, params, **kw):
+        # The user erases a point while the worker runs.
+        sess.deleted[np.flatnonzero(~sess.deleted)[0]] = True
+        return np.full(len(pts), main.WOOD_CLASS_LEAF, np.int32), {"warnings": []}
+
+    monkeypatch.setattr(main, "_run_killable", run_and_erase)
+    res = client.post(f"/api/cloud/session/{leafcube_session}/segment_wood",
+                      json={"method": "geometric"})
+    assert res.status_code == 409 and "edited" in res.json()["detail"]
+    assert main.WOOD_CLASS_SLUG not in sess.extras
+
+
+def test_session_segment_wood_writes_each_label_on_its_own_point(
+        client, leafcube_session, monkeypatch):
+    """Undisturbed, the labels land on the hit survivors they were computed for:
+    the fake worker labels by height, so any misalignment shows up."""
+    sess = main._cloud_sessions[leafcube_session]
+    sess.deleted[::17] = True     # some rows already deleted before the run
+
+    async def by_height(tool, pts, params, **kw):
+        z_mid = float(np.median(pts[:, 2]))
+        return np.where(pts[:, 2] > z_mid, main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF), {"warnings": []}
+
+    monkeypatch.setattr(main, "_run_killable", by_height)
+    res = client.post(f"/api/cloud/session/{leafcube_session}/segment_wood",
+                      json={"method": "geometric", "defer_octree": True})
+    assert res.status_code == 200, res.text
+    assert res.json()["octree_deferred"] is True
+    col = sess.extras[main.WOOD_CLASS_SLUG]
+    live_hit = (sess.extras[main._MISS_SLUG] == 0) & ~sess.deleted
+    z = sess.positions[:, 2]
+    z_mid = float(np.median(z[live_hit]))
+    expected = np.where(z[live_hit] > z_mid, main.WOOD_CLASS_WOOD, main.WOOD_CLASS_LEAF)
+    assert np.array_equal(col[live_hit], expected)
+    assert np.allclose(col[~live_hit], 0.0)

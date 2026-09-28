@@ -391,3 +391,22 @@ def test_helios_herb_reader_maps_fine_organs_to_the_organ_scheme(tmp_path):
     allowed = task_map("plant_organ").allowed_lut()
     assert allowed[S.SEM_YOUNG_LEAF].tolist() == [False, True, True]
     assert S.SEM_YOUNG_LEAF in TASKS["plant_organ"]["instance_codes"]
+
+def test_rows_clear_of_is_foliage_far_from_wood(tmp_path):
+    """Clear-of-wood seeding (CropConfig.clear_seed_prob) draws from leaf
+    points with no wood within the clearance, and never from ignored classes
+    such as ground."""
+    xyz, sem = _cloud(20000)
+    ground = np.column_stack([np.random.default_rng(5).uniform(-1, 1, (2000, 2)), np.zeros(2000)])
+    xyz = np.concatenate([xyz, ground])
+    sem = np.concatenate([sem, np.full(2000, readers.SEM_GROUND, np.uint8)])
+    write_item(readers.Cloud(xyz, sem), tmp_path / "t", {"dataset": "t", "name": "t", "split": "train"})
+    it = CachedItem(tmp_path / "t")
+    rows = it.rows_clear_of((readers.SEM_WOOD,), 0.3, (readers.SEM_LEAF,))
+    assert len(rows) > 0
+    assert (np.asarray(it.sem)[rows] == readers.SEM_LEAF).all()
+    wood = np.asarray(it.xyz)[it.rows_of((readers.SEM_WOOD,))]
+    from scipy.spatial import cKDTree
+    d, _ = cKDTree(wood).query(np.asarray(it.xyz)[rows])
+    # 2 cm thinning of the wood moves the boundary by at most ~1.7 cm.
+    assert d.min() > 0.3 - 0.02

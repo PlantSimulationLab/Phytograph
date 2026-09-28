@@ -101,6 +101,54 @@ Other findings:
   trees plus leaf-off almond). A few labelled orchard trees would be the most
   informative addition to the test set.
 
+## Dense crowns and hand-label-like synthetic wood (2026-09-25/26)
+
+The v1 model called leaf clumps wood in the crown of a dense leaf-on redbud. Two redbuds
+were hand-labelled for this (`real_labeled/redbud`, splits `dense_eastern` / `dense_western`).
+The eastern one is 0.8 % wood, with 78 % of its leaf points more than 30 cm from any
+labelled wood. v1 called 6.8 % of it wood, at wood precision 0.06, with the false wood in the
+top of the crown and a median 66 cm from real wood.
+
+- **It was a training-data gap.** Around each false-wood point, the model's crop held no
+  labelled wood at all. That almost never happens in training: under 4 % of real-tree crops
+  and 0 % of synthetic ones have < 1 % wood. A stricter threshold could not fix it, because it
+  wrecked recall on the other redbud.
+- **Clear-of-wood crop seeding alone does not fix it** (`crop.clear_seed_prob`). The public
+  trees are sparse enough that no crop-sized pure foliage exists to seed from. Kept, because it
+  is neutral to slightly positive everywhere (`dense_clear`).
+- **Exact synthetic labels cannot teach it.** Across 8 woody library species and 20 scans,
+  including crowns grown past the library's age cap (the generator's `<max_age>`), no synthetic
+  leaf point is more than 30 cm from labelled wood. Helios labels every scanned shoot, while a
+  person labels only wood they can see and follow.
+- **Hand-label-like synthetic wood does** (`ml/data/relabel.py`, reader argument
+  `human_wood_min_length`). Wood stays wood only in a connected visible run at least 0.5 m
+  long. That one threshold makes an open synthetic redbud look like the western tree (25-30 %
+  vs 33 % of leaf > 30 cm from wood) and a dense one like the eastern (65-69 % vs 78 %). All
+  17 original scenes plus 59 new ones (every woody library species, redbud and almond grown
+  past the cap) are cached relabelled as `*_hl` / `synthdense_*_hl`.
+- **Leaf-off trees must be in the mix.** The relabelling teaches "short visible wood is leaf",
+  which leafless twigs also look like: synthetic-only leaf-off recall was 0.59. Five of the
+  nine leaf-off almonds now train (`leafoff_train`); four stay the test.
+
+Both redbuds held out (`hl_ft`: the shipped recipe's fine-tune, plus 30 % relabelled synthetic
+crops, leaf-off almonds and clear seeding):
+
+| model | 59 trees mIoU | Wan | GBSep | leaf-off recall (4) | eastern redbud: predicted wood (truth 0.82 %) |
+|---|---|---|---|---|---|
+| v1 | 0.834 | 0.728 | 0.848 | 0.889 | 6.8 % |
+| `hl_ft` | 0.833 | 0.776 | 0.914 | 1.000 | 0.80 % |
+
+The shipped **v2** (`final2_s0`, `resources/ml_models/wood-leaf-pointnext-s-v2`) is the
+`hl_ft` recipe plus both redbuds, best of three seeds by validation mIoU:
+
+| | 59 trees mIoU | Wan | GBSep | leaf-off recall (4) | at 3 cm: 59 / Wan / leaf-off |
+|---|---|---|---|---|---|
+| v1 | 0.834 | 0.728 | 0.848 | 0.889 | 0.782 / 0.601 / 0.851 |
+| **v2** | 0.831 | 0.787 | 0.913 | 1.000 | 0.779 / 0.701 / 1.000 |
+
+The 59-tree score is within seed noise of v1 (seeds 0.829-0.831). With the redbuds now in
+training, the next hand-labelled tree is the independent test.
+
 # Plant organs (herbaceous plants)
 
 The `plant_organ` task labels soil / stem / leaf and splits the leaf into one

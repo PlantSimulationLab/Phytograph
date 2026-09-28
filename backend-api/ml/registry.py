@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .package import ModelPackage, PackageError, load_meta
 
-DEFAULT_WOOD_MODEL = "wood-leaf-pointnext-s-v1"
+DEFAULT_WOOD_MODEL = "wood-leaf-pointnext-s-v2"
 DEFAULT_ORGAN_MODEL = "plant-organ-pointnext-s-v1"
 # The model a tool runs when the caller names none, per task.
 DEFAULT_MODELS = {"wood_leaf": DEFAULT_WOOD_MODEL, "plant_organ": DEFAULT_ORGAN_MODEL}

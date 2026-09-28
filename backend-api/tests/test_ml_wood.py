@@ -41,10 +41,10 @@ def _f1(pred, truth, cls):
 # (stem, min OA, min wood F1). Bundled model vs `sota` on these same fixtures:
 #
 #   fixture   spacing   model OA / wood F1   sota OA / wood F1
-#   spruce    36 mm     0.86 / 0.82          0.86 / 0.78
-#   oak       21 mm     0.91 / 0.92          0.82 / 0.83
+#   spruce    36 mm     0.90 / 0.85          0.86 / 0.78
+#   oak       21 mm     0.90 / 0.90          0.82 / 0.83
 #   beech     42 mm     0.78 / 0.72          0.90 / 0.80
-#   lewos     37 mm     0.96 / 0.88          0.94 / 0.77
+#   lewos     37 mm     0.97 / 0.89          0.94 / 0.77
 #
 # The fixtures are decimated to 2-4 cm spacing, far sparser than the 1 cm the
 # model works at. That is why beech, the sparsest, is the one tree where sota

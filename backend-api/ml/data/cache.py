@@ -176,6 +176,33 @@ class CachedItem:
             self._class_rows[codes] = np.flatnonzero(np.isin(np.asarray(self.sem), codes))
         return self._class_rows[codes]
 
+    def rows_clear_of(self, codes: tuple[int, ...], min_dist: float,
+                      among: tuple[int, ...]) -> np.ndarray:
+        """Rows whose code is in ``among`` with no ``codes`` point within
+        ``min_dist``: the pure-foliage neighbourhoods. ``among`` is the
+        task's other trained classes, so ignored ground never counts. Cached per
+        worker. The ``codes`` points are thinned to a 2 cm grid first, which
+        moves the boundary by at most 1.7 cm and keeps the tree small on
+        multi-million-point items."""
+        key = ("clear", codes, min_dist, among)
+        if key not in self._class_rows:
+            from scipy.spatial import cKDTree
+
+            from ..grid import grid_sample
+
+            sem = np.asarray(self.sem)
+            cand = np.flatnonzero(np.isin(sem, among))
+            src = self.rows_of(codes)
+            if len(src) == 0 or len(cand) == 0:
+                self._class_rows[key] = cand
+            else:
+                xyz = np.asarray(self.xyz)
+                keep, _ = grid_sample(xyz[src], 0.02)
+                d, _ = cKDTree(xyz[src[keep]]).query(
+                    xyz[cand], k=1, distance_upper_bound=min_dist, workers=1)
+                self._class_rows[key] = cand[np.isinf(d)]
+        return self._class_rows[key]
+
     def ball(self, centre: np.ndarray, radius: float) -> np.ndarray:
         """Rows within ``radius`` of ``centre``, read cell by cell."""
         cells, starts = self._arr("cells"), self._arr("starts")

@@ -98,9 +98,13 @@ def _header_columns(path: Path) -> list[str] | None:
     return None
 
 
-def read_helios_synthetic(path: str | Path) -> Cloud:
+def read_helios_synthetic(path: str | Path, human_wood_min_length: float = 0.0) -> Cloud:
     """A SyntheticLiDAR_Organs scene: 14 named columns. Requires the header,
-    because the column order is only defined there."""
+    because the column order is only defined there.
+
+    ``human_wood_min_length`` > 0 relabels wood the way a person labelling a
+    real scan would (``ml.data.relabel.human_visible_wood``): only connected
+    runs of visible wood at least that long stay wood."""
     path = Path(path)
     cols = _header_columns(path)
     if not cols or "class_id" not in cols:
@@ -117,8 +121,15 @@ def read_helios_synthetic(path: str | Path) -> Cloud:
         o = df["organ_id"].to_numpy()
         organ = np.where((o >= 0) & (o < 255), o, 255).astype(np.uint8)
     refl = df["reflectance"].to_numpy(np.float32) if "reflectance" in df else None
-    return Cloud(df[["x", "y", "z"]].to_numpy(np.float64), sem, organ, refl,
-                 {"reader": "helios_synthetic"})
+    xyz = df[["x", "y", "z"]].to_numpy(np.float64)
+    meta = {"reader": "helios_synthetic"}
+    if human_wood_min_length > 0:
+        from .relabel import human_visible_wood
+        n_wood = int((sem == SEM_WOOD).sum())
+        sem = human_visible_wood(xyz, sem, SEM_WOOD, SEM_LEAF, human_wood_min_length)
+        meta.update(human_wood_min_length=human_wood_min_length,
+                    wood_relabelled_leaf=n_wood - int((sem == SEM_WOOD).sum()))
+    return Cloud(xyz, sem, organ, refl, meta)
 
 
 def read_lewos(path: str | Path) -> Cloud:
@@ -189,6 +200,20 @@ def read_phytograph_xyz(path: str | Path) -> Cloud:
     lab = df[3].to_numpy()
     sem = np.where(lab == 1, SEM_WOOD, np.where(lab == 2, SEM_LEAF, SEM_UNKNOWN)).astype(np.uint8)
     return Cloud(df[[0, 1, 2]].to_numpy(), sem, meta={"reader": "phytograph_xyz"})
+
+
+def read_las_class(path: str | Path, column: str = "wood_class",
+                   wood: int = 1, leaf: int = 2) -> Cloud:
+    """A LAS/LAZ labelled in Phytograph (its Label tool or a wood/leaf run)
+    and exported: the ``wood_class`` extra-dim, 1 = wood, 2 = leaf. Anything
+    else (0 = unclassified) is unknown."""
+    import laspy
+
+    las = laspy.read(str(path))
+    xyz = np.column_stack([las.x, las.y, las.z]).astype(np.float64)
+    lab = np.asarray(las[column]).astype(np.int64)
+    sem = np.where(lab == wood, SEM_WOOD, np.where(lab == leaf, SEM_LEAF, SEM_UNKNOWN)).astype(np.uint8)
+    return Cloud(xyz, sem, meta={"reader": "las_class", "column": column})
 
 
 def read_las_all(path: str | Path, sem_value: int, ground_band: float = 0.0) -> Cloud:
@@ -370,4 +395,5 @@ READERS = {
     "wan": read_wan,
     "phytograph_xyz": read_phytograph_xyz,
     "las_all": read_las_all,
+    "las_class": read_las_class,
 }

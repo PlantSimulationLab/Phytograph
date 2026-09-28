@@ -38103,24 +38103,32 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     The compute runs in a KILLABLE subprocess (see `_run_killable`) so the panel's
     Cancel button can SIGKILL it. The column write + octree rebuild run in the
     parent AFTER the compute returns, so a cancel during the long compute leaves
-    the session pristine."""
+    the session pristine. If the cloud's points are edited while it runs, the
+    write is refused (409, `_raise_if_session_edited_locked`) rather than
+    scattered onto the wrong points. The snapshot and the write run off the
+    event loop: each is a full-length gather."""
     sess = _get_cloud_session(session_id)
-    with _cloud_session_lock:
-        # Compute on HIT survivors only — misses (is_miss != 0, ~1 km out) hang
-        # the per-point geometry / connectivity skeleton. Labels scatter back over
-        # all survivors (misses → 0, dropped at rebuild). See _session_survivor_hit_mask.
-        surv = ~sess.deleted
-        hit = _session_survivor_hit_mask(sess)
-        pts = sess.positions[surv][hit].copy()
-        # Resolve an optional per-point reflectance scalar from the session,
-        # aligned 1:1 with the HIT points (the same set we compute on). `scalar_slug`
-        # picks a specific extra-dim (e.g. 'Reflectance'); default tries the common
-        # slugs then the LAS intensity field. None ⇒ pure geometry. The
-        # reflectance_weight_max request field still gates whether the assist runs.
-        reflectance = None
-        if request.reflectance_weight_max and request.reflectance_weight_max > 0:
-            refl_surv = _session_reflectance_scalar(sess, request.scalar_slug, surv)
-            reflectance = refl_surv[hit] if refl_surv is not None else None
+
+    def _snapshot():
+        with _cloud_session_lock:
+            # Compute on HIT survivors only — misses (is_miss != 0, ~1 km out) hang
+            # the per-point geometry / connectivity skeleton. Labels scatter back over
+            # all survivors (misses → 0, dropped at rebuild). See _session_survivor_hit_mask.
+            surv = ~sess.deleted
+            hit = _session_survivor_hit_mask(sess)
+            pts = _session_hit_positions_locked(sess, hit)
+            # Resolve an optional per-point reflectance scalar from the session,
+            # aligned 1:1 with the HIT points (the same set we compute on). `scalar_slug`
+            # picks a specific extra-dim (e.g. 'Reflectance'); default tries the common
+            # slugs then the LAS intensity field. None ⇒ pure geometry. The
+            # reflectance_weight_max request field still gates whether the assist runs.
+            reflectance = None
+            if request.reflectance_weight_max and request.reflectance_weight_max > 0:
+                refl_surv = _session_reflectance_scalar(sess, request.scalar_slug, surv)
+                reflectance = refl_surv[hit] if refl_surv is not None else None
+            return pts, hit, reflectance, sess.deleted.copy()
+
+    pts, hit, reflectance, deleted0 = await run_in_threadpool(_snapshot)
     if len(pts) < 3:
         raise HTTPException(status_code=400, detail="Need at least 3 points for wood/leaf segmentation.")
     _require_wood_ml_model(request)
@@ -38132,14 +38140,19 @@ async def session_segment_wood(session_id: str, request: SessionWoodSegmentReque
     except ClientDisconnected:
         raise HTTPException(status_code=499, detail="Wood/leaf segmentation was cancelled.")
     warns = list(wood_meta.get("warnings", []))
-    labels = np.zeros(len(hit), dtype=np.int64)
-    labels[hit] = np.asarray(hit_labels)
-    with _cloud_session_lock:
-        _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
-        if request.defer_octree:
-            # See the ground handler: without this the background bake after a
-            # split reuses the pre-column octree.
-            _mark_octree_stale_locked(sess)
+
+    def _write():
+        labels = np.zeros(len(hit), dtype=np.int64)
+        labels[hit] = np.asarray(hit_labels)
+        with _cloud_session_lock:
+            _raise_if_session_edited_locked(sess, deleted0, "wood/leaf segmentation")
+            _session_add_extra_column(sess, WOOD_CLASS_SLUG, WOOD_CLASS_LABEL, labels)
+            if request.defer_octree:
+                # See the ground handler: without this the background bake after a
+                # split reuses the pre-column octree.
+                _mark_octree_stale_locked(sess)
+
+    await run_in_threadpool(_write)
     common = {"session_id": session_id, "point_count": int(len(pts)), "warnings": warns}
     # Deferred: see `defer_octree` — the caller rebuilds this octree alongside
     # the split's children.

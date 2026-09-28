@@ -1,0 +1,23 @@
+# Hand-label-like synthetic wood (2026-09-25). Neither labelled redbud is trained on: both are the test.
+# Fine-tunes the exact-label synthetic pre-training on real trees plus relabelled synthetic scenes
+# (every woody species, incl. dense crowns grown past the age cap), leaf-off almonds, clear-of-wood seeding.
+name: hl_ft
+description: "Leaf/wood PointNeXt-S fine-tuned with hand-label-like synthetic wood (redbuds held out)."
+task: wood_leaf
+cache: /group/bnbaileygrp/bnbailey/phytograph_ml/cache
+out: /group/bnbaileygrp/bnbailey/phytograph_ml/runs
+model: {variant: S}
+hierarchy: {voxel: 0.01, levels: 5, k: 16}
+channels: [dxyz]
+crop: {max_points: 24000, clear_seed_prob: 0.25, clear_min_dist: 0.6}
+train:
+  - {name: real, weight: 1.0, domain: real, splits: [train]}
+  - {name: synth_hl, weight: 0.3, domain: synthetic, splits: [train_hl]}
+  - {name: leafoff, weight: 0.1, datasets: [almond_leafoff], splits: [leafoff_train]}
+val: {splits: [val, val_synth_hl], max_points_per_item: 400000}
+optim: {steps: 25000, batch: 8, lr: 0.0005, weight_decay: 0.05, warmup: 1000, label_smoothing: 0.1}
+eval_every: 2500
+checkpoint_every: 500
+workers: 14
+seed: 0
+init: /group/bnbaileygrp/bnbailey/phytograph_ml/runs/final_S_synth_s0/package

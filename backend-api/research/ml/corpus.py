@@ -14,7 +14,12 @@ into training:
   never looked at during training.
 - **test_synth**: both orchard-row scenes (``_v2`` regenerates the same scene,
   so neither may train). **val_synth** is one scene per species.
-- **leafoff**: the nine leaf-off almond trees, all wood apart from a ground
+- **dense_eastern** / **dense_western**: two hand-labelled leaf-on redbuds
+  with dense crowns, split apart so either can be held out.
+- ``*_hl`` twins of every synthetic scene, and ``synthdense_*_hl`` sets, carry
+  hand-label-like wood (``HUMAN_WOOD_MIN_LENGTH``); split names gain ``_hl``.
+- **leafoff**: four leaf-off almond trees (the other five are
+  ``leafoff_train``, which only the dense-crown configs train on), all wood apart from a ground
   band. They measure false-leaf rate on the crop this is ultimately for.
 
 GBSeparation's other eight trees are copies of LeWoS and Weiser trees and are
@@ -33,6 +38,17 @@ ROOT = Path(os.environ.get(
     str(Path.home() / "Helios/projects/SyntheticLiDAR_Organs/data"),
 ))
 REAL = ROOT / "real"
+SYNTH_DENSE = Path(os.environ.get(
+    "PHYTOGRAPH_SYNTH_DENSE", "/group/bnbaileygrp/bnbailey/phytograph_ml/synth_dense/data"))
+# A synthetic wood point stays wood only in a connected run of visible wood at
+# least this long (ml.data.relabel). 0.5 m makes an open synthetic redbud match
+# the hand-labelled western redbud (25-30 % vs 33 % of leaf > 30 cm from wood)
+# and a dense one the eastern (65-69 % vs 78 %); exact labels give 0 % on both.
+HUMAN_WOOD_MIN_LENGTH = 0.5
+REDBUD_LABELED = Path(os.environ.get(
+    "PHYTOGRAPH_REDBUD_LABELED",
+    "/group/bnbaileygrp/bnbailey/phytograph_ml/real_labeled/redbud",
+))
 
 
 @dataclass
@@ -95,9 +111,26 @@ def entries() -> list[Entry]:
         out.append(Entry("wan", f.stem.replace("reference_pc_", ""), "wan", (str(f),), "test", True))
 
     # Leaf-off almond: all wood above a 20 cm ground band.
+    # Five of the nine can train (split "leafoff_train", opt-in by config):
+    # the dense-crown redbuds taught the model that a dense fine-textured
+    # crown mass is leaf, and a leafless almond's twig mass is exactly that
+    # shape, so its wood recall fell 0.89 -> 0.61. The other four, one or two
+    # per cultivar, stay the leaf-off test.
+    leafoff_test = {"tree_3_Aldrich", "tree_14_Nonpareil", "tree_35_Independence",
+                    "tree_36_Independence"}
     for f in sorted((REAL / "almond").glob("tree_*.laz")):
-        out.append(Entry("almond_leafoff", f.stem, "las_all", (str(f), 1), "leafoff", True,
+        split = "leafoff" if f.stem in leafoff_test else "leafoff_train"
+        out.append(Entry("almond_leafoff", f.stem, "las_all", (str(f), 1), split, True,
                          {"ground_band": 0.2}))
+
+    # Hand-labelled leaf-on redbuds (Phytograph wood_class, 1 wood / 2 leaf),
+    # the first real trees with a DENSE crown: eastern is 0.8 % wood, with
+    # almost none visible in the crown; western 4.0 %. The public benchmark
+    # trees are 13-42 % wood. Each has its own split so configs can hold
+    # either one out.
+    for f in sorted(REDBUD_LABELED.glob("*_redbud_*woodclass.laz")):
+        side = f.name.split("_")[0]
+        out.append(Entry("redbud_labeled", side, "las_class", (str(f),), f"dense_{side}", True))
 
     # Synthetic Helios scenes.
     val_synth = {("synthetic_almond", "scene_00002"), ("synthetic_pistachio_v2", "scene_00001"),
@@ -113,6 +146,23 @@ def entries() -> list[Entry]:
             else:
                 split = "train"
             out.append(Entry(d.name, f.stem, "helios_synthetic", (str(f),), split, False,
+                             domain="synthetic"))
+            # The same scene with hand-label-like wood (see HUMAN_WOOD_MIN_LENGTH).
+            out.append(Entry(d.name + "_hl", f.stem, "helios_synthetic", (str(f),), split + "_hl",
+                             False, {"human_wood_min_length": HUMAN_WOOD_MIN_LENGTH},
+                             domain="synthetic"))
+
+    # Crowns from every woody library species, including redbud and almond grown
+    # past the library's age cap (<max_age>) into dense crowns. Only ever used
+    # with hand-label-like wood: with exact labels none of them, dense or not,
+    # has a leaf point more than 30 cm from wood.
+    for d in sorted(SYNTH_DENSE.glob("*")):
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("scene_*.xyz")):
+            split = "val_synth_hl" if (d.name, f.stem) == ("redbud", "scene_00011") else "train_hl"
+            out.append(Entry(f"synthdense_{d.name}_hl", f.stem, "helios_synthetic", (str(f),), split,
+                             False, {"human_wood_min_length": HUMAN_WOOD_MIN_LENGTH},
                              domain="synthetic"))
     return out
 

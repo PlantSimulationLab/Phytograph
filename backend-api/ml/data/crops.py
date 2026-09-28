@@ -72,6 +72,18 @@ class CropConfig:
     fetch_radius_max: float = 5.0
     minority_codes: tuple[int, ...] = (1,)    # seeds drawn from these codes...
     minority_seed_prob: float = 0.5           # ...this often
+    # Seeds at least `clear_min_dist` from any minority-class point, this
+    # often. Minority seeding alone means almost no training crop is free of
+    # wood (3.6 % of real-tree crops had < 1 % wood, 0 % of synthetic ones), so
+    # the model learned that every neighbourhood holds some and, in a dense
+    # crown with no visible wood, called its most wood-like leaf clumps wood
+    # (eastern redbud: wood precision 0.06). This only helps where the data
+    # HAS crop-sized pure foliage: the public trees are sparse enough that a
+    # 24k-voxel crop seeded 1 m from any wood is still < 1 % wood only 8.5 %
+    # of the time. Dense-crown trees supply it. Off by default so existing
+    # configs train exactly as before.
+    clear_seed_prob: float = 0.0
+    clear_min_dist: float = 0.3
     boundary_radius: float = 0.02
     boundary_weight: float = 0.3
 
@@ -160,9 +172,15 @@ class CropSampler:
         it = src.item
         cfg = self.crop
         # Seed: a minority-class point this often, so wood (~20% of plant
-        # points, far less once ground is counted) is not starved.
+        # points, far less once ground is counted) is not starved; a point
+        # clear of it this often, so pure foliage is not starved either.
         rows = None
-        if rng.random() < cfg.minority_seed_prob:
+        r = rng.random()
+        if r < cfg.clear_seed_prob:
+            others = tuple(c for c in range(255) if self.allowed_lut[c].any()
+                           and c not in cfg.minority_codes)
+            rows = it.rows_clear_of(tuple(cfg.minority_codes), cfg.clear_min_dist, others)
+        elif r < cfg.clear_seed_prob + cfg.minority_seed_prob:
             rows = it.rows_of(tuple(cfg.minority_codes))
         if rows is None or len(rows) == 0:
             labelled = [c for c in range(255) if self.allowed_lut[c].any()]
